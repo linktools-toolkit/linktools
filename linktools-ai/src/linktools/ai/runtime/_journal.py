@@ -58,7 +58,7 @@ class ModelRequestJournal:
         source_namespace: str,
         tenant_id: str,
         execution_id: str,
-        step_run_id: str,
+        agent_run_id: str,
         next_sequence: int = 1,
     ) -> None:
         self._source_namespace = source_namespace
@@ -70,7 +70,7 @@ class ModelRequestJournal:
             or next_sequence < 1
         ):
             raise ValueError("next_sequence must be a positive integer")
-        self._step_run_id = step_run_id
+        self._agent_run_id = agent_run_id
         self._next_sequence = next_sequence
         self._facts: dict[int, ModelRequestFact] = {}
 
@@ -97,7 +97,7 @@ class ModelRequestJournal:
                 self._source_namespace,
                 self._tenant_id,
                 self._execution_id,
-                self._step_run_id,
+                self._agent_run_id,
                 sequence,
                 purpose,
             ),

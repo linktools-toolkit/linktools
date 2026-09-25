@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import linktools.ai.runtime._event as event_module
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionDeltaType,
@@ -23,7 +23,7 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState, TaskGraphRun, TaskGraphRunEvent
+from linktools.ai.runtime import RuntimeStorage, TaskGraphRun, TaskGraphRunEvent
 from linktools.ai.runtime._event import (
     DefaultEventService,
     ExecutionDelta,
@@ -47,18 +47,18 @@ from linktools.ai.task import (
     TaskEvent,
     TaskEventType,
     TaskGraphResult,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskNode,
     TaskNodeView,
 )
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
+def _binding_contract() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("default", model="default"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
+        model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -78,8 +78,8 @@ def _execution(
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=status,
         revision=revision,
@@ -92,7 +92,7 @@ def _execution(
         mode="run",
         planning=False,
         thinking=False,
-        binding=_binding_snapshot(),
+        binding=_binding_contract(),
         **execution_owner_fields(),
     )
 
@@ -245,12 +245,12 @@ async def test_graph_wait_terminal_result_waits_for_observer_completion() -> Non
     )
 
     class GraphService:
-        async def snapshot(
+        async def state(
             self,
             graph_id: str,
             *,
             principal: Principal,
-        ) -> TaskGraphSnapshot:
+        ) -> TaskGraphState:
             del principal
             state = TaskNodeView(
                 graph_id,
@@ -265,7 +265,7 @@ async def test_graph_wait_terminal_result_waits_for_observer_completion() -> Non
                 None,
                 "execution",
             )
-            return TaskGraphSnapshot(
+            return TaskGraphState(
                 graph_id,
                 TaskStatus.RUNNING,
                 (TaskNode("node"),),
@@ -400,7 +400,7 @@ async def test_live_semantic_events_keep_agent_source_order() -> None:
     broker.publish_event(
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
-        {"run_id": "run"},
+        {"agent_run_id": "run"},
         durable_sequence=3,
     )
     broker.complete("execution")
@@ -422,7 +422,7 @@ async def test_live_durable_terminal_publication_is_idempotent() -> None:
     broker.register_local_producer("execution", 0)
     live = broker.claim_local_producer("execution")
     assert live is not None
-    payload = {"run_id": "run"}
+    payload = {"agent_run_id": "run"}
 
     broker.publish_event(
         "execution",
@@ -651,7 +651,7 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path: Path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="stream-order", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)

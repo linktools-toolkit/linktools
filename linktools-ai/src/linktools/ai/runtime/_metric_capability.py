@@ -97,7 +97,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
         tenant_id: str,
         execution_id: str,
         session_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         agent_id: str,
         journal: ModelRequestJournal | None = None,
         interaction_recorder: ModelInteractionRecorder | None = None,
@@ -108,13 +108,13 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
         self._tenant_id = tenant_id
         self._execution_id = execution_id
         self._session_id = session_id
-        self._step_run_id = step_run_id
+        self._agent_run_id = agent_run_id
         self._agent_id = agent_id
         self._journal = journal or ModelRequestJournal(
             source_namespace=source_namespace,
             tenant_id=tenant_id,
             execution_id=execution_id,
-            step_run_id=step_run_id,
+            agent_run_id=agent_run_id,
         )
         self._interaction_recorder = interaction_recorder
 
@@ -506,7 +506,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                     None if run_context is None else run_context.correlation,
                     execution_id=self._execution_id,
                     session_id=self._session_id,
-                    step_run_id=self._step_run_id,
+                    agent_run_id=self._agent_run_id,
                     request_sequence=fact.request_sequence,
                     request_purpose=fact.purpose,
                     output_retry_index=fact.output_retry_index,

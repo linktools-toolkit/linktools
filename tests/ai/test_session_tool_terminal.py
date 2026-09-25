@@ -21,17 +21,17 @@ from linktools.ai.capability import AgentContext, CapabilityGroup
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from linktools.ai.runtime.state._step_archive import StateStepArchive
 from linktools.ai.runtime.state._step_contracts import (
-    ContinuableSnapshot,
-    RunRecord,
+    AgentRunCheckpoint,
+    AgentRunRecord,
 )
-from linktools.ai.runtime.state._steps import RuntimeStepStore
+from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
 from linktools.ai.storage import PayloadPolicy
 
 from pydantic_ai.messages import (
@@ -49,8 +49,7 @@ class _ToolModelBinding:
     provider = "test"
     model_identity = "test:session-tool"
     vision = False
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "session-tool",
     }
@@ -63,7 +62,7 @@ class _ToolModelBinding:
 
 
 class _ToolModels:
-    def snapshot(self) -> "_ToolModels":
+    def capture(self) -> "_ToolModels":
         return self
 
     def resolve(self, route_id: str) -> _ToolModelBinding:
@@ -79,7 +78,7 @@ class _ToolModels:
     ) -> _ToolModelBinding:
         if (
             route_id not in {None, "default"}
-            or dict(payload) != _ToolModelBinding.semantic_payload
+            or dict(payload) != _ToolModelBinding.contract
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _ToolModelBinding()
@@ -88,11 +87,11 @@ class _ToolModels:
 async def _state(
     backend: str,
     tmp_path: Path,
-) -> tuple[RuntimeState, AsyncEngine | None]:
+) -> tuple[RuntimeStorage, AsyncEngine | None]:
     if backend == "memory":
-        return RuntimeState.in_memory(), None
+        return RuntimeStorage.in_memory(), None
     if backend == "sqlite":
-        return RuntimeState.sqlite(tmp_path / "runtime-sqlite.db"), None
+        return RuntimeStorage.sqlite(tmp_path / "runtime-sqlite.db"), None
     if backend == "sql":
         engine = create_async_engine(
             URL.create(
@@ -101,14 +100,14 @@ async def _state(
             )
         )
         await provision_runtime_database(engine)
-        return RuntimeState.sql(engine), engine
+        return RuntimeStorage.sql(engine), engine
     raise AssertionError(backend)
 
 
 def _application(
     calls: list[str],
     *,
-    effect: Literal["replay_safe", "non_replay_safe"] = "replay_safe",
+    effect_policy: Literal["replay_safe", "non_replay_safe"] = "replay_safe",
     effect_log: Path | None = None,
 ) -> CapabilityGroup[None]:
     application: CapabilityGroup[None] = CapabilityGroup("application")
@@ -122,7 +121,7 @@ def _application(
                 os.fsync(handle.fileno())
         return "tool-result"
 
-    application.tool(lookup, name="lookup", effect=effect)
+    application.tool(lookup, name="lookup", effect_policy=effect_policy)
     application.agent(
         "default",
         model="default",
@@ -156,7 +155,7 @@ async def test_session_tool_turn_commits_terminal_and_history(
         async with Runtime.open(
             "session-tool-terminal",
             models=_ToolModels(),  # type: ignore[arg-type]
-            state=state,
+            storage=state,
             capabilities=(application,),
         ) as runtime:
             await runtime.agent("default").create_session("session")
@@ -275,18 +274,18 @@ async def test_session_tool_turn_commits_terminal_and_history(
 async def test_durable_terminal_survives_local_seal_finalization_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     calls: list[str] = []
     application = _application(calls)
 
     async def fail_finalize(
-        _store: RuntimeStepStore,
+        _store: RuntimeAgentRunStore,
         _plan: object,
     ) -> None:
         raise RuntimeError("injected terminal seal finalization failure")
 
     monkeypatch.setattr(
-        RuntimeStepStore,
+        RuntimeAgentRunStore,
         "finalize_execution_terminal_seal",
         fail_finalize,
     )
@@ -294,7 +293,7 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
         async with Runtime.open(
             "session-tool-terminal-finalize",
             models=_ToolModels(),  # type: ignore[arg-type]
-            state=state,
+            storage=state,
             capabilities=(application,),
         ) as runtime:
             await runtime.agent("default").create_session("session")
@@ -377,7 +376,7 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
     async with Runtime.open(
         "session-tool-terminal-failure",
         models=_ToolModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
         await runtime.agent("default").create_session("session")
@@ -424,13 +423,13 @@ async def test_completed_tool_operation_is_reused_after_reopen(
     database = tmp_path / f"tool-replay-{backend}.db"
     first_engine: AsyncEngine | None = None
     if backend == "sqlite":
-        first = RuntimeState.sqlite(database)
+        first = RuntimeStorage.sqlite(database)
     else:
         first_engine = create_async_engine(
             URL.create("sqlite+aiosqlite", database=str(database))
         )
         await provision_runtime_database(first_engine)
-        first = RuntimeState.sql(first_engine)
+        first = RuntimeStorage.sql(first_engine)
     await first.initialize(namespace="tool-replay", tenant_id="tenant")
     try:
         first_bridge = RuntimeToolOperationBridge(
@@ -439,7 +438,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             namespace="tool-replay",
             tenant_id="tenant",
             execution_id="execution",
-            step_run_id="run-1",
+            agent_run_id="run-1",
             binding_digest="a" * 64,
             owner="worker-1",
             background_tasks=set(),
@@ -463,12 +462,12 @@ async def test_completed_tool_operation_is_reused_after_reopen(
 
     second_engine: AsyncEngine | None = None
     if backend == "sqlite":
-        second = RuntimeState.sqlite(database)
+        second = RuntimeStorage.sqlite(database)
     else:
         second_engine = create_async_engine(
             URL.create("sqlite+aiosqlite", database=str(database))
         )
-        second = RuntimeState.sql(second_engine)
+        second = RuntimeStorage.sql(second_engine)
     await second.initialize(namespace="tool-replay", tenant_id="tenant")
     try:
         replay_bridge = RuntimeToolOperationBridge(
@@ -477,8 +476,8 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             namespace="tool-replay",
             tenant_id="tenant",
             execution_id="execution",
-            step_run_id="run-2",
-            recovery_step_run_id="run-1",
+            agent_run_id="run-2",
+            recovery_agent_run_id="run-1",
             binding_digest="a" * 64,
             owner="worker-2",
             background_tasks=set(),
@@ -510,7 +509,7 @@ def _crash_session_process(
 ) -> None:
     """Exit without cleanup after a selected durable boundary."""
     original_complete = RuntimeToolOperationBridge.complete
-    original_snapshot = RuntimeStepStore.save_snapshot
+    original_checkpoint = RuntimeAgentRunStore.save_checkpoint
     original_success = LocalExecutionBackend._commit_success
     original_activate = RuntimeStateCommands.commit_agent_attempt_checkpoint
     original_admission = RuntimeStateCommands.commit_tool_admission
@@ -536,21 +535,21 @@ def _crash_session_process(
             os._exit(91)
         return cancelled
 
-    async def save_snapshot(
-        self: RuntimeStepStore, snapshot: ContinuableSnapshot, **kwargs: Any
+    async def save_checkpoint(
+        self: RuntimeAgentRunStore, checkpoint: AgentRunCheckpoint, **kwargs: Any
     ) -> None:
-        await original_snapshot(self, snapshot, **kwargs)
+        await original_checkpoint(self, checkpoint, **kwargs)
         if phase == "request_checkpoint" and not any(
-            isinstance(message, ModelResponse) for message in snapshot.messages
+            isinstance(message, ModelResponse) for message in checkpoint.messages
         ):
             os._exit(91)
         if (
             phase in {"tool_checkpoint", "projected_tool_checkpoint"}
-            and snapshot.pending_request_index is not None
+            and checkpoint.pending_request_index is not None
         ):
             if phase == "projected_tool_checkpoint":
                 await self.flush_execution_projection(
-                    snapshot.run_id, execution_id=kwargs["execution_id"]
+                    checkpoint.agent_run_id, execution_id=kwargs["execution_id"]
                 )
             os._exit(91)
 
@@ -567,26 +566,26 @@ def _crash_session_process(
     RuntimeToolOperationBridge.complete = complete
     RuntimeStateCommands.commit_agent_attempt_checkpoint = activate
     RuntimeStateCommands.commit_tool_admission = admit
-    RuntimeStepStore.save_snapshot = save_snapshot
+    RuntimeAgentRunStore.save_checkpoint = save_checkpoint
     LocalExecutionBackend._commit_success = commit_success
 
     async def run() -> None:
         if backend == "sqlite":
-            state = RuntimeState.sqlite(database)
+            state = RuntimeStorage.sqlite(database)
         else:
             engine = create_async_engine(
                 URL.create("sqlite+aiosqlite", database=database)
             )
             if phase != "recovered_before_terminal":
                 await provision_runtime_database(engine)
-            state = RuntimeState.sql(engine)
+            state = RuntimeStorage.sql(engine)
         application = _application(
-            [], effect="non_replay_safe", effect_log=Path(effect_log)
+            [], effect_policy="non_replay_safe", effect_log=Path(effect_log)
         )
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),
-            state=state,
+            storage=state,
             capabilities=(application,),
         ) as runtime:
             if phase != "recovered_before_terminal":
@@ -645,19 +644,19 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     execution_id = committed_effects[0]
     engine = None
     if backend == "sqlite":
-        state = RuntimeState.sqlite(database)
+        state = RuntimeStorage.sqlite(database)
     else:
         engine = create_async_engine(
             URL.create("sqlite+aiosqlite", database=str(database))
         )
-        state = RuntimeState.sql(engine)
+        state = RuntimeStorage.sql(engine)
     calls: list[str] = []
-    application = _application(calls, effect="non_replay_safe", effect_log=effect_log)
+    application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
     try:
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),
-            state=state,
+            storage=state,
             capabilities=(application,),
         ) as runtime:
             session = runtime.agent("default").session("session")
@@ -709,18 +708,18 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
 
 
 @pytest.mark.asyncio
-async def test_snapshot_save_readback_ignores_transient_before_coordinate(
+async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="snapshot-readback", tenant_id="tenant")
-    original = StateStepArchive.materialize_snapshot
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="checkpoint-readback", tenant_id="tenant")
+    original = StateStepArchive.materialize_checkpoint
     injected = False
 
     async def commit_then_fail(
         self: StateStepArchive,
-        run: RunRecord,
-        snapshot: ContinuableSnapshot,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
         **kwargs: Any,
@@ -729,7 +728,7 @@ async def test_snapshot_save_readback_ignores_transient_before_coordinate(
         await original(
             self,
             run,
-            snapshot,
+            checkpoint,
             execution_id=execution_id,
             **kwargs,
         )
@@ -739,13 +738,13 @@ async def test_snapshot_save_readback_ignores_transient_before_coordinate(
 
     monkeypatch.setattr(
         StateStepArchive,
-        "materialize_snapshot",
+        "materialize_checkpoint",
         commit_then_fail,
     )
     try:
-        run = RunRecord("run", conversation_id="conversation", agent_name="default")
-        snapshot = ContinuableSnapshot(
-            run_id="run",
+        run = AgentRunRecord("run", agent_conversation_id="conversation", agent_name="default")
+        checkpoint = AgentRunCheckpoint(
+            agent_run_id="run",
             step_index=1,
             messages=[
                 ModelRequest(parts=[UserPromptPart("inspect")]),
@@ -754,44 +753,44 @@ async def test_snapshot_save_readback_ignores_transient_before_coordinate(
             state="complete",
             transcript_message_count_before=0,
         )
-        await state.steps.register_run(run)
-        await state.steps.save_snapshot(snapshot)
+        await state.run_store.register_agent_run(run)
+        await state.run_store.save_checkpoint(checkpoint)
         assert injected
 
-        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
         assert isinstance(recovery, StateStepArchive)
         assert await recovery.transcript_message_count_for_run(run) == len(
-            snapshot.messages
+            checkpoint.messages
         )
-        stored = await recovery.latest_snapshot(
-            run_id=run.run_id,
+        stored = await recovery.latest_checkpoint(
+            agent_run_id=run.agent_run_id,
             include_interrupted=True,
         )
         assert stored is not None
         assert stored.transcript_message_count_before is None
-        assert tuple(stored.messages) == tuple(snapshot.messages)
+        assert tuple(stored.messages) == tuple(checkpoint.messages)
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_run_snapshot_relocation_is_idempotent_and_validates_prefix() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="run-snapshot-relocation", tenant_id="tenant")
+async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="run-checkpoint-relocation", tenant_id="tenant")
     try:
-        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
         assert isinstance(recovery, StateStepArchive)
-        run = RunRecord("run", conversation_id="conversation", agent_name="default")
-        await recovery.register_run(run)
-        first = ContinuableSnapshot(
-            run_id="run",
+        run = AgentRunRecord("run", agent_conversation_id="conversation", agent_name="default")
+        await recovery.register_agent_run(run)
+        first = AgentRunCheckpoint(
+            agent_run_id="run",
             step_index=1,
             messages=[ModelRequest(parts=[UserPromptPart("inspect")])],
             state="active",
             transcript_message_count_before=0,
         )
-        final = ContinuableSnapshot(
-            run_id="run",
+        final = AgentRunCheckpoint(
+            agent_run_id="run",
             step_index=2,
             messages=[
                 *first.messages,
@@ -800,25 +799,25 @@ async def test_run_snapshot_relocation_is_idempotent_and_validates_prefix() -> N
             state="complete",
             transcript_message_count_before=1,
         )
-        await recovery.materialize_snapshot(run, first)
-        await recovery.materialize_snapshot(run, final)
+        await recovery.materialize_checkpoint(run, first)
+        await recovery.materialize_checkpoint(run, final)
         before = await recovery.transcript_message_count_for_run(run)
 
-        relocated = await recovery.relocate_run_snapshot(run, final)
+        relocated = await recovery.relocate_run_checkpoint(run, final)
         assert relocated.transcript_message_count_before == len(final.messages)
-        await recovery.materialize_snapshot(run, relocated)
+        await recovery.materialize_checkpoint(run, relocated)
         assert await recovery.transcript_message_count_for_run(run) == before
 
-        bad_run = RunRecord(
+        bad_run = AgentRunRecord(
             "bad-run",
-            conversation_id="conversation",
+            agent_conversation_id="conversation",
             agent_name="default",
         )
-        await recovery.register_run(bad_run)
-        await recovery.materialize_snapshot(
+        await recovery.register_agent_run(bad_run)
+        await recovery.materialize_checkpoint(
             bad_run,
-            ContinuableSnapshot(
-                run_id="bad-run",
+            AgentRunCheckpoint(
+                agent_run_id="bad-run",
                 step_index=1,
                 messages=[ModelRequest(parts=[UserPromptPart("stored")])],
                 state="active",
@@ -826,10 +825,10 @@ async def test_run_snapshot_relocation_is_idempotent_and_validates_prefix() -> N
             ),
         )
         with pytest.raises(AIError) as raised:
-            await recovery.relocate_run_snapshot(
+            await recovery.relocate_run_checkpoint(
                 bad_run,
-                ContinuableSnapshot(
-                    run_id="bad-run",
+                AgentRunCheckpoint(
+                    agent_run_id="bad-run",
                     step_index=2,
                     messages=[
                         ModelRequest(parts=[UserPromptPart("different")]),
@@ -845,22 +844,22 @@ async def test_run_snapshot_relocation_is_idempotent_and_validates_prefix() -> N
 
 
 @pytest.mark.asyncio
-async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> None:
-    state = RuntimeState.in_memory()
+async def test_recovery_to_conversation_rebases_cumulative_tool_checkpoint() -> None:
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-tool-recovery", tenant_id="tenant")
     try:
-        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
-        conversation = state.steps.read_store(RuntimeDomain.CONVERSATION)
+        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        conversation = state.run_store.read_store(RuntimeDomain.CONVERSATION)
         assert isinstance(recovery, StateStepArchive)
         assert isinstance(conversation, StateStepArchive)
 
-        run = RunRecord(
+        run = AgentRunRecord(
             "run",
-            conversation_id="conversation",
+            agent_conversation_id="conversation",
             agent_name="default",
             metadata={"history_id": "history"},
         )
-        await recovery.register_run(run)
+        await recovery.register_agent_run(run)
         first_messages = [
             ModelRequest(parts=[UserPromptPart("inspect")]),
             ModelResponse(
@@ -886,20 +885,20 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> No
             ),
             ModelResponse(parts=[TextPart("done")]),
         ]
-        await recovery.materialize_snapshot(
+        await recovery.materialize_checkpoint(
             run,
-            ContinuableSnapshot(
-                run_id=run.run_id,
+            AgentRunCheckpoint(
+                agent_run_id=run.agent_run_id,
                 step_index=1,
                 messages=first_messages,
                 state="active",
                 transcript_message_count_before=0,
             ),
         )
-        await recovery.materialize_snapshot(
+        await recovery.materialize_checkpoint(
             run,
-            ContinuableSnapshot(
-                run_id=run.run_id,
+            AgentRunCheckpoint(
+                agent_run_id=run.agent_run_id,
                 step_index=2,
                 messages=final_messages,
                 state="complete",
@@ -907,16 +906,16 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> No
             ),
         )
 
-        await state.steps.materialize_from_recovery(
+        await state.run_store.materialize_from_recovery(
             target=RuntimeDomain.CONVERSATION,
-            step_run_id=run.run_id,
+            agent_run_id=run.agent_run_id,
         )
-        await state.steps.materialize_from_recovery(
+        await state.run_store.materialize_from_recovery(
             target=RuntimeDomain.CONVERSATION,
-            step_run_id=run.run_id,
+            agent_run_id=run.agent_run_id,
         )
 
-        stored = await conversation.latest_snapshot(run_id=run.run_id)
+        stored = await conversation.latest_checkpoint(agent_run_id=run.agent_run_id)
         assert stored is not None
         assert stored.state == "complete"
         assert tuple(stored.messages[-len(final_messages) :]) == tuple(final_messages)
@@ -945,9 +944,9 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
     async with Runtime.open(
         "session-tool-crash",
         models=_ToolModels(),
-        state=RuntimeState.sqlite(database),
+        storage=RuntimeStorage.sqlite(database),
         capabilities=(
-            _application(calls, effect="non_replay_safe", effect_log=effect_log),
+            _application(calls, effect_policy="non_replay_safe", effect_log=effect_log),
         ),
     ) as runtime:
         session = runtime.agent("default").session("session")
@@ -976,32 +975,32 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
 async def test_tool_effect_waits_for_durable_response_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original = StateStepArchive.materialize_snapshot
+    original = StateStepArchive.materialize_checkpoint
     calls: list[str] = []
     rejected = False
 
     async def reject_response(
         self: StateStepArchive,
-        run: RunRecord,
-        snapshot: ContinuableSnapshot,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
         **kwargs: Any,
     ) -> None:
         nonlocal rejected
         if self.runtime_domain is RuntimeDomain.RECOVERY and any(
             isinstance(message, ModelResponse)
             and any(isinstance(part, ToolCallPart) for part in message.parts)
-            for message in snapshot.messages
+            for message in checkpoint.messages
         ):
             rejected = True
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-        return await original(self, run, snapshot, **kwargs)
+        return await original(self, run, checkpoint, **kwargs)
 
-    monkeypatch.setattr(StateStepArchive, "materialize_snapshot", reject_response)
+    monkeypatch.setattr(StateStepArchive, "materialize_checkpoint", reject_response)
     with pytest.raises(AIError) as raised:
         async with Runtime.open(
             "pre-effect-checkpoint",
             models=_ToolModels(),
-            state=RuntimeState.in_memory(),
+            storage=RuntimeStorage.in_memory(),
             capabilities=(_application(calls),),
         ) as runtime:
             await runtime.agent("default").create_session("session")
@@ -1047,7 +1046,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
         async with Runtime.open(
             "session-atomic-terminal",
             models=_ToolModels(),
-            state=state,
+            storage=state,
             capabilities=(_application(calls),),
         ) as runtime:
             await runtime.agent("default").create_session("session")
@@ -1082,32 +1081,32 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
 async def test_recovery_preparation_failure_releases_its_owned_flight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="recovery-preparation", tenant_id="tenant")
-    recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
-    run = RunRecord(
+    recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    run = AgentRunRecord(
         "run",
-        conversation_id="conversation",
+        agent_conversation_id="conversation",
         agent_name="default",
         metadata={"history_id": "history"},
     )
-    snapshot = ContinuableSnapshot(
-        run_id="run",
+    checkpoint = AgentRunCheckpoint(
+        agent_run_id="run",
         step_index=1,
-        conversation_id=run.conversation_id,
+        agent_conversation_id=run.agent_conversation_id,
         agent_name=run.agent_name,
         messages=[ModelRequest(parts=[UserPromptPart("inspect")])],
         transcript_message_count_before=0,
     )
-    await recovery.materialize_snapshot(run, snapshot)
+    await recovery.materialize_checkpoint(run, checkpoint)
 
     async def fail_resolution(_interactions: Any) -> Any:
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
     monkeypatch.setattr(recovery, "resolve_model_interactions", fail_resolution)
     with pytest.raises(AIError) as raised:
-        await state.steps.materialize_from_recovery(
-            target=RuntimeDomain.CONVERSATION, step_run_id="run"
+        await state.run_store.materialize_from_recovery(
+            target=RuntimeDomain.CONVERSATION, agent_run_id="run"
         )
     assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
     await state.close()

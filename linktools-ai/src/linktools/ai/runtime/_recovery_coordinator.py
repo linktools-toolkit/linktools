@@ -40,7 +40,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import StoredPayload
-from ..workspace import RepositoryInstructionResolver, RepositoryInstructions
+from ..spec import RepositoryInstructionResolver, RepositoryInstructions
 from ._input import CanonicalUserInput
 from ._pydantic_tool_control import build_model_retry, build_tool_failed
 from ._repository_instructions import (
@@ -73,7 +73,7 @@ from .state._contracts import (
     RuntimePayloadRef,
     ToolOperationRecord,
 )
-from .state._step_contracts import ContinuableSnapshot, RunRecord
+from .state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 _logger = environ.get_logger("ai.runtime.local")
 
@@ -159,7 +159,7 @@ class _RecoveryCoordinatorPort(Protocol):
     async def materialize_deferred_call(
         self,
         execution: ExecutionRecord,
-        source_step_run_id: str,
+        source_agent_run_id: str,
         call: ToolCallPart,
         metadata: Mapping[str, object],
     ) -> PendingDeferredCall: ...
@@ -192,7 +192,7 @@ class _RecoveryCoordinatorPort(Protocol):
 
     async def load_interrupted_messages(
         self,
-        run_id: str,
+        agent_run_id: str,
     ) -> tuple[ModelMessage, ...]: ...
 
     async def claim_deferred_resume(
@@ -254,13 +254,13 @@ class _RecoveryCoordinatorPort(Protocol):
         stop_reason: StopReason,
         *,
         binding: AgentBinding | None = None,
-        run_id: str | None = None,
+        agent_run_id: str | None = None,
         usage: UsageMetrics | None = None,
         safe_error_details: Mapping[str, JsonValue] | None = None,
         error_diagnostics: ErrorDiagnostics | None = None,
         expected_cursor: ConversationCursor | None = None,
-        conversation_run: RunRecord | None = None,
-        conversation_snapshot: ContinuableSnapshot | None = None,
+        conversation_agent_run: AgentRunRecord | None = None,
+        conversation_checkpoint: AgentRunCheckpoint | None = None,
         recovery_checkpoint: RecoveryCheckpoint | None = None,
     ) -> ExecutionRecord: ...
 
@@ -366,7 +366,7 @@ class _RecoveryCoordinator:
         if (
             checkpoint is None
             or checkpoint.state is not RecoveryCheckpointState.ACTIVE
-            or checkpoint.step_run_id is None
+            or checkpoint.agent_run_id is None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         persisted_overlay = await self._port.load_repository_instructions(
@@ -377,7 +377,7 @@ class _RecoveryCoordinator:
         matching = tuple(
             barrier
             for barrier in checkpoint.repository_instruction_barriers
-            if barrier.step_run_id == checkpoint.step_run_id
+            if barrier.agent_run_id == checkpoint.agent_run_id
             and barrier.tool_call_id == tool_call_id
         )
         if matching:
@@ -412,10 +412,9 @@ class _RecoveryCoordinator:
         if next_overlay is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         barrier = RepositoryInstructionBarrier(
-            checkpoint.step_run_id,
+            checkpoint.agent_run_id,
             tool_call_id,
             arguments_digest,
-            next_overlay.digest,
         )
         committed = await self._port.commit_repository_instruction_barrier(
             execution,
@@ -435,7 +434,7 @@ class _RecoveryCoordinator:
         _logger.info(
             "repository instructions extended: execution=%s step=%s tool_call=%s",
             execution.execution_id,
-            checkpoint.step_run_id,
+            checkpoint.agent_run_id,
             tool_call_id,
         )
         return committed_overlay, True
@@ -445,7 +444,7 @@ class _RecoveryCoordinator:
         execution: ExecutionRecord,
         requests: DeferredToolRequests,
         *,
-        step_run_id: str,
+        agent_run_id: str,
         paused_at: datetime,
     ) -> None:
         current = await self._port.load_execution(
@@ -468,7 +467,7 @@ class _RecoveryCoordinator:
         if (
             current.status is not ExecutionStatus.STARTED
             or checkpoint.state is not RecoveryCheckpointState.ACTIVE
-            or checkpoint.step_run_id != step_run_id
+            or checkpoint.agent_run_id != agent_run_id
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         metadata = requests.metadata
@@ -477,7 +476,7 @@ class _RecoveryCoordinator:
             approvals_list.append(
                 await self._port.materialize_deferred_call(
                     current,
-                    step_run_id,
+                    agent_run_id,
                     call,
                     metadata.get(call.tool_call_id, {}),
                 )
@@ -488,14 +487,14 @@ class _RecoveryCoordinator:
             calls_list.append(
                 await self._port.materialize_deferred_call(
                     current,
-                    step_run_id,
+                    agent_run_id,
                     call,
                     metadata.get(call.tool_call_id, {}),
                 )
             )
         calls = tuple(calls_list)
         continuation = PendingToolContinuation(
-            source_step_run_id=step_run_id,
+            source_agent_run_id=agent_run_id,
             approvals=approvals,
             calls=calls,
         )
@@ -505,7 +504,7 @@ class _RecoveryCoordinator:
                     "approval-v1",
                     self._port.tenant_id,
                     current.execution_id,
-                    step_run_id,
+                    agent_run_id,
                     item.tool_call_id,
                 ),
                 current.execution_id,
@@ -525,7 +524,7 @@ class _RecoveryCoordinator:
                     "external-call-v1",
                     self._port.tenant_id,
                     current.execution_id,
-                    step_run_id,
+                    agent_run_id,
                     item.tool_call_id,
                 ),
                 current.execution_id,
@@ -924,7 +923,7 @@ class _RecoveryCoordinator:
                 "approval-v1",
                 self._port.tenant_id,
                 current.execution_id,
-                recovery.pending_tools.source_step_run_id,
+                recovery.pending_tools.source_agent_run_id,
                 pending.tool_call_id,
             )
             record = await self._port.load_approval(
@@ -959,7 +958,7 @@ class _RecoveryCoordinator:
                 "external-call-v1",
                 self._port.tenant_id,
                 current.execution_id,
-                recovery.pending_tools.source_step_run_id,
+                recovery.pending_tools.source_agent_run_id,
                 pending.tool_call_id,
             )
             record = await self._port.load_external_call(
@@ -991,7 +990,7 @@ class _RecoveryCoordinator:
                 record.resolution_metadata
             )
         history = await self._port.load_interrupted_messages(
-            recovery.pending_tools.source_step_run_id
+            recovery.pending_tools.source_agent_run_id
         )
         resumed_execution, resumed_checkpoint = (
             await self._port.claim_deferred_resume(checkpoint, current)
@@ -1045,7 +1044,7 @@ class _RecoveryCoordinator:
                 try:
                     await self.reconcile_checkpoint(checkpoint)
                 except AIError as error:
-                    if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                    if error.code is not ErrorCode.AGENT_BINDING_UNAVAILABLE:
                         raise
                     if error.safe_details.get("reason") == "workspace_mismatch":
                         raise
@@ -1083,7 +1082,7 @@ def _deferred_id(
     contract: str,
     tenant_id: str,
     execution_id: str,
-    source_step_run_id: str,
+    source_agent_run_id: str,
     tool_call_id: str,
 ) -> str:
     return canonical_sha256(
@@ -1091,7 +1090,7 @@ def _deferred_id(
             "contract": contract,
             "tenant_id": tenant_id,
             "execution_id": execution_id,
-            "source_step_run_id": source_step_run_id,
+            "source_agent_run_id": source_agent_run_id,
             "tool_call_id": tool_call_id,
         }
     )

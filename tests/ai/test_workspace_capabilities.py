@@ -7,15 +7,26 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.capability import (
+    CapabilityContribution,
     CapabilityGroup,
     ToolCallFailed,
     tool_class_from_metadata,
     workspace_capabilities,
+    workspace_tool_declarations,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.model import ModelRegistry
+from linktools.ai.spec import (
+    AgentSpec,
+    AgentSpecCodec,
+    MCPServerSpec,
+    RepositoryInstructions,
+    mcp_server_selector,
+    mcp_tool_selector,
+)
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -23,7 +34,6 @@ from linktools.ai.runtime._tool_boundary import (
 )
 from linktools.ai.workspace import (
     DisabledSandbox,
-    RepositoryInstructions,
     SandboxResource,
     SandboxSession,
     ToolPermissionRule,
@@ -180,10 +190,11 @@ class _SpoofedSandboxCapability(AbstractCapability[object]):
     id = "linktools.workspace-sandbox"
 
 
-def _semantic_contract(tool: object) -> dict[str, object]:
+def _tool_contract(tool: object) -> dict[str, object]:
     definition = tool.tool_def  # type: ignore[attr-defined]
     return {
         "version": 1,
+        "revision": 1,
         "description": definition.description,
         "parameters": definition.parameters_json_schema,
         "return_schema": definition.return_schema,
@@ -192,48 +203,167 @@ def _semantic_contract(tool: object) -> dict[str, object]:
     }
 
 
+def test_workspace_constructor_normalizes_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = Workspace(Path("project"), {})
+    assert workspace.root == (tmp_path / "project").resolve()
+
+
 def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     contributions = _workspace_tool_contributions(workspace)
 
     assert tuple(item.id for item in contributions) == (
         "attach_files",
+        "check_command",
         "create_directory",
         "edit_file",
         "file_info",
         "find_files",
         "list_directory",
         "read_file",
-        "search_files",
-        "write_file",
-        "check_command",
         "run_command",
+        "search_files",
         "start_command",
         "stop_command",
+        "write_file",
     )
     assert all(item.kind == "tool" for item in contributions)
-    assert all(len(item.fingerprint) == 64 for item in contributions)
+    assert all(item.revision == 1 for item in contributions)
     assert tuple(
         tool_class_from_metadata(item.value.tool_def.metadata)
         for item in contributions
     ) == (
         "filesystem.read",
+        "shell",
         "filesystem.write",
         "filesystem.write",
         "filesystem.read",
         "filesystem.read",
         "filesystem.read",
         "filesystem.read",
+        "shell",
         "filesystem.read",
+        "shell",
+        "shell",
         "filesystem.write",
-        "shell",
-        "shell",
-        "shell",
-        "shell",
     )
-    assert tuple(item.fingerprint for item in contributions) == tuple(
-        item.fingerprint for item in _workspace_tool_contributions(workspace)
+    assert tuple(item.revision for item in contributions) == tuple(
+        item.revision for item in _workspace_tool_contributions(workspace)
     )
+
+
+@pytest.mark.parametrize(
+    ("selectors", "tool_classes"),
+    (
+        (("file:read",), {"filesystem.read"}),
+        (("file:write",), {"filesystem.write"}),
+        (("file:*",), {"filesystem.read", "filesystem.write"}),
+        (("terminal:*",), {"shell"}),
+        (("file:read", "read_file"), {"filesystem.read"}),
+    ),
+)
+@pytest.mark.asyncio
+async def test_workspace_selector_expands_registered_tool_declarations(
+    tmp_path: Path,
+    selectors: tuple[str, ...],
+    tool_classes: set[str],
+) -> None:
+    workspace = Workspace.load(tmp_path)
+    snapshot = await CapabilityGroup("workspace", workspace=workspace).capture()
+    spec = AgentSpec(
+        "agent",
+        allow_tools=selectors,
+        allow_skills=(),
+        allow_subagents=(),
+        allow_runtime_capabilities=(),
+    )
+    compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        candidates=snapshot.contributions,
+        agents={"agent": spec},
+    )
+
+    definition = compiler.compile(spec)
+    expected = {
+        declaration.name
+        for declaration in workspace_tool_declarations()
+        if tool_class_from_metadata(declaration.metadata) in tool_classes
+    }
+    assert {item.id for item in definition.selected_tools} == expected
+
+
+@pytest.mark.asyncio
+async def test_workspace_selector_validation_and_candidate_boundaries(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(AIError) as error:
+        AgentSpec("agent", allow_tools=("*", "file:delete"))
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+    workspace = Workspace.load(tmp_path)
+    snapshot = await CapabilityGroup("workspace", workspace=workspace).capture()
+    for selectors in (("new_tool",), ("*", "new_tool")):
+        spec = AgentSpec("agent", allow_tools=selectors)
+        compiler = AgentCompiler(
+            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+            candidates=snapshot.contributions,
+            agents={"agent": spec},
+        )
+        with pytest.raises(AIError) as error:
+            compiler.compile(spec)
+        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+    for field in ("allow_skills", "allow_subagents", "allow_runtime_capabilities"):
+        kwargs = {
+            "allow_tools": (),
+            "allow_skills": (),
+            "allow_subagents": (),
+            "allow_runtime_capabilities": (),
+            field: ("*", "missing"),
+        }
+        spec = AgentSpec("agent", **kwargs)
+        compiler = AgentCompiler(
+            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+            candidates=(),
+            agents={"agent": spec},
+        )
+        with pytest.raises(AIError) as error:
+            compiler.compile(spec)
+        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+    empty = AgentSpec("agent", allow_tools=())
+    empty_compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        candidates=(),
+        agents={"agent": empty},
+    )
+    assert empty_compiler.compile(empty).selected_tools == ()
+
+
+def test_global_tool_wildcard_preserves_exact_mcp_requirement() -> None:
+    server = MCPServerSpec("server", "python")
+    exact = mcp_tool_selector(server.id, "required")
+    spec = AgentSpec(
+        "agent",
+        allow_tools=("*", exact),
+        allow_skills=(),
+        allow_subagents=(),
+        allow_runtime_capabilities=(),
+    )
+    compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+        candidates=(CapabilityContribution.from_declaration(server),),
+        agents={"agent": spec},
+    )
+
+    definition = compiler.compile(spec)
+
+    assert mcp_server_selector(server.id) in definition.mcp_selector_policy
+    assert exact in definition.mcp_selector_policy
 
 
 @pytest.mark.asyncio
@@ -259,30 +389,41 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
     try:
-        frozen = await CapabilityGroup(
+        snapshot = await CapabilityGroup(
             "workspace",
             workspace=workspace,
             assets=store,
-        ).freeze()
+        ).capture()
     finally:
         await store.close()
 
-    identities = {(item.kind, item.id) for item in frozen}
+    identities = {
+        (item.kind, item.id)
+        for item in snapshot.contributions
+    }
     assert ("agent", "audit") in identities
     assert ("tool", "read_file") in identities
     assert ("tool", "run_command") in identities
 
 
-def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(
+    tmp_path: Path,
+) -> None:
     sandbox = _RecordingSandbox()
-    workspaces = (
-        Workspace.load(tmp_path),
-        Workspace.load(tmp_path, sandbox=sandbox),
-        Workspace.load(tmp_path, sandbox=DisabledSandbox()),
+    workspace = Workspace.load(tmp_path)
+    groups = (
+        CapabilityGroup("workspace", workspace=workspace),
+        CapabilityGroup("workspace", workspace=workspace, sandbox=sandbox),
+        CapabilityGroup("workspace", workspace=workspace, sandbox=DisabledSandbox()),
     )
+    snapshots = [await group.capture() for group in groups]
     projected = tuple(
-        tuple((item.id, item.fingerprint, item.semantic_contract) for item in _workspace_tool_contributions(workspace))
-        for workspace in workspaces
+        tuple(
+            (item.id, item.revision, item.contract)
+            for item in snapshot.contributions
+        )
+        for snapshot in snapshots
     )
     assert projected[0] == projected[1] == projected[2]
     assert sandbox.sessions == []
@@ -299,7 +440,7 @@ def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) ->
 
 def test_workspace_capabilities_with_no_selected_tools_do_not_open_sandbox(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    assert workspace_capabilities(Workspace.load(tmp_path, sandbox=sandbox), ()) == ()
+    assert workspace_capabilities(Workspace.load(tmp_path), ()) == ()
     assert sandbox.sessions == []
 
 
@@ -311,16 +452,16 @@ def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> Non
 def test_workspace_sandbox_capability_id_is_reserved() -> None:
     group = CapabilityGroup[object]("custom")
     with pytest.raises(AIError) as raised:
-        group.capability(_SpoofedSandboxCapability())
+        group.runtime_capability(_SpoofedSandboxCapability())
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 @pytest.mark.asyncio
-async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_path: Path) -> None:
+async def test_workspace_runtime_tool_contracts_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    workspace = Workspace.load(tmp_path)
     contributions = _workspace_tool_contributions(workspace)
-    expected = {item.id: item.semantic_contract for item in contributions}
+    expected = {item.id: item.contract for item in contributions}
     capability = workspace_capabilities(
         workspace,
         (
@@ -343,7 +484,7 @@ async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_
     run_toolset = capability.get_toolset()
 
     assert {
-        name: _semantic_contract(tool)
+        name: _tool_contract(tool)
         for name, tool in run_toolset.tools.items()  # type: ignore[attr-defined]
     } == expected
     await run_toolset.__aexit__(None, None, None)
@@ -352,7 +493,7 @@ async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_
 @pytest.mark.asyncio
 async def test_workspace_capability_uses_the_caller_owned_session(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    workspace = Workspace.load(tmp_path)
     capability = workspace_capabilities(
         workspace,
         ("read_file", "start_command", "check_command", "stop_command"),
@@ -387,7 +528,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
     expected_error: type[BaseException],
 ) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    workspace = Workspace.load(tmp_path)
     session = await sandbox.open(root=workspace.root)
     capability = workspace_capabilities(
         workspace,
@@ -400,7 +541,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
         {
             "read_file": ManagedToolDescriptor(
                 effect_owner="none",
-                effect="none",
+                effect_policy="none",
                 tool_class="filesystem.read",
                 workspace_path_fields=("path",),
             )
@@ -435,7 +576,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
 @pytest.mark.asyncio
 async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    workspace = Workspace.load(tmp_path)
     session = await sandbox.open(root=workspace.root)
     capability = workspace_capabilities(
         workspace,
@@ -478,10 +619,11 @@ async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path
 
 @pytest.mark.asyncio
 async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, sandbox=DisabledSandbox())
+    workspace = Workspace.load(tmp_path)
+    group = CapabilityGroup("workspace", workspace=workspace, sandbox=DisabledSandbox())
 
     with pytest.raises(AIError) as raised:
-        await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
+        await group.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 
@@ -494,16 +636,13 @@ async def test_workspace_group_does_not_discover_declarations(
     agent.parent.mkdir(parents=True)
     agent.write_text("not a valid agent declaration", encoding="utf-8")
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(
-        tmp_path,
+    workspace = Workspace.load(tmp_path)
 
-        sandbox=sandbox,
-    )
-
-    group = CapabilityGroup("workspace", workspace=workspace)
-    frozen = await group.freeze()
+    group = CapabilityGroup("workspace", workspace=workspace, sandbox=sandbox)
+    snapshot = await group.capture()
 
     assert group.workspace is workspace
-    assert frozen
-    assert all(item.kind == "tool" for item in frozen)
+    assert snapshot.sandbox is sandbox
+    assert snapshot
+    assert all(item.kind == "tool" for item in snapshot.contributions)
     assert sandbox.sessions == []

@@ -28,7 +28,7 @@ from linktools.ai.runtime import (
     ExecutionTraceItem,
     Page,
     TranscriptItem,
-    RuntimeState,
+    RuntimeStorage,
     UsageSummary,
 )
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
@@ -36,9 +36,9 @@ from linktools.ai.runtime._runtime_history import RuntimeHistory
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskGraph,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskNode,
     TaskNodeView,
     TaskResultRecord,
@@ -306,7 +306,7 @@ async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
 async def test_runtime_history_opens_without_model_or_agent_composition() -> None:
     async with RuntimeHistory.open(
         "workspace",
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
     ) as history:
         assert history.tenant_id == "default"
         with pytest.raises(AIError) as error:
@@ -451,7 +451,7 @@ async def test_runtime_history_projects_owned_sessions_without_runtime_open() ->
 
 class _ResultExecutions:
     def __init__(self) -> None:
-        self.binding = TaskBindingSnapshot(
+        self.binding = TaskBindingContract(
             "handler",
             1,
             "none",
@@ -479,7 +479,7 @@ class _ResultExecutions:
             tenant_id="tenant",
             binding_kind="task",
             agent_id=None,
-            task_type="handler",
+            task_id="handler",
             status=ExecutionStatus.SUCCEEDED,
             lineage_kind=ExecutionLineageKind.RUN,
             parent_execution_id=None,
@@ -565,9 +565,6 @@ async def test_runtime_history_inspection_uses_safe_durable_summaries() -> None:
     assert info.terminal_at == executions.result.created_at
     assert info.terminal_at != executions.record.updated_at
     assert info.binding_digest == executions.binding.binding_digest
-    assert info.input_digest == executions.record.stored_user_input.digest
-    assert info.output_digest == executions.result.output.digest
-    assert info.output_fingerprint == executions.binding.output_fingerprint
     assert info.usage == UsageSummary(
         logical_requests=1,
         succeeded_requests=1,
@@ -595,7 +592,7 @@ class _TaskResults:
             None,
             "execution",
         )
-        self.snapshot = TaskGraphSnapshot(
+        self._graph_state = TaskGraphState(
             "graph",
             TaskStatus.SUCCEEDED,
             TaskGraph("graph", (node,)).nodes,
@@ -618,14 +615,14 @@ class _TaskResults:
             return ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
         return None
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot | None:
+    ) -> TaskGraphState | None:
         if graph_id == "graph" and tenant_id == "tenant":
-            return self.snapshot
+            return self._graph_state
         return None
 
     async def get_results(
@@ -690,7 +687,6 @@ async def test_runtime_history_reads_execution_task_results_and_artifacts() -> N
 
     assert result.status is ExecutionStatus.SUCCEEDED
     assert result.output is None
-    assert result.output_fingerprint == executions.binding.output_fingerprint
     assert reference.namespace == "workspace"
     assert reference.tenant_id == "tenant"
     assert reference.graph_id == "graph"

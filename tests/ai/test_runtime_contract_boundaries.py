@@ -35,9 +35,9 @@ from linktools.ai.runtime._tool_boundary import (
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
-    capability_identity_payload,
+    capability_ref_payload,
 )
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _GeneratedOutputAlpha(BaseModel):
@@ -106,33 +106,31 @@ class _ExplicitSameNameOutput(BaseModel):
         return schema
 
 
-def test_output_fingerprint_ignores_generated_type_titles() -> None:
+def test_output_contract_ignores_generated_type_titles() -> None:
     alpha = bind_output(_GeneratedOutputAlpha)
     beta = bind_output(_GeneratedOutputBeta)
 
-    assert alpha.fingerprint == beta.fingerprint
     assert alpha.schema_definition == beta.schema_definition
     assert alpha.schema_definition["properties"]["title"]["type"] == "string"
 
 
-def test_output_fingerprint_ignores_generated_nested_model_titles() -> None:
+def test_output_contract_ignores_generated_nested_model_titles() -> None:
     alpha = bind_output(_GeneratedNestedOutputAlpha)
     beta = bind_output(_GeneratedNestedOutputBeta)
 
-    assert alpha.fingerprint == beta.fingerprint
     assert alpha.schema_definition == beta.schema_definition
 
 
-def test_output_fingerprint_preserves_explicit_schema_titles() -> None:
-    assert bind_output(_ExplicitOutputAlpha).fingerprint != bind_output(
+def test_output_contract_preserves_explicit_schema_titles() -> None:
+    assert bind_output(_ExplicitOutputAlpha).schema_definition != bind_output(
         _ExplicitOutputBeta
-    ).fingerprint
+    ).schema_definition
 
 
-def test_output_fingerprint_preserves_explicit_nested_model_titles() -> None:
-    assert bind_output(_ExplicitNestedOutputAlpha).fingerprint != bind_output(
+def test_output_contract_preserves_explicit_nested_model_titles() -> None:
+    assert bind_output(_ExplicitNestedOutputAlpha).schema_definition != bind_output(
         _ExplicitNestedOutputBeta
-    ).fingerprint
+    ).schema_definition
 
 
 def test_output_schema_literal_ref_is_not_treated_as_schema_ref() -> None:
@@ -238,31 +236,34 @@ def test_output_schema_is_independent_of_mapping_insertion_order() -> None:
     assert canonicalize_output_schema_v1(first) == canonicalize_output_schema_v1(second)
 
 
-def test_tool_identity_preserves_absent_return_schema() -> None:
+def test_tool_ref_contains_named_revision_without_contract_payload() -> None:
     base = {
         "version": 1,
+        "revision": 1,
         "description": None,
         "parameters": {"type": "object", "properties": {}},
         "strict": None,
         "metadata": {
-            "linktools.ai.effect": "none",
+            "linktools.ai.effect_policy": "none",
             "linktools.ai.tool_class": "business",
         },
     }
-    without_schema = capability_identity_payload(
+    without_schema = capability_ref_payload(
         "tool",
         "sample",
         {**base, "return_schema": None},
     )
-    unconstrained_schema = capability_identity_payload(
+    unconstrained_schema = capability_ref_payload(
         "tool",
         "sample",
         {**base, "return_schema": {}},
     )
 
-    assert without_schema["semantic"]["return_schema"] is None
-    assert unconstrained_schema["semantic"]["return_schema"] == {}
-    assert without_schema != unconstrained_schema
+    assert without_schema == unconstrained_schema == {
+        "kind": "tool",
+        "id": "sample",
+        "revision": 1,
+    }
 
 
 def test_tool_argument_set_digest_is_stable_across_hash_seeds() -> None:
@@ -287,10 +288,10 @@ def test_tool_argument_set_digest_is_stable_across_hash_seeds() -> None:
     assert len(set(values)) == 1
 
 
-def test_agent_tool_retry_default_is_finite() -> None:
-    assert AgentSpec("agent").tool_retries == 10000
-    assert AgentSpecCodec().decode(b'{"version":1,"id":"agent"}').tool_retries == 10000
-    assert CapabilityGroup("group").agent("agent").tool_retries == 10000
+def test_agent_tool_retry_default_matches_v1_contract() -> None:
+    assert AgentSpec("agent").tool_retries == 10
+    assert AgentSpecCodec().decode(b'{"version":1,"id":"agent"}').tool_retries == 10
+    assert CapabilityGroup("group").agent("agent").tool_retries == 10
 
 
 def _request_context(model: TestModel) -> ModelRequestContext:
@@ -396,11 +397,11 @@ async def test_tool_operation_records_the_args_that_reach_the_handler() -> None:
     operations = _RecordingToolOperations()
     descriptor = ManagedToolDescriptor(
         effect_owner="tool_operation",
-        effect="replay_safe",
+        effect_policy="replay_safe",
         tool_class="business",
     )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(business, descriptor)]),),
+        (FunctionToolset([tool_with_metadata(business, descriptor)]),),
         {"business": descriptor},
         id="business",
         tool_operations=operations,  # type: ignore[arg-type]

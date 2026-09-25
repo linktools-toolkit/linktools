@@ -14,7 +14,7 @@ from linktools.ai.core import Principal, service_principal
 from linktools.ai.runtime import RuntimeHistory
 from linktools.cli import BaseCommand
 
-from ._common import _load_workspace, _local_runtime_state, _run_async
+from ._common import _load_workspace, _local_runtime_storage, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -34,7 +34,7 @@ class Command(BaseCommand):
         async def execute() -> int:
             async with RuntimeHistory.open(
                 "default",
-                state=_local_runtime_state(workspace),
+                storage=_local_runtime_storage(workspace),
             ) as history:
                 principal = service_principal(history.tenant_id, "ai-trace")
                 await _emit_trace(history, principal, args.execution_id)
@@ -92,10 +92,12 @@ async def _emit_trace(
 
 def _scope(payload: Mapping[object, object]) -> str:
     value = payload.get("scope")
-    segment = payload.get("segment_sequence")
+    agent_run_sequence = payload.get("agent_run_sequence")
     if value is None:
         return "-"
-    return f"{value}/{segment}" if segment is not None else str(value)
+    if agent_run_sequence is not None:
+        return f"{value}/{agent_run_sequence}"
+    return str(value)
 
 
 def _detail(payload: Mapping[object, object]) -> str:

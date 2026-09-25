@@ -43,7 +43,7 @@ from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskEvent,
     TaskEventType,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskNode,
     TaskNodeView,
 )
@@ -76,7 +76,6 @@ def _failed_result(
     return ExecutionResult(
         execution_id,
         ExecutionStatus.FAILED,
-        None,
         None,
         UsageMetrics(),
         code.value,
@@ -125,7 +124,7 @@ def test_non_ai_redaction_error_is_internal_without_message_leak() -> None:
 
 def test_unknown_model_route_has_stable_connection_error() -> None:
     with pytest.raises(AIError) as error:
-        ModelRegistry().snapshot().resolve("missing")
+        ModelRegistry().capture().resolve("missing")
     assert error.value.code is ErrorCode.MODEL_CONNECTION_NOT_FOUND
 
 
@@ -256,12 +255,12 @@ class _RunningTasks:
         del graph_id, tenant_id
         return SimpleNamespace(status=TaskStatus.RUNNING)
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del tenant_id
         node = TaskNode("node")
         state = TaskNodeView(
@@ -276,7 +275,7 @@ class _RunningTasks:
             None,
             None,
         )
-        return TaskGraphSnapshot(
+        return TaskGraphState(
             graph_id,
             TaskStatus.PENDING,
             (node,),
@@ -408,7 +407,6 @@ class _StreamingExecution:
             self.execution_id,
             ExecutionStatus.SUCCEEDED,
             {"text": "hello"},
-            "a" * 64,
             UsageMetrics(),
         )
 
@@ -450,7 +448,6 @@ async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["error_code"] == ErrorCode.MODEL_RATE_LIMITED.value
     assert payload["safe_error_details"] == {"status_code": 429}
-    assert payload["output_fingerprint"] is None
 
 
 @pytest.mark.asyncio

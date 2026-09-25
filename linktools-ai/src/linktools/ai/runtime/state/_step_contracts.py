@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime-owned step, event, and snapshot contracts."""
+"""Runtime-owned step, event, and checkpoint contracts."""
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
@@ -22,14 +22,14 @@ EventKind = Literal[
     "tool_call_completed",
     "tool_call_failed",
 ]
-SnapshotState = Literal["complete", "interrupted"]
+CheckpointState = Literal["complete", "interrupted"]
 
 
 @dataclass(slots=True)
-class RunRecord:
-    run_id: str
-    conversation_id: str | None = None
-    parent_run_id: str | None = None
+class AgentRunRecord:
+    agent_run_id: str
+    agent_conversation_id: str | None = None
+    parent_agent_run_id: str | None = None
     agent_name: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -38,12 +38,12 @@ class RunRecord:
 
 @dataclass(slots=True)
 class StepEvent:
-    run_id: str
+    agent_run_id: str
     kind: EventKind
     step_index: int
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    conversation_id: str | None = None
-    parent_run_id: str | None = None
+    agent_conversation_id: str | None = None
+    parent_agent_run_id: str | None = None
     agent_name: str | None = None
     tool_call_id: str | None = None
     tool_name: str | None = None
@@ -54,15 +54,15 @@ class StepEvent:
 
 
 @dataclass(slots=True)
-class ContinuableSnapshot:
-    run_id: str
+class AgentRunCheckpoint:
+    agent_run_id: str
     step_index: int
     messages: list[ModelMessage]
-    conversation_id: str | None = None
-    parent_run_id: str | None = None
+    agent_conversation_id: str | None = None
+    parent_agent_run_id: str | None = None
     agent_name: str | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    state: SnapshotState = "complete"
+    state: CheckpointState = "complete"
     idempotency_key: str | None = None
     context_messages: list[ModelMessage] | None = None
     transcript_message_count_before: int | None = None
@@ -78,7 +78,7 @@ class ContinuableSnapshot:
                 or self.transcript_message_count_before > len(self.messages)
             )
         ):
-            raise ValueError("snapshot transcript boundary is invalid")
+            raise ValueError("checkpoint transcript boundary is invalid")
         if self.pending_request_index is None:
             return
         if (
@@ -86,60 +86,60 @@ class ContinuableSnapshot:
             or not isinstance(self.pending_request_index, int)
             or self.pending_request_index < 0
         ):
-            raise ValueError("snapshot pending request index is invalid")
+            raise ValueError("checkpoint pending request index is invalid")
         context = self.messages if self.context_messages is None else self.context_messages
         if (
             self.pending_request_index >= len(context)
             or not isinstance(context[self.pending_request_index], ModelRequest)
         ):
-            raise ValueError("snapshot pending request must identify a model request")
+            raise ValueError("checkpoint pending request must identify a model request")
 
 
-class StepStore(Protocol):
+class AgentRunStore(Protocol):
     async def initialize(self) -> None: ...
 
     async def close(self) -> None: ...
 
-    async def register_run(
-        self, record: RunRecord, *, execution_id: str | None = None
+    async def register_agent_run(
+        self, record: AgentRunRecord, *, execution_id: str | None = None
     ) -> None: ...
 
-    async def get_run(self, *, run_id: str) -> RunRecord | None: ...
+    async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None: ...
 
-    async def list_runs(
+    async def list_agent_runs(
         self,
         *,
-        parent_run_id: str | None = None,
-        conversation_id: str | None = None,
-    ) -> list[RunRecord]: ...
+        parent_agent_run_id: str | None = None,
+        agent_conversation_id: str | None = None,
+    ) -> list[AgentRunRecord]: ...
 
     async def append_event(
         self, event: StepEvent, *, execution_id: str | None = None
     ) -> None: ...
 
-    async def list_events(self, *, run_id: str) -> list[StepEvent]: ...
+    async def list_events(self, *, agent_run_id: str) -> list[StepEvent]: ...
 
-    async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]: ...
+    async def iter_messages(self, *, agent_run_id: str) -> AsyncIterator[object]: ...
 
-    async def list_snapshots(self, *, run_id: str) -> list[ContinuableSnapshot]: ...
+    async def list_checkpoints(self, *, agent_run_id: str) -> list[AgentRunCheckpoint]: ...
 
-    async def save_snapshot(
-        self, snapshot: ContinuableSnapshot, *, execution_id: str | None = None
+    async def save_checkpoint(
+        self, checkpoint: AgentRunCheckpoint, *, execution_id: str | None = None
     ) -> None: ...
 
-    async def latest_snapshot(
-        self, *, run_id: str, include_interrupted: bool = False
-    ) -> ContinuableSnapshot | None: ...
+    async def latest_checkpoint(
+        self, *, agent_run_id: str, include_interrupted: bool = False
+    ) -> AgentRunCheckpoint | None: ...
 
     async def list_model_interactions(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         after_request_sequence: int | None = None,
         limit: int | None = None,
     ) -> list[object]: ...
 
-    async def model_interaction_count(self, *, run_id: str) -> int: ...
+    async def model_interaction_count(self, *, agent_run_id: str) -> int: ...
 
     async def resolve_model_interaction(
         self,
@@ -151,16 +151,16 @@ class StepStore(Protocol):
         interactions: Sequence[object],
     ) -> list[object]: ...
 
-    async def release_run(
-        self, run_id: str, *, execution_id: str | None = None
+    async def release_agent_run(
+        self, agent_run_id: str, *, execution_id: str | None = None
     ) -> None: ...
 
 
 __all__ = [
-    "ContinuableSnapshot",
+    "AgentRunCheckpoint",
     "EventKind",
-    "RunRecord",
-    "SnapshotState",
+    "AgentRunRecord",
+    "CheckpointState",
     "StepEvent",
-    "StepStore",
+    "AgentRunStore",
 ]

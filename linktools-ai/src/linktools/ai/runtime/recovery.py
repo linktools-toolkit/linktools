@@ -59,7 +59,7 @@ class ResolveToolEffectRequest:
 class ExecutionRecoveryEffect:
     operation_id: str
     execution_id: str
-    step_run_id: str
+    agent_run_id: str
     tool_call_id: str
     tool_name: str
     fence: int
@@ -71,7 +71,7 @@ class ExecutionRecoveryEffect:
         identities = (
             self.operation_id,
             self.execution_id,
-            self.step_run_id,
+            self.agent_run_id,
             self.tool_call_id,
             self.tool_name,
             self.idempotency_key_digest,

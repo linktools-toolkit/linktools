@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Private immutable capability snapshot used by admitted TaskGraphs."""
+"""Private immutable capability capture used by admitted TaskGraphs."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import cast
 
-from ..agent import AgentBindingSnapshot, AgentCompiler
+from ..agent import AgentBindingContract, AgentCompiler
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
-from ._binding_freeze import _RuntimeBindingFreezer
-from ._runtime_identity import task_capability_snapshot_key
+from ._binding_resolver import _RuntimeBindingResolver
+from ._runtime_identity import task_capability_capture_key
 
-_KIND = "task-capability-snapshot"
+_KIND = "task-capability-capture"
 _VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenTaskCapabilities:
-    roots: Mapping[str, AgentBindingSnapshot]
-    bindings: Mapping[str, AgentBindingSnapshot]
+class TaskCapabilityCapture:
+    roots: Mapping[str, AgentBindingContract]
+    bindings: Mapping[str, AgentBindingContract]
 
     def __post_init__(self) -> None:
         roots = dict(sorted(self.roots.items()))
@@ -31,7 +31,7 @@ class FrozenTaskCapabilities:
             any(
                 not isinstance(key, str)
                 or not key
-                or not isinstance(value, AgentBindingSnapshot)
+                or not isinstance(value, AgentBindingContract)
                 or value.agent_spec.id != key
                 for key, value in roots.items()
             )
@@ -39,7 +39,7 @@ class FrozenTaskCapabilities:
                 not isinstance(key, str)
                 or len(key) != 64
                 or any(character not in "0123456789abcdef" for character in key)
-                or not isinstance(value, AgentBindingSnapshot)
+                or not isinstance(value, AgentBindingContract)
                 for key, value in bindings.items()
             )
         ):
@@ -48,35 +48,35 @@ class FrozenTaskCapabilities:
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
 
 
-class TaskCapabilitySnapshotStore:
+class TaskCapabilityCaptureStore:
     def __init__(
         self,
         namespace: str,
         compiler: AgentCompiler,
-        binding_freezer: _RuntimeBindingFreezer,
+        binding_resolver: _RuntimeBindingResolver,
         object_store: ObjectStore,
         *,
-        agent_task_type: str,
+        agent_task_id: str,
     ) -> None:
         if not isinstance(namespace, str) or not namespace:
             raise ValueError("namespace is required")
         if not isinstance(compiler, AgentCompiler):
             raise TypeError("compiler must be AgentCompiler")
-        if not isinstance(binding_freezer, _RuntimeBindingFreezer):
-            raise TypeError("binding_freezer must be _RuntimeBindingFreezer")
-        if not isinstance(agent_task_type, str) or not agent_task_type:
-            raise ValueError("agent_task_type is required")
+        if not isinstance(binding_resolver, _RuntimeBindingResolver):
+            raise TypeError("binding_resolver must be _RuntimeBindingResolver")
+        if not isinstance(agent_task_id, str) or not agent_task_id:
+            raise ValueError("agent_task_id is required")
         self._namespace = namespace
         self._compiler = compiler
-        self._binding_freezer = binding_freezer
+        self._binding_resolver = binding_resolver
         self._objects = object_store
-        self._agent_task_type = agent_task_type
+        self._agent_task_id = agent_task_id
 
     async def capture(
         self,
         admission: TaskGraphAdmission,
         graph: TaskGraph,
-    ) -> FrozenTaskCapabilities:
+    ) -> TaskCapabilityCapture:
         key = self._key(admission)
         existing = await self._objects.stat(key)
         if existing is not None:
@@ -91,27 +91,22 @@ class TaskCapabilitySnapshotStore:
             )
 
         node_bindings = tuple(
-            snapshot
+            binding_contract
             for node in graph.nodes
-            if (snapshot := self._node_binding(node)) is not None
+            if (binding_contract := self._node_binding(node)) is not None
         )
         unique_bindings = {
-            snapshot.binding_digest: snapshot
-            for snapshot in node_bindings
+            binding_contract.binding_digest: binding_contract
+            for binding_contract in node_bindings
         }
-        skill_snapshots: dict[tuple[str, str], ObjectRef] = {}
-        roots: dict[str, AgentBindingSnapshot] = {}
+        roots: dict[str, AgentBindingContract] = {}
         if any(node.expander is not None for node in graph.nodes):
-            for agent_id in self._binding_freezer.root_ids:
-                roots[agent_id] = await self._binding_freezer.freeze_root(
-                    agent_id,
-                    skill_snapshots=skill_snapshots,
-                )
-        bindings: dict[str, AgentBindingSnapshot] = {}
-        for binding_digest, snapshot in sorted(unique_bindings.items()):
-            bindings[binding_digest] = await self._binding_freezer.freeze_snapshot(
-                snapshot,
-                skill_snapshots=skill_snapshots,
+            for agent_id in self._binding_resolver.root_ids:
+                roots[agent_id] = await self._binding_resolver.resolve_root(agent_id)
+        bindings: dict[str, AgentBindingContract] = {}
+        for binding_digest, binding_contract in sorted(unique_bindings.items()):
+            bindings[binding_digest] = await self._binding_resolver.resolve_contract(
+                binding_contract
             )
 
         manifest: dict[str, JsonValue] = {
@@ -171,14 +166,14 @@ class TaskCapabilitySnapshotStore:
     async def load(
         self,
         admission: TaskGraphAdmission,
-    ) -> FrozenTaskCapabilities:
+    ) -> TaskCapabilityCapture:
         key = self._key(admission)
         stat = await self._objects.stat(key)
         if stat is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
                 safe_details={
-                    "kind": "task_capability_snapshot",
+                    "kind": "task_capability_capture",
                     "graph_id": admission.graph_id,
                 },
             )
@@ -195,19 +190,19 @@ class TaskCapabilitySnapshotStore:
     def _node_binding(
         self,
         node: TaskNode,
-    ) -> AgentBindingSnapshot | None:
-        if node.input.get("type") != self._agent_task_type:
+    ) -> AgentBindingContract | None:
+        if node.input.get("task_id") != self._agent_task_id:
             return None
-        payload = node.input.get("binding")
+        payload = node.input.get("binding_contract")
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return AgentBindingSnapshot.from_payload(payload)
+        return AgentBindingContract.from_payload(payload)
 
     async def _read(
         self,
         ref: ObjectRef,
         admission: TaskGraphAdmission,
-    ) -> FrozenTaskCapabilities:
+    ) -> TaskCapabilityCapture:
         payload = await read_object(
             self._objects,
             ref.key,
@@ -245,24 +240,24 @@ class TaskCapabilitySnapshotStore:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         roots = {
-            str(agent_id): AgentBindingSnapshot.from_payload(value)
+            str(agent_id): AgentBindingContract.from_payload(value)
             for agent_id, value in cast(
                 "Mapping[object, object]",
                 manifest["roots"],
             ).items()
         }
         bindings = {
-            str(binding_digest): AgentBindingSnapshot.from_payload(value)
+            str(binding_digest): AgentBindingContract.from_payload(value)
             for binding_digest, value in cast(
                 "Mapping[object, object]",
                 manifest["bindings"],
             ).items()
         }
-        for agent_id, snapshot in roots.items():
-            if snapshot.agent_spec.id != agent_id:
+        for agent_id, binding_contract in roots.items():
+            if binding_contract.agent_spec.id != agent_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._compiler.restore(snapshot)
-        for source_digest, snapshot in bindings.items():
+            self._compiler.restore(binding_contract)
+        for source_digest, binding_contract in bindings.items():
             if (
                 len(source_digest) != 64
                 or any(
@@ -271,11 +266,11 @@ class TaskCapabilitySnapshotStore:
                 )
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._compiler.restore(snapshot)
-        return FrozenTaskCapabilities(roots, bindings)
+            self._compiler.restore(binding_contract)
+        return TaskCapabilityCapture(roots, bindings)
 
     def _key(self, admission: TaskGraphAdmission) -> str:
-        return task_capability_snapshot_key(
+        return task_capability_capture_key(
             self._namespace,
             admission.principal.tenant_id,
             admission.graph_id,
@@ -284,6 +279,6 @@ class TaskCapabilitySnapshotStore:
 
 
 __all__ = [
-    "FrozenTaskCapabilities",
-    "TaskCapabilitySnapshotStore",
+    "TaskCapabilityCapture",
+    "TaskCapabilityCaptureStore",
 ]

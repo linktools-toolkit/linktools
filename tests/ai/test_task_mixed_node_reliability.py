@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 from ._task_test_helpers import admit_graph
-from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.capability import CapabilityGroup, TaskExpansionContext
+from linktools.ai.agent import AgentBindingContract
+from linktools.ai.capability import CapabilityContribution, CapabilityGroup, TaskExpansionContext
 from linktools.ai.core import (
     JsonValue,
     Principal,
@@ -18,7 +18,7 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_task import _dependency_identity_payload
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
 from linktools.ai.runtime.state._codec import (
@@ -76,7 +76,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
     source.write_text("accepted content", encoding="utf-8")
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.hold", 1, hold)
-    application.task(handler, effect="none")
+    application.task(handler, effect_policy="none")
     attachment = (
         WorkspaceFileInput("input.txt", identifier="source")
         if workspace_input
@@ -89,7 +89,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
 
     class Expand:
         id = "example.attachments"
-        version = 1
+        revision = 1
 
         def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
             return (
@@ -111,12 +111,12 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         allow_subagents=(),
     )
     workspace = Workspace.load(tmp_path)
-    state_root = tmp_path / "state"
-    state = RuntimeState.filesystem(state_root)
+    storage_root = tmp_path / "state"
+    state = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "attachment-test",
         models=_TaskTestModels(),
-        state=state,
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         node = runtime.agent("default").task(
@@ -135,7 +135,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         source.unlink()
         repeated = await runtime.start_graph(graph, idempotency_key="attachment-1")
         assert repeated.graph_id == run.graph_id
-        snapshot = await state.task.tasks.scheduler_snapshot(
+        snapshot = await state.task.tasks.scheduler_state(
             run.graph_id,
             tenant_id=runtime.tenant_id,
         )
@@ -174,7 +174,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         assert record.stored_user_input.view["files"] == stored.view["files"]
 
     archive = InMemoryObjectStore("archive")
-    read_state = RuntimeState.filesystem(state_root)
+    read_state = RuntimeStorage.filesystem(storage_root)
     await read_state.initialize(
         namespace="attachment-test", tenant_id="default", read_only=True
     )
@@ -186,10 +186,10 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
     finally:
         await read_state.close()
     restored_root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(
+    await RuntimeStorage.restore_snapshot(
         reference, object_store=archive, root=restored_root, limits=limits
     )
-    restored = RuntimeState.from_root(restored_root)
+    restored = RuntimeStorage.from_root(restored_root)
     await restored.initialize(
         namespace="attachment-test", tenant_id="default", read_only=True
     )
@@ -209,8 +209,8 @@ class _TaskTestModelBinding:
     provider = "test"
     model_identity = "test:task"
     vision = False
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "a" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "task",
     }
@@ -220,7 +220,7 @@ class _TaskTestModelBinding:
 
 
 class _TaskTestModels:
-    def snapshot(self) -> "_TaskTestModels":
+    def capture(self) -> "_TaskTestModels":
         return self
 
     def resolve(self, route_id: str) -> _TaskTestModelBinding:
@@ -236,16 +236,33 @@ class _TaskTestModels:
     ) -> _TaskTestModelBinding:
         if route_id not in {None, "default"}:
             raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _TaskTestModelBinding.semantic_payload:
+        if dict(payload) != _TaskTestModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _TaskTestModelBinding()
+
+
+def test_direct_task_contribution_uses_group_task_defaults() -> None:
+    handler = TaskFunction[None]("example.direct", 1, _echo_task)
+    direct = CapabilityContribution.from_task(handler)
+
+    group = CapabilityGroup[None]("application")
+    group.task(handler)
+    captured = asyncio.run(group.capture())
+    registered = next(
+        item
+        for item in captured.contributions
+        if item.kind == "task" and item.id == handler.id
+    )
+
+    assert direct.contract == registered.contract
+    assert direct.contract["effect_policy"] == "non_replay_safe"
 
 
 def test_task_registration_returns_original_handler() -> None:
     group = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
 
-    registered = group.task(handler, effect="none")
+    registered = group.task(handler, effect_policy="none")
 
     assert registered is handler
     assert registered.node("node").node_id == "node"
@@ -314,12 +331,12 @@ def test_task_dependency_state_exposes_only_terminal_semantics() -> None:
         error_code=ErrorCode.REQUEST_FIELD_INVALID.value,
         error_digest="a" * 64,
     )
-    assert failed.semantic_payload == {
+    assert failed.to_payload() == {
         "status": TaskStatus.FAILED.value,
         "error_code": ErrorCode.REQUEST_FIELD_INVALID.value,
         "error_digest": "a" * 64,
     }
-    assert "execution_id" not in failed.semantic_payload
+    assert "execution_id" not in failed.to_payload()
 
 
 
@@ -354,8 +371,8 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
         return "collected"
 
     group = CapabilityGroup[None]("application")
-    failure = group.task(TaskFunction("example.fail", 1, fail), effect="none")
-    collector = group.task(TaskFunction("example.collect", 1, collect), effect="none")
+    failure = group.task(TaskFunction("example.fail", 1, fail), effect_policy="none")
+    collector = group.task(TaskFunction("example.collect", 1, collect), effect_policy="none")
     group.agent(
         "default", model="default", allow_tools=(), allow_skills=(), allow_subagents=()
     )
@@ -363,7 +380,7 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
         "terminal-dependencies",
         models=_TaskTestModels(),
         capabilities=(group,),
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
     ) as runtime:
         run = await runtime.start_graph(
             TaskGraph(
@@ -397,9 +414,9 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
 
 
 class _TestTaskExpander:
-    def __init__(self, expander_id: str, version: int = 1) -> None:
+    def __init__(self, expander_id: str, revision: int = 1) -> None:
         self.id = expander_id
-        self.version = version
+        self.revision = revision
 
     def expand(self, context: object) -> tuple[TaskNode, ...]:
         del context
@@ -408,13 +425,13 @@ class _TestTaskExpander:
 
 class _ApplicationGraphExpander:
     id = "application.graph"
-    version = 1
+    revision = 1
 
     def __init__(self, handler: TaskFunction[None]) -> None:
         self._handler = handler
 
     def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
-        reference = TaskExpanderRef(self.id, self.version)
+        reference = TaskExpanderRef(self.id, self.revision)
         source_id = context.source_node.node_id
         if source_id == "application-root":
             return (
@@ -446,7 +463,7 @@ class _ApplicationGraphExpander:
 
 class _AgentGraphExpander:
     id = "application.agent-graph"
-    version = 1
+    revision = 1
 
     def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
         return (
@@ -459,20 +476,24 @@ class _AgentGraphExpander:
 
 
 @pytest.mark.asyncio
-async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed() -> (
+async def test_task_handler_revisions_are_exact_and_reserved_namespace_is_closed() -> (
     None
 ):
     group = CapabilityGroup[None]("application")
     v1 = TaskFunction[None]("example.echo", 1, _echo_task)
     v2 = TaskFunction[None]("example.echo", 2, _echo_task)
 
-    group.task(v1, effect="none")
-    group.task(v2, effect="none")
-    frozen = await group.freeze()
+    group.task(v1, effect_policy="none")
+    group.task(v2, effect_policy="none")
+    snapshot = await group.capture()
 
-    assert {(item.kind, item.id) for item in frozen} == {
-        ("task", "example.echo@1"),
-        ("task", "example.echo@2"),
+    assert {
+        (item.kind, item.id, item.revision)
+        for item in snapshot.contributions
+        if item.kind == "task"
+    } == {
+        ("task", "example.echo", 1),
+        ("task", "example.echo", 2),
     }
     with pytest.raises(AIError) as duplicate:
         group.task(TaskFunction[None]("example.echo", 1, _echo_task))
@@ -487,8 +508,38 @@ async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed(
 
 
 @pytest.mark.asyncio
+async def test_runtime_accepts_multiple_task_handler_revisions() -> None:
+    group = CapabilityGroup[None]("application")
+    v1 = TaskFunction[None]("example.runtime-revision", 1, _echo_task)
+    v2 = TaskFunction[None]("example.runtime-revision", 2, _echo_task)
+    group.task(v1, effect_policy="none")
+    group.task(v2, effect_policy="none")
+    group.task_expander(_TestTaskExpander("example.runtime-expand", 1))
+    group.task_expander(_TestTaskExpander("example.runtime-expand", 2))
+    state = RuntimeStorage.in_memory()
+
+    async with Runtime.open(
+        "task-revisions",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(group,),
+    ) as runtime:
+        run = await runtime.start_graph(
+            TaskGraph(
+                "task-revisions",
+                (v1.node("v1"), v2.node("v2")),
+            ),
+            idempotency_key="task-revisions-run-0001",
+        )
+        result = await run.wait(timeout_seconds=10)
+
+    assert result.status is TaskStatus.SUCCEEDED
+    assert {item.node_id for item in result.node_results} == {"v1", "v2"}
+
+
+@pytest.mark.asyncio
 async def test_task_result_commit_preserves_early_execution_binding() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-result-regression", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -518,7 +569,7 @@ async def test_task_result_commit_preserves_early_execution_binding() -> None:
         )
 
         assert terminal.execution_id == "execution"
-        snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        snapshot = await repository.graph_state(graph.graph_id, tenant_id="tenant")
         assert snapshot is not None
         assert snapshot.status is TaskStatus.SUCCEEDED
         assert snapshot.node_states[0].execution_id == "execution"
@@ -542,7 +593,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
     workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
-    application.task(handler, effect="none")
+    application.task(handler, effect_policy="none")
     application.agent(
         "default",
         model="default",
@@ -550,12 +601,12 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
         allow_skills=(),
         allow_subagents=(),
     )
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
 
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         first = handler.node("custom-first", input={"value": "seed"})
@@ -599,7 +650,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
-    application.task(handler, effect="none")
+    application.task(handler, effect_policy="none")
     application.task_expander(_ApplicationGraphExpander(handler))
     application.task_expander(_AgentGraphExpander())
     application.agent(
@@ -618,12 +669,12 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     )
     app_reference = TaskExpanderRef("application.graph", 1)
     agent_reference = TaskExpanderRef("application.agent-graph", 1)
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
 
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         graph = TaskGraph(
@@ -660,7 +711,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
             "empty-root",
             "grandchild",
         }
-        snapshot = await runtime.graph.snapshot(
+        snapshot = await runtime.graph.state(
             graph.graph_id,
             principal=runtime.default_principal,
         )
@@ -670,7 +721,9 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         agent_child = next(
             node for node in snapshot.nodes if node.node_id == "agent-child"
         )
-        binding = AgentBindingSnapshot.from_payload(agent_child.input["binding"])
+        binding = AgentBindingContract.from_payload(
+            agent_child.input["binding_contract"]
+        )
         assert binding.agent_spec.id == "worker"
         assert snapshot.node_states[-1].status is TaskStatus.SUCCEEDED
         child_a_state = next(
@@ -707,6 +760,57 @@ class _EffectOutput(BaseModel):
     value: str
 
 
+class _ChangedEffectOutput(BaseModel):
+    value: int
+
+
+@pytest.mark.asyncio
+async def test_public_graph_start_canonicalizes_registered_task_semantics() -> None:
+    async def valid_output(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        return {"value": "ok"}
+
+    async def reconcile(
+        context: TaskNodeContext[None],
+    ) -> TaskEffectResolution:
+        del context
+        return TaskEffectResolution("unknown")
+
+    application = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.public-start", 1, valid_output)
+    application.task(
+        handler,
+        effect_policy="non_replay_safe",
+        output_type=_EffectOutput,
+        reconcile=reconcile,
+    )
+    state = RuntimeStorage.in_memory()
+
+    async with Runtime.open(
+        "task-public-start",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(application,),
+    ) as runtime:
+        request = TaskGraphRequest(
+            TaskGraph("task-public-start", (handler.node("node"),)),
+            runtime.default_principal,
+            "task-public-start-0001",
+        )
+        await runtime.graph.start(request)
+        graph_state = await state.task.tasks.graph_state(
+            "task-public-start",
+            tenant_id=runtime.default_principal.tenant_id,
+        )
+
+    assert graph_state is not None
+    node = graph_state.nodes[0]
+    assert node.effect_policy == "non_replay_safe"
+    assert node.output_contract is not None
+    assert node.output_contract["mode"] == "structured"
+    assert node.reconcile is True
+
+
 async def _invalid_effect_output(context: TaskNodeContext[None]) -> JsonValue:
     del context
     return {"wrong": True}
@@ -723,8 +827,8 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
     handler = TaskFunction[None]("example.effect-applied", 1, _invalid_effect_output)
     application.task(
         handler,
-        effect="non_replay_safe",
-        output=_EffectOutput,
+        effect_policy="non_replay_safe",
+        output_type=_EffectOutput,
     )
     application.agent(
         "default",
@@ -733,12 +837,12 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
         allow_skills=(),
         allow_subagents=(),
     )
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
 
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         run = await runtime.start_graph(
@@ -748,7 +852,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
         initial = await run.wait(timeout_seconds=10)
         assert initial.status is TaskStatus.RECOVERY_REQUIRED
 
-        snapshot = await runtime.graph.snapshot(
+        snapshot = await runtime.graph.state(
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -793,8 +897,8 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
     handler = TaskFunction[None]("example.effect-invalid", 1, _invalid_effect_output)
     application.task(
         handler,
-        effect="non_replay_safe",
-        output=_EffectOutput,
+        effect_policy="non_replay_safe",
+        output_type=_EffectOutput,
     )
     application.agent(
         "default",
@@ -807,7 +911,7 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         run = await runtime.start_graph(
@@ -816,7 +920,7 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
         )
         initial = await run.wait(timeout_seconds=10)
         assert initial.status is TaskStatus.RECOVERY_REQUIRED
-        snapshot = await runtime.graph.snapshot(
+        snapshot = await runtime.graph.state(
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -861,7 +965,7 @@ async def test_not_applied_retries_same_execution_once(
 
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.effect-retry", 1, flaky_effect)
-    application.task(handler, effect="non_replay_safe")
+    application.task(handler, effect_policy="non_replay_safe")
     application.agent(
         "default",
         model="default",
@@ -873,7 +977,7 @@ async def test_not_applied_retries_same_execution_once(
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         run = await runtime.start_graph(
@@ -885,7 +989,7 @@ async def test_not_applied_retries_same_execution_once(
         )
         initial = await run.wait(timeout_seconds=10)
         assert initial.status is TaskStatus.RECOVERY_REQUIRED
-        before = await runtime.graph.snapshot(
+        before = await runtime.graph.state(
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -903,7 +1007,7 @@ async def test_not_applied_retries_same_execution_once(
 
         assert final.status is TaskStatus.SUCCEEDED
         assert calls == 2
-        after = await runtime.graph.snapshot(
+        after = await runtime.graph.state(
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -934,7 +1038,7 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         run = await runtime.start_graph(
@@ -943,7 +1047,10 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
                 (
                     TaskNode(
                         "input",
-                        input={"type": "linktools.ai.input", "version": 1},
+                        input={
+                            "task_id": "linktools.ai.input",
+                            "task_revision": 1,
+                        },
                     ),
                 ),
             ),
@@ -1009,7 +1116,7 @@ class _BindingRunner:
 
 @pytest.mark.asyncio
 async def test_local_activity_generation_does_not_lose_pre_wait_handoff_signal() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-observation-regression", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     try:
@@ -1045,7 +1152,7 @@ async def test_local_activity_generation_does_not_lose_pre_wait_handoff_signal()
             ),
             0.2,
         )
-        snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        snapshot = await repository.graph_state(graph.graph_id, tenant_id="tenant")
         assert snapshot is not None
         assert snapshot.node_states[0].status is TaskStatus.WAITING
         assert snapshot.node_states[0].execution_id == "execution"
@@ -1058,7 +1165,7 @@ async def test_local_activity_generation_does_not_lose_pre_wait_handoff_signal()
 
 @pytest.mark.asyncio
 async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-waiting-hold", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     calls: list[str] = []
@@ -1130,7 +1237,7 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
             hold_id: str,
         ) -> None:
             del tenant_id
-            snapshot = await state.task.tasks.snapshot_graph(
+            snapshot = await state.task.tasks.graph_state(
                 graph.graph_id,
                 tenant_id="tenant",
             )
@@ -1151,7 +1258,7 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
 
         async def wait_terminal() -> None:
             while True:
-                snapshot = await state.task.tasks.snapshot_graph(
+                snapshot = await state.task.tasks.graph_state(
                     graph.graph_id,
                     tenant_id="tenant",
                 )
@@ -1173,13 +1280,90 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "semantic-drift-state"
+    entered = asyncio.Event()
+
+    async def blocking_task(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        entered.set()
+        await asyncio.Event().wait()
+        return {"value": "unreachable"}
+
+    first = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.semantic-drift", 1, blocking_task)
+    first.task(
+        handler,
+        effect_policy="none",
+        output_type=_EffectOutput,
+    )
+    state = RuntimeStorage.filesystem(storage_root)
+    graph = TaskGraph("semantic-drift", (handler.node("node"),))
+
+    async with Runtime.open(
+        "semantic-drift",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(first,),
+    ) as runtime:
+        await runtime.start_graph(
+            graph,
+            idempotency_key="semantic-drift-run-0001",
+        )
+        await asyncio.wait_for(entered.wait(), 10)
+
+    async def reconcile(
+        context: TaskNodeContext[None],
+    ) -> TaskEffectResolution:
+        del context
+        return TaskEffectResolution("unknown")
+
+    reconcile_changed = CapabilityGroup[None]("application")
+    reconcile_changed.task(
+        TaskFunction[None]("example.semantic-drift", 1, blocking_task),
+        effect_policy="none",
+        output_type=_EffectOutput,
+        reconcile=reconcile,
+    )
+    with pytest.raises(AIError) as reconcile_error:
+        async with Runtime.open(
+            "semantic-drift",
+            models=_TaskTestModels(),  # type: ignore[arg-type]
+            storage=RuntimeStorage.filesystem(storage_root),
+            capabilities=(reconcile_changed,),
+        ):
+            pass
+    assert reconcile_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert reconcile_error.value.safe_details["reason"] == "task_reconcile_changed"
+
+    output_changed = CapabilityGroup[None]("application")
+    output_changed.task(
+        TaskFunction[None]("example.semantic-drift", 1, blocking_task),
+        effect_policy="none",
+        output_type=_ChangedEffectOutput,
+    )
+    with pytest.raises(AIError) as output_error:
+        async with Runtime.open(
+            "semantic-drift",
+            models=_TaskTestModels(),  # type: ignore[arg-type]
+            storage=RuntimeStorage.filesystem(storage_root),
+            capabilities=(output_changed,),
+        ):
+            pass
+    assert output_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert output_error.value.safe_details["reason"] == "task_output_contract_changed"
+
+
+@pytest.mark.asyncio
 async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
     tmp_path: Path,
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     workspace = Workspace.load(workspace_root)
-    state_root = tmp_path / "state"
+    storage_root = tmp_path / "state"
     entered = asyncio.Event()
     cancelled = asyncio.Event()
 
@@ -1194,7 +1378,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.block", 1, blocking_task)
-    application.task(handler, effect="none")
+    application.task(handler, effect_policy="none")
     application.agent(
         "default",
         model="default",
@@ -1202,13 +1386,13 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
         allow_skills=(),
         allow_subagents=(),
     )
-    state = RuntimeState.filesystem(state_root)
+    state = RuntimeStorage.filesystem(storage_root)
     graph = TaskGraph("shutdown-graph", (handler.node("node"),))
 
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         await runtime.start_graph(
@@ -1216,17 +1400,17 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
             idempotency_key="shutdown-graph-run-0001",
         )
         await asyncio.wait_for(entered.wait(), 10)
-        snapshot = await runtime.graph.snapshot(
+        snapshot = await runtime.graph.state(
             graph.graph_id,
             principal=runtime.default_principal,
         )
         assert snapshot.node_states[0].status is TaskStatus.RUNNING
 
     assert cancelled.is_set()
-    probe = RuntimeState.filesystem(state_root)
+    probe = RuntimeStorage.filesystem(storage_root)
     await probe.initialize(namespace="default", tenant_id="default")
     try:
-        snapshot = await probe.task.tasks.snapshot_graph(
+        snapshot = await probe.task.tasks.graph_state(
             graph.graph_id,
             tenant_id="default",
         )

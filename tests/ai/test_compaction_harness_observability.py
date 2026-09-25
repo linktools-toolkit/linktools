@@ -73,7 +73,7 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
     )
     observed: list[tuple[str, ModelRequestFact, ModelResponse | None]] = []
     projections: list[
@@ -138,7 +138,7 @@ def test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> 
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
     )
     compaction = journal.begin(3, purpose="compaction")
     agent = journal.begin(3, purpose="agent")
@@ -158,7 +158,7 @@ def test_journal_rejects_double_finish() -> None:
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
     )
     fact = journal.begin(1)
     journal.finish(fact.request_sequence, status="SUCCEEDED")

@@ -10,7 +10,7 @@ from datetime import datetime
 from ..core import Page
 from ..errors import AIError, ErrorCode
 from ._codec import (
-    definition_semantic_digest,
+    same_definition_contract,
     observation_digest,
     observation_payload_digest,
 )
@@ -21,9 +21,7 @@ from ._store import _parse_scan_cursor, _scan_cursor
 class InMemoryMetricStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._definitions: dict[
-            tuple[str, str, int], tuple[str, MetricDefinition]
-        ] = {}
+        self._definitions: dict[tuple[str, str, int], MetricDefinition] = {}
         self._observations: dict[str, tuple[str, str, Observation]] = {}
 
     async def put_definition(
@@ -32,15 +30,14 @@ class InMemoryMetricStore:
         definition: MetricDefinition,
     ) -> MetricDefinition:
         key = (namespace, definition.name, definition.revision)
-        digest = definition_semantic_digest(definition)
         async with self._lock:
             current = self._definitions.get(key)
             if current is None:
-                self._definitions[key] = (digest, definition)
+                self._definitions[key] = definition
                 return definition
-            if current[0] != digest:
+            if not same_definition_contract(current, definition):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return current[1]
+            return current
 
     async def get_definition(
         self,
@@ -49,8 +46,7 @@ class InMemoryMetricStore:
         revision: int,
     ) -> MetricDefinition | None:
         async with self._lock:
-            current = self._definitions.get((namespace, name, revision))
-            return current[1] if current is not None else None
+            return self._definitions.get((namespace, name, revision))
 
     async def latest_definition(
         self,
@@ -59,7 +55,7 @@ class InMemoryMetricStore:
     ) -> MetricDefinition | None:
         async with self._lock:
             candidates = [
-                value[1]
+                value
                 for key, value in self._definitions.items()
                 if key[0] == namespace and key[1] == name
             ]

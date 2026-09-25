@@ -186,7 +186,7 @@ class VersionSummary:
 
 
 @dataclass(frozen=True, slots=True)
-class StorageOwnedInfo(Generic[InfoT]):
+class StorageLocatedInfo(Generic[InfoT]):
     info: InfoT
     layer: str
     writable: bool
@@ -338,7 +338,7 @@ __all__ = [
     "StorageEntryStatusInfo",
     "StorageMetadataReader",
     "StorageOperation",
-    "StorageOwnedInfo",
+    "StorageLocatedInfo",
     "StoragePutResult",
     "StorageReader",
     "StorageResetResult",

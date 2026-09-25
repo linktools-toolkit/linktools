@@ -64,7 +64,7 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
         "object_ref",
         "created_at",
     }
-    assert record.digest == reference.digest
+    assert record.object_ref.digest == reference.digest
     assert record.size == reference.size
 
 

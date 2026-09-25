@@ -23,29 +23,29 @@ pytestmark = pytest.mark.asyncio
 
 class _OutsideRootSource:
     @property
-    def id(self) -> str:
+    def asset_source_id(self) -> str:
         return "source"
 
-    async def inspect(self, root: str) -> SkillResourceView:
-        del root
+    async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
+        del source
         raise AssertionError("inspect should not be called")
 
-    async def read(self, root: str, path: str) -> bytes:
-        del root, path
+    async def read(self, source: SkillSourceRef, path: str) -> bytes:
+        del source, path
         raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT)
 
 
 class _MissingRootSource:
     @property
-    def id(self) -> str:
+    def asset_source_id(self) -> str:
         return "source"
 
-    async def inspect(self, root: str) -> SkillResourceView:
-        del root
+    async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
+        del source
         raise AIError(ErrorCode.ASSET_NOT_FOUND)
 
-    async def read(self, root: str, path: str) -> bytes:
-        del root, path
+    async def read(self, source: SkillSourceRef, path: str) -> bytes:
+        del source, path
         raise AssertionError("read should not be called")
 
 

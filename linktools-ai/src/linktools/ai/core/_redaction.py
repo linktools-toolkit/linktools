@@ -25,7 +25,6 @@ class RedactionClass(str, Enum):
 class RedactedValue:
     value: JsonValue
     redacted: bool
-    digest: "str | None"
 
 
 class RedactionPolicy(Protocol):
@@ -37,12 +36,12 @@ class StructuredRedactor:
     def redact(self, value: JsonValue, *, classification: RedactionClass) -> RedactedValue:
         try:
             if classification is RedactionClass.MODEL_REASONING:
-                return RedactedValue(None, True, None)
+                return RedactedValue(None, True)
             if classification is RedactionClass.SECRET:
-                return RedactedValue("<redacted>", True, canonical_sha256(value))
+                return RedactedValue("<redacted>", True)
             if classification is RedactionClass.SENSITIVE:
-                return RedactedValue(_redact_nested(value, set()), True, canonical_sha256(value))
-            return RedactedValue(value, False, None)
+                return RedactedValue(_redact_nested(value, set()), True)
+            return RedactedValue(value, False)
         except AIError:
             raise
         except Exception as error:

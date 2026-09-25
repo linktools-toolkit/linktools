@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Static Agent definition, compilation, binding, and output contracts."""
+"""Compiled Agent semantics, bindings, and output contracts."""
 
 from ..spec import SubagentRef
-from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin
+from ._binding import AgentBinding, AgentBindingContract, CapabilityPin
 from ._catalog import AgentCatalog
 from ._compiler import AgentCompiler
-from ._definition import AgentDefinition
+from ._compiled import CompiledAgent
 from ._output import (
     AssistantTextOutput,
     OutputBinding,
@@ -18,14 +18,14 @@ from ._output import (
 
 __all__ = [
     "AgentBinding",
-    "AgentBindingSnapshot",
+    "AgentBindingContract",
     "AgentCatalog",
     "AgentCompiler",
-    "AgentDefinition",
+    "CompiledAgent",
     "AssistantTextOutput",
     "OutputBinding",
     "OutputMode",
-    "SemanticPin",
+    "CapabilityPin",
     "SubagentRef",
     "bind_output",
     "canonicalize_output_schema_v1",

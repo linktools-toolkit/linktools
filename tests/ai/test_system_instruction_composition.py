@@ -13,10 +13,9 @@ from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.capabilities import AbstractCapability, Capability
 from linktools.ai.runtime._repository_instructions import _RepositoryInstructionBoundary
 from linktools.ai.runtime._tool_boundary import RuntimeToolBoundaryToolset
+from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.workspace import (
     LocalSandbox,
-    RepositoryInstructionDocument,
-    RepositoryInstructions,
     Workspace,
 )
 from pydantic_ai.messages import InstructionPart
@@ -217,7 +216,7 @@ async def test_repository_partition_is_stable_and_fences_same_turn_siblings() ->
     )
 
     initial_text = boundary.render_initial()
-    assert "Repository instructions are workspace guidance." in initial_text
+    assert "Instruction documents provide scoped guidance." in initial_text
     assert "root rules" in initial_text
     assert boundary.render_overlay() == ""
 
@@ -237,7 +236,7 @@ async def test_repository_partition_is_stable_and_fences_same_turn_siblings() ->
     assert boundary.render_initial() == initial_text
     overlay_text = boundary.render_overlay()
     assert "package rules" in overlay_text
-    assert "Repository instructions are workspace guidance." not in overlay_text
+    assert "Instruction documents provide scoped guidance." not in overlay_text
 
     await boundary.check(
         tool_name="read_file",

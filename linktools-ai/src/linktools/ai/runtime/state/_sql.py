@@ -89,6 +89,9 @@ class SqlStateStorageGroup:
         self._metadata = metadata
         self._owns_context = owns_context
         self._read_only = read_only
+        self._mutation_lock = (
+            asyncio.Lock() if context.dialect.name == "sqlite" else None
+        )
         self._closed = False
         self._initialized = False
 
@@ -180,6 +183,9 @@ class SqlStateStorageGroup:
             finally:
                 reset_state_transaction(token)
 
+        lock = self._mutation_lock
+        if lock is not None:
+            await lock.acquire()
         try:
             domains = ",".join(store.runtime_domain.value for store in members)
             return await self._context.run_mutation(
@@ -202,7 +208,7 @@ class SqlStateStorageGroup:
                 TimeoutError as SqlAlchemyTimeoutError,
             )
 
-            internal_details = {"phase": "runtime_state_sql_mutation"}
+            internal_details = {"phase": "runtime_storage_sql_mutation"}
             if isinstance(error, IntegrityError):
                 violation = self._context.dialect.classify_integrity_error(error)
                 code = (
@@ -229,7 +235,7 @@ class SqlStateStorageGroup:
                 code = ErrorCode.INTERNAL_ERROR
 
             _logger.error(
-                "SQL Runtime state mutation error mapped: error_type=%s code=%s",
+                "SQL Runtime storage mutation error mapped: error_type=%s code=%s",
                 type(error).__name__,
                 code.value,
             )
@@ -240,6 +246,9 @@ class SqlStateStorageGroup:
                     safe_details=internal_details,
                 ) from error
             raise AIError(code) from error
+        finally:
+            if lock is not None:
+                lock.release()
 
     @asynccontextmanager
     async def _session(self):

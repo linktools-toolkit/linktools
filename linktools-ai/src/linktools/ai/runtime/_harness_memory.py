@@ -20,20 +20,20 @@ from pydantic_ai_harness.memory import (
 from ..capability import (
     TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY,
     TOOL_PLAN_SAFE_METADATA_KEY,
-    tool_semantic_metadata,
+    tool_metadata,
 )
 
 _MEMORY_TOOL_DECLARATIONS: dict[str, Mapping[str, object]] = {
-    "delete_memory": tool_semantic_metadata(compaction_keep_result=True),
-    "read_memory": tool_semantic_metadata(
+    "delete_memory": tool_metadata(compaction_keep_result=True),
+    "read_memory": tool_metadata(
         plan_safe=True,
         compaction_keep_result=True,
     ),
-    "search_memory": tool_semantic_metadata(
+    "search_memory": tool_metadata(
         plan_safe=True,
         compaction_keep_result=True,
     ),
-    "write_memory": tool_semantic_metadata(compaction_keep_result=True),
+    "write_memory": tool_metadata(compaction_keep_result=True),
 }
 
 
@@ -106,7 +106,7 @@ class HarnessSelectedMemory(Memory[None]):
         if toolset is None:
             return None
         for name in self.selected_tool_names:
-            toolset.tools[name].metadata = tool_semantic_metadata(
+            toolset.tools[name].metadata = tool_metadata(
                 base=toolset.tools[name].metadata,
                 **_memory_metadata_kwargs(name),
             )

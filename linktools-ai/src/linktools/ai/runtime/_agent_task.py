@@ -9,7 +9,7 @@ from typing import cast
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
+from ..agent import AgentBindingContract, AgentCatalog, AgentCompiler
 from ..core import (
     CorrelationData,
     ExecutionMode,
@@ -52,11 +52,11 @@ from .service_api import (
 )
 
 _logger = environ.get_logger("ai.runtime.planner")
-_AGENT_TASK_TYPE = "linktools.ai.agent"
-_AGENT_TASK_VERSION = 1
+_AGENT_TASK_ID = "linktools.ai.agent"
+_AGENT_TASK_REVISION = 1
 _AGENT_BODY_FIELDS = frozenset(
     {
-        "binding",
+        "binding_contract",
         "user_prompt",
         "mode",
         "planning",
@@ -69,8 +69,11 @@ _AGENT_BODY_FIELDS = frozenset(
 
 
 class _AgentTaskNodeHandler:
-    type = _AGENT_TASK_TYPE
-    version = _AGENT_TASK_VERSION
+    id = _AGENT_TASK_ID
+    revision = _AGENT_TASK_REVISION
+    effect_policy = "none"
+    output_type = None
+    reconcile = None
 
     def __init__(
         self,
@@ -172,19 +175,24 @@ class _AgentTaskNodeHandler:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             resolved_mode = normalize_execution_mode(mode)
             resolved_thinking = normalize_thinking(thinking)
-            snapshot = AgentBindingSnapshot.from_payload(input.get("binding"))
-            binding = self._compiler.restore(snapshot)
+            binding_contract = AgentBindingContract.from_payload(
+                input.get("binding_contract")
+            )
+            binding = self._compiler.restore(binding_contract)
         except (AIError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         if resolved_mode != "run":
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if binding.snapshot != snapshot or binding.digest != snapshot.binding_digest:
+        if (
+            binding.binding_contract != binding_contract
+            or binding.binding_digest != binding_contract.binding_digest
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        validate_agent_id(binding.definition.spec.id)
+        validate_agent_id(binding.compiled_agent.spec.id)
         if isinstance(base_user_prompt, str):
             validate_user_prompt(base_user_prompt)
         return {
-            "binding": binding.snapshot.to_payload(),
+            "binding_contract": binding.binding_contract.to_payload(),
             "user_prompt": raw_user_prompt,
             "mode": "run",
             "planning": planning,
@@ -206,7 +214,7 @@ class _AgentTaskNodeHandler:
         except AIError as error:
             cause = error.__cause__
             if isinstance(cause, AIError) and cause.code in {
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                ErrorCode.AGENT_BINDING_UNAVAILABLE,
                 ErrorCode.STORAGE_VERSION_UNSUPPORTED,
             }:
                 raise cause
@@ -215,8 +223,8 @@ class _AgentTaskNodeHandler:
                 safe_details={
                     "graph_id": graph_id,
                     "node_id": node_id,
-                    "task_type": self.type,
-                    "task_version": self.version,
+                    "task_id": self.id,
+                    "task_revision": self.revision,
                 },
             ) from error
 
@@ -248,7 +256,7 @@ class _AgentTaskNodeHandler:
         binding_digest, request = prepared[:2]
         agent_id = prepared[2] if len(prepared) > 2 else ""
         session_id = prepared[3] if len(prepared) > 3 else None
-        binding_snapshot = prepared[4] if len(prepared) > 4 else None
+        binding_contract = prepared[4] if len(prepared) > 4 else None
         key = (principal.tenant_id, graph_id, node.node_id)
         hold_id = f"task:{graph_id}:{node.node_id}"
         if session_id is None or self._session is None:
@@ -256,7 +264,7 @@ class _AgentTaskNodeHandler:
                 binding_digest,
                 request,
                 dependency_hold_id=hold_id,
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
         else:
             launch = self._session.resume(
@@ -274,7 +282,7 @@ class _AgentTaskNodeHandler:
                     request.correlation,
                     request.files,
                 ),
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
         launch_task = asyncio.create_task(
             launch,
@@ -390,7 +398,7 @@ class _AgentTaskNodeHandler:
                 request,
                 _,
                 _,
-                binding_snapshot,
+                binding_contract,
             ) = await self._prepare_request(
                 node,
                 graph_id=graph_id,
@@ -404,7 +412,7 @@ class _AgentTaskNodeHandler:
                 handle = await self._execution.resolve_existing(
                     binding_digest,
                     request,
-                    binding_snapshot=binding_snapshot,
+                    binding_contract=binding_contract,
                 )
             except asyncio.CancelledError:
                 raise
@@ -461,15 +469,18 @@ class _AgentTaskNodeHandler:
         ExecutionRequest,
         str,
         str | None,
-        AgentBindingSnapshot,
+        AgentBindingContract,
     ]:
         payload = node.input
-        if payload.get("type") != self.type or payload.get("version") != self.version:
+        if (
+            payload.get("task_id") != self.id
+            or payload.get("task_revision") != self.revision
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         body = {
             key: value
             for key, value in payload.items()
-            if key not in {"type", "version"}
+            if key not in {"task_id", "task_revision"}
         }
         normalized = self.validate_recovery(
             body,
@@ -478,8 +489,10 @@ class _AgentTaskNodeHandler:
         )
         if normalized != body:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        snapshot = AgentBindingSnapshot.from_payload(normalized["binding"])
-        binding = self._compiler.restore(snapshot)
+        binding_contract = AgentBindingContract.from_payload(
+            normalized["binding_contract"]
+        )
+        binding = self._compiler.restore(binding_contract)
         raw_user_prompt = cast(Mapping[str, JsonValue], normalized["user_prompt"])
         if raw_user_prompt.get("kind") == "text":
             base_user_prompt: str | tuple[object, ...] = cast(
@@ -534,7 +547,7 @@ class _AgentTaskNodeHandler:
                 "version": 1,
                 "graph_id": graph_id,
                 "node_id": node.node_id,
-                "binding_digest": binding.digest,
+                "binding_digest": binding.binding_digest,
                 "input": node.input,
                 "dependencies": _dependency_identity_payload(
                     node,
@@ -556,11 +569,11 @@ class _AgentTaskNodeHandler:
             files=tuple(cast(list[str], normalized["files"])),
         )
         return (
-            binding.digest,
+            binding.binding_digest,
             request,
-            binding.definition.spec.id,
+            binding.compiled_agent.spec.id,
             cast("str | None", normalized["session_id"]),
-            binding.snapshot,
+            binding.binding_contract,
         )
 
     async def _handoff_execution(
@@ -828,14 +841,14 @@ def _dependency_identity_payload(
         result.append(
             {
                 "node_id": dependency_id,
-                **state.semantic_payload,
+                **state.to_payload(),
             }
         )
     return result
 
 
 def _dependency_state_payload(state: TaskDependencyState) -> dict[str, JsonValue]:
-    return state.semantic_payload
+    return state.to_payload()
 
 
 def _canonical_json(value: object) -> str:

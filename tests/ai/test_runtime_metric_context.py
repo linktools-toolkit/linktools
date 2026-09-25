@@ -18,7 +18,7 @@ from linktools.ai.observe import (
     Metrics,
     Observation,
 )
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._metrics import _RuntimeMetricBuffer
 from linktools.ai.workspace import Workspace
@@ -87,7 +87,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
         "default",
         context=context,
         models=models,
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=metrics,
     ) as runtime:

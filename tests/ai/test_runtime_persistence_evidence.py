@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     ExecutionEventType,
@@ -20,7 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -47,10 +47,10 @@ def _agent_group() -> CapabilityGroup[object]:
     return group
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding_contract() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="default"),
-        base_model={"provider": "test", "model": "fixture"},
+        model_contract={"provider": "test", "model": "fixture"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -65,8 +65,8 @@ def _execution() -> ExecutionRecord:
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=1,
@@ -79,7 +79,7 @@ def _execution() -> ExecutionRecord:
         mode="run",
         planning=False,
         thinking=False,
-        binding=_binding_snapshot(),
+        binding=_binding_contract(),
         **execution_owner_fields(),
     )
 
@@ -144,8 +144,7 @@ class _PersistenceTestModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "test",
     }
@@ -166,7 +165,7 @@ class _PersistenceTestModelBinding:
 
 
 class _PersistenceTestModels:
-    def snapshot(self) -> "_PersistenceTestModels":
+    def capture(self) -> "_PersistenceTestModels":
         return self
 
     def resolve(self, route_id: str) -> _PersistenceTestModelBinding:
@@ -182,7 +181,7 @@ class _PersistenceTestModels:
     ) -> _PersistenceTestModelBinding:
         if route_id not in {None, "default"}:
             raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _PersistenceTestModelBinding.semantic_payload:
+        if dict(payload) != _PersistenceTestModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _PersistenceTestModelBinding()
 
@@ -194,13 +193,13 @@ async def test_terminal_stream_allows_immediate_runtime_close(
     backend: str,
 ) -> None:
     if backend == "filesystem":
-        state = RuntimeState.filesystem(tmp_path / "runtime")
+        state = RuntimeStorage.filesystem(tmp_path / "runtime")
     else:
         database = tmp_path / "runtime.db"
         engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
         await provision_runtime_database(engine)
         await engine.dispose()
-        state = RuntimeState.sqlite(
+        state = RuntimeStorage.sqlite(
             database,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
@@ -209,7 +208,7 @@ async def test_terminal_stream_allows_immediate_runtime_close(
         async with Runtime.open(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
-            state=state,
+            storage=state,
             capabilities=(_agent_group(),),
         ) as runtime:
             execution = await runtime.agent("default").start("hello")
@@ -248,7 +247,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
         raise AssertionError("blocked execution unexpectedly completed")
 
     monkeypatch.setattr(AgentExecutor, "execute", blocking_execute)
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -256,7 +255,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
         async with Runtime.open(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
-            state=state,
+            storage=state,
             capabilities=(_agent_group(),),
         ) as runtime:
             task = asyncio.create_task(
@@ -277,7 +276,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
     finally:
         await state.close()
 
-    reopened = RuntimeState.sqlite(
+    reopened = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -285,7 +284,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
         async with Runtime.open(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
-            state=reopened,
+            storage=reopened,
             capabilities=(_agent_group(),),
         ):
             pass
@@ -301,7 +300,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
     await engine.dispose()
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -310,7 +309,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         async with Runtime.open(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
-            state=state,
+            storage=state,
             capabilities=(_agent_group(),),
         ) as runtime:
             created = await runtime.agent("default").create_session("session")
@@ -327,7 +326,6 @@ async def test_session_runtime_persists_and_reads_terminal_result(
                 timeout_seconds=10,
             )
             assert result.status is ExecutionStatus.SUCCEEDED
-            assert result.output_fingerprint is not None
 
             session_record = await state.conversation.sessions.get(
                 created.session_id,
@@ -375,6 +373,5 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             assert inspected.status is ExecutionStatus.SUCCEEDED
             assert waited.status is ExecutionStatus.SUCCEEDED
             assert waited.output == persisted_result.output.value
-            assert waited.output_fingerprint == result.output_fingerprint
     finally:
         await state.close()

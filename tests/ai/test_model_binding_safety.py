@@ -9,12 +9,12 @@ from linktools.ai.model import ModelRegistry
 from linktools.ai.model._openai import _OpenAIModelBinding, _resolved_connection
 
 
-def test_model_binding_fingerprint_excludes_secret_material() -> None:
+def test_model_binding_contract_excludes_secret_material() -> None:
     registry = ModelRegistry.openai(model="gpt-test", api_key="secret")
-    binding = registry.snapshot().resolve("default")
+    binding = registry.capture().resolve("default")
 
     assert "secret" not in repr(binding)
-    assert "secret" not in binding.fingerprint
+    assert "secret" not in repr(dict(binding.contract))
     assert binding.model_identity == "openai:gpt-test"
 
 
@@ -85,7 +85,7 @@ def test_model_alias_resolves_to_an_immutable_binding() -> None:
     registry.register_alias("alias-2", "alias")
     registry.register_openai("target", model="gpt-new")
 
-    snapshot = registry.snapshot()
+    snapshot = registry.capture()
     assert snapshot.resolve("alias").model_identity == "openai:gpt-old"
     assert snapshot.resolve("alias-2").model_identity == "openai:gpt-old"
     assert snapshot.resolve("target").model_identity == "openai:gpt-new"

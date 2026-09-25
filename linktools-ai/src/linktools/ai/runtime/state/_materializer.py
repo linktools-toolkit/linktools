@@ -25,29 +25,29 @@ from ...storage import (
     sync_directory,
 )
 from ._contracts import (
-    ArtifactState,
-    ConversationState,
-    EvaluationState,
-    ExecutionState,
-    MemoryState,
-    RecoveryState,
-    TaskState,
+    ArtifactRepositories,
+    ConversationRepositories,
+    EvaluationRepositories,
+    ExecutionRepositories,
+    MemoryRepositories,
+    RecoveryRepositories,
+    TaskRepositories,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import (
     RuntimeDomain,
-    RuntimeStatePlan,
-    RuntimeStateRoute,
+    RuntimeStoragePlan,
+    RuntimeStorageRoute,
     runtime_domain_uses_object_store,
 )
 from ._recovery_repositories import build_recovery_repository_bundle
 from ._repositories import OperationLedgerRepository, build_repository_bundle
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStorageGroup, SqlStateStore
-from ._step_materializer import build_runtime_steps
-from ._steps import RuntimeStepStore
+from ._step_materializer import build_runtime_agent_run_store
+from ._steps import RuntimeAgentRunStore
 from ._store import StateStore, state_store_digest
 from ._task_admission_repository import TaskAdmissionRepositoryImpl
 from ._task_repository import TaskRepositoryImpl
@@ -59,48 +59,48 @@ _logger = environ.get_logger("ai.runtime.state.materializer")
 
 
 @dataclass(frozen=True, slots=True)
-class _MaterializedRuntimeState:
-    conversation: ConversationState
-    execution: ExecutionState
-    memory: MemoryState
-    artifact: ArtifactState
-    task: TaskState
-    evaluation: EvaluationState
-    recovery: RecoveryState
+class _MaterializedRuntimeStorage:
+    conversation: ConversationRepositories
+    execution: ExecutionRepositories
+    memory: MemoryRepositories
+    artifact: ArtifactRepositories
+    task: TaskRepositories
+    evaluation: EvaluationRepositories
+    recovery: RecoveryRepositories
     objects: _RuntimeObjectRouter
-    steps: RuntimeStepStore
+    run_store: RuntimeAgentRunStore
     retention: RuntimeRetentionController
     stores: Mapping[RuntimeDomain, StateStore]
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
 
 @dataclass(frozen=True, slots=True)
-class _RuntimeStates:
-    conversation: ConversationState
-    execution: ExecutionState
-    memory: MemoryState
-    artifact: ArtifactState
-    task: TaskState
-    evaluation: EvaluationState
-    recovery: RecoveryState
+class _RuntimeRepositories:
+    conversation: ConversationRepositories
+    execution: ExecutionRepositories
+    memory: MemoryRepositories
+    artifact: ArtifactRepositories
+    task: TaskRepositories
+    evaluation: EvaluationRepositories
+    recovery: RecoveryRepositories
 
 
-async def materialize_runtime_state(
-    plan: RuntimeStatePlan,
+async def materialize_runtime_storage(
+    plan: RuntimeStoragePlan,
     *,
     namespace: str,
     tenant_id: str,
     object_store: ObjectStore | None,
     read_only: bool = False,
-) -> _MaterializedRuntimeState:
+) -> _MaterializedRuntimeStorage:
     stores: dict[RuntimeDomain, StateStore] = {}
     sql_contexts: dict[RuntimeDomain, SqlStorageContext] = {}
     cleanups: list[Callable[[], Awaitable[None]]] = []
     try:
         sql_groups: dict[tuple[str, object], list[RuntimeDomain]] = {}
-        sql_routes: dict[tuple[str, object], RuntimeStateRoute] = {}
+        sql_routes: dict[tuple[str, object], RuntimeStorageRoute] = {}
         filesystem_domains: dict[Path, list[RuntimeDomain]] = {}
-        filesystem_routes: dict[Path, RuntimeStateRoute] = {}
+        filesystem_routes: dict[Path, RuntimeStorageRoute] = {}
         filesystem_member_roots: dict[RuntimeDomain, Path] = {}
         memory_group = MemoryStateStorageGroup(read_only=read_only)
         for domain in RuntimeDomain:
@@ -310,9 +310,9 @@ async def materialize_runtime_state(
         for component in _unique(components):
             await component.initialize()
 
-        states = _states(bundles)
+        repositories = _repositories(bundles)
         objects = build_runtime_object_router(plan, object_store, stores, sql_contexts)
-        steps = build_runtime_steps(
+        run_store = build_runtime_agent_run_store(
             plan,
             stores,
             objects,
@@ -321,37 +321,37 @@ async def materialize_runtime_state(
             namespace=namespace,
             tenant_id=tenant_id,
         )
-        await steps.initialize()
+        await run_store.initialize()
         retention = RuntimeRetentionController(
-            conversation=states.conversation,
-            execution=states.execution,
+            conversation=repositories.conversation,
+            execution=repositories.execution,
             objects=objects,
-            steps=steps,
+            run_store=run_store,
             plan=plan,
             namespace=namespace,
         )
         actions: list[Callable[[], Awaitable[None]]] = [
-            steps.preflight_close,
+            run_store.preflight_close,
             objects.preflight_close,
             retention.close,
-            steps.close,
+            run_store.close,
         ]
         actions.extend(cleanups)
         _logger.info(
-            "runtime state materialized: namespace=%s domains=%s",
+            "runtime storage materialized: namespace=%s domains=%s",
             namespace,
             ",".join(domain.value for domain in RuntimeDomain),
         )
-        return _MaterializedRuntimeState(
-            conversation=states.conversation,
-            execution=states.execution,
-            memory=states.memory,
-            artifact=states.artifact,
-            task=states.task,
-            evaluation=states.evaluation,
-            recovery=states.recovery,
+        return _MaterializedRuntimeStorage(
+            conversation=repositories.conversation,
+            execution=repositories.execution,
+            memory=repositories.memory,
+            artifact=repositories.artifact,
+            task=repositories.task,
+            evaluation=repositories.evaluation,
+            recovery=repositories.recovery,
             objects=objects,
-            steps=steps,
+            run_store=run_store,
             retention=retention,
             stores=dict(stores),
             close_actions=tuple(actions),
@@ -454,39 +454,41 @@ def _sync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
-def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> _RuntimeStates:
+def _repositories(
+    bundles: Mapping[RuntimeDomain, Mapping[str, object]],
+) -> _RuntimeRepositories:
     try:
-        return _RuntimeStates(
-            conversation=ConversationState(
+        return _RuntimeRepositories(
+            conversation=ConversationRepositories(
                 bundles[RuntimeDomain.CONVERSATION]["sessions"],
                 bundles[RuntimeDomain.CONVERSATION]["histories"],
                 bundles[RuntimeDomain.CONVERSATION]["operations"],
             ),
-            execution=ExecutionState(
+            execution=ExecutionRepositories(
                 bundles[RuntimeDomain.EXECUTION]["executions"],
                 bundles[RuntimeDomain.EXECUTION]["events"],
                 bundles[RuntimeDomain.EXECUTION]["idempotency"],
                 bundles[RuntimeDomain.EXECUTION]["operations"],
             ),
-            memory=MemoryState(
+            memory=MemoryRepositories(
                 bundles[RuntimeDomain.MEMORY]["records"],
                 bundles[RuntimeDomain.MEMORY]["operations"],
             ),
-            artifact=ArtifactState(
+            artifact=ArtifactRepositories(
                 bundles[RuntimeDomain.ARTIFACT]["records"],
                 bundles[RuntimeDomain.ARTIFACT]["operations"],
             ),
-            task=TaskState(
+            task=TaskRepositories(
                 bundles[RuntimeDomain.TASK]["tasks"],
                 bundles[RuntimeDomain.TASK]["operations"],
                 bundles[RuntimeDomain.TASK]["admissions"],
             ),
-            evaluation=EvaluationState(
+            evaluation=EvaluationRepositories(
                 bundles[RuntimeDomain.EVALUATION]["records"],
                 bundles[RuntimeDomain.EVALUATION]["idempotency"],
                 bundles[RuntimeDomain.EVALUATION]["operations"],
             ),
-            recovery=RecoveryState(
+            recovery=RecoveryRepositories(
                 bundles[RuntimeDomain.RECOVERY]["approvals"],
                 bundles[RuntimeDomain.RECOVERY]["external_calls"],
                 bundles[RuntimeDomain.RECOVERY]["checkpoints"],
@@ -513,7 +515,7 @@ def _tenant_scope_digest(tenant_id: str) -> str:
 
 
 def _route_domain_path(
-    plan: RuntimeStatePlan,
+    plan: RuntimeStoragePlan,
     domain: RuntimeDomain,
     namespace: str,
     tenant_id: str,
@@ -536,7 +538,7 @@ def _validate_filesystem_member_roots(
         for right_domain, right in ordered[index + 1 :]:
             if left == right or left in right.parents or right in left.parents:
                 raise ValueError(
-                    "filesystem RuntimeStateRoute member paths overlap: "
+                    "filesystem RuntimeStorageRoute member paths overlap: "
                     f"{left_domain.value}={left} {right_domain.value}={right}"
                 )
     reserved_roots = tuple(
@@ -551,7 +553,7 @@ def _validate_filesystem_member_roots(
                 or reserved in member.parents
             ):
                 raise ValueError(
-                    "filesystem RuntimeStateRoute member path overlaps "
+                    "filesystem RuntimeStorageRoute member path overlaps "
                     f"coordination storage: {domain.value}={member}"
                 )
 
@@ -578,4 +580,4 @@ def _filesystem_group_scope(
     )[:32]
 
 
-__all__ = ["materialize_runtime_state"]
+__all__ = ["materialize_runtime_storage"]

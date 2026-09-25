@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Deferred approval and ordinary snapshot contracts."""
+"""Deferred approval and ordinary checkpoint contracts."""
 
 from pathlib import Path
 
@@ -12,14 +12,14 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 from linktools.ai.runtime.state._step_contracts import (
-    ContinuableSnapshot,
+    AgentRunCheckpoint,
 )
 from linktools.ai.runtime.state._steps import (
-    StagingStepStore,
+    StagingAgentRunStore,
 )
 
 from linktools.ai.runtime._capture import RuntimeCaptureStore
-from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
+from linktools.ai.runtime._capabilities import _RuntimeAgentRunPersistence
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
@@ -27,7 +27,7 @@ from linktools.ai.runtime._tool_boundary import (
 from linktools.ai.workspace import (
     WorkspaceToolPermissionPolicy,
 )
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _Bridge:
@@ -58,19 +58,19 @@ class _Bridge:
         return frozenset()
 
 
-class _RecordingStepStore(StagingStepStore):
+class _RecordingAgentRunStore(StagingAgentRunStore):
     def __init__(self) -> None:
         super().__init__()
-        self.saved_snapshots: list[ContinuableSnapshot] = []
+        self.saved_checkpoints: list[AgentRunCheckpoint] = []
 
-    async def save_snapshot(
+    async def save_checkpoint(
         self,
-        snapshot: ContinuableSnapshot,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
     ) -> None:
-        self.saved_snapshots.append(snapshot)
-        await super().save_snapshot(snapshot, execution_id=execution_id)
+        self.saved_checkpoints.append(checkpoint)
+        await super().save_checkpoint(checkpoint, execution_id=execution_id)
 
 
 async def _read_file(path: str) -> str:
@@ -79,18 +79,18 @@ async def _read_file(path: str) -> str:
 
 @pytest.mark.asyncio
 async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> None:
-    run_id = "deferred-run"
-    store = _RecordingStepStore()
+    agent_run_id = "deferred-run"
+    store = _RecordingAgentRunStore()
     bridge = _Bridge()
     captured: list[int] = []
     del tmp_path
     descriptor = ManagedToolDescriptor(
         effect_owner="tool_operation",
-        effect="non_replay_safe",
+        effect_policy="non_replay_safe",
         tool_class="filesystem.read",
     )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(_read_file, descriptor)]),),
+        (FunctionToolset([tool_with_metadata(_read_file, descriptor)]),),
         {
             "_read_file": descriptor
         },
@@ -103,7 +103,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id=run_id,
+        run_id=agent_run_id,
         tool_call_id="call",
     )
     tools = await boundary.get_tools(context)
@@ -117,33 +117,33 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
 
     assert bridge.calls == 0
     assert not captured
-    assert not store.saved_snapshots
+    assert not store.saved_checkpoints
 
 
 @pytest.mark.asyncio
-async def test_ordinary_completed_snapshot_behavior_is_unchanged() -> None:
-    run_id = "completed-run"
-    store = _RecordingStepStore()
-    persistence = _RuntimeStepPersistence(
+async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
+    agent_run_id = "completed-run"
+    store = _RecordingAgentRunStore()
+    persistence = _RuntimeAgentRunPersistence(
         capture=RuntimeCaptureStore(
             store,
             execution_id=None,
-            step_run_id=run_id,
+            agent_run_id=agent_run_id,
         ),
         agent_name="agent",
-        run_id=run_id,
+        agent_run_id=agent_run_id,
     )
     agent = Agent(TestModel(custom_output_text="ok"))
 
     result = await agent.run(
         "finish",
-        run_id=run_id,
+        run_id=agent_run_id,
         capabilities=(persistence,),
     )
 
     assert result.output == "ok"
-    assert store.saved_snapshots
-    latest = await store.latest_snapshot(run_id=run_id)
+    assert store.saved_checkpoints
+    latest = await store.latest_checkpoint(agent_run_id=agent_run_id)
     assert latest is not None
     assert latest.state == "complete"
-    assert latest == store.saved_snapshots[-1]
+    assert latest == store.saved_checkpoints[-1]

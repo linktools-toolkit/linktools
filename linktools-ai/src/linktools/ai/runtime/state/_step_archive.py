@@ -41,7 +41,7 @@ from ._contracts import (
     LoadedModelContext,
     ModelInteractionRecord,
     RuntimePayloadRef,
-    StoredStepSnapshot,
+    StoredAgentRunCheckpoint,
     TranscriptChunk,
     TranscriptMessageRef,
     TranscriptOrigin,
@@ -54,10 +54,10 @@ from ._history import (
 )
 from ._plan import RuntimeDomain
 from ._step_contracts import (
-    ContinuableSnapshot,
-    RunRecord,
+    AgentRunCheckpoint,
+    AgentRunRecord,
     StepEvent,
-    StepStore,
+    AgentRunStore,
 )
 from ._store import (
     FactQuery,
@@ -79,25 +79,25 @@ from ._store import (
     stream_digest,
 )
 
-_logger = environ.get_logger("ai.runtime.state.steps")
+_logger = environ.get_logger("ai.runtime.state.run_store")
 
 
 @runtime_checkable
 class _StepArchiveBatch(Protocol):
     async def sync_projection(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
-        snapshots: Sequence[ContinuableSnapshot],
+        checkpoints: Sequence[AgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None: ...
 
-    async def materialize_snapshot(
+    async def materialize_checkpoint(
         self,
-        run: RunRecord,
-        snapshot: ContinuableSnapshot,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
     ) -> None: ...
@@ -106,20 +106,20 @@ class _StepArchiveBatch(Protocol):
 @dataclass(slots=True)
 class _ProjectionOffset:
     events: int = 0
-    snapshots: int = 0
+    checkpoints: int = 0
     transcript_messages: int = 0
     interactions: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionProjectionBatch:
-    run: RunRecord
+    run: AgentRunRecord
     events: tuple[StepEvent, ...]
-    snapshots: tuple[ContinuableSnapshot, ...]
+    checkpoints: tuple[AgentRunCheckpoint, ...]
     base_event_offset: int
-    base_snapshot_offset: int
+    base_checkpoint_offset: int
     target_event_offset: int
-    target_snapshot_offset: int
+    target_checkpoint_offset: int
     base_message_index: int
     target_message_index: int
     interactions: tuple[StagedModelInteraction, ...] = ()
@@ -128,41 +128,41 @@ class ExecutionProjectionBatch:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedStepSnapshot:
+class PreparedAgentRunCheckpoint:
     owner_id: str
-    stored: StoredStepSnapshot
+    stored: StoredAgentRunCheckpoint
     chunks: tuple[TranscriptChunk, ...]
     projection: ContextProjection
     history_quality: HistoryQuality = HistoryQuality.COMPLETE
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedStepSnapshotBatch:
-    run_id: str
-    snapshots: tuple[PreparedStepSnapshot, ...]
+class PreparedAgentRunCheckpointBatch:
+    agent_run_id: str
+    checkpoints: tuple[PreparedAgentRunCheckpoint, ...]
     target_event_offset: int
-    target_snapshot_offset: int
+    target_checkpoint_offset: int
     target_transcript_message_count: int
 
     def __iter__(self):
-        return iter(self.snapshots)
+        return iter(self.checkpoints)
 
     def __len__(self) -> int:
-        return len(self.snapshots)
+        return len(self.checkpoints)
 
-    def __getitem__(self, index: int) -> PreparedStepSnapshot:
-        return self.snapshots[index]
+    def __getitem__(self, index: int) -> PreparedAgentRunCheckpoint:
+        return self.checkpoints[index]
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedExecutionProjection:
-    run: RunRecord
+    run: AgentRunRecord
     events: tuple[StepEvent, ...]
-    snapshots: tuple[PreparedStepSnapshot, ...]
+    checkpoints: tuple[PreparedAgentRunCheckpoint, ...]
     base_event_offset: int
-    base_snapshot_offset: int
+    base_checkpoint_offset: int
     target_event_offset: int
-    target_snapshot_offset: int
+    target_checkpoint_offset: int
     target_transcript_message_count: int
     durable_projection_digest: str = "empty"
     interactions: tuple["ModelInteractionRecord", ...] = ()
@@ -171,9 +171,9 @@ class PreparedExecutionProjection:
 
     @property
     def projection_digest(self) -> str:
-        if not self.snapshots:
+        if not self.checkpoints:
             return self.durable_projection_digest
-        return self.snapshots[-1].projection.digest
+        return self.checkpoints[-1].projection.digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,51 +184,51 @@ class ExecutionTerminalSealPlan:
     seal_tokens: tuple[tuple[str, str], ...]
     terminal_attempt_token: str = ""
 
-    def token_for(self, run_id: str) -> str:
+    def token_for(self, agent_run_id: str) -> str:
         for candidate, token in self.seal_tokens:
-            if candidate == run_id:
+            if candidate == agent_run_id:
                 return token
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-class _RunDurabilityKind(str, Enum):
+class _AgentRunDurabilityKind(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
     PROJECTION = "projection"
-    SNAPSHOT = "snapshot"
+    CHECKPOINT = "checkpoint"
     RECOVERY_MATERIALIZATION = "recovery_materialization"
     RELEASE = "release"
     TERMINAL = "terminal"
 
 
 @dataclass(frozen=True, slots=True)
-class _RunDurabilityFlight:
+class _AgentRunDurabilityFlight:
     """Registered in-flight durability work for one run.
 
     ``completion`` resolves only after the durable outcome is final; waiters
     must exit the run lock before awaiting it.
     """
 
-    run_id: str
+    agent_run_id: str
     token: str
-    kind: _RunDurabilityKind
+    kind: _AgentRunDurabilityKind
     completion: "asyncio.Future[None]"
 
 
-_RunProjectionFlight = _RunDurabilityFlight
+_AgentRunProjectionFlight = _AgentRunDurabilityFlight
 
 
 @dataclass(frozen=True, slots=True)
 class CapturedExecutionProjection:
     """Immutable capture of one run's staged projection state."""
 
-    run: RunRecord
+    run: AgentRunRecord
     events: tuple[StepEvent, ...]
-    snapshots: tuple[ContinuableSnapshot, ...]
+    checkpoints: tuple[AgentRunCheckpoint, ...]
     base_event_offset: int
-    base_snapshot_offset: int
+    base_checkpoint_offset: int
     target_event_offset: int
-    target_snapshot_offset: int
+    target_checkpoint_offset: int
     interactions: tuple[StagedModelInteraction, ...] = ()
     base_interaction_offset: int = 0
     target_interaction_offset: int = 0
@@ -252,7 +252,7 @@ class _ProjectionLockEntry:
 
 @dataclass(frozen=True, slots=True)
 class _HeldRunHistoryLock:
-    run_id: str
+    agent_run_id: str
     task: asyncio.Task[object]
 
 
@@ -266,13 +266,13 @@ _held_run_history_locks: ContextVar[tuple[_HeldRunHistoryLock, ...]] = ContextVa
 )
 
 
-class _RunHistoryLock:
+class _AgentRunHistoryLock:
     def __init__(self) -> None:
         self._entries: dict[str, _ProjectionLockEntry] = {}
         self._guard = asyncio.Lock()
 
     @asynccontextmanager
-    async def hold(self, run_id: str):
+    async def hold(self, agent_run_id: str):
         current_task = asyncio.current_task()
         if current_task is None:
             raise LockOrderError("run history lock requires an asyncio task")
@@ -283,20 +283,20 @@ class _RunHistoryLock:
         held = _held_run_history_locks.get()
         if any(value.task is not current_task for value in held):
             raise LockOrderError("a child task cannot inherit a RunHistoryLock")
-        if any(value.run_id != run_id for value in held):
+        if any(value.agent_run_id != agent_run_id for value in held):
             raise LockOrderError(
                 "one asyncio task cannot hold multiple RunHistoryLocks"
             )
         async with self._guard:
-            entry = self._entries.get(run_id)
+            entry = self._entries.get(agent_run_id)
             if entry is None:
                 entry = _ProjectionLockEntry(asyncio.Lock())
-                self._entries[run_id] = entry
+                self._entries[agent_run_id] = entry
             entry.references += 1
             if held and entry.owner is not current_task:
                 entry.references -= 1
-                if entry.references == 0 and self._entries.get(run_id) is entry:
-                    self._entries.pop(run_id, None)
+                if entry.references == 0 and self._entries.get(agent_run_id) is entry:
+                    self._entries.pop(agent_run_id, None)
                 raise LockOrderError("run history lock ownership is inconsistent")
             if entry.owner is current_task:
                 entry.depth += 1
@@ -304,7 +304,7 @@ class _RunHistoryLock:
             else:
                 nested = False
         if nested:
-            lock_token = enter_run_history_lock(run_id)
+            lock_token = enter_run_history_lock(agent_run_id)
             try:
                 yield
             finally:
@@ -312,8 +312,8 @@ class _RunHistoryLock:
                 async with self._guard:
                     entry.depth -= 1
                     entry.references -= 1
-                    if entry.references == 0 and self._entries.get(run_id) is entry:
-                        self._entries.pop(run_id, None)
+                    if entry.references == 0 and self._entries.get(agent_run_id) is entry:
+                        self._entries.pop(agent_run_id, None)
             return
         acquired = False
         token: Token[tuple[_HeldRunHistoryLock, ...]] | None = None
@@ -325,9 +325,9 @@ class _RunHistoryLock:
                 entry.owner = current_task
                 entry.depth = 1
             token = _held_run_history_locks.set(
-                held + (_HeldRunHistoryLock(run_id, current_task),)
+                held + (_HeldRunHistoryLock(agent_run_id, current_task),)
             )
-            lock_token = enter_run_history_lock(run_id)
+            lock_token = enter_run_history_lock(agent_run_id)
             yield
         finally:
             if lock_token is not None:
@@ -341,17 +341,17 @@ class _RunHistoryLock:
                 entry.lock.release()
             async with self._guard:
                 entry.references -= 1
-                if entry.references == 0 and self._entries.get(run_id) is entry:
-                    self._entries.pop(run_id, None)
+                if entry.references == 0 and self._entries.get(agent_run_id) is entry:
+                    self._entries.pop(agent_run_id, None)
 
 
-class StagingStepStore(StepStore):
+class StagingAgentRunStore(AgentRunStore):
     """Process-local facts collected before owner materialization."""
 
     def __init__(self) -> None:
-        self._runs: dict[str, RunRecord] = {}
+        self._runs: dict[str, AgentRunRecord] = {}
         self._events: dict[str, list[StepEvent]] = {}
-        self._snapshots: dict[str, list[ContinuableSnapshot]] = {}
+        self._checkpoints: dict[str, list[AgentRunCheckpoint]] = {}
         self._interactions: dict[str, list[StagedModelInteraction]] = {}
         self._payloads: dict[str, dict[str, bytes]] = {}
         self._lock = asyncio.Lock()
@@ -363,32 +363,32 @@ class StagingStepStore(StepStore):
     async def close(self) -> None:
         self._closed = True
 
-    async def register_run(
+    async def register_agent_run(
         self,
-        record: RunRecord,
+        record: AgentRunRecord,
         *,
         execution_id: str | None = None,
     ) -> None:
         del execution_id
         self._ensure_open()
         async with self._lock:
-            self.register_run_local(record)
+            self.register_agent_run_local(record)
 
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
+    async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
         self._ensure_open()
-        return self.get_run_local(run_id)
+        return self.get_agent_run_local(agent_run_id)
 
-    async def list_runs(
-        self, *, parent_run_id: str | None = None, conversation_id: str | None = None
-    ) -> list[RunRecord]:
+    async def list_agent_runs(
+        self, *, parent_agent_run_id: str | None = None, agent_conversation_id: str | None = None
+    ) -> list[AgentRunRecord]:
         self._ensure_open()
         values = [
             value
             for value in self._runs.values()
-            if (parent_run_id is None or value.parent_run_id == parent_run_id)
-            and (conversation_id is None or value.conversation_id == conversation_id)
+            if (parent_agent_run_id is None or value.parent_agent_run_id == parent_agent_run_id)
+            and (agent_conversation_id is None or value.agent_conversation_id == agent_conversation_id)
         ]
-        return sorted(values, key=lambda value: (value.started_at, value.run_id))
+        return sorted(values, key=lambda value: (value.started_at, value.agent_run_id))
 
     async def append_event(
         self,
@@ -401,47 +401,47 @@ class StagingStepStore(StepStore):
         async with self._lock:
             self.append_event_local(event)
 
-    async def list_events(self, *, run_id: str) -> list[StepEvent]:
+    async def list_events(self, *, agent_run_id: str) -> list[StepEvent]:
         self._ensure_open()
-        return self.list_events_local(run_id)
+        return self.list_events_local(agent_run_id)
 
-    async def list_snapshots(self, *, run_id: str) -> list[ContinuableSnapshot]:
+    async def list_checkpoints(self, *, agent_run_id: str) -> list[AgentRunCheckpoint]:
         self._ensure_open()
-        return self.list_snapshots_local(run_id)
+        return self.list_checkpoints_local(agent_run_id)
 
-    async def save_snapshot(
+    async def save_checkpoint(
         self,
-        snapshot: ContinuableSnapshot,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
     ) -> None:
         del execution_id
         self._ensure_open()
         async with self._lock:
-            self.save_snapshot_local(snapshot)
+            self.save_checkpoint_local(checkpoint)
 
-    async def latest_snapshot(
+    async def latest_checkpoint(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         include_interrupted: bool = False,
-    ) -> ContinuableSnapshot | None:
+    ) -> AgentRunCheckpoint | None:
         self._ensure_open()
-        return self.latest_snapshot_local(
-            run_id,
+        return self.latest_checkpoint_local(
+            agent_run_id,
             include_interrupted=include_interrupted,
         )
 
-    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]:
+    def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]:
         self._ensure_open()
         digest = hashlib.sha256(payload).hexdigest()
-        self._payloads.setdefault(run_id, {}).setdefault(digest, bytes(payload))
+        self._payloads.setdefault(agent_run_id, {}).setdefault(digest, bytes(payload))
         return digest, len(payload)
 
-    def staged_payload(self, run_id: str, digest: str) -> bytes:
+    def staged_payload(self, agent_run_id: str, digest: str) -> bytes:
         self._ensure_open()
         try:
-            return self._payloads[run_id][digest]
+            return self._payloads[agent_run_id][digest]
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -449,19 +449,19 @@ class StagingStepStore(StepStore):
         self._ensure_open()
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
-        self._interactions.setdefault(interaction.run_id, []).append(interaction)
+        self._interactions.setdefault(interaction.agent_run_id, []).append(interaction)
 
     async def list_model_interactions(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         after_request_sequence: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
         self._ensure_open()
         _validate_interaction_page(after_request_sequence, limit)
         selected: list[object] = []
-        for interaction in self._interactions.get(run_id, ()):
+        for interaction in self._interactions.get(agent_run_id, ()):
             if (
                 after_request_sequence is not None
                 and interaction.request_sequence <= after_request_sequence
@@ -472,9 +472,9 @@ class StagingStepStore(StepStore):
                 break
         return selected
 
-    async def model_interaction_count(self, *, run_id: str) -> int:
+    async def model_interaction_count(self, *, agent_run_id: str) -> int:
         self._ensure_open()
-        values = self._interactions.get(run_id, ())
+        values = self._interactions.get(agent_run_id, ())
         if not values:
             return 0
         sequences = tuple(value.request_sequence for value in values)
@@ -498,106 +498,106 @@ class StagingStepStore(StepStore):
         *,
         owner_id: str,
     ) -> LoadedModelContext:
-        snapshot = await self.latest_snapshot(
-            run_id=owner_id,
+        checkpoint = await self.latest_checkpoint(
+            agent_run_id=owner_id,
             include_interrupted=True,
         )
-        if snapshot is None:
+        if checkpoint is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         messages = (
-            snapshot.messages
-            if snapshot.context_messages is None
-            else snapshot.context_messages
+            checkpoint.messages
+            if checkpoint.context_messages is None
+            else checkpoint.context_messages
         )
         return LoadedModelContext(
             tuple(LoadedContextMessage(message, None) for message in messages)
         )
 
-    async def release_run(
+    async def release_agent_run(
         self,
-        run_id: str,
+        agent_run_id: str,
         *,
         execution_id: str | None = None,
     ) -> None:
         del execution_id
-        self.release_run_local(run_id)
+        self.release_agent_run_local(agent_run_id)
 
-    def register_run_local(self, record: RunRecord) -> None:
+    def register_agent_run_local(self, record: AgentRunRecord) -> None:
         self._ensure_open()
-        previous = self._runs.get(record.run_id)
+        previous = self._runs.get(record.agent_run_id)
         if previous is not None and previous != record:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        self._runs[record.run_id] = record
+        self._runs[record.agent_run_id] = record
 
-    def get_run_local(self, run_id: str) -> RunRecord | None:
+    def get_agent_run_local(self, agent_run_id: str) -> AgentRunRecord | None:
         self._ensure_open()
-        return self._runs.get(run_id)
+        return self._runs.get(agent_run_id)
 
     def append_event_local(self, event: StepEvent) -> None:
         self._ensure_open()
-        if event.run_id not in self._runs:
+        if event.agent_run_id not in self._runs:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        values = self._events.setdefault(event.run_id, [])
+        values = self._events.setdefault(event.agent_run_id, [])
         if event not in values:
             values.append(event)
 
-    def list_events_local(self, run_id: str) -> list[StepEvent]:
+    def list_events_local(self, agent_run_id: str) -> list[StepEvent]:
         self._ensure_open()
-        return list(self._events.get(run_id, ()))
+        return list(self._events.get(agent_run_id, ()))
 
-    def list_snapshots_local(self, run_id: str) -> list[ContinuableSnapshot]:
+    def list_checkpoints_local(self, agent_run_id: str) -> list[AgentRunCheckpoint]:
         self._ensure_open()
-        return list(self._snapshots.get(run_id, ()))
+        return list(self._checkpoints.get(agent_run_id, ()))
 
-    def save_snapshot_local(self, snapshot: ContinuableSnapshot) -> None:
+    def save_checkpoint_local(self, checkpoint: AgentRunCheckpoint) -> None:
         self._ensure_open()
-        if snapshot.run_id not in self._runs:
+        if checkpoint.agent_run_id not in self._runs:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        values = self._snapshots.setdefault(snapshot.run_id, [])
-        if snapshot not in values:
-            values.append(snapshot)
+        values = self._checkpoints.setdefault(checkpoint.agent_run_id, [])
+        if checkpoint not in values:
+            values.append(checkpoint)
 
-    def latest_snapshot_local(
+    def latest_checkpoint_local(
         self,
-        run_id: str,
+        agent_run_id: str,
         *,
         include_interrupted: bool = False,
-    ) -> ContinuableSnapshot | None:
+    ) -> AgentRunCheckpoint | None:
         self._ensure_open()
-        values = self._snapshots.get(run_id, ())
+        values = self._checkpoints.get(agent_run_id, ())
         if not values:
             return None
         latest = values[-1]
         return latest if include_interrupted or latest.state == "complete" else None
 
-    def release_run_local(self, run_id: str) -> None:
+    def release_agent_run_local(self, agent_run_id: str) -> None:
         self._ensure_open()
-        self._runs.pop(run_id, None)
-        self._events.pop(run_id, None)
-        self._snapshots.pop(run_id, None)
-        self._interactions.pop(run_id, None)
-        self._payloads.pop(run_id, None)
+        self._runs.pop(agent_run_id, None)
+        self._events.pop(agent_run_id, None)
+        self._checkpoints.pop(agent_run_id, None)
+        self._interactions.pop(agent_run_id, None)
+        self._payloads.pop(agent_run_id, None)
 
     def capture_projection_local(
         self,
-        run_id: str,
+        agent_run_id: str,
         offset: _ProjectionOffset,
     ) -> ExecutionProjectionBatch | None:
         self._ensure_open()
-        run = self._runs.get(run_id)
+        run = self._runs.get(agent_run_id)
         if run is None:
             return None
-        events = self._events.get(run_id, ())
-        snapshots = self._snapshots.get(run_id, ())
-        interactions = self._interactions.get(run_id, ())
+        events = self._events.get(agent_run_id, ())
+        checkpoints = self._checkpoints.get(agent_run_id, ())
+        interactions = self._interactions.get(agent_run_id, ())
         return ExecutionProjectionBatch(
             run,
             tuple(events[offset.events:]),
-            tuple(snapshots[offset.snapshots:]),
+            tuple(checkpoints[offset.checkpoints:]),
             offset.events,
-            offset.snapshots,
+            offset.checkpoints,
             len(events),
-            len(snapshots),
+            len(checkpoints),
             offset.transcript_messages,
             offset.transcript_messages,
             tuple(interactions[offset.interactions:]),
@@ -610,7 +610,7 @@ class StagingStepStore(StepStore):
             raise AIError(ErrorCode.STORAGE_CLOSED)
 
 
-class InMemoryStepArchive(StagingStepStore):
+class InMemoryStepArchive(StagingAgentRunStore):
     def __init__(self, runtime_domain: RuntimeDomain) -> None:
         super().__init__()
         self._runtime_domain = runtime_domain
@@ -621,44 +621,44 @@ class InMemoryStepArchive(StagingStepStore):
 
     async def sync_projection(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
-        snapshots: Sequence[ContinuableSnapshot],
+        checkpoints: Sequence[AgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None:
         del execution_id
         self._ensure_open()
         async with self._lock:
-            previous = self._runs.get(run.run_id)
+            previous = self._runs.get(run.agent_run_id)
             if previous is not None and previous != run:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            self._runs[run.run_id] = run
-            event_values = self._events.setdefault(run.run_id, [])
-            snapshot_values = self._snapshots.setdefault(run.run_id, [])
+            self._runs[run.agent_run_id] = run
+            event_values = self._events.setdefault(run.agent_run_id, [])
+            checkpoint_values = self._checkpoints.setdefault(run.agent_run_id, [])
             for event in events:
                 if event not in event_values:
                     event_values.append(event)
-            for snapshot in snapshots:
-                if snapshot not in snapshot_values:
-                    snapshot_values.append(snapshot)
-            interaction_values = self._interactions.setdefault(run.run_id, [])
+            for checkpoint in checkpoints:
+                if checkpoint not in checkpoint_values:
+                    checkpoint_values.append(checkpoint)
+            interaction_values = self._interactions.setdefault(run.agent_run_id, [])
             for interaction in interactions:
                 if interaction not in interaction_values:
                     interaction_values.append(interaction)
 
-    async def materialize_snapshot(
+    async def materialize_checkpoint(
         self,
-        run: RunRecord,
-        snapshot: ContinuableSnapshot,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
     ) -> None:
         await self.sync_projection(
             run,
             events=(),
-            snapshots=(snapshot,),
+            checkpoints=(checkpoint,),
             interactions=(),
             execution_id=execution_id,
         )
@@ -671,36 +671,36 @@ class InMemoryStepArchive(StagingStepStore):
             return ()
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-    async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]:
-        snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
-        if snapshot is not None:
-            for message in snapshot.messages:
+    async def iter_messages(self, *, agent_run_id: str) -> AsyncIterator[object]:
+        checkpoint = await self.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
+        if checkpoint is not None:
+            for message in checkpoint.messages:
                 yield message
 
-    async def transcript_message_count(self, run_id: str) -> int:
-        snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
-        return 0 if snapshot is None else len(snapshot.messages)
+    async def transcript_message_count(self, agent_run_id: str) -> int:
+        checkpoint = await self.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
+        return 0 if checkpoint is None else len(checkpoint.messages)
 
     async def iter_message_range(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         start: int,
         end: int,
     ) -> AsyncIterator[object]:
         if start < 0 or end < start:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
-        total = 0 if snapshot is None else len(snapshot.messages)
+        checkpoint = await self.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
+        total = 0 if checkpoint is None else len(checkpoint.messages)
         if end > total:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if snapshot is not None:
-            for message in snapshot.messages[start:end]:
+        if checkpoint is not None:
+            for message in checkpoint.messages[start:end]:
                 yield message
 
-    async def load_model_context(self, *, run_id: str) -> tuple[object, ...]:
-        snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
-        return () if snapshot is None else tuple(snapshot.messages)
+    async def load_model_context(self, *, agent_run_id: str) -> tuple[object, ...]:
+        checkpoint = await self.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
+        return () if checkpoint is None else tuple(checkpoint.messages)
 
     async def prepare_relocated_interactions(
         self,
@@ -757,20 +757,20 @@ class InMemoryStepArchive(StagingStepStore):
     ) -> tuple[tuple[ModelMessage, ...], tuple[ModelMessage, ...] | None, bytes]:
         if not isinstance(interaction, ModelInteractionRecord):
             raise TypeError("model interaction is invalid")
-        snapshot = await self.latest_snapshot(
-            run_id=interaction.run_id,
+        checkpoint = await self.latest_checkpoint(
+            agent_run_id=interaction.agent_run_id,
             include_interrupted=True,
         )
-        if snapshot is None:
+        if checkpoint is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         def resolve(projection: ContextProjection) -> tuple[ModelMessage, ...]:
             values: list[ModelMessage] = []
             for item in projection.items:
                 if isinstance(item, TranscriptSpanRef):
-                    if item.start < 0 or item.end > len(snapshot.messages):
+                    if item.start < 0 or item.end > len(checkpoint.messages):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    values.extend(snapshot.messages[item.start : item.end])
+                    values.extend(checkpoint.messages[item.start : item.end])
                     continue
                 payload = item.content.payload
                 if payload.kind != "inline":
@@ -801,7 +801,7 @@ class InMemoryStepArchive(StagingStepStore):
         ]
 
 
-class StateStepArchive(StepStore):
+class StateStepArchive(AgentRunStore):
     """Durable Step owner archive using StateStore Record and Fact primitives."""
 
     def __init__(
@@ -831,7 +831,7 @@ class StateStepArchive(StepStore):
         )
         self._execution_repository = execution_repository
         self._context_baselines: dict[str, LoadedModelContext] = {}
-        self._history_lock = _RunHistoryLock()
+        self._history_lock = _AgentRunHistoryLock()
         self._closed = False
 
     @property
@@ -851,53 +851,53 @@ class StateStepArchive(StepStore):
 
     async def execution_history_head(
         self,
-        run_id: str,
+        agent_run_id: str,
     ) -> tuple[int, int, int, str]:
-        values = await self.execution_history_heads((run_id,))
-        head = values.get(run_id)
+        values = await self.execution_history_heads((agent_run_id,))
+        head = values.get(agent_run_id)
         if head is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return (
             head.event_count,
-            head.snapshot_count,
+            head.checkpoint_count,
             head.transcript_message_count,
             head.projection_digest,
         )
 
     async def execution_history_head_record(
         self,
-        run_id: str,
+        agent_run_id: str,
     ) -> ExecutionRunSealHead:
-        values = await self.execution_history_heads((run_id,))
-        head = values.get(run_id)
+        values = await self.execution_history_heads((agent_run_id,))
+        head = values.get(agent_run_id)
         if head is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return head
 
     async def execution_history_heads(
         self,
-        run_ids: Sequence[str],
+        agent_run_ids: Sequence[str],
     ) -> Mapping[str, ExecutionRunSealHead]:
         require_no_run_history_lock("StateStepArchive.execution_history_heads")
         if self._runtime_domain is not RuntimeDomain.EXECUTION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        unique_run_ids = tuple(dict.fromkeys(run_ids))
-        if not unique_run_ids:
+        unique_agent_run_ids = tuple(dict.fromkeys(agent_run_ids))
+        if not unique_agent_run_ids:
             return {}
         sequence_keys = tuple(
             key
-            for run_id in unique_run_ids
+            for agent_run_id in unique_agent_run_ids
             for key in (
-                self._sequence(run_id, "event"),
-                self._sequence(run_id, "snapshot"),
-                self._sequence(run_id, "interaction"),
+                self._sequence(agent_run_id, "event"),
+                self._sequence(agent_run_id, "checkpoint"),
+                self._sequence(agent_run_id, "interaction"),
             )
         )
-        run_keys = tuple(self._run_key(run_id) for run_id in unique_run_ids)
+        run_keys = tuple(self._agent_run_key(agent_run_id) for agent_run_id in unique_agent_run_ids)
         projection_keys = tuple(
-            self._history.projection_key(run_id) for run_id in unique_run_ids
+            self._history.projection_key(agent_run_id) for agent_run_id in unique_agent_run_ids
         )
-        head_keys = tuple(self._history.head_key(run_id) for run_id in unique_run_ids)
+        head_keys = tuple(self._history.head_key(agent_run_id) for agent_run_id in unique_agent_run_ids)
         async def read(
             transaction: StateTransaction,
         ) -> tuple[Mapping[bytes, StoredRecord], Mapping[bytes, int]]:
@@ -909,27 +909,27 @@ class StateStepArchive(StepStore):
 
         records, sequences = await self._store.read(read)
         result: dict[str, ExecutionRunSealHead] = {}
-        for run_id in unique_run_ids:
-            run_record = records.get(self._run_key(run_id))
-            head_record = records.get(self._history.head_key(run_id))
-            projection_record = records.get(self._history.projection_key(run_id))
-            event_count = sequences.get(self._sequence(run_id, "event"), 0)
-            snapshot_count = sequences.get(self._sequence(run_id, "snapshot"), 0)
+        for agent_run_id in unique_agent_run_ids:
+            agent_run_record = records.get(self._agent_run_key(agent_run_id))
+            head_record = records.get(self._history.head_key(agent_run_id))
+            projection_record = records.get(self._history.projection_key(agent_run_id))
+            event_count = sequences.get(self._sequence(agent_run_id, "event"), 0)
+            checkpoint_count = sequences.get(self._sequence(agent_run_id, "checkpoint"), 0)
             interaction_count = sequences.get(
-                self._sequence(run_id, "interaction"), 0
+                self._sequence(agent_run_id, "interaction"), 0
             )
             if head_record is None:
                 if (
-                    run_record is not None
+                    agent_run_record is not None
                     or projection_record is not None
                     or event_count
-                    or snapshot_count
+                    or checkpoint_count
                     or interaction_count
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                result[run_id] = ExecutionRunSealHead(run_id, 0, 0, 0, "empty")
+                result[agent_run_id] = ExecutionRunSealHead(agent_run_id, 0, 0, 0, "empty")
                 continue
-            if run_record is None:
+            if agent_run_record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             head = self._history.decode_head(head_record)
             projection_digest = "empty"
@@ -939,10 +939,10 @@ class StateStepArchive(StepStore):
                     ContextProjection,
                 )
                 projection_digest = projection.digest
-            result[run_id] = ExecutionRunSealHead(
-                run_id,
+            result[agent_run_id] = ExecutionRunSealHead(
+                agent_run_id,
                 event_count,
-                snapshot_count,
+                checkpoint_count,
                 head.message_count,
                 projection_digest,
                 interaction_count,
@@ -964,7 +964,7 @@ class StateStepArchive(StepStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def inline_context(
-            run_id: str,
+            agent_run_id: str,
             messages: Sequence[ModelMessage],
         ) -> ContextProjection:
             projection = ContextProjection(
@@ -979,7 +979,7 @@ class StateStepArchive(StepStore):
                     ),
                 )
             )
-            return await self._history.prepare_projection(run_id, projection)
+            return await self._history.prepare_projection(agent_run_id, projection)
 
         values: list[ModelInteractionRecord] = []
         for interaction, (request, response, envelope) in zip(
@@ -991,11 +991,11 @@ class StateStepArchive(StepStore):
                 replace(
                     interaction,
                     request_context=await inline_context(
-                        interaction.run_id,
+                        interaction.agent_run_id,
                         request,
                     ),
                     request_envelope=await self._prepare_inline_payload(
-                        interaction.run_id,
+                        interaction.agent_run_id,
                         RuntimePayloadRef(
                             StoredPayload.inline_bytes(envelope),
                             self._runtime_domain,
@@ -1004,7 +1004,7 @@ class StateStepArchive(StepStore):
                     response_context=(
                         None
                         if response is None
-                        else await inline_context(interaction.run_id, response)
+                        else await inline_context(interaction.agent_run_id, response)
                     ),
                 )
             )
@@ -1017,14 +1017,14 @@ class StateStepArchive(StepStore):
         if not isinstance(interaction, ModelInteractionRecord):
             raise TypeError("model interaction is invalid")
         request = await self._history.load_projected_context(
-            interaction.run_id,
+            interaction.agent_run_id,
             interaction.request_context,
         )
         response = None
         if interaction.response_context is not None:
             response = (
                 await self._history.load_projected_context(
-                    interaction.run_id,
+                    interaction.agent_run_id,
                     interaction.response_context,
                 )
             ).model_messages()
@@ -1059,7 +1059,7 @@ class StateStepArchive(StepStore):
             )
         )
         contexts = await self._history.load_projected_contexts(
-            records[0].run_id,
+            records[0].agent_run_id,
             projections,
         )
         envelopes: dict[str, bytes] = {}
@@ -1082,7 +1082,7 @@ class StateStepArchive(StepStore):
 
     async def prepare_interactions(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         interactions: Sequence[StagedModelInteraction],
         payload: Callable[[str], bytes],
         *,
@@ -1098,7 +1098,7 @@ class StateStepArchive(StepStore):
         external_refs: list[TranscriptMessageRef] = []
         for interaction in values:
             if (
-                interaction.run_id != run.run_id
+                interaction.agent_run_id != run.agent_run_id
                 or interaction.request_sequence in request_sequences
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1131,17 +1131,17 @@ class StateStepArchive(StepStore):
         for staged in values:
             request_context = context_projection_to_durable(
                 staged.request_context,
-                owner_id=run.run_id,
+                owner_id=run.agent_run_id,
                 source_domain=self._runtime_domain,
                 payload=payload,
                 local_message_base=local_message_base,
             )
             request_context = await self._history.prepare_projection(
-                run.run_id,
+                run.agent_run_id,
                 request_context,
             )
             request_envelope = await self._prepare_inline_payload(
-                run.run_id,
+                run.agent_run_id,
                 RuntimePayloadRef(
                     StoredPayload.inline_bytes(payload(staged.request_envelope_digest)),
                     self._runtime_domain,
@@ -1151,18 +1151,18 @@ class StateStepArchive(StepStore):
             if staged.response_context is not None:
                 response_context = context_projection_to_durable(
                     staged.response_context,
-                    owner_id=run.run_id,
+                    owner_id=run.agent_run_id,
                     source_domain=self._runtime_domain,
                     payload=payload,
                     local_message_base=local_message_base,
                 )
                 response_context = await self._history.prepare_projection(
-                    run.run_id,
+                    run.agent_run_id,
                     response_context,
                 )
             result.append(
                 ModelInteractionRecord(
-                    staged.run_id,
+                    staged.agent_run_id,
                     staged.step_index,
                     staged.request_sequence,
                     staged.purpose,
@@ -1182,11 +1182,11 @@ class StateStepArchive(StepStore):
 
     async def _prepare_inline_payload(
         self,
-        run_id: str,
+        agent_run_id: str,
         content: RuntimePayloadRef,
     ) -> RuntimePayloadRef:
         projection = await self._history.prepare_projection(
-            run_id,
+            agent_run_id,
             ContextProjection((InlineContextBlock(content),)),
         )
         item = projection.items[0]
@@ -1201,30 +1201,30 @@ class StateStepArchive(StepStore):
         require_no_run_history_lock(
             "StateStepArchive.verify_execution_projection_head"
         )
-        if await self.get_run(run_id=projection.run.run_id) != projection.run:
+        if await self.get_agent_run(agent_run_id=projection.run.agent_run_id) != projection.run:
             return False
-        head = await self.execution_history_head(projection.run.run_id)
-        record = await self.execution_history_head_record(projection.run.run_id)
+        head = await self.execution_history_head(projection.run.agent_run_id)
+        record = await self.execution_history_head_record(projection.run.agent_run_id)
         return head == (
             projection.target_event_offset,
-            projection.target_snapshot_offset,
+            projection.target_checkpoint_offset,
             projection.target_transcript_message_count,
             projection.projection_digest,
         ) and record.interaction_count == projection.target_interaction_offset
 
-    def bind_history_lock(self, history_lock: _RunHistoryLock) -> None:
+    def bind_history_lock(self, history_lock: _AgentRunHistoryLock) -> None:
         self._history_lock = history_lock
 
     def register_context_baseline(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         context: LoadedModelContext,
     ) -> None:
-        self._context_baselines[step_run_id] = context
+        self._context_baselines[agent_run_id] = context
 
     async def transcript_message_count_for_run(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
     ) -> int:
         require_no_run_history_lock(
             "StateStepArchive.transcript_message_count_for_run"
@@ -1232,63 +1232,63 @@ class StateStepArchive(StepStore):
         owner_id = (
             self._history_id(run)
             if self._runtime_domain is RuntimeDomain.CONVERSATION
-            else run.run_id
+            else run.agent_run_id
         )
         return await self._history.transcript_message_count(owner_id)
 
-    async def relocate_conversation_snapshot(
+    async def relocate_conversation_checkpoint(
         self,
-        run: RunRecord,
-        snapshot: ContinuableSnapshot,
-    ) -> ContinuableSnapshot:
-        """Rebase one cumulative run snapshot onto the conversation owner."""
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
+    ) -> AgentRunCheckpoint:
+        """Rebase one cumulative run checkpoint onto the conversation owner."""
         self._ensure_open()
         require_no_run_history_lock(
-            "StateStepArchive.relocate_conversation_snapshot"
+            "StateStepArchive.relocate_conversation_checkpoint"
         )
         if self._runtime_domain is not RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        existing_run = await self.get_run(run_id=run.run_id)
+        existing_run = await self.get_agent_run(agent_run_id=run.agent_run_id)
         before = 0
         if existing_run is not None:
             if existing_run != run:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            observed = await self.latest_snapshot(
-                run_id=run.run_id,
+            observed = await self.latest_checkpoint(
+                agent_run_id=run.agent_run_id,
                 include_interrupted=True,
             )
-            if not _conversation_relocated_snapshot_matches(snapshot, observed):
+            if not _conversation_relocated_checkpoint_matches(checkpoint, observed):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            before = len(snapshot.messages)
+            before = len(checkpoint.messages)
         return replace(
-            snapshot,
+            checkpoint,
             transcript_message_count_before=before,
         )
 
-    async def relocate_run_snapshot(
+    async def relocate_run_checkpoint(
         self,
-        run: RunRecord,
-        snapshot: ContinuableSnapshot,
-    ) -> ContinuableSnapshot:
-        """Rebase one cumulative snapshot onto its run-owned archive."""
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
+    ) -> AgentRunCheckpoint:
+        """Rebase one cumulative checkpoint onto its run-owned archive."""
         self._ensure_open()
         require_no_run_history_lock(
-            "StateStepArchive.relocate_run_snapshot"
+            "StateStepArchive.relocate_run_checkpoint"
         )
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        existing_run = await self.get_run(run_id=run.run_id)
+        existing_run = await self.get_agent_run(agent_run_id=run.agent_run_id)
         if existing_run is None:
-            return replace(snapshot, transcript_message_count_before=0)
+            return replace(checkpoint, transcript_message_count_before=0)
         if existing_run != run:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         before = await self.transcript_message_count_for_run(run)
-        source_messages = tuple(snapshot.messages)
+        source_messages = tuple(checkpoint.messages)
         if before > len(source_messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if before:
             observed = await self._history.load_message_span(
-                run.run_id,
+                run.agent_run_id,
                 0,
                 before,
             )
@@ -1300,36 +1300,36 @@ class StateStepArchive(StepStore):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return replace(
-            snapshot,
+            checkpoint,
             transcript_message_count_before=before,
         )
 
-    async def prepare_snapshots(
+    async def prepare_checkpoints(
         self,
-        run: RunRecord,
-        snapshots: Sequence[ContinuableSnapshot],
-    ) -> PreparedStepSnapshotBatch:
+        run: AgentRunRecord,
+        checkpoints: Sequence[AgentRunCheckpoint],
+    ) -> PreparedAgentRunCheckpointBatch:
         self._ensure_open()
-        require_no_run_history_lock("StateStepArchive.prepare_snapshots")
-        return await self._prepare_snapshots(
+        require_no_run_history_lock("StateStepArchive.prepare_checkpoints")
+        return await self._prepare_checkpoints(
             run,
-            snapshots,
+            checkpoints,
         )
 
-    async def prepare_snapshots_after_seal(
+    async def prepare_checkpoints_after_seal(
         self,
-        run: RunRecord,
-        snapshots: Sequence[ContinuableSnapshot],
-    ) -> PreparedStepSnapshotBatch:
+        run: AgentRunRecord,
+        checkpoints: Sequence[AgentRunCheckpoint],
+    ) -> PreparedAgentRunCheckpointBatch:
         self._ensure_open()
-        require_no_run_history_lock("StateStepArchive.prepare_snapshots_after_seal")
+        require_no_run_history_lock("StateStepArchive.prepare_checkpoints_after_seal")
         if active_state_scope() is not None or _held_run_history_locks.get():
             raise LockOrderError(
-                "sealed snapshot preparation requires no StateStore or run lock"
+                "sealed checkpoint preparation requires no StateStore or run lock"
             )
-        return await self._prepare_snapshots(
+        return await self._prepare_checkpoints(
             run,
-            snapshots,
+            checkpoints,
         )
 
     async def initialize(self) -> None:
@@ -1340,23 +1340,23 @@ class StateStepArchive(StepStore):
         self._closed = True
         self._context_baselines.clear()
 
-    def _run_key(self, run_id: str) -> bytes:
-        return record_key_digest(self._namespace, self._tenant_id, self._runtime_domain.value, "step_run", run_id)
+    def _agent_run_key(self, agent_run_id: str) -> bytes:
+        return record_key_digest(self._namespace, self._tenant_id, self._runtime_domain.value, "agent_run", agent_run_id)
 
-    def _stream(self, run_id: str, family: str) -> bytes:
-        return stream_digest(self._namespace, self._tenant_id, self._runtime_domain.value, family, run_id)
+    def _stream(self, agent_run_id: str, family: str) -> bytes:
+        return stream_digest(self._namespace, self._tenant_id, self._runtime_domain.value, family, agent_run_id)
 
-    def _sequence(self, run_id: str, family: str) -> bytes:
-        return sequence_key(self._namespace, self._tenant_id, self._runtime_domain.value, family, run_id)
+    def _sequence(self, agent_run_id: str, family: str) -> bytes:
+        return sequence_key(self._namespace, self._tenant_id, self._runtime_domain.value, family, agent_run_id)
 
-    async def register_run(
+    async def register_agent_run(
         self,
-        record: RunRecord,
+        record: AgentRunRecord,
         *,
         execution_id: str | None = None,
     ) -> None:
         self._ensure_open()
-        require_no_run_history_lock("StateStepArchive.register_run")
+        require_no_run_history_lock("StateStepArchive.register_agent_run")
 
         async def mutate(transaction: StateTransaction) -> None:
             history_head_guard = await self._execution_history_guard_in_transaction(
@@ -1376,31 +1376,31 @@ class StateStepArchive(StepStore):
 
         await self._store.mutate(mutate)
 
-    def _stored_run(self, record: RunRecord) -> StoredRecord:
+    def _stored_agent_run(self, record: AgentRunRecord) -> StoredRecord:
         return StoredRecord(
-            self._run_key(record.run_id),
+            self._agent_run_key(record.agent_run_id),
             None
-            if record.conversation_id is None
+            if record.agent_conversation_id is None
             else scope_digest(
                 self._namespace,
                 self._tenant_id,
                 self._runtime_domain.value,
-                "step_run",
+                "agent_run",
                 "conversation",
-                record.conversation_id,
+                record.agent_conversation_id,
             ),
             None
-            if record.parent_run_id is None
+            if record.parent_agent_run_id is None
             else parent_digest(
                 self._namespace,
                 self._tenant_id,
                 self._runtime_domain.value,
-                "step_run",
+                "agent_run",
                 "parent",
-                record.parent_run_id,
+                record.parent_agent_run_id,
             ),
-            "step_run",
-            sortable_timestamp(record.started_at, record.run_id),
+            "agent_run",
+            sortable_timestamp(record.started_at, record.agent_run_id),
             None,
             0,
             None,
@@ -1409,107 +1409,107 @@ class StateStepArchive(StepStore):
             _encode_step(record),
         )
 
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
-        require_no_run_history_lock("StateStepArchive.get_run")
-        stored = await self._store.read(lambda transaction: transaction.get_record(self._run_key(run_id)))
+    async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
+        require_no_run_history_lock("StateStepArchive.get_agent_run")
+        stored = await self._store.read(lambda transaction: transaction.get_record(self._agent_run_key(agent_run_id)))
         return None if stored is None else _decode_step(stored.data)
 
-    async def list_runs(
-        self, *, parent_run_id: str | None = None, conversation_id: str | None = None
-    ) -> list[RunRecord]:
-        require_no_run_history_lock("StateStepArchive.list_runs")
-        if parent_run_id is not None:
+    async def list_agent_runs(
+        self, *, parent_agent_run_id: str | None = None, agent_conversation_id: str | None = None
+    ) -> list[AgentRunRecord]:
+        require_no_run_history_lock("StateStepArchive.list_agent_runs")
+        if parent_agent_run_id is not None:
             query = RecordQuery(
-                kind="step_run",
+                kind="agent_run",
                 parent_digest=parent_digest(
                     self._namespace,
                     self._tenant_id,
                     self._runtime_domain.value,
-                    "step_run",
+                    "agent_run",
                     "parent",
-                    parent_run_id,
+                    parent_agent_run_id,
                 )
             )
-        elif conversation_id is not None:
+        elif agent_conversation_id is not None:
             query = RecordQuery(
-                kind="step_run",
+                kind="agent_run",
                 scope_digest=scope_digest(
                     self._namespace,
                     self._tenant_id,
                     self._runtime_domain.value,
-                    "step_run",
+                    "agent_run",
                     "conversation",
-                    conversation_id,
+                    agent_conversation_id,
                 )
             )
         else:
             query = RecordQuery(
-                kind="step_run",
+                kind="agent_run",
             )
         records = await self._store.read(lambda transaction: transaction.list_records(query))
         values = [_decode_step(record.data) for record in records]
-        return [value for value in values if isinstance(value, RunRecord)]
+        return [value for value in values if isinstance(value, AgentRunRecord)]
 
-    async def _prepare_snapshots(
+    async def _prepare_checkpoints(
         self,
-        run: RunRecord,
-        snapshots: Sequence[ContinuableSnapshot],
-    ) -> PreparedStepSnapshotBatch:
-        values = tuple(snapshots)
+        run: AgentRunRecord,
+        checkpoints: Sequence[AgentRunCheckpoint],
+    ) -> PreparedAgentRunCheckpointBatch:
+        values = tuple(checkpoints)
         if not values:
             head_owner = (
                 self._history_id(run)
                 if self._runtime_domain is RuntimeDomain.CONVERSATION
-                else run.run_id
+                else run.agent_run_id
             )
             head = await self._history.get_head(head_owner)
-            return PreparedStepSnapshotBatch(
-                run.run_id,
+            return PreparedAgentRunCheckpointBatch(
+                run.agent_run_id,
                 (),
                 0,
                 0,
                 0 if head is None else head.message_count,
             )
         explicit = tuple(
-            snapshot.transcript_message_count_before is not None
-            for snapshot in values
+            checkpoint.transcript_message_count_before is not None
+            for checkpoint in values
         )
         if all(explicit):
-            return await self._prepare_explicit_snapshots(run, values)
+            return await self._prepare_explicit_checkpoints(run, values)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    async def _prepare_explicit_snapshots(
+    async def _prepare_explicit_checkpoints(
         self,
-        run: RunRecord,
-        snapshots: Sequence[ContinuableSnapshot],
-    ) -> PreparedStepSnapshotBatch:
+        run: AgentRunRecord,
+        checkpoints: Sequence[AgentRunCheckpoint],
+    ) -> PreparedAgentRunCheckpointBatch:
         owner_id = (
             self._history_id(run)
             if self._runtime_domain is RuntimeDomain.CONVERSATION
-            else run.run_id
+            else run.agent_run_id
         )
         head = await self._history.get_head(owner_id)
         if head is None:
-            if await self.get_run(run_id=run.run_id) is not None:
+            if await self.get_agent_run(agent_run_id=run.agent_run_id) is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             head = self._history.empty_head(owner_id)
 
-        first_before = snapshots[0].transcript_message_count_before
+        first_before = checkpoints[0].transcript_message_count_before
         if first_before is None or first_before > head.message_count:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         archive_base = head.message_count - first_before
         target_message_count = head.message_count
-        baseline = self._context_baselines.get(run.run_id, LoadedModelContext(()))
+        baseline = self._context_baselines.get(run.agent_run_id, LoadedModelContext(()))
         baseline_messages = baseline.model_messages()
         baseline_sources = tuple(
             self._reusable_context_source(value.source)
             for value in baseline.messages
         )
-        prepared: list[PreparedStepSnapshot] = []
+        prepared: list[PreparedAgentRunCheckpoint] = []
 
-        for snapshot in snapshots:
-            before = snapshot.transcript_message_count_before
-            incoming = tuple(snapshot.messages)
+        for checkpoint in checkpoints:
+            before = checkpoint.transcript_message_count_before
+            incoming = tuple(checkpoint.messages)
             if (
                 before is None
                 or before > len(incoming)
@@ -1538,8 +1538,8 @@ class StateStepArchive(StepStore):
             source_refs = (*baseline_sources, *raw_sources)
             projection_messages = (
                 source_messages
-                if snapshot.context_messages is None
-                else tuple(snapshot.context_messages)
+                if checkpoint.context_messages is None
+                else tuple(checkpoint.context_messages)
             )
             projection_sources = self._projection_sources(
                 projection_messages,
@@ -1555,16 +1555,16 @@ class StateStepArchive(StepStore):
             self._validate_projection_sources(projection, projection_sources)
             projection = await self._history.prepare_projection(owner_id, projection)
             prepared.append(
-                PreparedStepSnapshot(
+                PreparedAgentRunCheckpoint(
                     owner_id,
-                    StoredStepSnapshot(
-                        run.run_id,
-                        snapshot.step_index,
-                        snapshot.timestamp,
-                        snapshot.state,
+                    StoredAgentRunCheckpoint(
+                        run.agent_run_id,
+                        checkpoint.step_index,
+                        checkpoint.timestamp,
+                        checkpoint.state,
                         projection.digest,
-                        snapshot.context_messages is not None,
-                        snapshot.pending_request_index,
+                        checkpoint.context_messages is not None,
+                        checkpoint.pending_request_index,
                     ),
                     chunks,
                     projection,
@@ -1573,8 +1573,8 @@ class StateStepArchive(StepStore):
             )
             target_message_count += len(delta)
 
-        return PreparedStepSnapshotBatch(
-            run.run_id,
+        return PreparedAgentRunCheckpointBatch(
+            run.agent_run_id,
             tuple(prepared),
             0,
             0,
@@ -1651,9 +1651,9 @@ class StateStepArchive(StepStore):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    def _history_id(self, run: RunRecord) -> str:
+    def _history_id(self, run: AgentRunRecord) -> str:
         history_id = run.metadata.get("history_id")
-        return history_id or run.run_id
+        return history_id or run.agent_run_id
 
     async def _prepare_captured_chunks(
         self,
@@ -1695,15 +1695,15 @@ class StateStepArchive(StepStore):
             for source in sources
         )
 
-    async def _normalize_snapshots_in_transaction(
+    async def _normalize_checkpoints_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
-        snapshots: Sequence[PreparedStepSnapshot],
-    ) -> tuple[PreparedStepSnapshot, ...]:
+        run: AgentRunRecord,
+        checkpoints: Sequence[PreparedAgentRunCheckpoint],
+    ) -> tuple[PreparedAgentRunCheckpoint, ...]:
         del transaction, run
-        values = tuple(snapshots)
-        if any(not isinstance(snapshot, PreparedStepSnapshot) for snapshot in values):
+        values = tuple(checkpoints)
+        if any(not isinstance(checkpoint, PreparedAgentRunCheckpoint) for checkpoint in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
@@ -1752,25 +1752,25 @@ class StateStepArchive(StepStore):
 
     async def sync_projection(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
-        snapshots: Sequence[ContinuableSnapshot],
+        checkpoints: Sequence[AgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.sync_projection")
-        prepared = await self._prepare_snapshots(
+        prepared = await self._prepare_checkpoints(
             run,
-            snapshots,
+            checkpoints,
         )
         await self._store.mutate(
             lambda transaction: self._sync_projection_in_transaction(
                 transaction,
                 run,
                 events=events,
-                snapshots=prepared.snapshots,
+                checkpoints=prepared.checkpoints,
                 interactions=interactions,
                 execution_id=execution_id,
             )
@@ -1778,10 +1778,10 @@ class StateStepArchive(StepStore):
 
     async def sync_prepared_projection(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
-        snapshots: Sequence[PreparedStepSnapshot],
+        checkpoints: Sequence[PreparedAgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None:
@@ -1790,15 +1790,15 @@ class StateStepArchive(StepStore):
         require_no_run_history_lock(
             "StateStepArchive.sync_prepared_projection"
         )
-        values = tuple(snapshots)
-        if any(not isinstance(value, PreparedStepSnapshot) for value in values):
+        values = tuple(checkpoints)
+        if any(not isinstance(value, PreparedAgentRunCheckpoint) for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._store.mutate(
             lambda transaction: self._sync_projection_in_transaction(
                 transaction,
                 run,
                 events=events,
-                snapshots=values,
+                checkpoints=values,
                 interactions=interactions,
                 execution_id=execution_id,
             )
@@ -1807,25 +1807,25 @@ class StateStepArchive(StepStore):
     async def _sync_projection_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
+        run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
-        snapshots: Sequence[PreparedStepSnapshot],
+        checkpoints: Sequence[PreparedAgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
         self._ensure_open()
-        snapshots = await self._normalize_snapshots_in_transaction(
+        checkpoints = await self._normalize_checkpoints_in_transaction(
             transaction,
             run,
-            snapshots,
+            checkpoints,
         )
         facts = tuple(
             ("event", event, _step_event_kind(event)) for event in events
         ) + tuple(
-            ("snapshot", snapshot.stored, snapshot.stored.state)
-            for snapshot in snapshots
+            ("checkpoint", checkpoint.stored, checkpoint.stored.state)
+            for checkpoint in checkpoints
         ) + tuple(
             ("interaction", interaction, interaction.status)
             for interaction in interactions
@@ -1847,16 +1847,16 @@ class StateStepArchive(StepStore):
                     history_head_guard,
                 )
             return
-        owner = self._run_key(run.run_id)
+        owner = self._agent_run_key(run.agent_run_id)
         owner_record = await self._ensure_run_in_transaction(transaction, run)
         grouped: dict[str, list[object]] = {
             "event": [],
-            "snapshot": [],
+            "checkpoint": [],
             "interaction": [],
         }
         kinds: dict[str, list[str]] = {
             "event": [],
-            "snapshot": [],
+            "checkpoint": [],
             "interaction": [],
         }
         for family, value, kind in facts:
@@ -1864,22 +1864,22 @@ class StateStepArchive(StepStore):
             kinds[family].append(kind)
         stored_facts: list[StoredFact] = []
         reservation_requests = {
-            self._sequence(run.run_id, family): len(grouped[family])
-            for family in ("event", "snapshot", "interaction")
+            self._sequence(run.agent_run_id, family): len(grouped[family])
+            for family in ("event", "checkpoint", "interaction")
             if grouped[family]
         }
         high_waters = await transaction.reserve_sequences(reservation_requests)
-        for family in ("event", "snapshot", "interaction"):
+        for family in ("event", "checkpoint", "interaction"):
             values = grouped[family]
             if not values:
                 continue
-            sequence_key_value = self._sequence(run.run_id, family)
+            sequence_key_value = self._sequence(run.agent_run_id, family)
             final = high_waters[sequence_key_value]
             sequences = tuple(range(final - len(values) + 1, final + 1))
-            stream = self._stream(run.run_id, family)
+            stream = self._stream(run.agent_run_id, family)
             fact_kind = {
                 "event": "step_event",
-                "snapshot": "step_snapshot",
+                "checkpoint": "step_checkpoint",
                 "interaction": "model_interaction",
             }[family]
             for sequence, value, kind in zip(sequences, values, kinds[family], strict=True):
@@ -1894,25 +1894,25 @@ class StateStepArchive(StepStore):
                         _encode_step(value),
                     )
                 )
-        if snapshots:
+        if checkpoints:
             await self._history.append_chunks(
                 transaction,
-                snapshots[0].owner_id,
+                checkpoints[0].owner_id,
                 tuple(
                     chunk
-                    for snapshot in snapshots
-                    for chunk in snapshot.chunks
+                    for checkpoint in checkpoints
+                    for chunk in checkpoint.chunks
                 ),
                 min(
-                    (snapshot.history_quality for snapshot in snapshots),
+                    (checkpoint.history_quality for checkpoint in checkpoints),
                     key=lambda value: value is HistoryQuality.COMPLETE,
                     default=HistoryQuality.COMPLETE,
                 ),
             )
             await self._history.store_projection(
                 transaction,
-                snapshots[-1].owner_id,
-                snapshots[-1].projection,
+                checkpoints[-1].owner_id,
+                checkpoints[-1].projection,
             )
         if await transaction.guard_record(
             owner,
@@ -1926,25 +1926,25 @@ class StateStepArchive(StepStore):
                 history_head_guard,
             )
 
-    async def materialize_snapshot(
+    async def materialize_checkpoint(
         self,
-        run: RunRecord,
-        snapshot: ContinuableSnapshot,
+        run: AgentRunRecord,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
         interactions: Sequence[ModelInteractionRecord] = (),
     ) -> None:
         self._ensure_open()
-        require_no_run_history_lock("StateStepArchive.materialize_snapshot")
-        prepared = await self._prepare_snapshots(
+        require_no_run_history_lock("StateStepArchive.materialize_checkpoint")
+        prepared = await self._prepare_checkpoints(
             run,
-            (snapshot,),
+            (checkpoint,),
         )
         async def mutate(transaction: StateTransaction) -> None:
-            await self._materialize_snapshot_in_transaction(
+            await self._materialize_checkpoint_in_transaction(
                 transaction,
                 run,
-                prepared.snapshots[0],
+                prepared.checkpoints[0],
                 execution_id=execution_id,
             )
             if interactions:
@@ -1952,23 +1952,23 @@ class StateStepArchive(StepStore):
                     transaction,
                     run,
                     events=(),
-                    snapshots=(),
+                    checkpoints=(),
                     interactions=interactions,
                     execution_id=execution_id,
                 )
 
         await self._store.mutate(mutate)
 
-    async def _materialize_snapshot_in_transaction(
+    async def _materialize_checkpoint_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
-        snapshot: PreparedStepSnapshot,
+        run: AgentRunRecord,
+        checkpoint: PreparedAgentRunCheckpoint,
         *,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
-        if not isinstance(snapshot, PreparedStepSnapshot):
+        if not isinstance(checkpoint, PreparedAgentRunCheckpoint):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         supplied_history_head_guard = history_head_guard is not None
         history_head_guard = await self._execution_history_guard_in_transaction(
@@ -1979,29 +1979,29 @@ class StateStepArchive(StepStore):
         if await self._has_existing_fact_in_transaction(
             transaction,
             run,
-            "snapshot",
-            snapshot.stored,
-            snapshot.stored.state,
+            "checkpoint",
+            checkpoint.stored,
+            checkpoint.stored.state,
         ):
             return
         await self._ensure_run_in_transaction(transaction, run)
         await self._history.append_chunks(
             transaction,
-            snapshot.owner_id,
-            snapshot.chunks,
-            snapshot.history_quality,
+            checkpoint.owner_id,
+            checkpoint.chunks,
+            checkpoint.history_quality,
         )
         await self._history.store_projection(
             transaction,
-            snapshot.owner_id,
-            snapshot.projection,
+            checkpoint.owner_id,
+            checkpoint.projection,
         )
         await self._materialize_fact_in_transaction(
             transaction,
             run,
-            "snapshot",
-            snapshot.stored,
-            snapshot.stored.state,
+            "checkpoint",
+            checkpoint.stored,
+            checkpoint.stored.state,
         )
         if history_head_guard is not None and not supplied_history_head_guard:
             await self._advance_execution_history_head_in_transaction(
@@ -2009,22 +2009,22 @@ class StateStepArchive(StepStore):
                 history_head_guard,
             )
 
-    async def materialize_snapshot_in_transaction(
+    async def materialize_checkpoint_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
-        snapshot: PreparedStepSnapshot,
+        run: AgentRunRecord,
+        checkpoint: PreparedAgentRunCheckpoint,
         *,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
         require_no_run_history_lock(
-            "StateStepArchive.materialize_snapshot_in_transaction"
+            "StateStepArchive.materialize_checkpoint_in_transaction"
         )
-        await self._materialize_snapshot_in_transaction(
+        await self._materialize_checkpoint_in_transaction(
             transaction,
             run,
-            snapshot,
+            checkpoint,
             execution_id=execution_id,
             history_head_guard=history_head_guard,
         )
@@ -2032,10 +2032,10 @@ class StateStepArchive(StepStore):
     async def sync_projection_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
+        run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
-        snapshots: Sequence[PreparedStepSnapshot],
+        checkpoints: Sequence[PreparedAgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
@@ -2047,7 +2047,7 @@ class StateStepArchive(StepStore):
             transaction,
             run,
             events=events,
-            snapshots=snapshots,
+            checkpoints=checkpoints,
             interactions=interactions,
             execution_id=execution_id,
             history_head_guard=history_head_guard,
@@ -2056,16 +2056,16 @@ class StateStepArchive(StepStore):
     async def _materialize_fact_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
+        run: AgentRunRecord,
         family: str,
         value: object,
         kind: str,
     ) -> None:
-        stream = self._stream(run.run_id, family)
-        owner = self._run_key(run.run_id)
+        stream = self._stream(run.agent_run_id, family)
+        owner = self._agent_run_key(run.agent_run_id)
         subject = _step_subject(value)
         fact_kind = {
-            "snapshot": "step_snapshot",
+            "checkpoint": "step_checkpoint",
         }[family]
         data = _encode_step(value)
 
@@ -2083,7 +2083,7 @@ class StateStepArchive(StepStore):
             expected_storage_version=owner_record.storage_version,
         ) is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        sequence = (await _reserve_sequences(transaction, self._sequence(run.run_id, family), 1))[0]
+        sequence = (await _reserve_sequences(transaction, self._sequence(run.agent_run_id, family), 1))[0]
         await _insert_facts(
             transaction,
             (StoredFact(stream, sequence, owner, fact_kind, subject, kind, data),),
@@ -2092,7 +2092,7 @@ class StateStepArchive(StepStore):
     async def _ensure_run_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
+        run: AgentRunRecord,
     ) -> StoredRecord:
         owner_record, _created = await self._ensure_run_with_head_in_transaction(
             transaction,
@@ -2103,20 +2103,20 @@ class StateStepArchive(StepStore):
     async def _ensure_run_with_head_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
+        run: AgentRunRecord,
     ) -> tuple[StoredRecord, bool]:
-        owner = self._run_key(run.run_id)
+        owner = self._agent_run_key(run.agent_run_id)
         history_owner = (
             self._history_id(run)
             if self._runtime_domain is RuntimeDomain.CONVERSATION
-            else run.run_id
+            else run.agent_run_id
         )
         head_key = self._history.head_key(history_owner)
         records = await transaction.get_records((owner, head_key))
         owner_record = records.get(owner)
         head_record = records.get(head_key)
         if owner_record is None:
-            stored_run = self._stored_run(run)
+            stored_run = self._stored_agent_run(run)
             if head_record is None:
                 await transaction.insert_records(
                     (
@@ -2125,15 +2125,15 @@ class StateStepArchive(StepStore):
                     )
                 )
                 _logger.debug(
-                    "step run admitted with transcript head: run=%s",
-                    run.run_id,
+                    "AgentRun admitted with transcript head: agent_run=%s",
+                    run.agent_run_id,
                 )
             else:
                 self._history.decode_head(head_record)
                 await transaction.insert_records((stored_run,))
                 _logger.debug(
-                    "step run admitted using existing transcript head: run=%s",
-                    run.run_id,
+                    "AgentRun admitted using existing transcript head: agent_run=%s",
+                    run.agent_run_id,
                 )
             return stored_run, True
         elif _decode_step(owner_record.data) != run:
@@ -2146,12 +2146,12 @@ class StateStepArchive(StepStore):
     async def _has_existing_fact_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
+        run: AgentRunRecord,
         family: str,
         value: object,
         kind: str,
     ) -> bool:
-        stream = self._stream(run.run_id, family)
+        stream = self._stream(run.agent_run_id, family)
         subject = _step_subject(value)
         data = _encode_step(value)
         existing = await transaction.list_facts(
@@ -2171,28 +2171,28 @@ class StateStepArchive(StepStore):
     ) -> None:
         require_no_run_history_lock("StateStepArchive.append_event")
         await self._append(
-            event.run_id,
+            event.agent_run_id,
             "event",
             event,
             _step_event_kind(event),
             execution_id=execution_id,
         )
 
-    async def list_events(self, *, run_id: str) -> list[StepEvent]:
+    async def list_events(self, *, agent_run_id: str) -> list[StepEvent]:
         require_no_run_history_lock("StateStepArchive.list_events")
-        values = await self._facts(run_id, "event")
+        values = await self._facts(agent_run_id, "event")
         return [_decode_step(value.data) for value in values]
 
     async def list_model_interactions(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         after_request_sequence: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
         require_no_run_history_lock("StateStepArchive.list_model_interactions")
         _validate_interaction_page(after_request_sequence, limit)
-        values = await self._facts(run_id, "interaction")
+        values = await self._facts(agent_run_id, "interaction")
         result: list[object] = []
         for value in values:
             interaction = _decode_step(value.data)
@@ -2208,11 +2208,11 @@ class StateStepArchive(StepStore):
                 break
         return result
 
-    async def model_interaction_count(self, *, run_id: str) -> int:
+    async def model_interaction_count(self, *, agent_run_id: str) -> int:
         require_no_run_history_lock(
             "StateStepArchive.model_interaction_count"
         )
-        values = await self._facts(run_id, "interaction", latest=True)
+        values = await self._facts(agent_run_id, "interaction", latest=True)
         if not values:
             return 0
         if len(values) != 1:
@@ -2227,43 +2227,43 @@ class StateStepArchive(StepStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return fact.sequence
 
-    async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]:
+    async def iter_messages(self, *, agent_run_id: str) -> AsyncIterator[object]:
         require_no_run_history_lock("StateStepArchive.iter_messages")
-        async for message in self._history.iter_messages(run_id):
+        async for message in self._history.iter_messages(agent_run_id):
             yield message
 
-    async def transcript_message_count(self, run_id: str) -> int:
+    async def transcript_message_count(self, agent_run_id: str) -> int:
         require_no_run_history_lock(
             "StateStepArchive.transcript_message_count"
         )
-        return await self._history.transcript_message_count(run_id)
+        return await self._history.transcript_message_count(agent_run_id)
 
     def iter_message_range(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         start: int,
         end: int,
     ) -> AsyncIterator[object]:
         return self._history.iter_message_range(
-            run_id,
+            agent_run_id,
             start=start,
             end=end,
         )
 
-    async def iter_raw_messages(self, *, run_id: str) -> AsyncIterator[ModelMessage]:
+    async def iter_raw_messages(self, *, agent_run_id: str) -> AsyncIterator[ModelMessage]:
         require_no_run_history_lock("StateStepArchive.iter_raw_messages")
-        async for message in self._history.iter_raw_messages(run_id):
+        async for message in self._history.iter_raw_messages(agent_run_id):
             yield message
 
     async def load_model_context(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
     ) -> tuple[object, ...]:
         require_no_run_history_lock("StateStepArchive.load_model_context")
         values = await self._history.load_model_context(
-            run_id,
+            agent_run_id,
         )
         return values.model_messages()
 
@@ -2350,7 +2350,7 @@ class StateStepArchive(StepStore):
         self,
         history_id: str,
         *,
-        step_run_id: str,
+        agent_run_id: str,
         message_count: int,
         tenant_id: str,
     ) -> LoadedModelContext:
@@ -2371,13 +2371,13 @@ class StateStepArchive(StepStore):
         )
         if message_count > total:
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        values = await self._facts(step_run_id, "snapshot", latest=True)
+        values = await self._facts(agent_run_id, "checkpoint", latest=True)
         if not values:
             raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
         stored = _decode_step(values[0].data)
         if (
-            not isinstance(stored, StoredStepSnapshot)
-            or stored.run_id != step_run_id
+            not isinstance(stored, StoredAgentRunCheckpoint)
+            or stored.agent_run_id != agent_run_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if stored.state != "complete":
@@ -2397,80 +2397,80 @@ class StateStepArchive(StepStore):
             message_count=message_count,
         )
 
-    async def verify_snapshot_projection(
+    async def verify_checkpoint_projection(
         self,
         *,
-        run_id: str,
-        snapshot: ContinuableSnapshot,
+        agent_run_id: str,
+        checkpoint: AgentRunCheckpoint,
     ) -> bool:
         require_no_run_history_lock(
-            "StateStepArchive.verify_snapshot_projection"
+            "StateStepArchive.verify_checkpoint_projection"
         )
-        values = await self._facts(run_id, "snapshot", latest=True)
+        values = await self._facts(agent_run_id, "checkpoint", latest=True)
         if not values:
             return False
         stored = _decode_step(values[0].data)
-        if not isinstance(stored, StoredStepSnapshot):
+        if not isinstance(stored, StoredAgentRunCheckpoint):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        run = await self.get_run(run_id=run_id)
+        run = await self.get_agent_run(agent_run_id=agent_run_id)
         if run is None:
             return False
         owner_id = (
             self._history_id(run)
             if self._runtime_domain is RuntimeDomain.CONVERSATION
-            else run_id
+            else agent_run_id
         )
         projection = await self._history.load_projection(owner_id)
         if projection is None or projection.digest != stored.projection_digest:
             return False
         context = await self._history.load_model_context(owner_id)
         expected_messages = (
-            snapshot.messages
-            if snapshot.context_messages is None
-            else snapshot.context_messages
+            checkpoint.messages
+            if checkpoint.context_messages is None
+            else checkpoint.context_messages
         )
         return (
-            stored.run_id == snapshot.run_id
-            and stored.step_index == snapshot.step_index
-            and stored.timestamp == snapshot.timestamp
-            and stored.state == snapshot.state
+            stored.agent_run_id == checkpoint.agent_run_id
+            and stored.step_index == checkpoint.step_index
+            and stored.timestamp == checkpoint.timestamp
+            and stored.state == checkpoint.state
             and stored.has_context_projection
-            == (snapshot.context_messages is not None)
-            and stored.pending_request_index == snapshot.pending_request_index
+            == (checkpoint.context_messages is not None)
+            and stored.pending_request_index == checkpoint.pending_request_index
             and context.model_messages() == tuple(expected_messages)
         )
 
-    async def save_snapshot(
+    async def save_checkpoint(
         self,
-        snapshot: ContinuableSnapshot,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
     ) -> None:
-        require_no_run_history_lock("StateStepArchive.save_snapshot")
-        run = await self.get_run(run_id=snapshot.run_id)
+        require_no_run_history_lock("StateStepArchive.save_checkpoint")
+        run = await self.get_agent_run(agent_run_id=checkpoint.agent_run_id)
         if run is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        await self.materialize_snapshot(
+        await self.materialize_checkpoint(
             run,
-            snapshot,
+            checkpoint,
             execution_id=execution_id,
         )
 
-    async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
-        require_no_run_history_lock("StateStepArchive.latest_snapshot")
-        values = await self._facts(run_id, "snapshot", latest=True)
+    async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
+        require_no_run_history_lock("StateStepArchive.latest_checkpoint")
+        values = await self._facts(agent_run_id, "checkpoint", latest=True)
         if not values:
             return None
         latest = _decode_step(values[0].data)
-        if not isinstance(latest, StoredStepSnapshot):
+        if not isinstance(latest, StoredAgentRunCheckpoint):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        run = await self.get_run(run_id=run_id)
+        run = await self.get_agent_run(agent_run_id=agent_run_id)
         if run is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         owner_id = (
             self._history_id(run)
             if self._runtime_domain is RuntimeDomain.CONVERSATION
-            else run_id
+            else agent_run_id
         )
         messages = (await self._history.load_model_context(owner_id)).model_messages()
         raw_messages = tuple(
@@ -2481,12 +2481,12 @@ class StateStepArchive(StepStore):
         context_messages = (
             list(messages) if latest.has_context_projection else None
         )
-        latest = ContinuableSnapshot(
-            run_id=latest.run_id,
+        latest = AgentRunCheckpoint(
+            agent_run_id=latest.agent_run_id,
             step_index=latest.step_index,
             messages=list(raw_messages),
-            conversation_id=run.conversation_id,
-            parent_run_id=run.parent_run_id,
+            agent_conversation_id=run.agent_conversation_id,
+            parent_agent_run_id=run.parent_agent_run_id,
             agent_name=run.agent_name,
             timestamp=latest.timestamp,
             state=latest.state,
@@ -2495,13 +2495,13 @@ class StateStepArchive(StepStore):
         )
         return latest if include_interrupted or latest.state == "complete" else None
 
-    async def release_run(
+    async def release_agent_run(
         self,
-        run_id: str,
+        agent_run_id: str,
         *,
         execution_id: str | None = None,
     ) -> None:
-        require_no_run_history_lock("StateStepArchive.release_run")
+        require_no_run_history_lock("StateStepArchive.release_agent_run")
 
         async def mutate(transaction: StateTransaction) -> None:
             history_head_guard = await self._execution_history_guard_in_transaction(
@@ -2509,11 +2509,11 @@ class StateStepArchive(StepStore):
                 execution_id,
                 None,
             )
-            await transaction.delete_record(self._run_key(run_id))
+            await transaction.delete_record(self._agent_run_key(agent_run_id))
             await transaction.delete_sequences(
                 tuple(
-                    self._sequence(run_id, family)
-                    for family in ("event", "snapshot", "interaction")
+                    self._sequence(agent_run_id, family)
+                    for family in ("event", "checkpoint", "interaction")
                 )
             )
             await self._advance_execution_history_head_in_transaction(
@@ -2522,14 +2522,14 @@ class StateStepArchive(StepStore):
             )
 
         await self._store.mutate(mutate)
-        self._context_baselines.pop(run_id, None)
+        self._context_baselines.pop(agent_run_id, None)
 
-    def release_runtime_cache(self, run_id: str) -> None:
-        self._context_baselines.pop(run_id, None)
+    def release_runtime_cache(self, agent_run_id: str) -> None:
+        self._context_baselines.pop(agent_run_id, None)
 
     async def _append(
         self,
-        run_id: str,
+        agent_run_id: str,
         family: str,
         value: object,
         kind: str,
@@ -2537,12 +2537,12 @@ class StateStepArchive(StepStore):
         execution_id: str | None = None,
     ) -> None:
         require_no_run_history_lock("StateStepArchive._append")
-        stream = self._stream(run_id, family)
-        owner = self._run_key(run_id)
+        stream = self._stream(agent_run_id, family)
+        owner = self._agent_run_key(agent_run_id)
         subject = _step_subject(value)
         fact_kind = {
             "event": "step_event",
-            "snapshot": "step_snapshot",
+            "checkpoint": "step_checkpoint",
         }[family]
         data = _encode_step(value)
 
@@ -2566,7 +2566,7 @@ class StateStepArchive(StepStore):
                 expected_storage_version=owner_record.storage_version,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            sequence = await transaction.next_sequence(self._sequence(run_id, family))
+            sequence = await transaction.next_sequence(self._sequence(agent_run_id, family))
             await transaction.insert_fact(StoredFact(stream, sequence, owner, fact_kind, subject, kind, data))
             await self._advance_execution_history_head_in_transaction(
                 transaction,
@@ -2577,7 +2577,7 @@ class StateStepArchive(StepStore):
 
     async def _facts(
         self,
-        run_id: str,
+        agent_run_id: str,
         family: str,
         *,
         subject: bytes | None = None,
@@ -2590,7 +2590,7 @@ class StateStepArchive(StepStore):
         return await self._store.read(
             lambda transaction: transaction.list_facts(
                 FactQuery(
-                    self._stream(run_id, family),
+                    self._stream(agent_run_id, family),
                     subject_digest=subject,
                     latest=latest,
                     latest_per_subject=latest_per_subject,
@@ -2620,17 +2620,17 @@ def _validate_interaction_page(
         raise ValueError("interaction limit must be positive")
 
 
-def _conversation_relocated_snapshot_matches(
-    source: ContinuableSnapshot,
-    observed: ContinuableSnapshot | None,
+def _conversation_relocated_checkpoint_matches(
+    source: AgentRunCheckpoint,
+    observed: AgentRunCheckpoint | None,
 ) -> bool:
     if observed is None:
         return False
     if (
-        observed.run_id != source.run_id
+        observed.agent_run_id != source.agent_run_id
         or observed.step_index != source.step_index
-        or observed.conversation_id != source.conversation_id
-        or observed.parent_run_id != source.parent_run_id
+        or observed.agent_conversation_id != source.agent_conversation_id
+        or observed.parent_agent_run_id != source.parent_agent_run_id
         or observed.agent_name != source.agent_name
         or observed.timestamp != source.timestamp
         or observed.state != source.state
@@ -2650,10 +2650,10 @@ def _conversation_relocated_snapshot_matches(
 
 
 async def _sync_projection(
-    target: StepStore,
-    run: RunRecord,
+    target: AgentRunStore,
+    run: AgentRunRecord,
     events: tuple[StepEvent, ...],
-    snapshots: tuple[ContinuableSnapshot, ...],
+    checkpoints: tuple[AgentRunCheckpoint, ...],
     interactions: tuple[ModelInteractionRecord, ...] = (),
     *,
     execution_id: str | None = None,
@@ -2662,17 +2662,17 @@ async def _sync_projection(
         await target.sync_projection(
             run,
             events=events,
-            snapshots=snapshots,
+            checkpoints=checkpoints,
             interactions=interactions,
             execution_id=execution_id,
         )
         return
-    if await target.get_run(run_id=run.run_id) is None:
-        await target.register_run(run, execution_id=execution_id)
+    if await target.get_agent_run(agent_run_id=run.agent_run_id) is None:
+        await target.register_agent_run(run, execution_id=execution_id)
     for event in events:
         await target.append_event(event, execution_id=execution_id)
-    for snapshot in snapshots:
-        await target.save_snapshot(snapshot, execution_id=execution_id)
+    for checkpoint in checkpoints:
+        await target.save_checkpoint(checkpoint, execution_id=execution_id)
 
 
 async def _reserve_sequences(
@@ -2690,29 +2690,29 @@ async def _insert_facts(transaction: StateTransaction, facts: tuple[StoredFact, 
     await transaction.insert_facts(facts)
 
 
-async def _materialize_snapshot(
-    target: StepStore,
-    run: RunRecord,
-    snapshot: ContinuableSnapshot,
+async def _materialize_checkpoint(
+    target: AgentRunStore,
+    run: AgentRunRecord,
+    checkpoint: AgentRunCheckpoint,
     *,
     execution_id: str | None = None,
 ) -> None:
     if isinstance(target, _StepArchiveBatch):
-        await target.materialize_snapshot(
+        await target.materialize_checkpoint(
             run,
-            snapshot,
+            checkpoint,
             execution_id=execution_id,
         )
         return
-    existing_run = await target.get_run(run_id=run.run_id)
-    existing_snapshot = await target.latest_snapshot(
-        run_id=run.run_id,
+    existing_run = await target.get_agent_run(agent_run_id=run.agent_run_id)
+    existing_checkpoint = await target.latest_checkpoint(
+        agent_run_id=run.agent_run_id,
         include_interrupted=True,
     )
-    if existing_run == run and existing_snapshot == snapshot:
+    if existing_run == run and existing_checkpoint == checkpoint:
         return
-    await target.register_run(run, execution_id=execution_id)
-    await target.save_snapshot(snapshot, execution_id=execution_id)
+    await target.register_agent_run(run, execution_id=execution_id)
+    await target.save_checkpoint(checkpoint, execution_id=execution_id)
 
 
 def _encode_step(value: object) -> dict[str, object]:
@@ -2724,7 +2724,7 @@ def _step_subject(value: object) -> bytes | None:
         return hashlib.sha256(
             canonical_json_bytes(
                 {
-                    "run_id": value.run_id,
+                    "agent_run_id": value.agent_run_id,
                     "request_sequence": value.request_sequence,
                 }
             )
@@ -2746,8 +2746,8 @@ __all__ = [
     "InMemoryStepArchive",
     "LockOrderError",
     "PreparedExecutionProjection",
-    "PreparedStepSnapshot",
-    "PreparedStepSnapshotBatch",
-    "StagingStepStore",
+    "PreparedAgentRunCheckpoint",
+    "PreparedAgentRunCheckpointBatch",
+    "StagingAgentRunStore",
     "StateStepArchive",
 ]

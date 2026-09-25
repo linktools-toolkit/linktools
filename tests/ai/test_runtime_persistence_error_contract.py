@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -98,10 +98,10 @@ def test_persisted_explicit_null_schema_is_integrity_error() -> None:
 async def test_transcript_decoders_preserve_future_schema_unsupported(
     tmp_path: Path,
 ) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="future-transcript-schema", tenant_id="tenant")
     try:
-        history = state.steps.read_store(
+        history = state.run_store.read_store(
             RuntimeDomain.EXECUTION
         ).transcript_repository
 

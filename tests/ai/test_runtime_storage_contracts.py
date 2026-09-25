@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import (
     OperationKind,
     OperationLedgerInput,
@@ -19,7 +19,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
-from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
 from linktools.ai.runtime.state._filesystem import (
@@ -45,7 +45,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 from linktools.ai.runtime.state._step_contracts import (
-    RunRecord,
+    AgentRunRecord,
 )
 from sqlalchemy import event
 from sqlalchemy.dialects import mysql
@@ -55,10 +55,10 @@ from sqlalchemy.schema import CreateTable
 pytestmark = pytest.mark.asyncio
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding_contract() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="default"),
-        base_model={"version": 1, "id": "default"},
+        model_contract={"version": 1, "id": "default"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -66,11 +66,11 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     )
 
 
-def _tool_run(run_id: str) -> RunRecord:
-    return RunRecord(
-        run_id=run_id,
-        conversation_id="conversation",
-        parent_run_id=None,
+def _tool_run(agent_run_id: str) -> AgentRunRecord:
+    return AgentRunRecord(
+        agent_run_id=agent_run_id,
+        agent_conversation_id="conversation",
+        parent_agent_run_id=None,
         agent_name="agent",
         metadata={},
         started_at=datetime.now(timezone.utc),
@@ -129,7 +129,7 @@ async def test_sql_state_group_maps_programming_failure_to_internal(
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -144,7 +144,7 @@ async def test_sql_state_group_maps_programming_failure_to_internal(
             await store.storage_group.mutate((store,), fail)
         assert raised.value.code is ErrorCode.INTERNAL_ERROR
         assert raised.value.retryable is False
-        assert raised.value.safe_details == {"phase": "runtime_state_sql_mutation"}
+        assert raised.value.safe_details == {"phase": "runtime_storage_sql_mutation"}
     finally:
         await state.close()
         await engine.dispose()
@@ -236,7 +236,7 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
 
 
 def _runtime_commands(
-    state: RuntimeState,
+    state: RuntimeStorage,
     namespace: str,
     background_tasks: "set[asyncio.Task[object]] | None" = None,
 ) -> RuntimeStateCommands:
@@ -249,9 +249,9 @@ def _runtime_commands(
         recovery=state.recovery.checkpoints,
         conversation_history=state.conversation.histories,
         tools=state.recovery.tools,
-        conversation_steps=state.steps.read_store(RuntimeDomain.CONVERSATION),
-        execution_steps=state.steps.read_store(RuntimeDomain.EXECUTION),
-        recovery_steps=state.steps.read_store(RuntimeDomain.RECOVERY),
+        conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
+        execution_run_store=state.run_store.read_store(RuntimeDomain.EXECUTION),
+        recovery_run_store=state.run_store.read_store(RuntimeDomain.RECOVERY),
         background_tasks=set() if background_tasks is None else background_tasks,
     )
 
@@ -263,14 +263,14 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
     provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(provisioning_engine)
     await provisioning_engine.dispose()
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     await state.initialize(namespace="parallel-tools", tenant_id="tenant")
     try:
-        run_id = "run"
-        await state.steps.register_run(_tool_run(run_id))
+        agent_run_id = "run"
+        await state.run_store.register_agent_run(_tool_run(agent_run_id))
         background_tasks: set[asyncio.Task[object]] = set()
         bridge = RuntimeToolOperationBridge(
             state.recovery.tools,
@@ -278,7 +278,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             namespace="parallel-tools",
             tenant_id="tenant",
             execution_id="execution",
-            step_run_id=run_id,
+            agent_run_id=agent_run_id,
             binding_digest="a" * 64,
             owner="owner",
             background_tasks=background_tasks,
@@ -293,7 +293,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
 
         async def execute(call_id: str) -> object:
             context = RunContext(
-                deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id
+                deps=None, model=TestModel(), usage=RunUsage(), run_id=agent_run_id
             )
             call = ToolCallPart("tool", {}, tool_call_id=call_id)
             tool_def = ToolDefinition(
@@ -327,7 +327,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
 
         for call_id in call_ids:
             operation = await state.recovery.tools.get_by_call(
-                run_id,
+                agent_run_id,
                 call_id,
                 tenant_id="tenant",
             )
@@ -730,7 +730,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
 
 
 async def test_operation_compaction_keeps_one_stream_anchor() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="operation-anchor", tenant_id="tenant")
     now = datetime.now(timezone.utc)
 

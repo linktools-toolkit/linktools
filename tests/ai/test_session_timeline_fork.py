@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.spec import AgentSpec
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -18,7 +18,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.service_api import ForkSessionRequest
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     SessionRecord,
@@ -27,10 +27,10 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.storage import StoredPayload
 
 
-def _binding() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="model"),
-        base_model={"version": 1, "id": "model"},
+        model_contract={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -67,8 +67,8 @@ def _execution(
         session_id="source",
         parent_execution_id=None,
         root_execution_id=execution_id,
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.SESSION_RESUME,
         status=status,
         revision=1,
@@ -115,7 +115,7 @@ class _ExecutionService:
 
 @pytest.mark.asyncio
 async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-timeline-fork", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session("source"))

@@ -20,6 +20,7 @@ from linktools.ai.runtime.state._codec import (
     decode_fact,
     decode_operation,
     decode_record,
+    encode_domain,
     encode_record,
     parse_envelope,
     wire_type_id,
@@ -27,9 +28,10 @@ from linktools.ai.runtime.state._codec import (
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
     ExecutionHistoryState,
-    StoredStepSnapshot,
+    StoredAgentRunCheckpoint,
     TranscriptMessageRef,
 )
+from linktools.ai.task import TaskBindingContract
 
 
 def _fixture() -> dict[str, object]:
@@ -84,14 +86,34 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     )
 
 
-def test_record_reader_rejects_superseded_partition_field() -> None:
+def test_task_binding_contract_uses_wire_version_and_behavior_reference() -> None:
+    contract = TaskBindingContract(
+        "example.task",
+        3,
+        "replay_safe",
+        {"kind": "json"},
+        None,
+        2,
+        0.5,
+    )
+    encoded = encode_domain(contract)
+    fields = encoded["fields"]
+
+    assert fields["version"] == 1
+    assert fields["id"] == "example.task"
+    assert fields["revision"] == 3
+    assert "task_id" not in fields
+    assert "task_revision" not in fields
+    assert decode_domain(encoded, TaskBindingContract) == contract
+
+
+def test_record_reader_ignores_additive_fields() -> None:
     value = dict(_fixture()["stored_primitives"]["record"])
     value["partition"] = "11" * 32
-
-    with pytest.raises(AIError) as raised:
-        decode_record(value)
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    value["lease"] = {**value["lease"], "future_note": {"source": "remote"}}
+    assert decode_record(value) == decode_record(
+        _fixture()["stored_primitives"]["record"]
+    )
 
 
 def test_future_envelope_version_is_parseable_but_not_decoded_without_registry() -> None:
@@ -102,8 +124,8 @@ def test_future_envelope_version_is_parseable_but_not_decoded_without_registry()
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_snapshot_frontier_always_writes_pending_request_index() -> None:
-    snapshot = StoredStepSnapshot(
+def test_checkpoint_frontier_always_writes_pending_request_index() -> None:
+    checkpoint = StoredAgentRunCheckpoint(
         "run",
         1,
         datetime(2026, 9, 20, tzinfo=timezone.utc),
@@ -112,15 +134,15 @@ def test_snapshot_frontier_always_writes_pending_request_index() -> None:
         True,
     )
 
-    encoded = _encode_step_envelope(snapshot)
+    encoded = _encode_step_envelope(checkpoint)
     fields = encoded["value"]["payload"]["fields"]  # type: ignore[index]
 
     assert fields["pending_request_index"] is None
-    assert _decode_step_envelope(encoded) == snapshot
+    assert _decode_step_envelope(encoded) == checkpoint
 
 
-def test_snapshot_frontier_preserves_pending_request_index() -> None:
-    snapshot = StoredStepSnapshot(
+def test_checkpoint_frontier_preserves_pending_request_index() -> None:
+    checkpoint = StoredAgentRunCheckpoint(
         "run",
         1,
         datetime(2026, 9, 20, tzinfo=timezone.utc),
@@ -130,8 +152,8 @@ def test_snapshot_frontier_preserves_pending_request_index() -> None:
         3,
     )
 
-    encoded = _encode_step_envelope(snapshot)
+    encoded = _encode_step_envelope(checkpoint)
     fields = encoded["value"]["payload"]["fields"]  # type: ignore[index]
 
     assert fields["pending_request_index"] == 3
-    assert _decode_step_envelope(encoded) == snapshot
+    assert _decode_step_envelope(encoded) == checkpoint

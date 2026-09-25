@@ -2,7 +2,7 @@
   "agent_spec": {
     "version": 1,
     "id": "parent",
-    "model": "default",
+    "revision": 1,
     "system_prompt": "",
     "instructions": [],
     "allow_tools": [
@@ -14,16 +14,17 @@
     "allow_subagents": [
       "child"
     ],
-    "allow_capabilities": [
+    "allow_runtime_capabilities": [
       "*"
     ],
     "usage_limits": null,
     "planning": false,
     "thinking": false,
     "tool_retries": 10000,
-    "output_retries": 3
+    "output_retries": 3,
+    "model": "default"
   },
-  "base_model": {
+  "model_contract": {
     "model_identity": "openai:gpt-test",
     "provider": "openai",
     "vision": false,
@@ -33,7 +34,8 @@
   "subagents": [
     {
       "kind": "agent",
-      "id": "child"
+      "id": "child",
+      "revision": 1
     }
   ],
   "output_mode": "text",

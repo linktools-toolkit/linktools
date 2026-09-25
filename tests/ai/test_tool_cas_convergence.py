@@ -12,7 +12,7 @@ from linktools.ai.core import ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
 from linktools.ai.runtime.state._contracts import ToolOperationAdmission
 from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
@@ -33,7 +33,7 @@ def _record(
     return ToolOperationRecord(
         tool_operation_id="tool-operation",
         execution_id="execution",
-        step_run_id="step-run",
+        agent_run_id="agent-run",
         tool_call_id="tool-call",
         idempotency_key_digest=canonical_sha256({"call": "tool-call"}),
         tool_name="tool",
@@ -60,8 +60,8 @@ def _admission(*, owner: str = "tool-owner") -> ToolOperationAdmission:
     return ToolOperationAdmission(
         execution_id="execution",
         tool_operation_id="tool-operation",
-        step_run_id="step-run",
-        recovery_step_run_id=None,
+        agent_run_id="agent-run",
+        recovery_agent_run_id=None,
         tool_call_id="tool-call",
         idempotency_key_digest=canonical_sha256({"call": "tool-call"}),
         tool_name="tool",
@@ -80,7 +80,7 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
     await provision_runtime_database(engine)
     await engine.dispose()
 
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -446,7 +446,7 @@ async def test_tool_bridge_requires_terminal_owner_and_fence_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_expired_non_replay_safe_admission_commits_unknown_before_raising() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
         repository = state.recovery.tools

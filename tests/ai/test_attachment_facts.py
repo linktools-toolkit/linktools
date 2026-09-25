@@ -9,8 +9,8 @@ import pytest
 from linktools.ai.core import (
     ExecutionStatus,
     HmacCursorSigner,
-    step_conversation_id,
-    step_run_id,
+    agent_conversation_id as make_agent_conversation_id,
+    agent_run_id as make_agent_run_id,
 )
 from linktools.ai.runtime._history import StepExecutionHistoryReader
 from linktools.ai.runtime.state import RuntimeDomain
@@ -20,7 +20,7 @@ from linktools.ai.runtime.state._contracts import (
     RuntimePayloadRef,
     StoredUserInput,
 )
-from linktools.ai.runtime.state._step_contracts import RunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 
@@ -49,12 +49,12 @@ def _fact(
 
 
 def _interaction(
-    run_id: str,
+    agent_run_id: str,
     sequence: int,
     attachments: tuple[dict[str, object], ...],
 ) -> ModelInteractionRecord:
     return ModelInteractionRecord(
-        run_id=run_id,
+        agent_run_id=agent_run_id,
         step_index=sequence,
         request_sequence=sequence,
         purpose="agent",
@@ -90,26 +90,26 @@ class _Executions:
 
 
 class _Store:
-    def __init__(self, run: RunRecord, interactions: list[ModelInteractionRecord]) -> None:
+    def __init__(self, run: AgentRunRecord, interactions: list[ModelInteractionRecord]) -> None:
         self.run = run
         self.interactions = interactions
         self.interaction_reads: list[tuple[int | None, int | None]] = []
 
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
-        return self.run if run_id == self.run.run_id else None
+    async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
+        return self.run if agent_run_id == self.run.agent_run_id else None
 
-    async def model_interaction_count(self, *, run_id: str) -> int:
-        assert run_id == self.run.run_id
+    async def model_interaction_count(self, *, agent_run_id: str) -> int:
+        assert agent_run_id == self.run.agent_run_id
         return len(self.interactions)
 
     async def list_model_interactions(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         after_request_sequence: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
-        assert run_id == self.run.run_id
+        assert agent_run_id == self.run.agent_run_id
         self.interaction_reads.append((after_request_sequence, limit))
         values = [
             value
@@ -125,11 +125,11 @@ async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:
     namespace = "attachment-page"
     tenant_id = "tenant"
     execution_id = "execution"
-    run_id = step_run_id(
+    agent_run_id = make_agent_run_id(
         namespace=namespace,
         tenant_id=tenant_id,
         execution_id=execution_id,
-        segment_sequence=1,
+        agent_run_sequence=1,
     )
     stored_input = StoredUserInput(
         "user-content-v1",
@@ -148,18 +148,18 @@ async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:
         agent_run_sequence=1,
         stored_user_input=stored_input,
     )
-    run = RunRecord(
-        run_id=run_id,
-        conversation_id=step_conversation_id(
+    run = AgentRunRecord(
+        agent_run_id=agent_run_id,
+        agent_conversation_id=make_agent_conversation_id(
             namespace=namespace,
             tenant_id=tenant_id,
             execution_id=execution_id,
         ),
-        metadata={"segment_sequence": "1", "agent_name": "default"},
+        metadata={"agent_run_sequence": "1", "agent_name": "default"},
     )
     interactions = [
         _interaction(
-            run_id,
+            agent_run_id,
             sequence,
             (
                 _fact(
@@ -200,11 +200,11 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
     namespace = "attachment-history"
     tenant_id = "tenant"
     execution_id = "execution"
-    run_id = step_run_id(
+    agent_run_id = make_agent_run_id(
         namespace=namespace,
         tenant_id=tenant_id,
         execution_id=execution_id,
-        segment_sequence=1,
+        agent_run_sequence=1,
     )
     initial_id = "a" * 64
     initial_digest = "b" * 64
@@ -238,18 +238,18 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
         agent_run_sequence=1,
         stored_user_input=stored_input,
     )
-    run = RunRecord(
-        run_id=run_id,
-        conversation_id=step_conversation_id(
+    run = AgentRunRecord(
+        agent_run_id=agent_run_id,
+        agent_conversation_id=make_agent_conversation_id(
             namespace=namespace,
             tenant_id=tenant_id,
             execution_id=execution_id,
         ),
-        metadata={"segment_sequence": "1", "agent_name": "default"},
+        metadata={"agent_run_sequence": "1", "agent_name": "default"},
     )
     interactions = [
         _interaction(
-            run_id,
+            agent_run_id,
             1,
             (
                 _fact(
@@ -262,7 +262,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
             ),
         ),
         _interaction(
-            run_id,
+            agent_run_id,
             2,
             (
                 _fact(
@@ -313,7 +313,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
 
     interactions.append(
         _interaction(
-            run_id,
+            agent_run_id,
             3,
             (
                 _fact(

@@ -59,12 +59,22 @@ def _normalize_json_value(value: object, seen: set[int]) -> JsonValue:
 
 
 class ImmutableJsonMapping(Mapping[str, JsonValue]):
-    """Store one JSON object canonically and return detached values on access."""
+    """Store one JSON object canonically and return detached values on access.
+
+    Root keys are non-empty by default; nested objects allow any string key.
+    """
 
     __slots__ = ("_payload",)
 
-    def __init__(self, value: Mapping[str, JsonValue]) -> None:
-        self._payload = canonical_json_bytes(_normalize_mapping(value))
+    def __init__(
+        self,
+        value: Mapping[str, JsonValue],
+        *,
+        allow_empty_keys: bool = False,
+    ) -> None:
+        self._payload = canonical_json_bytes(
+            _normalize_mapping(value, allow_empty_keys=allow_empty_keys)
+        )
 
     def __getitem__(self, key: str) -> JsonValue:
         return _normalize_value(self._decode()[key])
@@ -89,10 +99,14 @@ class ImmutableJsonMapping(Mapping[str, JsonValue]):
         return cast("dict[str, JsonValue]", self._payload)
 
 
-def _normalize_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
+def _normalize_mapping(
+    value: Mapping[object, object],
+    *,
+    allow_empty_keys: bool = False,
+) -> "dict[str, JsonValue]":
     normalized: dict[str, JsonValue] = {}
     for key, item in value.items():
-        if not isinstance(key, str) or not key:
+        if not isinstance(key, str) or (not allow_empty_keys and not key):
             raise ValueError("JSON object keys must be non-empty strings")
         normalized[key] = _normalize_value(item)
     return normalized
@@ -110,7 +124,10 @@ def _normalize_value(value: object) -> JsonValue:
     if isinstance(value, list):
         return [_normalize_value(item) for item in value]
     if isinstance(value, Mapping):
-        return _normalize_mapping(cast("Mapping[str, JsonValue]", value))
+        return _normalize_mapping(
+            value,
+            allow_empty_keys=True,
+        )
     raise TypeError(f"unsupported JSON value: {type(value).__name__}")
 
 

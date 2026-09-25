@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from enum import Enum, IntEnum
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.capability import SubagentCapability
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -27,7 +27,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.runtime.state import RuntimeStatePlan
+from linktools.ai.runtime.state import RuntimeStoragePlan
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import (
@@ -59,10 +59,10 @@ class _JsonIntEnum(IntEnum):
     VALUE = 1
 
 
-def _binding_snapshot(*, agent_id: str = "default") -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding_contract(*, agent_id: str = "default") -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec(agent_id, model="route"),
-        base_model={"version": 1, "id": "route"},
+        model_contract={"version": 1, "id": "route"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -149,17 +149,38 @@ def test_task_graph_rejects_cycles_and_agent_spec_is_stable() -> None:
     )
 
 
+def test_task_graph_exposes_deterministic_topological_order() -> None:
+    nodes = (
+        TaskNode("late", ("right", "left")),
+        TaskNode("right", ("root",)),
+        TaskNode("independent"),
+        TaskNode("left", ("root",)),
+        TaskNode("root"),
+    )
+    graph = TaskGraph("topology", nodes)
+    shuffled = TaskGraph("topology-shuffled", tuple(reversed(nodes)))
+
+    assert graph.topological_order() == (
+        "independent",
+        "root",
+        "left",
+        "right",
+        "late",
+    )
+    assert shuffled.topological_order() == graph.topological_order()
+
+
 def test_model_registry_snapshot_is_instance_owned() -> None:
     registry = ModelRegistry()
     registry.register_openai("route", model="model")
-    snapshot = registry.snapshot()
+    snapshot = registry.capture()
     assert snapshot.resolve("route").model_identity == "openai:model"
     assert snapshot.resolve("route").route_id == "route"
 
 
-def test_runtime_state_plan_rejects_an_invalid_domain() -> None:
+def test_runtime_storage_plan_rejects_an_invalid_domain() -> None:
     with pytest.raises(ValueError):
-        RuntimeStatePlan(conversation="invalid")  # type: ignore[arg-type]
+        RuntimeStoragePlan(conversation="invalid")  # type: ignore[arg-type]
 
 
 def _pending_tools() -> PendingToolContinuation:
@@ -176,12 +197,12 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
 
     def checkpoint(
         state: RecoveryCheckpointState,
-        step_run_id: str | None,
+        agent_run_id: str | None,
         pending_tools: PendingToolContinuation | None = None,
     ) -> RecoveryCheckpoint:
         return RecoveryCheckpoint(
             execution_id="execution",
-            step_run_id=step_run_id,
+            agent_run_id=agent_run_id,
             state=state,
             revision=0,
             created_at=now,
@@ -194,14 +215,14 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
         checkpoint(RecoveryCheckpointState.ADMITTED, "step-1")
     with pytest.raises(ValueError):
         checkpoint(RecoveryCheckpointState.ACTIVE, None)
-    assert checkpoint(RecoveryCheckpointState.COMPLETED, None).step_run_id is None
+    assert checkpoint(RecoveryCheckpointState.COMPLETED, None).agent_run_id is None
     waiting = checkpoint(
         RecoveryCheckpointState.WAITING,
         "step-1",
         _pending_tools(),
     )
     assert waiting.pending_tools is not None
-    assert waiting.pending_tools.source_step_run_id == waiting.step_run_id
+    assert waiting.pending_tools.source_agent_run_id == waiting.agent_run_id
 
 
 def test_recovery_handoff_phase_only_models_reachable_boundaries() -> None:
@@ -213,15 +234,15 @@ def test_recovery_handoff_phase_only_models_reachable_boundaries() -> None:
 
 
 def test_execution_record_owns_binding_and_durable_user_input() -> None:
-    snapshot = _binding_snapshot()
+    binding_contract = _binding_contract()
     now = datetime.now(timezone.utc)
     record = ExecutionRecord(
         execution_id="execution",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.PENDING_START,
         revision=0,
@@ -234,7 +255,7 @@ def test_execution_record_owns_binding_and_durable_user_input() -> None:
         mode="run",
         planning=False,
         thinking=False,
-        binding=snapshot,
+        binding=binding_contract,
         principal_id="principal",
         principal_kind="user",
         stored_user_input=StoredUserInput(
@@ -243,7 +264,7 @@ def test_execution_record_owns_binding_and_durable_user_input() -> None:
         ),
     )
     assert record.stored_user_input.payload.decode() == "prompt"
-    assert record.binding_digest == snapshot.binding_digest
+    assert record.binding_digest == binding_contract.binding_digest
 
 
 def test_domain_codec_preserves_mapping_payloads_in_nullable_json_values() -> None:

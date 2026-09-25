@@ -16,7 +16,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.spec import AgentSpec
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -26,12 +26,12 @@ from linktools.ai.core import (
     SessionStatus,
     TenantAuthorizationPolicy,
     UsageMetrics,
-    step_conversation_id,
+    agent_conversation_id as make_agent_conversation_id,
 )
 import linktools.ai.runtime._session_timeline as timeline_module
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.service_api import ExecutionView, SessionHistoryItem
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
     ExecutionRecord,
@@ -39,14 +39,14 @@ from linktools.ai.runtime.state._contracts import (
     SessionRecord,
     StoredUserInput,
 )
-from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, RunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 
-def _binding() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="model"),
-        base_model={"version": 1, "id": "model"},
+        model_contract={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -94,8 +94,8 @@ def _execution(
         session_id="session",
         parent_execution_id=None,
         root_execution_id=execution_id,
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.SESSION_RESUME,
         status=status,
         revision=1,
@@ -145,20 +145,20 @@ class _ExecutionService:
 
 
 async def _materialize_conversation(
-    state: RuntimeState, history_id: str
+    state: RuntimeStorage, history_id: str
 ) -> tuple[str, int]:
-    run_id = "timeline-conversation-run"
-    conversation_id = step_conversation_id(
+    agent_run_id = "timeline-conversation-run"
+    agent_conversation_id = make_agent_conversation_id(
         namespace="session-timeline",
         tenant_id="tenant",
         execution_id="success",
     )
     now = datetime.now(timezone.utc)
-    await state.steps.register_run(
-        RunRecord(
-            run_id=run_id,
-            conversation_id=conversation_id,
-            parent_run_id=None,
+    await state.run_store.register_agent_run(
+        AgentRunRecord(
+            agent_run_id=agent_run_id,
+            agent_conversation_id=agent_conversation_id,
+            parent_agent_run_id=None,
             agent_name="agent",
             metadata={"agent_name": "agent", "history_id": history_id},
             started_at=now,
@@ -177,33 +177,33 @@ async def _materialize_conversation(
                     content={"ok": True},
                 ),
             ],
-            conversation_id=conversation_id,
+            conversation_id=agent_conversation_id,
         ),
         ModelResponse(
             parts=[TextPart(content="visible answer")],
-            conversation_id=conversation_id,
+            conversation_id=agent_conversation_id,
         ),
     ]
-    await state.steps.save_snapshot(
-        ContinuableSnapshot(
-            run_id=run_id,
+    await state.run_store.save_checkpoint(
+        AgentRunCheckpoint(
+            agent_run_id=agent_run_id,
             step_index=1,
             messages=messages,
-            conversation_id=conversation_id,
-            parent_run_id=None,
+            agent_conversation_id=agent_conversation_id,
+            parent_agent_run_id=None,
             agent_name="agent",
             timestamp=now,
             state="complete",
             transcript_message_count_before=0,
         )
     )
-    await state.steps.materialize_conversation(step_run_id=run_id)
-    return run_id, len(messages)
+    await state.run_store.materialize_conversation(agent_run_id=agent_run_id)
+    return agent_run_id, len(messages)
 
 
 @pytest.mark.asyncio
 async def test_session_timeline_restores_original_prompt_without_runtime_instructions() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
     try:
         created = await state.conversation.sessions.create(_session())
@@ -226,7 +226,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             expected=None,
         )
         assert created.history_id is not None
-        run_id, message_count = await _materialize_conversation(
+        agent_run_id, message_count = await _materialize_conversation(
             state, created.history_id
         )
 
@@ -246,7 +246,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
                 execution_id="success",
                 expected=None,
                 next_cursor=ConversationCursor(
-                    run_id,
+                    agent_run_id,
                     history_id=created.history_id,
                     message_count=message_count,
                 ),
@@ -256,18 +256,18 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
 
         await state.conversation.sessions.state_store.mutate(commit_success)
 
-        stale_run_id = "stale-timeline-run"
-        stale_conversation_id = step_conversation_id(
+        stale_agent_run_id = "stale-timeline-run"
+        stale_conversation_id = make_agent_conversation_id(
             namespace="session-timeline",
             tenant_id="tenant",
             execution_id="stale",
         )
         stale_now = datetime.now(timezone.utc)
-        await state.steps.register_run(
-            RunRecord(
-                run_id=stale_run_id,
-                conversation_id=stale_conversation_id,
-                parent_run_id=None,
+        await state.run_store.register_agent_run(
+            AgentRunRecord(
+                agent_run_id=stale_agent_run_id,
+                agent_conversation_id=stale_conversation_id,
+                parent_agent_run_id=None,
                 agent_name="agent",
                 metadata={"agent_name": "agent", "history_id": created.history_id},
                 started_at=stale_now,
@@ -280,27 +280,27 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             )
             for index in range(3)
         ]
-        await state.steps.save_snapshot(
-            ContinuableSnapshot(
-                run_id=stale_run_id,
+        await state.run_store.save_checkpoint(
+            AgentRunCheckpoint(
+                agent_run_id=stale_agent_run_id,
                 step_index=1,
                 messages=stale_messages,
-                conversation_id=stale_conversation_id,
-                parent_run_id=None,
+                agent_conversation_id=stale_conversation_id,
+                parent_agent_run_id=None,
                 agent_name="agent",
                 timestamp=stale_now,
                 state="complete",
                 transcript_message_count_before=0,
             )
         )
-        await state.steps.materialize_conversation(step_run_id=stale_run_id)
+        await state.run_store.materialize_conversation(agent_run_id=stale_agent_run_id)
 
         await state.conversation.sessions.admit_execution(
             "session",
             tenant_id="tenant",
             execution_id="failed",
             expected=ConversationCursor(
-                run_id,
+                agent_run_id,
                 history_id=created.history_id,
                 message_count=message_count,
             ),
@@ -319,7 +319,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             _ExecutionService(),  # type: ignore[arg-type]
             HmacCursorSigner("session", b"session-timeline-key"),
             history_reader=object(),  # type: ignore[arg-type]
-            transcript_store=state.steps,
+            transcript_store=state.run_store,
         )
         principal = Principal("owner", "tenant")
 

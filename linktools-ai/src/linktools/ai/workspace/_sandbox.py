@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace filesystem and process execution boundary."""
+"""Filesystem and process execution boundary."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
+from ..asset import AssetStoreReader, AssetVersionRef
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ._root import validate_workspace_path
 
 
 class SandboxOperationRejected(AIError):
@@ -45,22 +48,133 @@ class SandboxOperationRejected(AIError):
 
 @dataclass(frozen=True, slots=True)
 class SandboxResource:
-    """One explicitly authorized read-only directory exposed to a session."""
+    """One read-only directory or set of existing files exposed to a session."""
 
-    key: str
-    source: Path
+    id: str
+    source: Path | None = None
+    files: Mapping[str, Path] | None = field(default=None, hash=False)
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.key, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", self.key)
+            not isinstance(self.id, str)
+            or not self.id
+            or not self.id.strip()
         ):
-            raise ValueError("sandbox resource key is invalid")
-        if not isinstance(self.source, Path):
-            raise TypeError("sandbox resource source must be a Path")
+            raise ValueError("sandbox resource id is invalid")
+        try:
+            self.id.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise ValueError("sandbox resource id is invalid") from error
         source = self.source
-        if not source.is_absolute() or not source.is_dir() or source.is_symlink():
-            raise ValueError("sandbox resource source must be an absolute directory")
+        if source is not None:
+            if not isinstance(source, Path):
+                raise TypeError("sandbox resource source must be a Path")
+            if not source.is_absolute() or not source.is_dir() or source.is_symlink():
+                raise ValueError(
+                    "sandbox resource source must be an absolute directory"
+                )
+        files = self.files
+        if files is not None:
+            if not isinstance(files, Mapping) or not files:
+                raise ValueError("sandbox resource files must be a non-empty mapping")
+            normalized: dict[str, Path] = {}
+            for relative, path in files.items():
+                try:
+                    validate_workspace_path(relative)
+                except (TypeError, ValueError) as error:
+                    raise ValueError("sandbox resource file path is invalid") from error
+                if relative == "." or not isinstance(path, Path):
+                    raise ValueError("sandbox resource file path is invalid")
+                if not path.is_absolute() or not path.is_file() or path.is_symlink():
+                    raise ValueError("sandbox resource file source is invalid")
+                if source is not None:
+                    try:
+                        expected = source.joinpath(
+                            *PurePosixPath(relative).parts
+                        ).resolve(strict=True)
+                    except (OSError, RuntimeError) as error:
+                        raise ValueError(
+                            "sandbox resource file does not match source"
+                        ) from error
+                    if expected != path.resolve():
+                        raise ValueError(
+                            "sandbox resource file does not match source"
+                        )
+                normalized[relative] = path
+            object.__setattr__(self, "files", MappingProxyType(normalized))
+        if source is None and files is None:
+            raise ValueError("sandbox resource requires a source or files")
+
+    @classmethod
+    async def from_asset_versions(
+        cls,
+        resource_id: str,
+        reader: AssetStoreReader,
+        files: Mapping[str, AssetVersionRef],
+        *,
+        executable_bits: Mapping[str, int] | None = None,
+    ) -> "SandboxResource | None":
+        """Expose pinned Asset files only when their backend has native paths."""
+        if not files:
+            return None
+        ordered = tuple(sorted(files.items()))
+        for relative, ref in ordered:
+            try:
+                validate_workspace_path(relative)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+            if relative == "." or not isinstance(ref, AssetVersionRef):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        refs = tuple(ref for _relative, ref in ordered)
+        paths = await reader.local_paths(tuple(ref.key for ref in refs))
+        if any(path is None for path in paths):
+            return None
+        if await reader.resolve_versions(tuple(ref.key for ref in refs)) != refs:
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        await reader.read_versions(refs)
+        local: dict[str, Path] = {}
+        roots: set[Path] = set()
+        for (relative, _ref), path in zip(ordered, paths, strict=True):
+            if path is None:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            try:
+                resolved = path.resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+            if not resolved.is_file():
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            if executable_bits is not None:
+                expected = executable_bits.get(relative)
+                try:
+                    mode = resolved.stat().st_mode & 0o111
+                except OSError as error:
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+                if expected is None or mode != expected:
+                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+            local[relative] = resolved
+            root = path
+            for _part in PurePosixPath(relative).parts:
+                root = root.parent
+            try:
+                roots.add(root.resolve(strict=True))
+            except (OSError, RuntimeError) as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        if executable_bits is not None and set(executable_bits) != set(local):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source = next(iter(roots)) if len(roots) == 1 else None
+        if source is not None:
+            for relative, path in local.items():
+                try:
+                    actual = source.joinpath(
+                        *PurePosixPath(relative).parts
+                    ).resolve(strict=True)
+                except (OSError, RuntimeError):
+                    source = None
+                    break
+                if actual != path:
+                    source = None
+                    break
+        return cls(resource_id, source, local)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +240,7 @@ class SandboxSession(Protocol):
     Ordinary ``AIError`` values carry no effect-certainty guarantee.
     """
 
-    def resource_path(self, key: str) -> str: ...
+    def resource_path(self, resource_id: str) -> "str | None": ...
 
     async def canonicalize_path(self, path: str) -> str: ...
 
@@ -199,7 +313,51 @@ class SandboxSession(Protocol):
     async def close(self) -> None: ...
 
 
-def normalize_workspace_path(path: str) -> str:
+@dataclass(frozen=True, slots=True)
+class SandboxResourcePath:
+    """One file path inside a resource explicitly granted to a process."""
+
+    resource_id: str
+    path: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_id, str) or not self.resource_id:
+            raise ValueError("sandbox resource id is invalid")
+        try:
+            validate_workspace_path(self.path)
+        except (TypeError, ValueError) as error:
+            raise ValueError("sandbox resource path is invalid") from error
+        if self.path == ".":
+            raise ValueError("sandbox resource path must name a file")
+
+
+class SandboxStdioProcess(Protocol):
+    async def write_stdin(self, data: bytes) -> None: ...
+
+    async def read_stdout(self, max_bytes: int = 65536) -> bytes: ...
+
+    async def close_stdin(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
+class StdioSandbox(Sandbox, Protocol):
+    def stdio_execution_policy(self) -> Mapping[str, JsonValue]: ...
+
+
+@runtime_checkable
+class StdioSandboxSession(SandboxSession, Protocol):
+    async def open_stdio_process(
+        self,
+        command: str,
+        args: "Sequence[str | SandboxResourcePath]" = (),
+        *,
+        resources: "Sequence[SandboxResource]" = (),
+    ) -> SandboxStdioProcess: ...
+
+
+def normalize_workspace_input_path(path: str) -> str:
     """Normalize one logical workspace-relative POSIX path."""
     if not isinstance(path, str) or "\x00" in path or "\\" in path:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -220,7 +378,11 @@ def normalize_workspace_path(path: str) -> str:
         if part == "..":
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         parts.append(part)
-    return "." if not parts else "/".join(parts)
+    normalized = "." if not parts else "/".join(parts)
+    try:
+        return validate_workspace_path(normalized)
+    except ValueError as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
 class DisabledSandbox:
@@ -310,7 +472,11 @@ __all__ = [
     "Sandbox",
     "SandboxOperationRejected",
     "SandboxResource",
+    "SandboxResourcePath",
     "SandboxSession",
+    "SandboxStdioProcess",
+    "StdioSandbox",
+    "StdioSandboxSession",
     "ReadOnlySandboxPolicy",
-    "normalize_workspace_path",
+    "normalize_workspace_input_path",
 ]

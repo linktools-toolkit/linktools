@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from ..core import canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
 from ._codec import (
-    definition_semantic_digest,
+    same_definition_contract,
     observation_envelope,
     observation_payload_digest,
 )
@@ -244,7 +244,7 @@ class Metrics:
         )
         if stored is None:
             return None
-        if definition_semantic_digest(stored) != definition_semantic_digest(definition):
+        if not same_definition_contract(stored, definition):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return stored
 

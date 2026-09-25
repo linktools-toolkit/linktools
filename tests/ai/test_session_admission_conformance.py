@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionStatus,
@@ -20,7 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import ExecutionRequest, RuntimeState
+from linktools.ai.runtime import ExecutionRequest, RuntimeStorage
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
     CancelEffectOutcome,
@@ -50,7 +50,7 @@ def _session() -> SessionRecord:
     )
 
 
-async def _admission_result(state: RuntimeState, execution_id: str) -> str:
+async def _admission_result(state: RuntimeStorage, execution_id: str) -> str:
     try:
         record = await state.conversation.sessions.admit_execution(
             "session",
@@ -65,7 +65,7 @@ async def _admission_result(state: RuntimeState, execution_id: str) -> str:
 
 @pytest.mark.asyncio
 async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-admission-memory", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -115,7 +115,7 @@ async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
 async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeState.sql(engine)
+    state = RuntimeStorage.sql(engine)
     await state.initialize(namespace="session-admission-sql", tenant_id="tenant")
     await state.conversation.sessions.create(_session())
     try:
@@ -134,7 +134,7 @@ async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> No
         assert owner is not None
         await state.close()
 
-        reopened = RuntimeState.sql(engine)
+        reopened = RuntimeStorage.sql(engine)
         await reopened.initialize(namespace="session-admission-sql", tenant_id="tenant")
         try:
             persisted = await reopened.conversation.sessions.get(
@@ -154,7 +154,7 @@ async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_closing_session_can_commit_owned_continuation_then_close() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-admission-close", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -199,11 +199,11 @@ async def test_closing_session_can_commit_owned_continuation_then_close() -> Non
         await state.close()
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="model"),
-        base_model={"route_id": "model", "model_identity": "test:model"},
+        model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -211,14 +211,14 @@ def _binding() -> AgentBindingSnapshot:
     )
 
 
-class _DefinitionCatalog:
+class _BindingCatalog:
     def binding(self, digest: str) -> object:
         binding = _binding()
         assert digest == binding.binding_digest
         return SimpleNamespace(
-            digest=binding.binding_digest,
-            definition=SimpleNamespace(digest="b" * 64),
-            snapshot=binding,
+            binding_digest=binding.binding_digest,
+            compiled_agent=SimpleNamespace(digest="b" * 64),
+            binding_contract=binding,
         )
 
 
@@ -331,7 +331,7 @@ class _RejectingBackend:
 
 @pytest.mark.asyncio
 async def test_rejected_admission_terminalizes_pending_start() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-admission-rejection", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -346,7 +346,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
             state.object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
             sessions=state.conversation.sessions,
-            catalog=_DefinitionCatalog(),
+            catalog=_BindingCatalog(),
             compiler=object(),
             runtime_bridge=runtime_bridge,
             live_broker=LiveExecutionEventBroker(),

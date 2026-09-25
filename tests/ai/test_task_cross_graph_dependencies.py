@@ -67,7 +67,7 @@ async def test_prepare_node_authorizes_source_header_and_deduplicates_hold() -> 
     )
     node = TaskNode(
         "target-node",
-        input={"type": "example.task", "version": 1},
+        input={"task_id": "example.task", "task_revision": 1},
         input_refs={"first": reference, "second": reference},
     )
     source_header = ResourceRef(
@@ -77,7 +77,7 @@ async def test_prepare_node_authorizes_source_header_and_deduplicates_hold() -> 
         "source-owner",
     )
 
-    class TaskState:
+    class TaskRepositories:
         async def get_header(self, graph_id: str, *, tenant_id: str):
             assert (graph_id, tenant_id) == ("source-graph", "tenant")
             return source_header
@@ -100,7 +100,7 @@ async def test_prepare_node_authorizes_source_header_and_deduplicates_hold() -> 
                 )
             }
 
-        async def snapshot_graph(self, graph_id: str, *, tenant_id: str):
+        async def graph_state(self, graph_id: str, *, tenant_id: str):
             assert (graph_id, tenant_id) == ("source-graph", "tenant")
             return SimpleNamespace(
                 node_states=(
@@ -153,12 +153,12 @@ async def test_prepare_node_authorizes_source_header_and_deduplicates_hold() -> 
     runner = object.__new__(RuntimeTaskNodeRunner)
     runner._namespace = "runtime"
     runner._authorization = authorization
-    runner._task_state = TaskState()
+    runner._task_state = TaskRepositories()
     runner._execution = execution
     runner._task_durable = True
     runner._execution_durable = True
     runner._recovery_durable = True
-    runner._agent = SimpleNamespace(type="linktools.ai.agent")
+    runner._agent = SimpleNamespace(id="linktools.ai.agent")
 
     await runner.prepare_node(
         node,

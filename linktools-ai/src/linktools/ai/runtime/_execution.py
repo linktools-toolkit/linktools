@@ -18,7 +18,7 @@ from linktools.core import environ
 
 from ..agent import (
     AgentBinding,
-    AgentBindingSnapshot,
+    AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
     restore_output,
@@ -54,7 +54,7 @@ from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskBindingSnapshot, TaskEffectResolution
+from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
@@ -102,7 +102,7 @@ from .state._contracts import (
     ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartUnknownCommit,
-    ExecutionState,
+    ExecutionRepositories,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     IdempotencyRecord,
@@ -179,7 +179,7 @@ class _ExecutionTerminalVerifier(Protocol):
         self,
         execution: ExecutionRecord,
         status: ExecutionStatus,
-        required_step_run_id: "str | None",
+        required_agent_run_id: "str | None",
     ) -> None: ...
 
 
@@ -205,9 +205,6 @@ class _LocalExecutionWaiter(Protocol):
 
 
 class _RepositoryInstructionBundle(Protocol):
-    @property
-    def digest(self) -> str: ...
-
     def to_payload(self) -> JsonValue: ...
 
 
@@ -223,9 +220,9 @@ async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> bool:
 async def _missing_terminal_verifier(
     execution: ExecutionRecord,
     status: ExecutionStatus,
-    required_step_run_id: "str | None",
+    required_agent_run_id: "str | None",
 ) -> None:
-    del execution, status, required_step_run_id
+    del execution, status, required_agent_run_id
     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
@@ -305,7 +302,7 @@ class _ExecutionRuntimePort(ExecutionBackend, Protocol):
         self,
         execution: ExecutionRecord,
         status: ExecutionStatus,
-        required_step_run_id: str | None,
+        required_agent_run_id: str | None,
     ) -> None: ...
 
     async def cancel_children(
@@ -347,7 +344,7 @@ class DefaultExecutionService:
 
     def __init__(
         self,
-        state: ExecutionState,
+        state: ExecutionRepositories,
         object_store: ObjectStore,
         authorization: AuthorizationPolicy,
         *,
@@ -442,8 +439,6 @@ class DefaultExecutionService:
         if self._object_key_factory is None or self._payload_policy is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         payload = instructions.to_payload()
-        if canonical_sha256(payload) != instructions.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         inline = StoredPayload.inline_json(payload)
         if payload_fits_inline(inline, self._payload_policy):
             stored = inline
@@ -456,8 +451,6 @@ class DefaultExecutionService:
                 canonical_json_bytes(payload),
             )
             stored = StoredPayload.object(reference)
-        if stored.digest != instructions.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return RuntimePayloadRef(stored, RuntimeDomain.EXECUTION)
 
     async def _canonicalize_request(
@@ -554,14 +547,17 @@ class DefaultExecutionService:
     def _binding(
         self,
         binding_digest: str,
-        snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> AgentBinding:
-        if snapshot is None:
+        if binding_contract is None:
             return self._catalog.binding(binding_digest)
-        if snapshot.binding_digest != binding_digest:
+        if binding_contract.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        binding = self._compiler.restore(snapshot)
-        if binding.digest != binding_digest or binding.snapshot != snapshot:
+        binding = self._compiler.restore(binding_contract)
+        if (
+            binding.binding_digest != binding_digest
+            or binding.binding_contract != binding_contract
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return binding
 
@@ -572,7 +568,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
     ) -> None:
         if (
-            execution.binding_digest != binding.digest
+            execution.binding_digest != binding.binding_digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
         ):
@@ -683,15 +679,15 @@ class DefaultExecutionService:
 
     async def start_task(
         self,
-        binding: TaskBindingSnapshot,
+        binding: TaskBindingContract,
         *,
         principal: Principal,
         input: Mapping[str, JsonValue],
         idempotency_key: str,
         correlation: Mapping[str, str | int],
     ) -> ExecutionHandle:
-        if not isinstance(binding, TaskBindingSnapshot):
-            raise TypeError("binding must be TaskBindingSnapshot")
+        if not isinstance(binding, TaskBindingContract):
+            raise TypeError("binding must be TaskBindingContract")
         normalized_input = normalize_json_value(dict(input))
         if not isinstance(normalized_input, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -708,8 +704,8 @@ class DefaultExecutionService:
             {
                 "version": 1,
                 "kind": "task",
-                "task_type": binding.task_type,
-                "task_version": binding.task_version,
+                "task_id": binding.id,
+                "task_revision": binding.revision,
             },
         )
         scope = "execution.task"
@@ -728,8 +724,8 @@ class DefaultExecutionService:
             session_id=None,
             parent_execution_id=None,
             root_execution_id=execution_id,
-            source_execution_id=None,
-            base_execution_id=None,
+            previous_execution_id=None,
+            fork_base_execution_id=None,
             lineage_kind=ExecutionLineageKind.RUN,
             status=ExecutionStatus.PENDING_START,
             revision=0,
@@ -812,7 +808,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if current.status in {
             ExecutionStatus.SUCCEEDED,
@@ -866,7 +862,7 @@ class DefaultExecutionService:
             AuthorizationAction.EXECUTION_RUN,
         )
         if (
-            not isinstance(current.binding, TaskBindingSnapshot)
+            not isinstance(current.binding, TaskBindingContract)
             or current.status is not ExecutionStatus.STARTED
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -906,7 +902,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return _execution_view(current)
@@ -944,7 +940,7 @@ class DefaultExecutionService:
             AuthorizationAction.EXECUTION_RUN,
         )
         if (
-            not isinstance(current.binding, TaskBindingSnapshot)
+            not isinstance(current.binding, TaskBindingContract)
             or not isinstance(wait_id, str)
             or not wait_id.strip()
         ):
@@ -984,7 +980,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         normalized = normalize_json_value(value)
         try:
@@ -1027,7 +1023,7 @@ class DefaultExecutionService:
             AuthorizationAction.EXECUTION_RUN,
         )
         if (
-            not isinstance(current.binding, TaskBindingSnapshot)
+            not isinstance(current.binding, TaskBindingContract)
             or current.status is not ExecutionStatus.RECOVERY_REQUIRED
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1073,8 +1069,8 @@ class DefaultExecutionService:
         )
         binding = current.binding
         if (
-            not isinstance(binding, TaskBindingSnapshot)
-            or binding.effect != "non_replay_safe"
+            not isinstance(binding, TaskBindingContract)
+            or binding.effect_policy != "non_replay_safe"
         ):
             raise AIError(ErrorCode.TASK_NOT_READY)
 
@@ -1199,7 +1195,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if current.status is ExecutionStatus.CANCELLED:
             return CancelExecutionResult(execution_id, True)
@@ -1208,7 +1204,7 @@ class DefaultExecutionService:
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         if (
-            current.binding.effect == "non_replay_safe"
+            current.binding.effect_policy == "non_replay_safe"
             and current.task_attempt > 0
             and current.status is ExecutionStatus.STARTED
         ):
@@ -1279,7 +1275,7 @@ class DefaultExecutionService:
         output: JsonValue,
         terminal_event_payload: "Mapping[str, JsonValue] | None" = None,
     ) -> ExecutionResult:
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         execution_id = current.execution_id
         if current.status is ExecutionStatus.SUCCEEDED:
@@ -1343,7 +1339,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if current.status is ExecutionStatus.FAILED:
             return await self.result(execution_id, principal=principal)
@@ -1454,7 +1450,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         dependency_hold_id: "str | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1462,7 +1458,7 @@ class DefaultExecutionService:
             scope="execution.run",
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
 
     async def resolve_existing(
@@ -1470,11 +1466,11 @@ class DefaultExecutionService:
         binding_digest: str,
         request: ExecutionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> "ExecutionHandle | None":
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        binding = self._binding(binding_digest, binding_snapshot)
+        binding = self._binding(binding_digest, binding_contract)
         context = await self._canonicalize_request(request)
         request = context.request
         scope = "execution.run"
@@ -1483,8 +1479,8 @@ class DefaultExecutionService:
             request,
             binding_digest,
             session_id=None,
-            source_execution_id=None,
-            base_execution_id=None,
+            previous_execution_id=None,
+            fork_base_execution_id=None,
             parent_execution_id=None,
             root_execution_id=None,
             parent_invocation_id=None,
@@ -1565,7 +1561,7 @@ class DefaultExecutionService:
         session_id: str,
         request: ExecutionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1576,7 +1572,7 @@ class DefaultExecutionService:
             session_agent_id=agent_id,
             scope="session.resume",
             prepare_local_stream=True,
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
 
     async def start_subagent(
@@ -1587,7 +1583,7 @@ class DefaultExecutionService:
         parent_execution_id: str,
         root_execution_id: str,
         parent_invocation_id: str,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1597,7 +1593,7 @@ class DefaultExecutionService:
             parent_invocation_id=parent_invocation_id,
             lineage_kind=ExecutionLineageKind.SUBAGENT,
             scope="execution.subagent",
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
 
     async def replay_subagent(
@@ -1630,7 +1626,7 @@ class DefaultExecutionService:
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         binding = self._binding(execution.binding_digest, execution.binding)
-        if binding.definition.spec.id != agent_id:
+        if binding.compiled_agent.spec.id != agent_id:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (
             execution.lineage_kind is not ExecutionLineageKind.SUBAGENT
@@ -1656,7 +1652,7 @@ class DefaultExecutionService:
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
             parent_invocation_id=parent_invocation_id,
-            binding_snapshot=execution.binding,
+            binding_contract=execution.binding,
         )
 
     async def list_children(
@@ -1679,9 +1675,9 @@ class DefaultExecutionService:
         *,
         session_id: "str | None" = None,
         session_agent_id: "str | None" = None,
-        source_execution_id: "str | None" = None,
-        base_execution_id: "str | None" = None,
-        conversation_step_run_id: "str | None" = None,
+        previous_execution_id: "str | None" = None,
+        fork_base_execution_id: "str | None" = None,
+        conversation_agent_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
         root_execution_id: "str | None" = None,
         parent_invocation_id: "str | None" = None,
@@ -1689,7 +1685,7 @@ class DefaultExecutionService:
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         if session_id is None:
             return await self._start_unlocked(
@@ -1697,9 +1693,9 @@ class DefaultExecutionService:
                 request,
                 session_id=session_id,
                 session_agent_id=session_agent_id,
-                source_execution_id=source_execution_id,
-                base_execution_id=base_execution_id,
-                conversation_step_run_id=conversation_step_run_id,
+                previous_execution_id=previous_execution_id,
+                fork_base_execution_id=fork_base_execution_id,
+                conversation_agent_run_id=conversation_agent_run_id,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
                 parent_invocation_id=parent_invocation_id,
@@ -1707,7 +1703,7 @@ class DefaultExecutionService:
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
         async with self._session_guard(request.principal.tenant_id, session_id):
             return await self._start_unlocked(
@@ -1715,9 +1711,9 @@ class DefaultExecutionService:
                 request,
                 session_id=session_id,
                 session_agent_id=session_agent_id,
-                source_execution_id=source_execution_id,
-                base_execution_id=base_execution_id,
-                conversation_step_run_id=conversation_step_run_id,
+                previous_execution_id=previous_execution_id,
+                fork_base_execution_id=fork_base_execution_id,
+                conversation_agent_run_id=conversation_agent_run_id,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
                 parent_invocation_id=parent_invocation_id,
@@ -1725,7 +1721,7 @@ class DefaultExecutionService:
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
 
     async def _start_unlocked(
@@ -1735,9 +1731,9 @@ class DefaultExecutionService:
         *,
         session_id: "str | None" = None,
         session_agent_id: "str | None" = None,
-        source_execution_id: "str | None" = None,
-        base_execution_id: "str | None" = None,
-        conversation_step_run_id: "str | None" = None,
+        previous_execution_id: "str | None" = None,
+        fork_base_execution_id: "str | None" = None,
+        conversation_agent_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
         root_execution_id: "str | None" = None,
         parent_invocation_id: "str | None" = None,
@@ -1745,7 +1741,7 @@ class DefaultExecutionService:
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1755,7 +1751,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         context = await self._canonicalize_request(request)
         request = context.request
-        binding = self._binding(binding_digest, binding_snapshot)
+        binding = self._binding(binding_digest, binding_contract)
         parent: ExecutionRecord | None = None
         if lineage_kind is ExecutionLineageKind.SUBAGENT:
             if parent_execution_id is None or not parent_invocation_id:
@@ -1769,9 +1765,9 @@ class DefaultExecutionService:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             request = replace(request, correlation=parent.correlation)
-        conversation_run_id = conversation_step_run_id
+        conversation_agent_run_id = conversation_agent_run_id
         session = None
-        if session_id is not None and source_execution_id is None:
+        if session_id is not None and previous_execution_id is None:
             session = await self._sessions.get(
                 session_id, tenant_id=request.principal.tenant_id
             )
@@ -1788,12 +1784,12 @@ class DefaultExecutionService:
                     ErrorCode.REQUEST_FIELD_INVALID,
                     safe_details={"field": "cwd", "reason": "workspace_required"},
                 )
-            conversation_run_id = (
+            conversation_agent_run_id = (
                 None
                 if session.continuation is None
-                else session.continuation.step_run_id
+                else session.continuation.agent_run_id
             )
-            base_execution_id = None
+            fork_base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
         execution_id = self._operation_ids()
         resource = ResourceRef(
@@ -1807,8 +1803,8 @@ class DefaultExecutionService:
             request,
             binding_digest,
             session_id=session_id,
-            source_execution_id=source_execution_id,
-            base_execution_id=base_execution_id,
+            previous_execution_id=previous_execution_id,
+            fork_base_execution_id=fork_base_execution_id,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
             parent_invocation_id=parent_invocation_id,
@@ -1978,16 +1974,16 @@ class DefaultExecutionService:
             safe_error_details={},
             created_at=now,
             updated_at=now,
-            source_execution_id=source_execution_id,
-            base_execution_id=base_execution_id,
+            previous_execution_id=previous_execution_id,
+            fork_base_execution_id=fork_base_execution_id,
             lineage_kind=lineage_kind,
             agent_run_sequence=0,
             memory_scope=request.memory_scope,
-            conversation_step_run_id=conversation_run_id,
+            conversation_agent_run_id=conversation_agent_run_id,
             mode=request.mode,
             planning=request.planning,
             thinking=request.thinking,
-            binding=binding.snapshot,
+            binding=binding.binding_contract,
             repository_instructions=repository_instructions,
             correlation=request.correlation,
             principal_id=request.principal.principal_id,
@@ -2466,7 +2462,6 @@ class DefaultExecutionService:
                     execution.execution_id,
                     execution.status,
                     None,
-                    None,
                     result.usage,
                     error_code,
                     safe_details,
@@ -2476,16 +2471,6 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        task_binding = (
-            execution.binding
-            if isinstance(execution.binding, TaskBindingSnapshot)
-            else None
-        )
-        binding = (
-            None
-            if task_binding is not None
-            else self._binding(execution.binding_digest, execution.binding)
-        )
         try:
             if result.output.kind == "inline":
                 decoded = result.output.decode()
@@ -2507,11 +2492,6 @@ class DefaultExecutionService:
                 execution.execution_id,
                 execution.status,
                 output,
-                (
-                    task_binding.output_fingerprint
-                    if task_binding is not None
-                    else binding.output_fingerprint
-                ),
                 result.usage,
                 error_code,
                 safe_details,
@@ -2619,12 +2599,12 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         timeout_seconds: "float | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionResult:
         handle = await self.start(
             binding_digest,
             request,
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
         return await self.wait(
             handle.execution_id,
@@ -2640,12 +2620,12 @@ class DefaultExecutionService:
         )
         if (
             previous.parent_execution_id is not None
-            or not isinstance(previous.binding, AgentBindingSnapshot)
+            or not isinstance(previous.binding, AgentBindingContract)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
         binding = self._binding(binding_digest, previous.binding)
-        if binding.digest != binding_digest:
+        if binding.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
@@ -2667,11 +2647,11 @@ class DefaultExecutionService:
             parent_execution_id=previous.parent_execution_id,
             root_execution_id=previous.root_execution_id,
             scope="execution.retry",
-            source_execution_id=previous.execution_id,
+            previous_execution_id=previous.execution_id,
             lineage_kind=ExecutionLineageKind.RETRY,
-            base_execution_id=previous.base_execution_id,
-            conversation_step_run_id=previous.conversation_step_run_id,
-            binding_snapshot=previous.binding,
+            fork_base_execution_id=previous.fork_base_execution_id,
+            conversation_agent_run_id=previous.conversation_agent_run_id,
+            binding_contract=previous.binding,
         )
 
     async def fork(
@@ -2682,12 +2662,12 @@ class DefaultExecutionService:
         )
         if (
             previous.parent_execution_id is not None
-            or not isinstance(previous.binding, AgentBindingSnapshot)
+            or not isinstance(previous.binding, AgentBindingContract)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
         binding = self._binding(binding_digest, previous.binding)
-        if binding.digest != binding_digest:
+        if binding.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,
@@ -2709,10 +2689,10 @@ class DefaultExecutionService:
             parent_execution_id=previous.parent_execution_id,
             root_execution_id=previous.root_execution_id,
             scope="execution.fork",
-            source_execution_id=previous.execution_id,
+            previous_execution_id=previous.execution_id,
             lineage_kind=ExecutionLineageKind.FORK,
-            base_execution_id=previous.execution_id,
-            binding_snapshot=previous.binding,
+            fork_base_execution_id=previous.execution_id,
+            binding_contract=previous.binding,
         )
 
     async def cancel(
@@ -3488,7 +3468,7 @@ def _execution_view(execution: ExecutionRecord) -> ExecutionView:
 
 
 def _validate_task_binding_output(
-    binding: TaskBindingSnapshot,
+    binding: TaskBindingContract,
     output: JsonValue,
 ) -> None:
     contract = dict(binding.output_contract)
@@ -3570,8 +3550,8 @@ def _request_digest(
     binding_digest: str,
     *,
     session_id: str | None,
-    source_execution_id: str | None,
-    base_execution_id: str | None,
+    previous_execution_id: str | None,
+    fork_base_execution_id: str | None,
     parent_execution_id: str | None,
     root_execution_id: str | None,
     parent_invocation_id: str | None,
@@ -3592,8 +3572,8 @@ def _request_digest(
             "scope": session_id or "execution",
             "principal": principal_identity_payload(request.principal),
             "session_id": session_id,
-            "source_execution_id": source_execution_id,
-            "base_execution_id": base_execution_id,
+            "previous_execution_id": previous_execution_id,
+            "fork_base_execution_id": fork_base_execution_id,
             "parent_execution_id": parent_execution_id,
             "parent_invocation_id": parent_invocation_id,
             "root_identity": root_execution_id or "$self",

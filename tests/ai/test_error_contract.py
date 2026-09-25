@@ -94,17 +94,14 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
         "success",
         ExecutionStatus.SUCCEEDED,
         {"ok": True},
-        "a" * 64,
         usage,
     )
-    assert succeeded.output_fingerprint == "a" * 64
     assert succeeded.error_code is None
     assert succeeded.safe_error_details == {}
 
     failed = ExecutionResult(
         "failed",
         ExecutionStatus.FAILED,
-        None,
         None,
         usage,
         ErrorCode.MODEL_REQUEST_REJECTED.value,
@@ -117,7 +114,6 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
         "cancelled",
         ExecutionStatus.CANCELLED,
         None,
-        None,
         usage,
         ErrorCode.EXECUTION_CANCELLED.value,
     )
@@ -128,14 +124,12 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
             "invalid",
             ExecutionStatus.FAILED,
             None,
-            None,
             usage,
             ErrorCode.EXECUTION_CANCELLED.value,
         )
     unknown = ExecutionResult(
         "unknown",
         ExecutionStatus.FAILED,
-        None,
         None,
         usage,
         "NOT_A_REAL_ERROR",
@@ -146,16 +140,14 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
             "failed-with-output",
             ExecutionStatus.FAILED,
             {"unexpected": True},
-            "a" * 64,
             usage,
             ErrorCode.INTERNAL_ERROR.value,
         )
     with pytest.raises(ValueError):
         ExecutionResult(
-            "cancelled-with-output-contract",
+            "cancelled-with-output",
             ExecutionStatus.CANCELLED,
-            None,
-            "a" * 64,
+            {"unexpected": True},
             usage,
             ErrorCode.EXECUTION_CANCELLED.value,
         )
@@ -227,7 +219,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         namespace="error-contract",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         binding_digest="a" * 64,
         owner="worker",
         background_tasks=set(),
@@ -244,7 +236,7 @@ def _failed_tool_record(
     return ToolOperationRecord(
         tool_operation_id="operation",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         tool_call_id="call",
         idempotency_key_digest="b" * 64,
         tool_name="tool",

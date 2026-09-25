@@ -32,12 +32,12 @@ from linktools.ai.runtime import (
 )
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
-from linktools.ai.task import TaskBindingSnapshot
+from linktools.ai.task import TaskBindingContract
 from linktools.ai.workspace import Workspace
 from linktools.commands.ai._common import (
     _load_workspace,
     _local_metrics,
-    _local_runtime_state,
+    _local_runtime_storage,
 )
 from linktools.commands.ai.history import Command as HistoryCommand, _emit_execution_detail
 from linktools.commands.ai.metrics import Command as MetricsCommand, _query_summary
@@ -57,7 +57,7 @@ def _info(
         execution_id=execution_id,
         binding_kind="agent",
         agent_id="agent",
-        task_type=None,
+        task_id=None,
         status=(
             ExecutionStatus.FAILED
             if error_code is not None
@@ -73,9 +73,6 @@ def _info(
         started_at=created_at,
         terminal_at=created_at,
         binding_digest="a" * 64,
-        input_digest="b" * 64,
-        output_fingerprint="c" * 64,
-        output_digest=None if error_code is not None else "d" * 64,
         usage=UsageSummary(),
         error_code=error_code,
         safe_error_details={} if error_code is None else {"stage": "runtime"},
@@ -90,7 +87,7 @@ def _record(
     error_code: str | None = None,
 ):
     info = _info(execution_id, created_at, error_code=error_code)
-    binding = TaskBindingSnapshot(
+    binding = TaskBindingContract(
         "debug",
         1,
         "none",
@@ -108,7 +105,7 @@ def _record(
         execution_id=info.execution_id,
         binding_kind="task",
         agent_id=None,
-        task_type="debug",
+        task_id="debug",
         status=info.status,
         lineage_kind=info.lineage_kind,
         parent_execution_id=info.parent_execution_id,
@@ -213,7 +210,7 @@ class _DetailHistory:
             (
                 ModelInteractionItem(
                     execution_id=execution_id,
-                    segment_sequence=1,
+                    agent_run_sequence=1,
                     depth=0,
                     request_sequence=1,
                     purpose="agent",
@@ -333,13 +330,13 @@ async def test_local_debug_storage_uses_separate_runtime_and_metrics_databases(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    state = _local_runtime_state(workspace)
+    storage = _local_runtime_storage(workspace)
     metrics = await _local_metrics(workspace)
     runtime_root = workspace.storage_root / "runtime"
 
     assert all(
-        state.plan.route(domain).path == (runtime_root / "runtime.db").resolve()
-        for domain in state.plan.durable_domains
+        storage.plan.route(domain).path == (runtime_root / "runtime.db").resolve()
+        for domain in storage.plan.durable_domains
     )
     assert metrics.namespace == "default"
     assert (runtime_root / "metrics.db").is_file()
@@ -462,7 +459,7 @@ class _TraceHistory:
                             "kind": "MODEL_RESPONSE",
                             "status": "SUCCEEDED",
                             "step_index": 0,
-                            "segment_sequence": 1,
+                            "agent_run_sequence": 1,
                             "scope": "root",
                             "request_sequence": 1,
                             "purpose": "agent",

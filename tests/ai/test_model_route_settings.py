@@ -41,7 +41,7 @@ class _CountingModel(TestModel):
         )
 
 
-def test_openai_operational_settings_do_not_change_durable_identity() -> None:
+def test_openai_operational_settings_do_not_change_model_contract() -> None:
     first = ModelRegistry.openai(
         model="gpt-test",
         base_url="https://first.example/v1",
@@ -49,7 +49,7 @@ def test_openai_operational_settings_do_not_change_durable_identity() -> None:
         timeout=30,
         max_retries=1,
         max_tokens=2048,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
     second = ModelRegistry.openai(
         model="openai:gpt-test",
         base_url="https://second.example/v1",
@@ -57,19 +57,18 @@ def test_openai_operational_settings_do_not_change_durable_identity() -> None:
         timeout=60,
         max_retries=3,
         max_tokens=2048,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
-    assert dict(first.semantic_payload) == dict(second.semantic_payload)
-    assert first.fingerprint == second.fingerprint
+    assert dict(first.contract) == dict(second.contract)
 
 
 def test_openai_custom_endpoint_is_operational_configuration() -> None:
     binding = ModelRegistry.openai(
         model="gpt-test",
         base_url="https://gateway.example/v1",
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
-    assert dict(binding.semantic_payload) == {
+    assert dict(binding.contract) == {
         "provider": "openai",
         "model_identity": "openai:gpt-test",
         "vision": False,
@@ -77,19 +76,19 @@ def test_openai_custom_endpoint_is_operational_configuration() -> None:
     }
 
 
-def test_openai_vision_is_durable_model_semantics() -> None:
+def test_openai_vision_is_durable_model_contract() -> None:
     without_vision = ModelRegistry.openai(
         model="gpt-test",
         vision=False,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
     with_vision = ModelRegistry.openai(
         model="gpt-test",
         vision=True,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
-    assert dict(without_vision.semantic_payload)["vision"] is False
-    assert dict(with_vision.semantic_payload)["vision"] is True
-    assert without_vision.fingerprint != with_vision.fingerprint
+    assert dict(without_vision.contract)["vision"] is False
+    assert dict(with_vision.contract)["vision"] is True
+    assert dict(without_vision.contract) != dict(with_vision.contract)
 
 
 @pytest.mark.asyncio
@@ -214,35 +213,35 @@ async def test_openai_without_vision_does_not_guess_opaque_uploaded_file_type() 
     assert wrapped.calls == 1
 
 
-def test_openai_max_tokens_changes_durable_identity() -> None:
-    plain = ModelRegistry.openai(model="gpt-test").snapshot().resolve("default")
+def test_openai_max_tokens_changes_model_contract() -> None:
+    plain = ModelRegistry.openai(model="gpt-test").capture().resolve("default")
     configured = ModelRegistry.openai(
         model="gpt-test",
         max_tokens=2048,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
-    assert dict(plain.semantic_payload)["settings"] == {}
-    assert dict(configured.semantic_payload)["settings"] == {"max_tokens": 2048}
-    assert plain.fingerprint != configured.fingerprint
+    assert dict(plain.contract)["settings"] == {}
+    assert dict(configured.contract)["settings"] == {"max_tokens": 2048}
+    assert dict(plain.contract) != dict(configured.contract)
 
 
-def test_model_registry_restore_requires_exact_semantic_settings() -> None:
+def test_model_registry_restore_requires_exact_model_contract() -> None:
     historical = ModelRegistry.openai(
         model="gpt-test",
         max_tokens=1024,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
     registry = ModelRegistry.openai(
         model="gpt-test",
         max_tokens=2048,
     )
 
     with pytest.raises(AIError) as raised:
-        registry.snapshot().restore(
-            dict(historical.semantic_payload),
+        registry.capture().restore(
+            dict(historical.contract),
             route_id="default",
         )
 
-    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
 
 def test_openai_route_materializes_settings_and_retries() -> None:
@@ -252,7 +251,7 @@ def test_openai_route_materializes_settings_and_retries() -> None:
         timeout=30,
         max_retries=1,
         max_tokens=2048,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
     model = binding.materialize()
 

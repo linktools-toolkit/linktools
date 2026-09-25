@@ -225,7 +225,7 @@ async def test_latest_metric_revision_does_not_mix_measurement_revisions() -> No
 
 
 @pytest.mark.asyncio
-async def test_definition_identity_is_idempotent_and_semantic_change_conflicts() -> None:
+async def test_definition_identity_requires_revision_bump_for_semantic_change() -> None:
     metrics = Metrics.in_memory(namespace="definition-semantics")
     base = _measurement_definition(
         "business.definition",
@@ -238,7 +238,7 @@ async def test_definition_identity_is_idempotent_and_semantic_change_conflicts()
     replay = await metrics.define(base)
     assert replay == first == base
 
-    conflict = MetricDefinition(
+    changed_same_revision = MetricDefinition(
         name=base.name,
         revision=base.revision,
         observation_kind=base.observation_kind,
@@ -249,8 +249,20 @@ async def test_definition_identity_is_idempotent_and_semantic_change_conflicts()
         query_fields=base.query_fields,
     )
     with pytest.raises(AIError) as raised:
-        await metrics.define(conflict)
+        await metrics.define(changed_same_revision)
     assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+
+    revised = MetricDefinition(
+        name=base.name,
+        revision=base.revision + 1,
+        observation_kind=changed_same_revision.observation_kind,
+        source=changed_same_revision.source,
+        metric_type=changed_same_revision.metric_type,
+        unit=changed_same_revision.unit,
+        default_aggregation=changed_same_revision.default_aggregation,
+        query_fields=changed_same_revision.query_fields,
+    )
+    assert await metrics.define(revised) == revised
 
 
 @pytest.mark.asyncio

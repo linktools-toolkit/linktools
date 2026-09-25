@@ -39,11 +39,7 @@ class InMemoryAssetBackend:
     """Store each AssetKey as one independently versioned bytes file."""
 
     def __init__(self, root: "AssetRoot | None" = None, *, writable: bool = True) -> None:
-        self._root = root or AssetRoot(
-            "memory",
-            "memory",
-            hashlib.sha256(b"memory:default").hexdigest(),
-        )
+        self._root = root or AssetRoot("memory", "memory")
         self._writable = writable
         self._entries: dict[AssetKey, tuple[AssetInfo, bytes]] = {}
         self._versions: dict[AssetKey, list[tuple[AssetInfo, bytes]]] = {}
@@ -368,7 +364,6 @@ class InMemoryAssetBackend:
             _etag(value),
             len(value),
             status,
-            self._root.digest,
             datetime.now(timezone.utc),
             normalize_storage_metadata(metadata),
         )
@@ -432,7 +427,6 @@ def _decode_entry(raw: object, root: AssetRoot) -> "tuple[AssetInfo, bytes]":
             str(raw["etag"]),
             int(raw["size"]),
             StorageEntryStatus(str(raw["status"])),
-            root.digest,
             datetime.fromisoformat(str(raw["modified_at"])),
             normalize_storage_metadata(raw.get("metadata")),
         )

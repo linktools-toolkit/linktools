@@ -248,7 +248,7 @@ class DefaultExecutionHistoryService:
                     tool_name=item.tool_name,
                     tool_call_id=item.tool_call_id,
                     content_included=False,
-                    segment_sequence=item.segment_sequence,
+                    agent_run_sequence=item.agent_run_sequence,
                     request_sequence=item.request_sequence,
                     tool_operation_id=item.tool_operation_id,
                     started_at=item.started_at,

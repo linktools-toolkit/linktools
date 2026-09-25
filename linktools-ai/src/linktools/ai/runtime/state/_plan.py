@@ -52,7 +52,7 @@ class RuntimeRetentionMode(str, Enum):
     TRANSIENT = "transient"
 
 
-class _RuntimeStateBackendKind(str, Enum):
+class _RuntimeStorageBackendKind(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
     MEMORY = "memory"
@@ -62,26 +62,26 @@ class _RuntimeStateBackendKind(str, Enum):
 
 
 @dataclass(frozen=True, slots=True, init=False)
-class RuntimeStateRoute:
-    _kind: _RuntimeStateBackendKind
+class RuntimeStorageRoute:
+    _kind: _RuntimeStorageBackendKind
     _retention: RuntimeRetentionMode
     _path: "Path | None"
     _transaction_root: "Path | None"
     _engine: "AsyncEngine | None"
 
     def __init__(self, *args: object, **kwargs: object) -> None:
-        raise TypeError("use RuntimeStateRoute factory methods")
+        raise TypeError("use RuntimeStorageRoute factory methods")
 
     @classmethod
     def _create(
         cls,
         *,
-        kind: _RuntimeStateBackendKind,
+        kind: _RuntimeStorageBackendKind,
         retention: RuntimeRetentionMode,
         path: "Path | None" = None,
         transaction_root: "Path | None" = None,
         engine: "AsyncEngine | None" = None,
-    ) -> "RuntimeStateRoute":
+    ) -> "RuntimeStorageRoute":
         value = object.__new__(cls)
         object.__setattr__(value, "_kind", kind)
         object.__setattr__(value, "_retention", retention)
@@ -94,14 +94,14 @@ class RuntimeStateRoute:
     def _validate(self) -> None:
         valid = (
             (
-                self._kind is _RuntimeStateBackendKind.MEMORY
+                self._kind is _RuntimeStorageBackendKind.MEMORY
                 and self._retention in {RuntimeRetentionMode.VOLATILE, RuntimeRetentionMode.TRANSIENT}
                 and self._path is None
                 and self._transaction_root is None
                 and self._engine is None
             )
             or (
-                self._kind is _RuntimeStateBackendKind.FILESYSTEM
+                self._kind is _RuntimeStorageBackendKind.FILESYSTEM
                 and self._retention is RuntimeRetentionMode.DURABLE
                 and self._path is not None
                 and self._engine is None
@@ -111,14 +111,14 @@ class RuntimeStateRoute:
                 )
             )
             or (
-                self._kind is _RuntimeStateBackendKind.SQLITE
+                self._kind is _RuntimeStorageBackendKind.SQLITE
                 and self._retention is RuntimeRetentionMode.DURABLE
                 and self._path is not None
                 and self._transaction_root is None
                 and self._engine is None
             )
             or (
-                self._kind is _RuntimeStateBackendKind.SQL
+                self._kind is _RuntimeStorageBackendKind.SQL
                 and self._retention is RuntimeRetentionMode.DURABLE
                 and self._path is None
                 and self._transaction_root is None
@@ -126,7 +126,7 @@ class RuntimeStateRoute:
             )
         )
         if not valid:
-            raise ValueError("RuntimeStateRoute has an invalid backend and retention combination")
+            raise ValueError("RuntimeStorageRoute has an invalid backend and retention combination")
 
     @property
     def kind(self) -> str:
@@ -149,12 +149,12 @@ class RuntimeStateRoute:
         return self._engine
 
     @classmethod
-    def memory(cls) -> "RuntimeStateRoute":
-        return cls._create(kind=_RuntimeStateBackendKind.MEMORY, retention=RuntimeRetentionMode.VOLATILE)
+    def memory(cls) -> "RuntimeStorageRoute":
+        return cls._create(kind=_RuntimeStorageBackendKind.MEMORY, retention=RuntimeRetentionMode.VOLATILE)
 
     @classmethod
-    def transient(cls) -> "RuntimeStateRoute":
-        return cls._create(kind=_RuntimeStateBackendKind.MEMORY, retention=RuntimeRetentionMode.TRANSIENT)
+    def transient(cls) -> "RuntimeStorageRoute":
+        return cls._create(kind=_RuntimeStorageBackendKind.MEMORY, retention=RuntimeRetentionMode.TRANSIENT)
 
     @classmethod
     def filesystem(
@@ -162,48 +162,48 @@ class RuntimeStateRoute:
         path: "str | Path",
         *,
         transaction_root: "str | Path | None" = None,
-    ) -> "RuntimeStateRoute":
+    ) -> "RuntimeStorageRoute":
         return cls._create(
-            kind=_RuntimeStateBackendKind.FILESYSTEM,
+            kind=_RuntimeStorageBackendKind.FILESYSTEM,
             retention=RuntimeRetentionMode.DURABLE,
             path=_normalize_path(path),
             transaction_root=None if transaction_root is None else _normalize_path(transaction_root),
         )
 
     @classmethod
-    def sqlite(cls, path: "str | Path") -> "RuntimeStateRoute":
+    def sqlite(cls, path: "str | Path") -> "RuntimeStorageRoute":
         if not isinstance(path, (str, Path)) or not str(path).strip() or str(path).strip() == ":memory:":
-            raise ValueError("RuntimeStateRoute.sqlite requires a filesystem path")
+            raise ValueError("RuntimeStorageRoute.sqlite requires a filesystem path")
         normalized = _normalize_path(path)
-        return cls._create(kind=_RuntimeStateBackendKind.SQLITE, retention=RuntimeRetentionMode.DURABLE, path=normalized)
+        return cls._create(kind=_RuntimeStorageBackendKind.SQLITE, retention=RuntimeRetentionMode.DURABLE, path=normalized)
 
     @classmethod
-    def sql(cls, engine: "AsyncEngine") -> "RuntimeStateRoute":
+    def sql(cls, engine: "AsyncEngine") -> "RuntimeStorageRoute":
         from sqlalchemy.ext.asyncio import AsyncEngine
 
         if not isinstance(engine, AsyncEngine):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL route requires an AsyncEngine")
         if engine.dialect.name == "sqlite" and engine.url.database in {None, "", ":memory:"}:
             raise ValueError("external SQL route requires durable SQLite or external SQL")
-        return cls._create(kind=_RuntimeStateBackendKind.SQL, retention=RuntimeRetentionMode.DURABLE, engine=engine)
+        return cls._create(kind=_RuntimeStorageBackendKind.SQL, retention=RuntimeRetentionMode.DURABLE, engine=engine)
 
 @dataclass(frozen=True, slots=True)
-class RuntimeStatePlan:
-    conversation: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
-    execution: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
-    memory: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
-    artifact: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
-    task: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
-    evaluation: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
+class RuntimeStoragePlan:
+    conversation: RuntimeStorageRoute = field(default_factory=RuntimeStorageRoute.memory)
+    execution: RuntimeStorageRoute = field(default_factory=RuntimeStorageRoute.memory)
+    memory: RuntimeStorageRoute = field(default_factory=RuntimeStorageRoute.memory)
+    artifact: RuntimeStorageRoute = field(default_factory=RuntimeStorageRoute.memory)
+    task: RuntimeStorageRoute = field(default_factory=RuntimeStorageRoute.memory)
+    evaluation: RuntimeStorageRoute = field(default_factory=RuntimeStorageRoute.memory)
 
     def __post_init__(self) -> None:
         routes = tuple(self.route(domain) for domain in RuntimeDomain)
-        if any(not isinstance(route, RuntimeStateRoute) for route in routes):
-            raise ValueError("RuntimeStatePlan contains an invalid route")
+        if any(not isinstance(route, RuntimeStorageRoute) for route in routes):
+            raise ValueError("RuntimeStoragePlan contains an invalid route")
         grouped: dict[Path, list[Path]] = {}
         for domain, route in zip(RuntimeDomain, routes):
             if (
-                route.kind != _RuntimeStateBackendKind.FILESYSTEM.value
+                route.kind != _RuntimeStorageBackendKind.FILESYSTEM.value
                 or route.transaction_root is None
             ):
                 continue
@@ -224,7 +224,7 @@ class RuntimeStatePlan:
                     if left in right.parents or right in left.parents:
                         raise ValueError("filesystem group member paths must be disjoint")
 
-    def route(self, domain: RuntimeDomain) -> RuntimeStateRoute:
+    def route(self, domain: RuntimeDomain) -> RuntimeStorageRoute:
         if not isinstance(domain, RuntimeDomain):
             raise TypeError("RuntimeDomain is required")
         return {
@@ -253,14 +253,14 @@ class RuntimeStatePlan:
 
 def _normalize_path(value: "str | Path") -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
-        raise ValueError("RuntimeStateRoute path is required")
+        raise ValueError("RuntimeStorageRoute path is required")
     return Path(value).expanduser().resolve(strict=False)
 
 
 __all__ = [
     "RuntimeDomain",
     "RuntimeRetentionMode",
-    "RuntimeStatePlan",
-    "RuntimeStateRoute",
+    "RuntimeStoragePlan",
+    "RuntimeStorageRoute",
     "runtime_domain_uses_object_store",
 ]

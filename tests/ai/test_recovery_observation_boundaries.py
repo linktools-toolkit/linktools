@@ -16,7 +16,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._event import DefaultEventService, LiveExecutionEventBroker
-from linktools.ai.task import TaskGraphSnapshot, TaskNode, TaskNodeView
+from linktools.ai.task import TaskGraphState, TaskNode, TaskNodeView
 
 
 class _Authorization:
@@ -143,7 +143,7 @@ async def test_durable_recovery_event_ends_restart_observation_cleanly() -> None
 
 
 class _RecoveryTaskGraphService:
-    async def snapshot(self, graph_id: str, *, principal: Principal):
+    async def state(self, graph_id: str, *, principal: Principal):
         assert graph_id == "graph"
         assert principal.tenant_id == "tenant"
         state = TaskNodeView(
@@ -159,7 +159,7 @@ class _RecoveryTaskGraphService:
             error_digest="a" * 64,
             execution_id="execution",
         )
-        return TaskGraphSnapshot(
+        return TaskGraphState(
             "graph",
             TaskStatus.RECOVERY_REQUIRED,
             (TaskNode("node"),),

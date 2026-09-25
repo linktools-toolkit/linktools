@@ -10,13 +10,13 @@ from ._correlation import (
 )
 from ._discovery import DEFAULT_DISCOVERY_POLICY
 from ._ids import (
-    canonical_identity_digest,
+    RUNTIME_OBJECT_STORE_ID,
     canonical_sha256,
     deterministic_id,
     idempotency_key_digest,
     principal_identity_payload,
-    step_conversation_id,
-    step_run_id,
+    agent_conversation_id,
+    agent_run_id,
 )
 from ._limits import PromptLimits
 from ._json import (
@@ -67,6 +67,7 @@ from ._validation import (
     validate_tenant_id,
     validate_tool_arguments,
     validate_user_prompt,
+    validate_logical_id,
 )
 from ._value import (
     ApprovalDecision,
@@ -126,6 +127,7 @@ __all__ = [
     "RedactedValue",
     "RedactionClass",
     "RedactionPolicy",
+    "RUNTIME_OBJECT_STORE_ID",
     "ResourceKind",
     "ResourceRef",
     "CorrelationData",
@@ -140,7 +142,6 @@ __all__ = [
     "ToolOperationStatus",
     "WorkspaceFileInput",
     "UsageMetrics",
-    "canonical_identity_digest",
     "canonical_json_bytes",
     "canonical_sha256",
     "canonical_string_tuple",
@@ -155,8 +156,8 @@ __all__ = [
     "overlay_correlation",
     "principal_identity_payload",
     "service_principal",
-    "step_conversation_id",
-    "step_run_id",
+    "agent_conversation_id",
+    "agent_run_id",
     "validate_agent_id",
     "validate_asset_kind",
     "validate_asset_namespace",
@@ -177,4 +178,5 @@ __all__ = [
     "validate_tenant_id",
     "validate_tool_arguments",
     "validate_user_prompt",
+    "validate_logical_id",
 ]

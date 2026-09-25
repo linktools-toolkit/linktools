@@ -6,21 +6,54 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.models.function import AgentInfo
 
+from linktools.ai.asset import (
+    AssetKey,
+    AssetStore,
+    DirectoryAssetBackend,
+    InMemoryAssetBackend,
+    PrefixAssetPathAdapter,
+)
+from linktools.ai.capability import CapabilityGroup
+from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import (
-    LocalRepositoryInstructionResolver,
-    LocalRuleCatalog,
+from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.spec import (
     RepositoryInstructionDocument,
     RepositoryInstructions,
+)
+from linktools.ai.storage import StorageOverlay
+from linktools.ai.workspace import (
+    LocalRepositoryInstructionResolver,
+    Workspace,
     WorkspacePolicy,
 )
+from . import _runtime_test_helpers as runtime_test_helpers
+
+
+async def _capture_rules(root: Path) -> RepositoryInstructions:
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root / "assets"),
+                path_adapter=PrefixAssetPathAdapter({"rule": "rules"}),
+                kinds=("rule",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        return (await CapabilityGroup("assets", assets=store).capture()).instructions
+    finally:
+        await store.close()
 
 
 def _resolver(root: Path, *, policy: WorkspacePolicy | None = None) -> LocalRepositoryInstructionResolver:
     selected = WorkspacePolicy() if policy is None else policy
-    catalog = asyncio.run(LocalRuleCatalog.load(root, selected))
-    return LocalRepositoryInstructionResolver(root, selected, catalog)
+    rules = asyncio.run(_capture_rules(root))
+    return LocalRepositoryInstructionResolver(root, selected, rules)
 
 
 def test_repository_instruction_bundle_is_canonical_and_strict() -> None:
@@ -39,10 +72,10 @@ def test_repository_instruction_bundle_is_canonical_and_strict() -> None:
         "agents:pkg/AGENTS.md",
     ]
     assert RepositoryInstructions.from_payload(bundle.to_payload()) == bundle
-    assert RepositoryInstructions(bundle.documents).digest == bundle.digest
+    assert RepositoryInstructions(bundle.documents) == bundle
     assert RepositoryInstructions(bundle.documents).render() == bundle.render()
-    assert RepositoryInstructionDocument("rule:base", ".", "root rule").digest != (
-        RepositoryInstructionDocument("rule:base", "pkg", "root rule").digest
+    assert RepositoryInstructionDocument("rule:base", ".", "root rule") != (
+        RepositoryInstructionDocument("rule:base", "pkg", "root rule")
     )
 
     payload = bundle.to_payload()
@@ -76,7 +109,7 @@ def test_repository_resolver_uses_target_ancestry_and_rules_before_agents(tmp_pa
     (tmp_path / "AGENTS.md").write_text("root-agent", encoding="utf-8")
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "AGENTS.md").write_text("nested-agent", encoding="utf-8")
-    rules = tmp_path / ".linktools" / "rules"
+    rules = tmp_path / "assets" / "rules"
     (rules / "python").mkdir(parents=True)
     (rules / "base.md").write_text("root-rule", encoding="utf-8")
     (rules / "python" / "strict.md").write_text(
@@ -175,21 +208,24 @@ def test_non_regular_agents_file_is_rejected_before_read(tmp_path: Path) -> None
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_rule_catalog_is_recursive_scoped_and_frozen(tmp_path: Path) -> None:
-    rules = tmp_path / ".linktools" / "rules"
+def test_rule_capture_is_recursive_scoped_and_frozen(tmp_path: Path) -> None:
+    rules = tmp_path / "assets" / "rules"
     (rules / "nested").mkdir(parents=True)
     base = rules / "base.md"
     strict = rules / "nested" / "strict.md"
     base.write_text("base-v1", encoding="utf-8")
-    strict.write_text("---\nscope: src\n---\nstrict", encoding="utf-8")
+    strict.write_text(
+        "---\nscope: src\nowner: security\nfuture-field: enabled\n---\nstrict",
+        encoding="utf-8",
+    )
 
     policy = WorkspacePolicy()
-    catalog = asyncio.run(LocalRuleCatalog.load(tmp_path, policy))
-    assert [(item.source, item.scope) for item in catalog.documents] == [
+    rules = asyncio.run(_capture_rules(tmp_path))
+    assert [(item.source, item.scope) for item in rules.documents] == [
         ("rule:base", "."),
         ("rule:nested/strict", "src"),
     ]
-    resolver = LocalRepositoryInstructionResolver(tmp_path, policy, catalog)
+    resolver = LocalRepositoryInstructionResolver(tmp_path, policy, rules)
     root = asyncio.run(resolver.resolve("."))
     nested = asyncio.run(resolver.resolve("src/pkg"))
     assert [item.source for item in root.documents] == ["rule:base"]
@@ -202,22 +238,22 @@ def test_rule_catalog_is_recursive_scoped_and_frozen(tmp_path: Path) -> None:
     assert fresh.documents[0].content == "base-v2"
 
 
-def test_rule_catalog_rejects_invalid_rule_shapes(tmp_path: Path) -> None:
-    rules = tmp_path / ".linktools" / "rules"
+def test_rule_capture_rejects_invalid_rule_content(tmp_path: Path) -> None:
+    rules = tmp_path / "assets" / "rules"
     rules.mkdir(parents=True)
-    (rules / "bad.md").mkdir()
-    with pytest.raises(AIError) as directory_error:
-        asyncio.run(LocalRuleCatalog.load(tmp_path, WorkspacePolicy()))
-    assert directory_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    (rules / "bad.md").write_bytes(b"\xff")
+    with pytest.raises(AIError) as content_error:
+        asyncio.run(_capture_rules(tmp_path))
+    assert content_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_rule_catalog_rejects_invalid_scope_and_outside_symlink(tmp_path: Path) -> None:
-    rules = tmp_path / ".linktools" / "rules"
+def test_rule_capture_rejects_invalid_scope_and_ignores_symlink(tmp_path: Path) -> None:
+    rules = tmp_path / "assets" / "rules"
     rules.mkdir(parents=True)
     rule = rules / "bad.md"
     rule.write_text("---\nscope: ../outside\n---\nbad", encoding="utf-8")
     with pytest.raises(AIError) as scope_error:
-        asyncio.run(LocalRuleCatalog.load(tmp_path, WorkspacePolicy()))
+        asyncio.run(_capture_rules(tmp_path))
     assert scope_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
     rule.unlink()
@@ -225,8 +261,91 @@ def test_rule_catalog_rejects_invalid_scope_and_outside_symlink(tmp_path: Path) 
     outside.write_text("outside", encoding="utf-8")
     try:
         rule.symlink_to(outside)
-        with pytest.raises(AIError) as symlink_error:
-            asyncio.run(LocalRuleCatalog.load(tmp_path, WorkspacePolicy()))
-        assert symlink_error.value.code is ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT
+        assert asyncio.run(_capture_rules(tmp_path)).documents == ()
     finally:
         outside.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_rule_assets_follow_capability_capture_and_reject_duplicate_sources() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        key = AssetKey("rule", "nested/review.md")
+        await store.put(key, b"---\nscope: src\n---\nfirst")
+        capture = await CapabilityGroup("rules", assets=store).capture()
+        assert capture.instructions.documents == (
+            RepositoryInstructionDocument("rule:nested/review", "src", "first"),
+        )
+
+        await store.put(key, b"---\nscope: src\n---\nsecond")
+        assert capture.instructions.documents[0].content == "first"
+        with pytest.raises(AIError) as stale_error:
+            await capture.verify_source_revision()
+        assert stale_error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+
+        fresh = await CapabilityGroup("rules", assets=store).capture()
+        assert fresh.instructions.documents[0].content == "second"
+        duplicate = RepositoryInstructionDocument("rule:duplicate", ".", "same")
+        with pytest.raises(AIError) as duplicate_error:
+            RepositoryInstructions((duplicate, duplicate))
+        assert duplicate_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_rule_asset_id_must_be_canonical() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        await store.put(AssetKey("rule", "../outside.md"), b"unsafe")
+        with pytest.raises(AIError) as error:
+            await CapabilityGroup("rules", assets=store).capture()
+        assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_reads_rules_from_asset_store_not_workspace_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = tmp_path / ".linktools" / "rules"
+    legacy.mkdir(parents=True)
+    (legacy / "legacy.md").write_text("legacy-rule", encoding="utf-8")
+
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    await store.put(AssetKey("rule", "base.md"), b"asset-rule")
+    observed: list[str] = []
+    original = runtime_test_helpers._runtime_usage_model
+
+    async def record_model(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> ModelResponse:
+        observed.append(repr(messages))
+        return await original(messages, info)
+
+    monkeypatch.setattr(runtime_test_helpers, "_runtime_usage_model", record_model)
+    try:
+        async with Runtime.open(
+            "rule-assets",
+            models=runtime_test_helpers.RuntimeUsageModels(),  # type: ignore[arg-type]
+            storage=RuntimeStorage.in_memory(),
+            capabilities=(
+                CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),
+                CapabilityGroup("rules", assets=store),
+            ),
+        ) as runtime:
+            result = await runtime.agent("default").run("hello", timeout_seconds=10)
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert any("asset-rule" in request for request in observed)
+        assert all("legacy-rule" not in request for request in observed)
+    finally:
+        await store.close()

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -22,7 +22,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ListExecutionRequest, RuntimeHistory
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     ExecutionCandidate,
     ExecutionCandidatePage,
@@ -93,11 +93,11 @@ class _CandidateRepository:
         return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
 
 
-def _binding(agent_id: str) -> AgentBindingSnapshot:
+def _binding(agent_id: str) -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec(agent_id, model="model"),
-        base_model={"route_id": "model", "model_identity": "test:model"},
+        model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -111,8 +111,8 @@ def _record(
     agent_id: str,
     session_id: str | None = None,
     parent_execution_id: str | None = None,
-    source_execution_id: str | None = None,
-    base_execution_id: str | None = None,
+    previous_execution_id: str | None = None,
+    fork_base_execution_id: str | None = None,
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     is_child = parent_execution_id is not None
@@ -121,8 +121,8 @@ def _record(
         session_id=session_id,
         parent_execution_id=parent_execution_id,
         root_execution_id="exec-001" if is_child else execution_id,
-        source_execution_id=source_execution_id,
-        base_execution_id=base_execution_id,
+        previous_execution_id=previous_execution_id,
+        fork_base_execution_id=fork_base_execution_id,
         lineage_kind=(
             ExecutionLineageKind.SUBAGENT
             if is_child
@@ -172,7 +172,7 @@ async def test_execution_service_list_delegates_public_query_request() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_list_applies_tenant_filters_and_direct_parent() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="execution-query", tenant_id="tenant")
     try:
         records = (
@@ -188,8 +188,8 @@ async def test_execution_list_applies_tenant_filters_and_direct_parent() -> None
             _record(
                 "exec-005",
                 agent_id="agent-a",
-                source_execution_id="exec-001",
-                base_execution_id="exec-001",
+                previous_execution_id="exec-001",
+                fork_base_execution_id="exec-001",
             ),
         )
         for record in records:
@@ -241,7 +241,7 @@ async def test_execution_list_applies_tenant_filters_and_direct_parent() -> None
 
 @pytest.mark.asyncio
 async def test_execution_list_cursor_binds_identity_and_continues_without_repeat() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="execution-cursor", tenant_id="tenant")
     try:
         records = tuple(
@@ -296,7 +296,7 @@ async def test_execution_list_cursor_binds_identity_and_continues_without_repeat
 
 @pytest.mark.asyncio
 async def test_execution_list_skips_unauthorized_candidates() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="execution-auth", tenant_id="tenant")
     try:
         for index in range(1, 4):
@@ -322,7 +322,7 @@ async def test_execution_list_skips_unauthorized_candidates() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_list_skips_new_records_before_cursor() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="execution-weak-consistency", tenant_id="tenant")
     try:
         for execution_id in ("exec-001", "exec-002", "exec-003"):
@@ -349,7 +349,7 @@ async def test_execution_list_skips_new_records_before_cursor() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_list_exact_physical_boundary_has_no_false_cursor() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="execution-boundary", tenant_id="tenant")
     try:
         for index in range(1000):
@@ -377,7 +377,7 @@ async def test_execution_list_exact_physical_boundary_has_no_false_cursor() -> N
 
 @pytest.mark.asyncio
 async def test_runtime_and_history_execution_queries_share_projection() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="execution-parity", tenant_id="tenant")
     try:
         record = _record(

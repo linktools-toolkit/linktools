@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Thread-safe model registry and immutable snapshots."""
+"""Thread-safe model registry and immutable resolver captures."""
 
 from collections.abc import Callable, Mapping
 from threading import RLock
@@ -112,12 +112,12 @@ class ModelRegistry:
                 del self._bindings[route_id]
                 _logger.info("model binding removed: route=%s", route_id)
 
-    def snapshot(self) -> ModelResolver:
+    def capture(self) -> ModelResolver:
         with self._lock:
-            return _ModelRegistrySnapshot(MappingProxyType(dict(self._bindings)))
+            return _CapturedModelResolver(MappingProxyType(dict(self._bindings)))
 
 
-class _ModelRegistrySnapshot:
+class _CapturedModelResolver:
     def __init__(self, bindings: "Mapping[str, ModelBinding]") -> None:
         self._bindings = bindings
 
@@ -138,8 +138,8 @@ class _ModelRegistrySnapshot:
         binding = self._bindings.get(route_id)
         if binding is None:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        if dict(binding.semantic_payload) != dict(payload):
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        if dict(binding.contract) != dict(payload):
+            raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
         return binding
 
 
@@ -175,12 +175,8 @@ class _ModelAliasBinding:
         return self._target.vision
 
     @property
-    def semantic_payload(self) -> Mapping[str, JsonValue]:
-        return self._target.semantic_payload
-
-    @property
-    def fingerprint(self) -> str:
-        return self._target.fingerprint
+    def contract(self) -> Mapping[str, JsonValue]:
+        return self._target.contract
 
     def materialize(self) -> Model:
         return self._target.materialize()

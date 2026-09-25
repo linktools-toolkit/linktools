@@ -142,7 +142,7 @@ def test_asset_path_adapter_and_config_are_available() -> None:
 @pytest.mark.asyncio
 async def test_local_directory_asset_backend_maps_single_files(tmp_path: Path) -> None:
     backend = DirectoryAssetBackend(
-        AssetRoot("file", str(tmp_path), "directory"),
+        AssetRoot("file", str(tmp_path)),
         path_adapter=_MappedPathAdapter(),
     )
     await backend.initialize()
@@ -165,9 +165,9 @@ async def test_local_directory_asset_layer_stat_has_integer_revision(tmp_path: P
     path = tmp_path / "mapped" / "mcp" / "one.json"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"one")
-    primary = InMemoryAssetBackend(AssetRoot("memory", "primary", "primary"))
+    primary = InMemoryAssetBackend(AssetRoot("memory", "primary"))
     builtin = DirectoryAssetBackend(
-        AssetRoot("file", str(tmp_path), "directory"),
+        AssetRoot("file", str(tmp_path)),
         path_adapter=_MappedPathAdapter(),
     )
     store = AssetStore(
@@ -576,7 +576,6 @@ def test_sql_asset_info_v1_rejects_future_and_coerced_versions() -> None:
         "a" * 64,
         0,
         StorageEntryStatus.NORMAL,
-        "root",
         datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     payload = asset_sql._info_data(info)
@@ -671,6 +670,9 @@ async def test_asset_snapshot_uses_v1_manifest_and_object_namespace() -> None:
         await restored.initialize()
         try:
             assert await restored.get(key) == b"value"
+            version = (await restored.resolve_versions((key,)))[0]
+            assert version.layer_id == "snapshot"
+            assert await restored.read_versions((version,)) == (b"value",)
         finally:
             await restored.close()
     finally:

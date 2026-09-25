@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """Adapt one opened workspace session to Pydantic AI tools."""
 
-import asyncio
 import hashlib
 import mimetypes
 from collections.abc import Awaitable, Mapping, Sequence
-from pathlib import Path
+from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, TypeVar, cast
 
 from linktools.core import environ
@@ -18,96 +18,134 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ..workspace import (
-    LocalSandbox,
     Sandbox,
     SandboxOperationRejected,
     SandboxSession,
     Workspace,
     WorkspacePolicy,
-    normalize_workspace_path,
 )
 from ._context import AgentContext
 from ._tool_signal import ToolCallRetry
-from ._tool_semantic import tool_effect_from_metadata, tool_semantic_metadata
+from ._tool_metadata import tool_effect_policy_from_metadata, tool_metadata
 
 _ResultT = TypeVar("_ResultT")
 
-_WORKSPACE_TOOL_DECLARATIONS: dict[str, Mapping[str, object]] = {
-    "attach_files": tool_semantic_metadata(
-        effect="none",
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceToolDeclaration:
+    """Immutable metadata declaration for one Workspace tool."""
+
+    name: str
+    metadata: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        immutable_metadata = _immutable_tool_metadata(self.metadata)
+        object.__setattr__(self, "metadata", MappingProxyType(immutable_metadata))
+
+
+def _immutable_tool_metadata(
+    metadata: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        key: tuple(value) if isinstance(value, list) else value
+        for key, value in metadata.items()
+    }
+
+
+def _runtime_tool_metadata(
+    declaration: WorkspaceToolDeclaration,
+) -> dict[str, object]:
+    metadata = dict(declaration.metadata)
+    path_fields = metadata.get("linktools.ai.path_fields")
+    if isinstance(path_fields, tuple):
+        metadata["linktools.ai.path_fields"] = list(path_fields)
+    return metadata
+
+
+_WORKSPACE_TOOL_DECLARATIONS = (
+    WorkspaceToolDeclaration("attach_files", tool_metadata(
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("paths",),
-    ),
-    "create_directory": tool_semantic_metadata(
-        effect="non_replay_safe",
+    )),
+    WorkspaceToolDeclaration("create_directory", tool_metadata(
+        effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
-    ),
-    "edit_file": tool_semantic_metadata(
-        effect="non_replay_safe",
+    )),
+    WorkspaceToolDeclaration("edit_file", tool_metadata(
+        effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
-    ),
-    "file_info": tool_semantic_metadata(
-        effect="none",
+    )),
+    WorkspaceToolDeclaration("file_info", tool_metadata(
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
-    ),
-    "find_files": tool_semantic_metadata(
-        effect="none",
+    )),
+    WorkspaceToolDeclaration("find_files", tool_metadata(
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
-    ),
-    "list_directory": tool_semantic_metadata(
-        effect="none",
+    )),
+    WorkspaceToolDeclaration("list_directory", tool_metadata(
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
-    ),
-    "read_file": tool_semantic_metadata(
-        effect="none",
+    )),
+    WorkspaceToolDeclaration("read_file", tool_metadata(
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
         context_dedupe="workspace_file_read_v1",
-    ),
-    "search_files": tool_semantic_metadata(
-        effect="none",
+    )),
+    WorkspaceToolDeclaration("search_files", tool_metadata(
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
-    ),
-    "write_file": tool_semantic_metadata(
-        effect="non_replay_safe",
+    )),
+    WorkspaceToolDeclaration("write_file", tool_metadata(
+        effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
-    ),
-    "check_command": tool_semantic_metadata(
-        effect="none",
+    )),
+    WorkspaceToolDeclaration("check_command", tool_metadata(
+        effect_policy="none",
         plan_safe=True,
         tool_class="shell",
-    ),
-    "run_command": tool_semantic_metadata(
-        effect="non_replay_safe",
+    )),
+    WorkspaceToolDeclaration("run_command", tool_metadata(
+        effect_policy="non_replay_safe",
         tool_class="shell",
-    ),
-    "start_command": tool_semantic_metadata(
-        effect="non_replay_safe",
+    )),
+    WorkspaceToolDeclaration("start_command", tool_metadata(
+        effect_policy="non_replay_safe",
         tool_class="shell",
-    ),
-    "stop_command": tool_semantic_metadata(
-        effect="non_replay_safe",
+    )),
+    WorkspaceToolDeclaration("stop_command", tool_metadata(
+        effect_policy="non_replay_safe",
         tool_class="shell",
-    ),
+    )),
+)
+_WORKSPACE_TOOL_DECLARATIONS_BY_NAME = {
+    declaration.name: declaration
+    for declaration in _WORKSPACE_TOOL_DECLARATIONS
 }
 _EFFECTFUL_WORKSPACE_TOOLS = frozenset(
     {
-        name
-        for name, metadata in _WORKSPACE_TOOL_DECLARATIONS.items()
-        if tool_effect_from_metadata(metadata, require=True) != "none"
+        declaration.name
+        for declaration in _WORKSPACE_TOOL_DECLARATIONS
+        if tool_effect_policy_from_metadata(
+            _runtime_tool_metadata(declaration),
+            require=True,
+        )
+        != "none"
     }
 )
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
@@ -213,59 +251,6 @@ _INVALID_WORKSPACE_REQUESTS = {
         "returned by start_command."
     ),
 }
-
-
-class WorkspaceAccess:
-    """Own one lazy SandboxSession for durable path and byte access."""
-
-    def __init__(
-        self,
-        sandbox: Sandbox,
-        *,
-        root: Path,
-        session: SandboxSession | None = None,
-    ) -> None:
-        self._sandbox = sandbox
-        self._root = root
-        self._session = session
-        self._lock = asyncio.Lock()
-        self._closed = False
-
-    @classmethod
-    def for_workspace(cls, workspace: Workspace) -> "WorkspaceAccess":
-        sandbox = workspace.sandbox if workspace.sandbox is not None else LocalSandbox()
-        return cls(sandbox, root=workspace.root)
-
-    async def _ensure_session(self) -> SandboxSession:
-        async with self._lock:
-            if self._closed:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            if self._session is None:
-                self._session = await self._sandbox.open(root=self._root)
-            return self._session
-
-    async def canonicalize_path(self, path: str) -> str:
-        session = await self._ensure_session()
-        return normalize_workspace_path(await session.canonicalize_path(path))
-
-    async def read_bytes(
-        self,
-        path: str,
-        *,
-        max_bytes: int | None = None,
-    ) -> bytes:
-        session = await self._ensure_session()
-        return await session.read_bytes(path, max_bytes=max_bytes)
-
-    async def close(self) -> None:
-        async with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            session = self._session
-            self._session = None
-        if session is not None:
-            await session.close()
 
 
 class _WorkspaceToolSurface:
@@ -749,7 +734,7 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
                 _workspace_tool(
                     surface,
                     name,
-                    _WORKSPACE_TOOL_DECLARATIONS[name],
+                    _runtime_tool_metadata(_declaration_for(name)),
                 )
             )
 
@@ -788,9 +773,27 @@ def _workspace_tool_definitions(workspace: Workspace) -> tuple[Tool[Any], ...]:
     """Return stable Workspace tool definitions before execution materialization."""
     surface = _WorkspaceToolSurface(None, workspace.policy, PromptLimits())
     return tuple(
-        _workspace_tool(surface, name, metadata)
-        for name, metadata in _WORKSPACE_TOOL_DECLARATIONS.items()
+        _workspace_tool(
+            surface,
+            declaration.name,
+            _runtime_tool_metadata(declaration),
+        )
+        for declaration in workspace_tool_declarations()
     )
+
+
+def workspace_tool_declarations() -> tuple[WorkspaceToolDeclaration, ...]:
+    """Return the canonical Workspace tool declarations in name order."""
+    return tuple(
+        sorted(_WORKSPACE_TOOL_DECLARATIONS, key=lambda item: item.name)
+    )
+
+
+def _declaration_for(name: str) -> WorkspaceToolDeclaration:
+    try:
+        return _WORKSPACE_TOOL_DECLARATIONS_BY_NAME[name]
+    except KeyError as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
 
 
 def workspace_capabilities(
@@ -806,7 +809,7 @@ def workspace_capabilities(
     if not isinstance(selected_limits, PromptLimits):
         raise TypeError("limits must be PromptLimits")
     selected = frozenset(selected_tool_names)
-    unknown = selected.difference(_WORKSPACE_TOOL_DECLARATIONS)
+    unknown = selected.difference(_WORKSPACE_TOOL_DECLARATIONS_BY_NAME)
     if unknown:
         raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
     if not selected:
@@ -814,7 +817,7 @@ def workspace_capabilities(
     if session is None:
         raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
     ordered = tuple(
-        name for name in _WORKSPACE_TOOL_DECLARATIONS if name in selected
+        item.name for item in workspace_tool_declarations() if item.name in selected
     )
     _logger.debug(
         "workspace capability materialized: tools=%s session_open=%s",
@@ -878,6 +881,7 @@ def _workspace_tool_rejected(
 
 
 __all__ = [
-    "WorkspaceAccess",
+    "WorkspaceToolDeclaration",
+    "workspace_tool_declarations",
     "workspace_capabilities",
 ]

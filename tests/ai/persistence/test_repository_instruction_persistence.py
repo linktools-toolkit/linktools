@@ -5,9 +5,11 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from linktools.ai.agent import AgentBindingSnapshot, SemanticPin
+from linktools.ai.agent import AgentBindingContract, CapabilityPin
 from linktools.ai.agent._output import bind_output
-from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, canonical_sha256
+from linktools.ai.asset import AssetKey, AssetVersionRef
+from linktools.ai.capability import SkillDefinition, SkillResourceVersion, SkillSourceRef
+from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
@@ -25,15 +27,15 @@ from linktools.ai.runtime.state._contracts import (
     RuntimePayloadRef,
     StoredUserInput,
 )
-from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import ObjectRef, StoredPayload
+from linktools.ai.spec import AgentSpec, SkillSpec
+from linktools.ai.storage import ObjectRef, StorageEntryRevision, StoredPayload
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="model"),
-        base_model={"route_id": "model", "model_identity": "test:model"},
+        model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -59,8 +61,8 @@ def _execution(repository_instructions: RuntimePayloadRef | None) -> ExecutionRe
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.PENDING_START,
         revision=0,
@@ -103,7 +105,7 @@ def _checkpoint(pending_tools: PendingToolContinuation | None) -> RecoveryCheckp
     waiting = pending_tools is not None
     return RecoveryCheckpoint(
         execution_id="execution",
-        step_run_id="step-1" if waiting else None,
+        agent_run_id="step-1" if waiting else None,
         state=(
             RecoveryCheckpointState.WAITING
             if waiting
@@ -127,33 +129,36 @@ def test_instruction_aware_execution_round_trips_exact_pin() -> None:
     assert decoded.repository_instructions == reference
 
 
-def test_object_ref_traversal_allows_additive_skill_snapshot_fields() -> None:
-    reference = ObjectRef("runtime", "skill/snapshot", "c" * 64, 23)
+def test_object_ref_traversal_allows_additive_skill_asset_fields() -> None:
+    reference = _instruction_ref(object_backed=True)
     output = bind_output()
-    contract = {
-        "version": 1,
-        "id": "review",
-        "content": "review instructions",
-        "source": {
-            "source_id": "application",
-            "root": "review",
-            "snapshot": {
-                "key": reference.key,
-                "digest": reference.digest,
-                "size": reference.size,
-                "future_metadata": {"version": 2},
-            },
-        },
-    }
-    binding = AgentBindingSnapshot(
+    asset = AssetVersionRef(
+        AssetKey("skill", "review/guide.md"),
+        "application",
+        StorageEntryRevision(1),
+        "a" * 64,
+        23,
+    )
+    contract = SkillDefinition(
+        SkillSpec("review", "review instructions"),
+        SkillSourceRef(
+            "application",
+            "review",
+            (SkillResourceVersion("guide.md", asset),),
+        ),
+    ).contract
+    source = contract["source"]
+    assert isinstance(source, dict)
+    source["future_metadata"] = {"version": 2}
+    binding = AgentBindingContract(
         agent_spec=AgentSpec("agent", model="model"),
-        base_model={"route_id": "model", "model_identity": "test:model"},
-        selected=(SemanticPin("skill", "review", contract),),
+        model_contract={"route_id": "model", "model_identity": "test:model"},
+        selected=(CapabilityPin("skill", "review", contract),),
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
     )
-    execution = replace(_execution(None), binding=binding)
+    execution = replace(_execution(reference), binding=binding)
 
     refs = tuple(
         iter_runtime_object_refs(
@@ -162,7 +167,7 @@ def test_object_ref_traversal_allows_additive_skill_snapshot_fields() -> None:
         )
     )
 
-    assert refs == ((RuntimeDomain.EXECUTION, reference),)
+    assert refs == ((RuntimeDomain.EXECUTION, reference.payload.ref),)
 
 
 def test_deferred_frontier_round_trips_current_contract() -> None:

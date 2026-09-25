@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared Tool metadata keys and strict semantic parsing."""
+"""Shared Tool metadata keys and strict metadata parsing."""
 
 from collections.abc import Mapping, Sequence
 from typing import Literal, cast
 
 from ..errors import AIError, ErrorCode
 
-TOOL_EFFECT_METADATA_KEY = "linktools.ai.effect"
+TOOL_EFFECT_POLICY_METADATA_KEY = "linktools.ai.effect_policy"
 TOOL_PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 TOOL_CLASS_METADATA_KEY = "linktools.ai.tool_class"
 TOOL_PATH_FIELDS_METADATA_KEY = "linktools.ai.path_fields"
@@ -16,7 +16,7 @@ TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY = (
 )
 TOOL_CONTEXT_DEDUPE_METADATA_KEY = "linktools.ai.context_dedupe"
 
-ToolEffect = Literal["none", "replay_safe", "non_replay_safe"]
+ToolEffectPolicy = Literal["none", "replay_safe", "non_replay_safe"]
 ToolClass = Literal[
     "business",
     "filesystem.read",
@@ -37,9 +37,9 @@ _TOOL_CLASSES = {
 _TOOL_CONTEXT_DEDUPE = "workspace_file_read_v1"
 
 
-def tool_semantic_metadata(
+def tool_metadata(
     *,
-    effect: ToolEffect | None = None,
+    effect_policy: ToolEffectPolicy | None = None,
     plan_safe: bool | None = None,
     tool_class: ToolClass | None = None,
     path_fields: Sequence[str] | None = None,
@@ -49,8 +49,8 @@ def tool_semantic_metadata(
 ) -> dict[str, object]:
     """Build Tool metadata while preserving unrelated upstream metadata."""
     metadata = {} if base is None else dict(base)
-    if effect is not None:
-        metadata[TOOL_EFFECT_METADATA_KEY] = effect
+    if effect_policy is not None:
+        metadata[TOOL_EFFECT_POLICY_METADATA_KEY] = effect_policy
     if plan_safe is not None:
         metadata[TOOL_PLAN_SAFE_METADATA_KEY] = plan_safe
     if tool_class is not None:
@@ -65,29 +65,29 @@ def tool_semantic_metadata(
         )
     if context_dedupe is not None:
         metadata[TOOL_CONTEXT_DEDUPE_METADATA_KEY] = context_dedupe
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     return metadata
 
 
-def validate_tool_semantic_metadata(
+def validate_tool_metadata(
     metadata: Mapping[str, object] | None,
     *,
-    require_effect: bool = False,
+    require_effect_policy: bool = False,
     require_tool_class: bool = False,
 ) -> None:
     """Validate LinkTools Tool metadata without coercing any value."""
     if metadata is None:
-        if require_effect or require_tool_class:
+        if require_effect_policy or require_tool_class:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return
     if not isinstance(metadata, Mapping):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
-    effect = metadata.get(TOOL_EFFECT_METADATA_KEY)
-    if effect is not None or TOOL_EFFECT_METADATA_KEY in metadata:
-        if not isinstance(effect, str) or effect not in _TOOL_EFFECTS:
+    effect_policy = metadata.get(TOOL_EFFECT_POLICY_METADATA_KEY)
+    if effect_policy is not None or TOOL_EFFECT_POLICY_METADATA_KEY in metadata:
+        if not isinstance(effect_policy, str) or effect_policy not in _TOOL_EFFECTS:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    elif require_effect:
+    elif require_effect_policy:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
     for key in (
@@ -106,7 +106,7 @@ def validate_tool_semantic_metadata(
 
     path_fields = metadata.get(TOOL_PATH_FIELDS_METADATA_KEY)
     if path_fields is not None or TOOL_PATH_FIELDS_METADATA_KEY in metadata:
-        if not isinstance(path_fields, list):
+        if not isinstance(path_fields, (list, tuple)):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if any(
             not isinstance(field, str) or not field
@@ -122,18 +122,22 @@ def validate_tool_semantic_metadata(
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
-def tool_effect_from_metadata(
+def tool_effect_policy_from_metadata(
     metadata: Mapping[str, object] | None,
     *,
     require: bool = False,
-) -> ToolEffect | None:
-    validate_tool_semantic_metadata(metadata, require_effect=require)
-    value = None if metadata is None else metadata.get(TOOL_EFFECT_METADATA_KEY)
-    return cast("ToolEffect | None", value)
+) -> ToolEffectPolicy | None:
+    validate_tool_metadata(metadata, require_effect_policy=require)
+    value = (
+        None
+        if metadata is None
+        else metadata.get(TOOL_EFFECT_POLICY_METADATA_KEY)
+    )
+    return cast("ToolEffectPolicy | None", value)
 
 
 def tool_plan_safe_from_metadata(metadata: Mapping[str, object] | None) -> bool:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = None if metadata is None else metadata.get(TOOL_PLAN_SAFE_METADATA_KEY)
     return False if value is None else cast(bool, value)
 
@@ -141,7 +145,7 @@ def tool_plan_safe_from_metadata(metadata: Mapping[str, object] | None) -> bool:
 def tool_class_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> ToolClass | None:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = None if metadata is None else metadata.get(TOOL_CLASS_METADATA_KEY)
     return cast("ToolClass | None", value)
 
@@ -149,15 +153,15 @@ def tool_class_from_metadata(
 def tool_path_fields_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> tuple[str, ...]:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = None if metadata is None else metadata.get(TOOL_PATH_FIELDS_METADATA_KEY)
-    return () if value is None else tuple(cast(list[str], value))
+    return () if value is None else tuple(cast(Sequence[str], value))
 
 
 def tool_compaction_keep_result_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> bool:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = (
         None
         if metadata is None
@@ -169,7 +173,7 @@ def tool_compaction_keep_result_from_metadata(
 def tool_context_dedupe_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> ToolContextDedupe | None:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = (
         None
         if metadata is None
@@ -182,18 +186,18 @@ __all__ = [
     "TOOL_CLASS_METADATA_KEY",
     "TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY",
     "TOOL_CONTEXT_DEDUPE_METADATA_KEY",
-    "TOOL_EFFECT_METADATA_KEY",
+    "TOOL_EFFECT_POLICY_METADATA_KEY",
     "TOOL_PATH_FIELDS_METADATA_KEY",
     "TOOL_PLAN_SAFE_METADATA_KEY",
     "ToolClass",
     "ToolContextDedupe",
-    "ToolEffect",
+    "ToolEffectPolicy",
     "tool_class_from_metadata",
     "tool_compaction_keep_result_from_metadata",
     "tool_context_dedupe_from_metadata",
-    "tool_effect_from_metadata",
+    "tool_effect_policy_from_metadata",
     "tool_path_fields_from_metadata",
     "tool_plan_safe_from_metadata",
-    "tool_semantic_metadata",
-    "validate_tool_semantic_metadata",
+    "tool_metadata",
+    "validate_tool_metadata",
 ]

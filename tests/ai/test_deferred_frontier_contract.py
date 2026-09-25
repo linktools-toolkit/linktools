@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
+from linktools.ai.runtime._capabilities import _RuntimeAgentRunPersistence
 from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -22,7 +22,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import DeferredToolRequests, RunContext
 from pydantic_ai.usage import RunUsage
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _Bridge:
@@ -59,28 +59,28 @@ class _Bridge:
 
 class _Store:
     def __init__(self) -> None:
-        self.snapshots: list[object] = []
+        self.checkpoints: list[object] = []
 
-    async def register_run(self, record: object, *, execution_id: str | None = None) -> None:
+    async def register_agent_run(self, record: object, *, execution_id: str | None = None) -> None:
         del record, execution_id
 
-    async def save_snapshot(
+    async def save_checkpoint(
         self,
-        snapshot: object,
+        checkpoint: object,
         *,
         execution_id: str | None = None,
     ) -> None:
         del execution_id
-        self.snapshots.append(snapshot)
+        self.checkpoints.append(checkpoint)
 
-    async def latest_snapshot(
-        self, *, run_id: str, include_interrupted: bool = False
+    async def latest_checkpoint(
+        self, *, agent_run_id: str, include_interrupted: bool = False
     ) -> object | None:
-        del run_id, include_interrupted
-        return self.snapshots[-1] if self.snapshots else None
+        del agent_run_id, include_interrupted
+        return self.checkpoints[-1] if self.checkpoints else None
 
-    async def list_events(self, *, run_id: str) -> list[object]:
-        del run_id
+    async def list_events(self, *, agent_run_id: str) -> list[object]:
+        del agent_run_id
         return []
 
     async def append_event(
@@ -106,14 +106,14 @@ def _context() -> RunContext[None]:
 async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() -> None:
     store = _Store()
     captured: list[int] = []
-    persistence = _RuntimeStepPersistence(
+    persistence = _RuntimeAgentRunPersistence(
         capture=RuntimeCaptureStore(
             store,  # type: ignore[arg-type]
             execution_id=None,
-            step_run_id="run",
+            agent_run_id="run",
         ),
         agent_name="agent",
-        run_id="run",
+        agent_run_id="run",
         deferred_pause_sink=captured.append,
     )
     node_result = object()
@@ -141,22 +141,22 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
     assert await persistence.after_run(ctx, result=result) is result  # type: ignore[arg-type]
 
     assert captured == [7]
-    assert len(store.snapshots) == 1
-    snapshot = store.snapshots[0]
-    assert getattr(snapshot, "state") == "interrupted"
-    assert getattr(snapshot, "step_index") == 7
+    assert len(store.checkpoints) == 1
+    checkpoint = store.checkpoints[0]
+    assert getattr(checkpoint, "state") == "interrupted"
+    assert getattr(checkpoint, "step_index") == 7
 
 
 @pytest.mark.asyncio
 async def test_runtime_step_persistence_requires_pause_sink_for_native_deferred() -> None:
-    persistence = _RuntimeStepPersistence(
+    persistence = _RuntimeAgentRunPersistence(
         capture=RuntimeCaptureStore(
             _Store(),  # type: ignore[arg-type]
             execution_id=None,
-            step_run_id="run",
+            agent_run_id="run",
         ),
         agent_name="agent",
-        run_id="run",
+        agent_run_id="run",
     )
     persistence._last_observed_step_index = 3
     result = SimpleNamespace(
@@ -180,11 +180,11 @@ async def test_ask_boundary_defers_before_runtime_operation() -> None:
 
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
-        effect="none",
+        effect_policy="none",
         tool_class="filesystem.read",
     )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(read_file, descriptor)]),),
+        (FunctionToolset([tool_with_metadata(read_file, descriptor)]),),
         {
             "read_file": descriptor
         },

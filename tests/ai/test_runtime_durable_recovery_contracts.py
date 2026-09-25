@@ -23,7 +23,7 @@ from linktools.ai.runtime import (
 from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.storage import StoredPayload
-from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphSnapshot, TaskNode, TaskNodeView
+from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphState, TaskNode, TaskNodeView
 
 
 def _node(
@@ -87,14 +87,14 @@ def test_recovery_required_graph_status_precedes_failed_nodes() -> None:
         ),
     )
 
-    snapshot = TaskGraphSnapshot(
+    graph_state = TaskGraphState(
         "graph",
         TaskStatus.RECOVERY_REQUIRED,
         nodes,
         states,
     )
 
-    assert snapshot.status is TaskStatus.RECOVERY_REQUIRED
+    assert graph_state.status is TaskStatus.RECOVERY_REQUIRED
 
 
 def test_recovered_pending_event_preserves_execution_and_fence() -> None:
@@ -237,7 +237,7 @@ def test_execution_recovery_contracts_validate_identity() -> None:
     effect = ExecutionRecoveryEffect(
         operation_id="operation",
         execution_id="execution",
-        step_run_id="step",
+        agent_run_id="step",
         tool_call_id="call",
         tool_name="write_file",
         fence=2,

@@ -25,7 +25,7 @@ from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from ..core import JsonValue, canonical_sha256
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.model.openai")
@@ -76,7 +76,7 @@ class _OpenAIModelBinding:
         return f"openai:{self.model}"
 
     @property
-    def semantic_payload(self) -> "dict[str, JsonValue]":
+    def contract(self) -> "dict[str, JsonValue]":
         settings: dict[str, JsonValue] = {}
         if self.max_tokens is not None:
             settings["max_tokens"] = self.max_tokens
@@ -86,10 +86,6 @@ class _OpenAIModelBinding:
             "vision": self.vision,
             "settings": settings,
         }
-
-    @property
-    def fingerprint(self) -> str:
-        return canonical_sha256({"contract": "model-v1", **self.semantic_payload})
 
     def materialize(self) -> Model:
         connection = _resolved_connection(self)

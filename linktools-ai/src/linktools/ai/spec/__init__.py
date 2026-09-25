@@ -10,6 +10,7 @@ from ._codec import (
     SkillSpecCodec,
     SpecCodec,
 )
+from ._agent_markdown import AgentMarkdownSpecCodec
 from ._contract import (
     AgentSpec,
     AgentUsageLimits,
@@ -20,28 +21,45 @@ from ._contract import (
     ThinkingValue,
     canonical_selectors,
     normalize_thinking,
+    mcp_server_selector,
+    mcp_tool_selector,
     parse_mcp_tool_selector,
 )
+from ..core import validate_logical_id
+from ._instructions import (
+    AssetRuleInstructionResolver,
+    DEFAULT_REPOSITORY_INSTRUCTION_BYTES,
+    DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS,
+    RepositoryInstructionDocument,
+    RepositoryInstructionResolver,
+    RepositoryInstructions,
+)
 from ._identity import (
-    agent_spec_identity_payload,
-    bound_agent_spec_identity_payload,
-    binding_identity_payload,
-    capability_identity_payload,
+    agent_ref_payload,
+    binding_digest_payload,
+    capability_ref_payload,
 )
 from ._schema import canonicalize_json_schema, canonicalize_pydantic_model_schema
 
 __all__ = [
     "AgentSpec",
     "AgentSpecCodec",
+    "AgentMarkdownSpecCodec",
     "AgentUsageLimits",
-    "agent_spec_identity_payload",
-    "bound_agent_spec_identity_payload",
-    "binding_identity_payload",
+    "AssetRuleInstructionResolver",
+    "DEFAULT_REPOSITORY_INSTRUCTION_BYTES",
+    "DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS",
+    "agent_ref_payload",
+    "binding_digest_payload",
     "canonicalize_json_schema",
     "canonicalize_pydantic_model_schema",
-    "capability_identity_payload",
+    "validate_logical_id",
+    "capability_ref_payload",
     "MCPServerSpec",
     "MCPServerSpecCodec",
+    "RepositoryInstructionDocument",
+    "RepositoryInstructionResolver",
+    "RepositoryInstructions",
     "SkillMarkdownSpecAdapter",
     "SkillMarkdownSpecCodec",
     "SkillSpec",
@@ -52,5 +70,7 @@ __all__ = [
     "ThinkingValue",
     "canonical_selectors",
     "normalize_thinking",
+    "mcp_server_selector",
+    "mcp_tool_selector",
     "parse_mcp_tool_selector",
 ]

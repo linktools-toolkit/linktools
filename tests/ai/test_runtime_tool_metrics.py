@@ -19,7 +19,7 @@ from linktools.ai.runtime._tool_metrics import (
     RuntimeToolMetricsCapability,
     _ToolMetricContext,
 )
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 from pydantic_ai.exceptions import SkipToolExecution
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
@@ -93,7 +93,7 @@ def _metric_context(recorder: _Recorder) -> _ToolMetricContext:
         tenant_id="tenant",
         execution_id="execution",
         session_id="session",
-        step_run_id="run",
+        agent_run_id="run",
         agent_id="agent",
     )
 
@@ -109,10 +109,10 @@ async def _boundary(
     bridge = _Bridge(decision)
     descriptor = ManagedToolDescriptor(
         effect_owner="tool_operation",
-        effect="replay_safe",
+        effect_policy="replay_safe",
         tool_class="business",
     )
-    raw = FunctionToolset([semantic_tool(tool, descriptor)])
+    raw = FunctionToolset([tool_with_metadata(tool, descriptor)])
     boundary = RuntimeToolBoundaryToolset(
         (raw,),
         {"tool": descriptor},
@@ -180,7 +180,7 @@ async def test_actual_tool_handler_emits_one_execution_metric() -> None:
     assert dict(observation.correlation) == {
         "execution_id": "execution",
         "session_id": "session",
-        "step_run_id": "run",
+        "agent_run_id": "run",
         "tool_call_id": "call",
     }
     assert len(observation.measurements) == 1

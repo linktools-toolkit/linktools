@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionEventType,
@@ -18,18 +18,18 @@ from linktools.ai.core import (
     ToolOperationStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="default"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
+        model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -42,7 +42,7 @@ def _tool_record() -> ToolOperationRecord:
     return ToolOperationRecord(
         tool_operation_id="operation",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         tool_call_id="call",
         idempotency_key_digest="a" * 64,
         tool_name="tool",
@@ -61,7 +61,7 @@ def _tool_record() -> ToolOperationRecord:
 
 @pytest.mark.asyncio
 async def test_configured_runtime_mutation_requires_active_transaction() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="mutation-guard", tenant_id="tenant")
     try:
         with pytest.raises(RuntimeError, match="storage mutation outside transaction"):
@@ -73,7 +73,7 @@ async def test_configured_runtime_mutation_requires_active_transaction() -> None
 @pytest.mark.asyncio
 async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
-    state = RuntimeState.filesystem(root)
+    state = RuntimeStorage.filesystem(root)
     await state.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
         await state.recovery.tools.reserve(_tool_record())
@@ -95,7 +95,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     finally:
         await state.close()
 
-    reopened = RuntimeState.filesystem(root)
+    reopened = RuntimeStorage.filesystem(root)
     await reopened.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
         record = await reopened.recovery.tools.get_operation(
@@ -110,7 +110,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
 @pytest.mark.asyncio
 async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
-    state = RuntimeState.filesystem(root)
+    state = RuntimeStorage.filesystem(root)
     await state.initialize(namespace="nested-event", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = ExecutionRecord(
@@ -118,8 +118,8 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
@@ -148,7 +148,7 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
     finally:
         await state.close()
 
-    reopened = RuntimeState.filesystem(root)
+    reopened = RuntimeStorage.filesystem(root)
     await reopened.initialize(namespace="nested-event", tenant_id="tenant")
     try:
         events = await reopened.execution.events.list(
@@ -166,7 +166,7 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_blob_stream_consumption_does_not_hold_runtime_transaction_lock() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="blob-stream", tenant_id="tenant")
     started = asyncio.Event()
     release = asyncio.Event()

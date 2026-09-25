@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot
+from ..agent import AgentBindingContract
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -24,7 +24,6 @@ from ..core import (
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
-from ._snapshot_contract import RunSnapshot
 from .service_api import (
     CompareEvaluationRequest,
     EvaluationComparison,
@@ -38,7 +37,7 @@ from .service_api import (
 )
 from .state._contracts import (
     EvaluationRecord,
-    EvaluationState,
+    EvaluationRepositories,
     ExecutionRecord,
     ExecutionRepository,
     IdempotencyRecord,
@@ -79,7 +78,7 @@ class DefaultEvaluationService:
 
     def __init__(
         self,
-        state: EvaluationState,
+        state: EvaluationRepositories,
         executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
         execution: ExecutionService,
@@ -94,7 +93,7 @@ class DefaultEvaluationService:
         binding_digest: str,
         request: StartEvaluationRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> EvaluationHandle:
         evaluation_id = uuid.uuid4().hex
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
@@ -111,7 +110,7 @@ class DefaultEvaluationService:
             {
                 "action": "evaluation.run",
                 "principal": principal_identity_payload(request.principal),
-                "dataset_digest": request.dataset_digest,
+                "dataset_id": request.dataset_id,
                 "memory_scope": request.memory_scope,
                 "binding_digest": binding_digest,
             }
@@ -161,7 +160,7 @@ class DefaultEvaluationService:
                 execution = await self._execution.start(
                     binding_digest,
                     ExecutionRequest(
-                        user_prompt=f"evaluation:{request.dataset_digest}",
+                        user_prompt=f"evaluation:{request.dataset_id}",
                         principal=request.principal,
                         idempotency_key=f"evaluation:{request.idempotency_key}",
                         memory_scope=request.memory_scope,
@@ -169,13 +168,13 @@ class DefaultEvaluationService:
                         planning=False,
                         thinking=False,
                     ),
-                    binding_snapshot=binding_snapshot,
+                    binding_contract=binding_contract,
                 )
                 await self._state.records.create(
                     EvaluationRecord(
                         evaluation_id,
                         execution.execution_id,
-                        request.dataset_digest,
+                        request.dataset_id,
                         EvaluationStatus.PENDING,
                         0,
                         now,
@@ -286,7 +285,7 @@ class DefaultEvaluationService:
             ),
         )
         if (
-            baseline.dataset_digest != candidate.dataset_digest
+            baseline.dataset_id != candidate.dataset_id
             or baseline_execution.binding_digest
             != candidate_execution.binding_digest
         ):
@@ -296,42 +295,15 @@ class DefaultEvaluationService:
             request.candidate_id,
         )
 
-    async def snapshot(
-        self,
-        evaluation_id: str,
-        *,
-        principal: Principal,
-    ) -> RunSnapshot:
-        record, source = await self._synchronize(
-            await self._authorized(
-                evaluation_id,
-                principal,
-                AuthorizationAction.EVALUATION_READ,
-            )
-        )
-        digest = canonical_sha256(
-            {
-                "snapshot_id": evaluation_id,
-                "execution_id": record.execution_id,
-                "binding_digest": source.binding_digest,
-            }
-        )
-        return RunSnapshot(
-            evaluation_id,
-            record.execution_id,
-            source.binding_digest,
-            digest,
-        )
-
     async def replay(
         self,
         agent_id: str,
-        snapshot_id: str,
+        evaluation_id: str,
         request: ReplayEvaluationRequest,
     ) -> ExecutionHandle:
         record, source = await self._synchronize(
             await self._authorized(
-                snapshot_id,
+                evaluation_id,
                 request.principal,
                 AuthorizationAction.EVALUATION_READ,
             )
@@ -341,7 +313,7 @@ class DefaultEvaluationService:
         return await self._execution.start(
             source.binding_digest,
             ExecutionRequest(
-                user_prompt=f"evaluation:{record.dataset_digest}",
+                user_prompt=f"evaluation:{record.dataset_id}",
                 principal=request.principal,
                 idempotency_key=request.idempotency_key,
                 memory_scope=request.memory_scope,
@@ -349,7 +321,7 @@ class DefaultEvaluationService:
                 planning=False,
                 thinking=False,
             ),
-            binding_snapshot=source.binding,
+            binding_contract=source.binding,
         )
 
     async def _synchronize(
@@ -405,7 +377,7 @@ class DefaultEvaluationService:
             record.execution_id,
             tenant_id=self._state.records.tenant_id,
         )
-        if execution is None or not isinstance(execution.binding, AgentBindingSnapshot):
+        if execution is None or not isinstance(execution.binding, AgentBindingContract):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return execution
 

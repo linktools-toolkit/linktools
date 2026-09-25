@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Metric definition semantic identity across persistence."""
+"""Metric definition contract identity across persistence."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ from linktools.ai.observe import (
 from linktools.ai.observe._codec import (
     decode_definition_envelope,
     definition_envelope,
-    definition_semantic_digest,
+    same_definition_contract,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -80,7 +81,7 @@ def test_definition_description_is_nonsemantic_and_v1_optional() -> None:
         description="changed description",
     )
 
-    assert definition_semantic_digest(first) == definition_semantic_digest(changed)
+    assert same_definition_contract(first, changed)
 
     legacy = definition_envelope(
         "definition-description",
@@ -102,6 +103,32 @@ def test_definition_description_is_nonsemantic_and_v1_optional() -> None:
         expected_namespace="definition-description",
     )
     assert decoded.description is None
+
+
+def test_definition_identity_is_name_and_revision_only() -> None:
+    first = MetricDefinition(
+        name="business.revision",
+        revision=1,
+        observation_kind="business.revision.sample",
+        source=MetricSource.measurement("value"),
+        metric_type=MetricType.GAUGE,
+        unit="1",
+        default_aggregation=MetricAggregation.MEAN,
+    )
+    changed = MetricDefinition(
+        name=first.name,
+        revision=first.revision,
+        observation_kind="other.sample",
+        source=MetricSource.measurement("other"),
+        metric_type=MetricType.COUNTER,
+        unit="items",
+        default_aggregation=MetricAggregation.SUM,
+    )
+
+    assert (first.name, first.revision) == (changed.name, changed.revision)
+    assert not same_definition_contract(first, changed)
+    revised = replace(changed, revision=2)
+    assert (first.name, first.revision) != (revised.name, revised.revision)
 
 
 @pytest.mark.asyncio

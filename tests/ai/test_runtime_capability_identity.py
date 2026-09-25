@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Regression coverage for opaque capability semantic identity."""
+"""Regression coverage for explicit Capability identity and contracts."""
 
 from dataclasses import dataclass, fields
 
@@ -111,59 +111,43 @@ class _OutputTransformCapability(AbstractCapability[AgentContext[None]]):
 
 
 @pytest.mark.asyncio
-async def test_capability_revision_is_fingerprint_input_only() -> None:
+async def test_capability_identity_is_id_and_revision() -> None:
     first = CapabilityGroup[None]("first")
-    first.capability(_Capability(), revision=1, semantic_config={})
+    first.runtime_capability(_Capability(), revision=1)
     second = CapabilityGroup[None]("second")
-    second.capability(_Capability(), revision=2, semantic_config={})
+    second.runtime_capability(_Capability(), revision=2)
 
-    first_candidate = (await first.freeze())[0]
-    second_candidate = (await second.freeze())[0]
+    first_candidate = (await first.capture()).contributions[0]
+    second_candidate = (await second.capture()).contributions[0]
 
     assert tuple(item.name for item in fields(CapabilityContribution)) == (
         "kind",
         "id",
-        "fingerprint",
         "value",
     )
-    assert first_candidate.kind == "capability"
+    assert first_candidate.kind == "runtime_capability"
     assert first_candidate.id == "test-capability"
-    assert not hasattr(first_candidate, "semantic_revision")
-    assert first_candidate.semantic_contract["revision"] == 1
-    assert second_candidate.semantic_contract["revision"] == 2
-    assert first_candidate.fingerprint != second_candidate.fingerprint
-    assert "restore_locator" not in first_candidate.semantic_contract
+    assert first_candidate.revision == 1
+    assert second_candidate.revision == 2
+    assert first_candidate.contract["revision"] == 1
+    assert second_candidate.contract["revision"] == 2
 
 
 @pytest.mark.asyncio
-async def test_identical_capability_semantics_have_stable_fingerprint() -> None:
-    left = CapabilityGroup[None]("left")
-    left.capability(_Capability(), revision=7, semantic_config={"mode": "strict"})
-    right = CapabilityGroup[None]("right")
-    right.capability(_Capability(), revision=7, semantic_config={"mode": "strict"})
-
-    left_candidate = (await left.freeze())[0]
-    right_candidate = (await right.freeze())[0]
-
-    assert left_candidate.fingerprint == right_candidate.fingerprint
-    assert left_candidate.semantic_contract == right_candidate.semantic_contract
-    assert left_candidate.semantic_contract["config"] == {"mode": "strict"}
-
-
-@pytest.mark.asyncio
-async def test_public_semantic_config_changes_capability_fingerprint() -> None:
+async def test_config_is_contract_data_not_a_second_identity() -> None:
     strict = CapabilityGroup[None]("strict")
-    strict.capability(_Capability(), revision=1, semantic_config={"mode": "strict"})
+    strict.runtime_capability(_Capability(), revision=1, config={"mode": "strict"})
     relaxed = CapabilityGroup[None]("relaxed")
-    relaxed.capability(_Capability(), revision=1, semantic_config={"mode": "relaxed"})
+    relaxed.runtime_capability(_Capability(), revision=1, config={"mode": "relaxed"})
 
-    strict_candidate = (await strict.freeze())[0]
-    relaxed_candidate = (await relaxed.freeze())[0]
+    strict_candidate = (await strict.capture()).contributions[0]
+    relaxed_candidate = (await relaxed.capture()).contributions[0]
 
-    assert strict_candidate.fingerprint != relaxed_candidate.fingerprint
+    assert strict_candidate.revision == relaxed_candidate.revision == 1
+    assert strict_candidate.contract != relaxed_candidate.contract
 
 
-def test_opaque_contribution_factory_rejects_canonical_declarations() -> None:
+def test_opaque_contribution_factory_rejects_declarations() -> None:
     with pytest.raises(AIError) as error:
         CapabilityContribution.from_opaque(
             "agent",  # type: ignore[arg-type]
@@ -177,71 +161,61 @@ def test_opaque_contribution_factory_rejects_canonical_declarations() -> None:
 def test_invalid_capability_revision_is_rejected(revision: object) -> None:
     group = CapabilityGroup[None]("group")
     with pytest.raises(AIError) as error:
-        group.capability(_Capability(), revision=revision)  # type: ignore[arg-type]
+        group.runtime_capability(_Capability(), revision=revision)  # type: ignore[arg-type]
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 @pytest.mark.asyncio
-async def test_deferred_generic_capability_keeps_native_semantics() -> None:
+async def test_deferred_generic_capability_keeps_native_behavior() -> None:
     capability = _Capability()
     capability.defer_loading = True
     capability.description = "load on demand"
     group = CapabilityGroup[None]("group")
-    group.capability(capability)
+    group.runtime_capability(capability)
 
-    candidate = (await group.freeze())[0]
+    candidate = (await group.capture()).contributions[0]
     assert candidate.value is capability
     assert candidate.value.defer_loading is True
-    assert candidate.semantic_contract["config"] == {}
+    assert candidate.contract["config"] == {}
 
 
-@pytest.mark.parametrize(
-    "capability_id",
-    [
-        "linktools.custom",
-        "linktools.workspace",
-    ],
-)
-def test_custom_capability_cannot_claim_runtime_or_mcp_namespace(capability_id: str) -> None:
+@pytest.mark.parametrize("capability_id", ["linktools.custom", "linktools.workspace"])
+def test_custom_capability_cannot_claim_runtime_namespace(capability_id: str) -> None:
     group = CapabilityGroup[None]("group")
     with pytest.raises(AIError) as error:
-        group.capability(_Capability(capability_id), semantic_config={})
+        group.runtime_capability(_Capability(capability_id))
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 @pytest.mark.asyncio
-async def test_duplicate_capability_identity_is_rejected_when_group_freezes() -> None:
+async def test_duplicate_capability_id_is_rejected_when_group_freezes() -> None:
     group = CapabilityGroup[None]("group")
-    group.capability(_Capability(), revision=1, semantic_config={})
-    group.capability(_Capability(), revision=1, semantic_config={})
-
+    group.runtime_capability(_Capability(), revision=1)
+    group.runtime_capability(_Capability(), revision=1)
     with pytest.raises(AIError) as error:
-        await group.freeze()
-
+        await group.capture()
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
 @pytest.mark.asyncio
-async def test_capability_semantic_config_defaults_to_empty() -> None:
+async def test_capability_config_defaults_to_empty() -> None:
     group = CapabilityGroup[None]("group")
-    group.capability(_Capability())
-
-    candidate = (await group.freeze())[0]
-    assert candidate.semantic_contract["config"] == {}
+    group.runtime_capability(_Capability())
+    candidate = (await group.capture()).contributions[0]
+    assert candidate.contract["config"] == {}
 
 
 @pytest.mark.asyncio
-async def test_capability_implementation_identity_is_not_fingerprint_input() -> None:
+async def test_capability_implementation_class_is_not_identity() -> None:
     first = CapabilityGroup[None]("first")
-    first.capability(_Capability(), revision=1, semantic_config={})
+    first.runtime_capability(_Capability(), revision=1)
     second = CapabilityGroup[None]("second")
-    second.capability(_OtherCapability(), revision=1, semantic_config={})
+    second.runtime_capability(_OtherCapability(), revision=1)
 
-    first_candidate = (await first.freeze())[0]
-    second_candidate = (await second.freeze())[0]
-
-    assert first_candidate.semantic_contract == second_candidate.semantic_contract
-    assert first_candidate.fingerprint == second_candidate.fingerprint
+    first_candidate = (await first.capture()).contributions[0]
+    second_candidate = (await second.capture()).contributions[0]
+    assert first_candidate.revision == second_candidate.revision == 1
+    assert first_candidate.contract == second_candidate.contract
 
 
 @pytest.mark.asyncio
@@ -262,22 +236,17 @@ async def test_external_capability_keeps_native_pydantic_extension_surface(
     capability: AbstractCapability[AgentContext[None]],
 ) -> None:
     group = CapabilityGroup[None]("group")
-    group.capability(capability)
-
-    candidate = (await group.freeze())[0]
+    group.runtime_capability(capability)
+    candidate = (await group.capture()).contributions[0]
     assert candidate.value is capability
-    assert candidate.semantic_contract["revision"] == 1
+    assert candidate.revision == 1
 
 
 @pytest.mark.asyncio
 async def test_external_capability_keeps_output_transformation_hooks() -> None:
     group = CapabilityGroup[None]("group")
-    group.capability(
-        _OutputTransformCapability(),
-        semantic_config={"mode": "identity"},
-    )
-
-    candidate = (await group.freeze())[0]
+    group.runtime_capability(_OutputTransformCapability(), config={"mode": "identity"})
+    candidate = (await group.capture()).contributions[0]
     assert candidate.id == "output-transform-capability"
 
 
@@ -291,7 +260,6 @@ def test_output_binding_revalidates_final_payload() -> None:
             "additionalProperties": False,
         },
     )
-
     binding.validate_payload({"answer": "ok"})
     with pytest.raises(AIError) as error:
         binding.validate_payload({"unexpected": True})
@@ -299,14 +267,14 @@ def test_output_binding_revalidates_final_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_anonymous_native_capabilities_require_explicit_semantic_ids() -> None:
+async def test_anonymous_native_capabilities_require_explicit_ids() -> None:
     select_model = SelectModel(lambda ctx: ctx.model)
     prepare_tools = PrepareTools(lambda _ctx, tool_defs: tool_defs)
     group = CapabilityGroup[None]("group")
 
-    group.capability(select_model, semantic_id="select-model")
-    group.capability(prepare_tools, semantic_id="prepare-tools")
-    candidates = await group.freeze()
+    group.runtime_capability(select_model, id="select-model")
+    group.runtime_capability(prepare_tools, id="prepare-tools")
+    candidates = (await group.capture()).contributions
 
     assert select_model.id is None
     assert prepare_tools.id is None

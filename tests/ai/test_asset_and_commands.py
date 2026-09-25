@@ -28,7 +28,7 @@ from linktools.ai.storage import (
     StorageLayer,
     StorageOperation,
     StorageOverlay,
-    StorageOwnedInfo,
+    StorageLocatedInfo,
     StorageResetResult,
 )
 
@@ -56,7 +56,7 @@ def make_store(
 
 def test_in_memory_asset_store_cas_tombstone_and_history() -> None:
     async def run() -> None:
-        backend = InMemoryAssetBackend(AssetRoot("memory", "test", "digest"))
+        backend = InMemoryAssetBackend(AssetRoot("memory", "test"))
         store, _ = make_store(backend)
         await store.initialize()
         key = AssetKey("sample", "one")
@@ -78,7 +78,7 @@ def test_in_memory_asset_store_cas_tombstone_and_history() -> None:
 
 def test_asset_get_many_and_cursor_preserve_order() -> None:
     async def run() -> None:
-        backend = InMemoryAssetBackend(AssetRoot("memory", "test", "digest"))
+        backend = InMemoryAssetBackend(AssetRoot("memory", "test"))
         store, _ = make_store(backend)
         await store.initialize()
         one = AssetKey("sample", "one")
@@ -101,7 +101,7 @@ def test_asset_get_many_and_cursor_preserve_order() -> None:
 
 def test_asset_storage_uses_file_cache() -> None:
     async def run() -> None:
-        backend = CountingAssetBackend(AssetRoot("memory", "cache", "digest"))
+        backend = CountingAssetBackend(AssetRoot("memory", "cache"))
         cache = InMemoryContentCache(max_bytes=1024 * 1024)
         storage = StorageOverlay(
             backend,
@@ -127,13 +127,13 @@ def test_asset_storage_uses_file_cache() -> None:
 
 def test_read_only_asset_storage_can_cold_start() -> None:
     async def run() -> None:
-        source = InMemoryAssetBackend(AssetRoot("memory", "seed", "digest"))
+        source = InMemoryAssetBackend(AssetRoot("memory", "seed"))
         source_store, _ = make_store(source)
         await source_store.initialize()
         key = AssetKey("sample", "read-only")
         await source_store.put(key, b"value")
         backend = InMemoryAssetBackend(
-            AssetRoot("memory", "readonly", "digest"),
+            AssetRoot("memory", "readonly"),
             writable=False,
         )
         backend.import_state(source.export_state())
@@ -149,7 +149,7 @@ def test_read_only_asset_storage_can_cold_start() -> None:
 
 def test_filesystem_asset_store_recovers_history_after_restart(tmp_path: Path) -> None:
     async def run() -> None:
-        root = AssetRoot("file", str(tmp_path), "digest")
+        root = AssetRoot("file", str(tmp_path))
         backend = FilesystemAssetBackend(root)
         store, _ = make_store(backend)
         await store.initialize()
@@ -165,10 +165,16 @@ def test_filesystem_asset_store_recovers_history_after_restart(tmp_path: Path) -
     asyncio.run(run())
 
 
+def test_storage_layer_reserves_primary_identity() -> None:
+    backend = InMemoryAssetBackend(AssetRoot("memory", "fallback"))
+    with pytest.raises(ValueError):
+        StorageLayer("primary", backend)
+
+
 def test_asset_store_reads_effective_layer_owner() -> None:
     async def run() -> None:
-        primary = InMemoryAssetBackend(AssetRoot("memory", "primary", "primary"))
-        fallback = InMemoryAssetBackend(AssetRoot("memory", "fallback", "fallback"))
+        primary = InMemoryAssetBackend(AssetRoot("memory", "primary"))
+        fallback = InMemoryAssetBackend(AssetRoot("memory", "fallback"))
         key = AssetKey("sample", "fallback")
         await fallback.put(key, b"value")
         storage = StorageOverlay(primary, layers=(StorageLayer("fallback", fallback),))
@@ -176,18 +182,42 @@ def test_asset_store_reads_effective_layer_owner() -> None:
         await store.initialize()
         assert await primary.get(key) is None
         assert await store.get(key) == b"value"
-        owners = await store.list_info_with_owners()
+        locations = await store.list_info_with_locations()
         fallback_info = await fallback.stat(key)
         assert fallback_info is not None
-        assert owners.items == (StorageOwnedInfo(fallback_info, "fallback", False),)
+        assert locations.items == (StorageLocatedInfo(fallback_info, "fallback", False),)
+
+    asyncio.run(run())
+
+
+def test_asset_version_ref_pins_effective_layer() -> None:
+    async def run() -> None:
+        primary = InMemoryAssetBackend(AssetRoot("memory", "primary"))
+        fallback = InMemoryAssetBackend(AssetRoot("memory", "fallback"))
+        key = AssetKey("sample", "shared")
+        await fallback.put(key, b"fallback")
+        store = AssetStore(
+            StorageOverlay(
+                primary,
+                writer=primary,
+                layers=(StorageLayer("fallback", fallback),),
+            )
+        )
+        await store.initialize()
+        frozen = (await store.resolve_versions((key,)))[0]
+        assert frozen.layer_id == "fallback"
+
+        await store.put(key, b"primary")
+        assert await store.get(key) == b"primary"
+        assert await store.read_versions((frozen,)) == (b"fallback",)
 
     asyncio.run(run())
 
 
 def test_asset_store_reset_clears_writer_overlay_and_reveals_layer() -> None:
     async def run() -> None:
-        primary = InMemoryAssetBackend(AssetRoot("memory", "primary", "primary"))
-        fallback = InMemoryAssetBackend(AssetRoot("memory", "fallback", "fallback"))
+        primary = InMemoryAssetBackend(AssetRoot("memory", "primary"))
+        fallback = InMemoryAssetBackend(AssetRoot("memory", "fallback"))
         key = AssetKey("sample", "reset")
         await fallback.put(key, b"builtin")
         storage = StorageOverlay(

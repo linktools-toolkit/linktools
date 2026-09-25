@@ -654,8 +654,8 @@ def _default_record_scope(
             tenant_id,
             domain.value,
             kind,
-            "step_run",
-            value.step_run_id,
+            "agent_run",
+            value.agent_run_id,
         )
     return None
 

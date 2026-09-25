@@ -1,6 +1,6 @@
 [
   {
-    "conversation_id": null,
+    "agent_conversation_id": null,
     "instructions": null,
     "kind": "request",
     "metadata": null,

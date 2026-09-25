@@ -29,24 +29,24 @@ from linktools.ai.runtime._model_interaction import (
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
 from linktools.ai.runtime.state._contracts import TranscriptSpanRef
 from linktools.ai.runtime.state._model_interaction_runtime import (
-    ModelInteractionRuntimeStepStore,
+    ModelInteractionRuntimeAgentRunStore,
 )
 from linktools.ai.runtime.state._model_interaction_store import (
     ModelInteractionInMemoryStepArchive,
-    ModelInteractionStagingStepStore,
+    ModelInteractionStagingAgentRunStore,
 )
-from linktools.ai.runtime.state._step_contracts import RunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import (
     InMemoryStepArchive,
-    RuntimeStepStore,
-    StagingStepStore,
+    RuntimeAgentRunStore,
+    StagingAgentRunStore,
     _ProjectionOffset,
 )
 
 
 def _interaction(sequence: int) -> StagedModelInteraction:
     return StagedModelInteraction(
-        run_id="run",
+        agent_run_id="run",
         step_index=1,
         request_sequence=sequence,
         purpose="agent",
@@ -95,35 +95,35 @@ def test_public_projection_summarizes_real_binary_without_mutation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enhanced", (False, True))
-async def test_base_step_store_applies_interaction_page_contract(
+async def test_base_run_store_applies_interaction_page_contract(
     enhanced: bool,
 ) -> None:
-    store = ModelInteractionStagingStepStore() if enhanced else StagingStepStore()
+    store = ModelInteractionStagingAgentRunStore() if enhanced else StagingAgentRunStore()
     await store.initialize()
     try:
-        await store.register_run(RunRecord("run"))
+        await store.register_agent_run(AgentRunRecord("run"))
         interactions = tuple(_interaction(sequence) for sequence in range(1, 4))
         for interaction in interactions:
             store.stage_model_interaction(interaction)
         assert await store.list_model_interactions(
-            run_id="run", after_request_sequence=1, limit=1,
+            agent_run_id="run", after_request_sequence=1, limit=1,
         ) == [interactions[1]]
         assert await store.list_model_interactions(
-            run_id="run", after_request_sequence=3, limit=1,
+            agent_run_id="run", after_request_sequence=3, limit=1,
         ) == []
-        assert await store.list_model_interactions(run_id="run") == list(interactions)
+        assert await store.list_model_interactions(agent_run_id="run") == list(interactions)
         with pytest.raises(ValueError):
-            await store.list_model_interactions(run_id="run", limit=0)
+            await store.list_model_interactions(agent_run_id="run", limit=0)
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enhanced", (False, True))
-async def test_runtime_step_store_pages_plain_staging(enhanced: bool) -> None:
-    store_type = ModelInteractionRuntimeStepStore if enhanced else RuntimeStepStore
+async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
+    store_type = ModelInteractionRuntimeAgentRunStore if enhanced else RuntimeAgentRunStore
     store = store_type(
-        StagingStepStore(),
+        StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None,
         recovery_archive=None,
@@ -133,12 +133,12 @@ async def test_runtime_step_store_pages_plain_staging(enhanced: bool) -> None:
     )
     await store.initialize()
     try:
-        await store.register_run(RunRecord("run"))
+        await store.register_agent_run(AgentRunRecord("run"))
         values = tuple(_interaction(sequence) for sequence in range(1, 4))
         for value in values:
             store.stage_model_interaction(value)
         assert await store.list_model_interactions(
-            run_id="run", after_request_sequence=1, limit=1,
+            agent_run_id="run", after_request_sequence=1, limit=1,
         ) == [values[1]]
     finally:
         await store.preflight_close()
@@ -146,10 +146,10 @@ async def test_runtime_step_store_pages_plain_staging(enhanced: bool) -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_step_store_continues_recovery_interaction_high_water() -> None:
-    staging = ModelInteractionStagingStepStore()
+async def test_runtime_run_store_continues_recovery_interaction_high_water() -> None:
+    staging = ModelInteractionStagingAgentRunStore()
     recovery = ModelInteractionInMemoryStepArchive(RuntimeDomain.RECOVERY)
-    store = RuntimeStepStore(
+    store = RuntimeAgentRunStore(
         staging,
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None,
@@ -160,8 +160,8 @@ async def test_runtime_step_store_continues_recovery_interaction_high_water() ->
     )
     await store.initialize()
     try:
-        run = RunRecord("run")
-        await recovery.register_run(run)
+        run = AgentRunRecord("run")
+        await recovery.register_agent_run(run)
         durable = await recovery.prepare_interactions(
             run,
             (_interaction(1), _interaction(2)),
@@ -170,13 +170,13 @@ async def test_runtime_step_store_continues_recovery_interaction_high_water() ->
         await recovery.sync_projection(
             run,
             events=(),
-            snapshots=(),
+            checkpoints=(),
             interactions=durable,
         )
 
-        assert await store.model_interaction_count(run_id="run") == 2
+        assert await store.model_interaction_count(agent_run_id="run") == 2
         store.stage_model_interaction(_interaction(3))
-        assert await store.model_interaction_count(run_id="run") == 3
+        assert await store.model_interaction_count(agent_run_id="run") == 3
     finally:
         await store.preflight_close()
         await store.close()
@@ -187,8 +187,8 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
     archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.EXECUTION)
     await archive.initialize()
     try:
-        run = RunRecord("run")
-        await archive.register_run(run)
+        run = AgentRunRecord("run")
+        await archive.register_agent_run(run)
         source = ModelRequest(parts=[UserPromptPart(content="hello")])
         payloads: dict[str, bytes] = {}
 
@@ -205,7 +205,7 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
         )
         envelope_digest, _ = intern(b"{}")
         interaction = StagedModelInteraction(
-            run_id="run",
+            agent_run_id="run",
             step_index=1,
             request_sequence=1,
             purpose="agent",
@@ -248,7 +248,7 @@ def test_interaction_projection_keeps_exact_stamped_request_content() -> None:
         conversation_id="conversation",
         instructions="instruction",
     )
-    store = StagingStepStore()
+    store = StagingAgentRunStore()
 
     projection = build_context_projection(
         (source,),
@@ -280,7 +280,7 @@ def test_context_projection_preserves_nested_business_timestamp() -> None:
             )
         ],
     )
-    store = StagingStepStore()
+    store = StagingAgentRunStore()
 
     projection = build_context_projection(
         (first,),
@@ -295,7 +295,7 @@ def test_context_projection_preserves_nested_business_timestamp() -> None:
 def test_ambiguous_duplicate_projection_does_not_guess_occurrence() -> None:
     message = ModelRequest(parts=[UserPromptPart(content="same")])
     other = ModelRequest(parts=[UserPromptPart(content="other")])
-    store = StagingStepStore()
+    store = StagingAgentRunStore()
     projection = build_context_projection(
         (message, message, other),
         (message, other, message, message),
@@ -311,7 +311,7 @@ def test_ambiguous_duplicate_projection_does_not_guess_occurrence() -> None:
 
 @pytest.mark.asyncio
 async def test_interaction_replay_preserves_nonzero_sequence_origin() -> None:
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
     try:
         values = tuple(_interaction(sequence) for sequence in (5, 6, 7))
@@ -326,17 +326,17 @@ async def test_interaction_replay_preserves_nonzero_sequence_origin() -> None:
             with pytest.raises(AIError) as raised:
                 store.stage_model_interaction(invalid)
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        assert await store.list_model_interactions(run_id="run") == list(values)
+        assert await store.list_model_interactions(agent_run_id="run") == list(values)
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
 async def test_interaction_capture_respects_durable_high_water() -> None:
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
     try:
-        await store.register_run(RunRecord("run"))
+        await store.register_agent_run(AgentRunRecord("run"))
         values = tuple(_interaction(sequence) for sequence in (5, 6, 7))
         for value in values:
             store.stage_model_interaction(value)
@@ -361,7 +361,7 @@ async def test_volatile_archive_does_not_expose_staged_interactions() -> None:
     try:
         archive.stage_model_interaction(_interaction(1))
         with pytest.raises(AIError) as raised:
-            await archive.list_model_interactions(run_id="run")
+            await archive.list_model_interactions(agent_run_id="run")
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await archive.close()

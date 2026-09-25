@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime-owned transient object and Step retention."""
+"""Runtime-owned transient object and AgentRun retention."""
 
 from typing import Protocol
 
 from linktools.core import environ
 
-from ...core import step_run_id
+from ...core import agent_run_id
 from ...storage import ObjectStore
-from ._contracts import ConversationCursor, ConversationState, ExecutionState
-from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
-from ._steps import RuntimeStepStore
+from ._contracts import ConversationCursor, ConversationRepositories, ExecutionRepositories
+from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStoragePlan
+from ._steps import RuntimeAgentRunStore
 
 _logger = environ.get_logger("ai.runtime.state.retention")
 
@@ -27,18 +27,18 @@ class RuntimeRetentionController:
     def __init__(
         self,
         *,
-        conversation: ConversationState,
-        execution: ExecutionState,
+        conversation: ConversationRepositories,
+        execution: ExecutionRepositories,
         objects: _RuntimeObjectRouter,
-        steps: RuntimeStepStore,
-        plan: RuntimeStatePlan,
+        run_store: RuntimeAgentRunStore,
+        plan: RuntimeStoragePlan,
         namespace: str,
     ) -> None:
         self._conversation = conversation
         self._execution = execution
         self._namespace = namespace
         self._objects = objects
-        self._steps = steps
+        self._run_store = run_store
         self._transient_domains = frozenset(
             domain
             for domain in RuntimeDomain
@@ -64,17 +64,17 @@ class RuntimeRetentionController:
                 execution_id=execution_id,
             )
         if execution is not None:
-            run_ids = tuple(
-                step_run_id(
+            agent_run_ids = tuple(
+                agent_run_id(
                     namespace=self._namespace,
                     tenant_id=tenant_id,
                     execution_id=execution_id,
-                    segment_sequence=sequence,
+                    agent_run_sequence=sequence,
                 )
                 for sequence in range(1, execution.agent_run_sequence + 1)
             )
-            await self._steps.release_staging_many(
-                candidate_step_run_ids=run_ids,
+            await self._run_store.release_staging_many(
+                candidate_agent_run_ids=agent_run_ids,
                 execution_id=execution_id,
             )
         for domain in self._transient_domains:

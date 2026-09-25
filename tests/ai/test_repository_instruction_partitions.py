@@ -12,7 +12,7 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpointState,
     RepositoryInstructionBarrier,
 )
-from linktools.ai.workspace import (
+from linktools.ai.spec import (
     RepositoryInstructionDocument,
     RepositoryInstructions,
 )
@@ -60,25 +60,31 @@ def _checkpoint(
     first: RepositoryInstructions,
     latest: RepositoryInstructions,
     *,
-    latest_barrier_digest: str | None = None,
+    latest_payload_digest: str | None = None,
 ) -> tuple[object, dict[str, str]]:
     arguments = {"path": "pkg/file.txt"}
     first_barrier = RepositoryInstructionBarrier(
         "step",
         "call-a",
         canonical_sha256(arguments),
-        first.digest,
     )
     latest_barrier = RepositoryInstructionBarrier(
         "step",
         "call-b",
         canonical_sha256({"path": "pkg/deep/file.txt"}),
-        latest.digest if latest_barrier_digest is None else latest_barrier_digest,
     )
-    reference = SimpleNamespace(payload=SimpleNamespace(digest=latest.digest))
+    reference = SimpleNamespace(
+        payload=SimpleNamespace(
+            digest=(
+                canonical_sha256(latest.to_payload())
+                if latest_payload_digest is None
+                else latest_payload_digest
+            )
+        )
+    )
     checkpoint = SimpleNamespace(
         state=RecoveryCheckpointState.ACTIVE,
-        step_run_id="step",
+        agent_run_id="step",
         repository_instruction_overlay=reference,
         repository_instruction_barriers=(first_barrier, latest_barrier),
     )
@@ -132,12 +138,12 @@ async def test_historical_barrier_replay_rejects_changed_arguments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_latest_overlay_must_match_latest_barrier_digest() -> None:
+async def test_latest_overlay_must_match_persisted_payload_digest() -> None:
     first, latest = _instructions()
     checkpoint, arguments = _checkpoint(
         first,
         latest,
-        latest_barrier_digest="0" * 64,
+        latest_payload_digest="0" * 64,
     )
     coordinator = _RecoveryCoordinator(
         _Port(checkpoint, latest),  # type: ignore[arg-type]

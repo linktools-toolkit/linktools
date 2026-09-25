@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
 from linktools.ai.workspace import (
     Workspace,
@@ -25,15 +25,14 @@ class _ToolModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "d" * 64
-    semantic_payload: dict[str, JsonValue] = {"provider": "test", "model": "test"}
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "test"}
 
     def materialize(self) -> TestModel:
         return TestModel(call_tools=["read_file"])
 
 
 class _ToolModels:
-    def snapshot(self) -> "_ToolModels":
+    def capture(self) -> "_ToolModels":
         return self
 
     def resolve(self, route_id: str) -> _ToolModelBinding:
@@ -47,7 +46,7 @@ class _ToolModels:
         *,
         route_id: str | None = None,
     ) -> _ToolModelBinding:
-        if route_id not in {None, "default"} or dict(payload) != _ToolModelBinding.semantic_payload:
+        if route_id not in {None, "default"} or dict(payload) != _ToolModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _ToolModelBinding()
 
@@ -66,9 +65,9 @@ async def test_composed_runtime_ask_enters_approval_wait(
         ),
     )
     state = (
-        RuntimeState.in_memory()
+        RuntimeStorage.in_memory()
         if backend == "memory"
-        else RuntimeState.filesystem(tmp_path / "runtime-state")
+        else RuntimeStorage.filesystem(tmp_path / "runtime-state")
     )
     application = CapabilityGroup("application")
     application.agent(
@@ -80,7 +79,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
     async with Runtime.open(
         "default",
         models=_ToolModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         execution = await runtime.agent("default").start("read a file")

@@ -5,7 +5,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ApprovalDecision,
@@ -16,7 +16,7 @@ from linktools.ai.core import (
     canonical_sha256,
     idempotency_key_digest,
 )
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._approval import approval_id_for_call
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
@@ -35,11 +35,11 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("default", model="default"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
+        model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -54,8 +54,8 @@ def _execution(now: datetime) -> ExecutionRecord:
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
@@ -95,7 +95,7 @@ def _continuation() -> PendingToolContinuation:
 def _checkpoint(now: datetime) -> RecoveryCheckpoint:
     return RecoveryCheckpoint(
         execution_id="execution",
-        step_run_id="step-1",
+        agent_run_id="step-1",
         state=RecoveryCheckpointState.ACTIVE,
         revision=0,
         created_at=now,
@@ -114,7 +114,7 @@ def _approval(
         approval_id=approval_id_for_call(
             "tenant",
             execution.execution_id,
-            continuation.source_step_run_id,
+            continuation.source_agent_run_id,
             pending.tool_call_id,
         ),
         execution_id=execution.execution_id,
@@ -128,7 +128,7 @@ def _approval(
     )
 
 
-def _commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
+def _commands(state: RuntimeStorage, namespace: str) -> RuntimeStateCommands:
     return RuntimeStateCommands(
         state.execution.executions,
         namespace=namespace,
@@ -140,9 +140,9 @@ def _commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
         recovery=state.recovery.checkpoints,
         conversation_history=state.conversation.histories,
         tools=state.recovery.tools,
-        conversation_steps=state.steps.read_store(RuntimeDomain.CONVERSATION),
-        execution_steps=state.steps.read_store(RuntimeDomain.EXECUTION),
-        recovery_steps=state.steps.read_store(RuntimeDomain.RECOVERY),
+        conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
+        execution_run_store=state.run_store.read_store(RuntimeDomain.EXECUTION),
+        recovery_run_store=state.run_store.read_store(RuntimeDomain.RECOVERY),
         background_tasks=set(),
     )
 
@@ -150,13 +150,13 @@ def _commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
 async def _enter_waiting(
     namespace: str,
 ) -> tuple[
-    RuntimeState,
+    RuntimeStorage,
     RuntimeStateCommands,
     ExecutionRecord,
     RecoveryCheckpoint,
     PendingToolContinuation,
 ]:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace=namespace, tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -197,7 +197,7 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
             approval_id_for_call(
                 "tenant",
                 execution.execution_id,
-                continuation.source_step_run_id,
+                continuation.source_agent_run_id,
                 continuation.approvals[0].tool_call_id,
             ),
             tenant_id="tenant",
@@ -230,7 +230,7 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
         approval_id = approval_id_for_call(
             "tenant",
             execution.execution_id,
-            continuation.source_step_run_id,
+            continuation.source_agent_run_id,
             continuation.approvals[0].tool_call_id,
         )
         now = datetime.now(timezone.utc)
@@ -257,7 +257,7 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
         assert resumed.agent_run_sequence == 2
         assert active.state is RecoveryCheckpointState.ACTIVE
         assert active.pending_tools is None
-        assert active.step_run_id != continuation.source_step_run_id
+        assert active.agent_run_id != continuation.source_agent_run_id
     finally:
         await state.close()
 
@@ -289,7 +289,7 @@ async def test_deferred_cancel_cancels_pending_approval_and_clears_frontier() ->
             approval_id_for_call(
                 "tenant",
                 execution.execution_id,
-                continuation.source_step_run_id,
+                continuation.source_agent_run_id,
                 continuation.approvals[0].tool_call_id,
             ),
             tenant_id="tenant",

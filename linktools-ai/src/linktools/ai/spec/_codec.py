@@ -4,15 +4,14 @@
 
 import json
 import re
-from collections.abc import Mapping
-from typing import Protocol, TypeVar, cast
+from collections.abc import Mapping, Sequence
+from typing import Literal, Protocol, TypeVar
 
 import yaml
 
-from ..core import JsonValue
+from ..core import ImmutableJsonMapping, JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ..asset import AssetKey
-from ..storage import ObjectRef
+from ..asset import AssetKey, AssetVersionRef
 from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec, normalize_thinking
 
 SpecT = TypeVar("SpecT")
@@ -33,19 +32,20 @@ class SpecCodec(Protocol[SpecT]):
 
 class AgentSpecCodec:
     def to_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
-        """Return the canonical declaration payload used by identity projections."""
+        """Return the canonical resolved Agent declaration payload."""
         if not isinstance(value, AgentSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid")
         payload: dict[str, JsonValue] = {
             "version": 1,
             "id": value.id,
+            "revision": value.revision,
             "model": value.model,
             "system_prompt": value.system_prompt,
             "instructions": list(value.instructions),
             "allow_tools": list(value.allow_tools),
             "allow_skills": list(value.allow_skills),
             "allow_subagents": list(value.allow_subagents),
-            "allow_capabilities": list(value.allow_capabilities),
+            "allow_runtime_capabilities": list(value.allow_runtime_capabilities),
             "usage_limits": None
             if value.usage_limits is None
             else {
@@ -68,23 +68,27 @@ class AgentSpecCodec:
         payload = self.to_payload(value)
         if value.description is not None:
             payload["description"] = value.description
+        if value.metadata:
+            payload["metadata"] = dict(value.metadata)
         return payload
 
     def from_payload(self, raw: Mapping[str, object]) -> AgentSpec:
         _require_v1(raw)
         identity = raw.get("id")
+        revision = _decode_revision(raw)
         model = raw.get("model", "default")
         system_prompt = raw.get("system_prompt", "")
         instructions = raw.get("instructions", [])
         allow_tools = raw.get("allow_tools", ["*"])
         allow_skills = raw.get("allow_skills", ["*"])
         allow_subagents = raw.get("allow_subagents", ["*"])
-        allow_capabilities = raw.get("allow_capabilities", ["*"])
+        allow_runtime_capabilities = raw.get("allow_runtime_capabilities", ["*"])
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
         tool_retries = raw.get("tool_retries", AgentSpec.DEFAULT_TOOL_RETRIES)
         output_retries = raw.get("output_retries", AgentSpec.DEFAULT_OUTPUT_RETRIES)
         description = raw.get("description")
+        metadata = raw.get("metadata", {})
         preload_skills: object = raw.get("preload_skills", [])
         if not isinstance(preload_skills, list) or any(
             not isinstance(item, str) for item in preload_skills
@@ -102,12 +106,15 @@ class AgentSpecCodec:
             ("allow_tools", allow_tools),
             ("allow_skills", allow_skills),
             ("allow_subagents", allow_subagents),
-            ("allow_capabilities", allow_capabilities),
+            ("allow_runtime_capabilities", allow_runtime_capabilities),
         ):
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a string array")
         if not isinstance(planning, bool):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "planning must be bool")
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                "planning must be bool",
+            )
         for name, value in (
             ("tool_retries", tool_retries),
             ("output_retries", output_retries),
@@ -128,27 +135,54 @@ class AgentSpecCodec:
                 model=model,
                 system_prompt=system_prompt,
                 instructions=tuple(instructions),
-                allow_tools=tuple(cast("list[str]", allow_tools)),
-                allow_skills=tuple(cast("list[str]", allow_skills)),
-                allow_subagents=tuple(cast("list[str]", allow_subagents)),
-                allow_capabilities=tuple(cast("list[str]", allow_capabilities)),
+                allow_tools=tuple(allow_tools),
+                allow_skills=tuple(allow_skills),
+                allow_subagents=tuple(allow_subagents),
+                allow_runtime_capabilities=tuple(allow_runtime_capabilities),
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
                 planning=planning,
                 thinking=normalized_thinking,
                 tool_retries=tool_retries,
                 output_retries=output_retries,
-                description=cast("str | None", description),
-                preload_skills=tuple(cast("list[str]", preload_skills)),
+                description=description,
+                preload_skills=tuple(preload_skills),
+                metadata=metadata,
+                revision=revision,
             )
         except AIError as error:
             if error.code in {ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.STORAGE_VERSION_UNSUPPORTED}:
                 raise
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
-        except (TypeError, ValueError) as error:
+        except (TypeError, ValueError, UnicodeError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
 
+    def from_author_payload(self, raw: Mapping[str, object]) -> AgentSpec:
+        """Decode the stable Agent authoring fields and ignore unrelated keys."""
+        if not isinstance(raw, Mapping):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        payload: dict[str, object] = {
+            "version": raw.get("version", _VERSION),
+            "id": raw.get("id"),
+            "revision": raw.get("revision", 1),
+            "model": raw.get("model", "default"),
+            "system_prompt": raw.get("system_prompt", ""),
+            "instructions": raw.get("instructions", []),
+            "allow_tools": raw.get("allow_tools", ["*"]),
+            "allow_skills": raw.get("allow_skills", ["*"]),
+            "allow_subagents": raw.get("allow_subagents", ["*"]),
+        }
+        if "description" in raw:
+            payload["description"] = raw["description"]
+        if "metadata" in raw:
+            payload["metadata"] = raw["metadata"]
+        return self.from_payload(payload)
+
+    def decode_author_mapping(self, data: bytes) -> dict[str, object]:
+        """Decode an author JSON mapping while rejecting malformed syntax and duplicate keys."""
+        return decode_author_json_mapping(data)
+
     def encode(self, value: AgentSpec) -> bytes:
-        return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
+        return _encode(self.to_wire_payload(value))
 
     def decode(self, data: bytes) -> AgentSpec:
         return self.from_payload(_decode(data))
@@ -156,28 +190,43 @@ class AgentSpecCodec:
 
 class SkillSpecCodec:
     def to_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":
-        """Return the canonical semantic v1 payload used by durable identity."""
+        """Return the canonical resolved Skill declaration payload."""
         if not isinstance(value, SkillSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
         payload: dict[str, JsonValue] = {
             "version": 1,
             "id": value.id,
-            "content": value.content,
+            "revision": value.revision,
+            "content": SkillMarkdownSpecCodec().model_content(value.content),
         }
         if value.description is not None:
             payload["description"] = value.description
         return payload
 
     def to_wire_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":
-        return self.to_payload(value)
+        if not isinstance(value, SkillSpec):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
+        payload: dict[str, JsonValue] = {
+            "version": 1,
+            "id": value.id,
+            "revision": value.revision,
+            "content": value.content,
+        }
+        if value.description is not None:
+            payload["description"] = value.description
+        if value.metadata:
+            payload["metadata"] = dict(value.metadata)
+        return payload
 
     def from_payload(self, raw: Mapping[str, object]) -> SkillSpec:
         _require_v1(raw)
         identity = raw.get("id")
+        revision = _decode_revision(raw)
         content = raw.get("content")
         if not isinstance(identity, str) or not identity.strip() or not isinstance(content, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
         description = raw.get("description")
+        metadata = raw.get("metadata", {})
         if description is not None and (
             not isinstance(description, str) or not 1 <= len(description) <= 1024
         ):
@@ -186,13 +235,35 @@ class SkillSpecCodec:
             return SkillSpec(
                 identity,
                 content,
-                cast("str | None", description),
+                description,
+                metadata,
+                revision=revision,
             )
-        except (TypeError, ValueError) as error:
+        except (TypeError, ValueError, UnicodeError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
 
+    def from_author_payload(self, raw: Mapping[str, object]) -> SkillSpec:
+        """Decode the stable Skill authoring fields and ignore unrelated keys."""
+        if not isinstance(raw, Mapping):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        payload: dict[str, object] = {
+            "version": raw.get("version", _VERSION),
+            "id": raw.get("id"),
+            "revision": raw.get("revision", 1),
+            "content": raw.get("content"),
+        }
+        if "description" in raw:
+            payload["description"] = raw["description"]
+        if "metadata" in raw:
+            payload["metadata"] = raw["metadata"]
+        return self.from_payload(payload)
+
+    def decode_author(self, data: bytes) -> SkillSpec:
+        """Decode one strict JSON Skill declaration."""
+        return self.from_author_payload(decode_author_json_mapping(data))
+
     def encode(self, value: SkillSpec) -> bytes:
-        return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
+        return _encode(self.to_wire_payload(value))
 
     def decode(self, data: bytes) -> SkillSpec:
         return self.from_payload(_decode(data))
@@ -201,6 +272,51 @@ class SkillSpecCodec:
 class SkillMarkdownSpecCodec:
     """Decode standard SKILL.md documents without rewriting their text."""
 
+    def model_content(self, content: str) -> str:
+        """Return the model-visible Markdown with display metadata removed."""
+        if not isinstance(content, str):
+            raise TypeError("skill content must be a string")
+        try:
+            frontmatter = _parse_skill_markdown(content)
+            lines = content.splitlines(keepends=True)
+            closing = next(
+                index
+                for index, line in enumerate(lines[1:], 1)
+                if line.rstrip("\r\n") == "---"
+            )
+            node = yaml.compose(
+                "".join(lines[1:closing]), Loader=_StrictSafeLoader
+            )
+        except (AIError, yaml.YAMLError, TypeError, ValueError):
+            return content
+        if not isinstance(node, yaml.nodes.MappingNode):
+            return content
+        if not node.flow_style:
+            if "metadata" not in frontmatter:
+                return content
+            for index, (key_node, _value_node) in enumerate(node.value):
+                if (
+                    isinstance(key_node, yaml.nodes.ScalarNode)
+                    and key_node.tag == "tag:yaml.org,2002:str"
+                    and key_node.value == "metadata"
+                ):
+                    start = key_node.start_mark.line
+                    end = (
+                        node.value[index + 1][0].start_mark.line
+                        if index + 1 < len(node.value)
+                        else closing - 1
+                    )
+                    return "".join(lines[: start + 1] + lines[end + 1 :])
+            return content
+        frontmatter.pop("metadata", None)
+        encoded = yaml.safe_dump(
+            frontmatter,
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=True,
+        )
+        return f"---\n{encoded}---\n{''.join(lines[closing + 1:])}"
+
     def encode(self, value: SkillSpec) -> bytes:
         try:
             frontmatter = _parse_skill_markdown(value.content)
@@ -208,7 +324,14 @@ class SkillMarkdownSpecCodec:
             if isinstance(error, AIError):
                 raise
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        if frontmatter["name"] != value.id or frontmatter["description"] != value.description:
+        metadata = dict(frontmatter.get("metadata", {}))
+        revision = metadata.pop("linktools-revision", 1)
+        if (
+            frontmatter["name"] != value.id
+            or frontmatter["description"] != value.description
+            or metadata != dict(value.metadata)
+            or revision != value.revision
+        ):
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
         try:
             return value.content.encode("utf-8")
@@ -219,10 +342,14 @@ class SkillMarkdownSpecCodec:
         try:
             content = data.decode("utf-8")
             frontmatter = _parse_skill_markdown(content)
+            metadata = dict(frontmatter.get("metadata", {}))
+            revision = metadata.pop("linktools-revision", 1)
             return SkillSpec(
-                cast(str, frontmatter["name"]),
+                frontmatter["name"],
                 content,
-                cast(str, frontmatter["description"]),
+                frontmatter["description"],
+                metadata,
+                revision=revision,
             )
         except AIError:
             raise
@@ -241,6 +368,8 @@ class SkillMarkdownSpecAdapter:
             logical_id,
             value.content,
             value.description,
+            value.metadata,
+            revision=value.revision,
         )
 
     def to_storage(self, logical_id: str, value: SkillSpec) -> SkillSpec:
@@ -250,6 +379,8 @@ class SkillMarkdownSpecAdapter:
             logical_id.rsplit("/", 1)[-1],
             value.content,
             value.description,
+            value.metadata,
+            revision=value.revision,
         )
 
 
@@ -272,77 +403,178 @@ class MCPServerSpecCodec:
         payload: dict[str, JsonValue] = {
             "version": 1,
             "id": value.id,
+            "revision": value.revision,
             "command": value.command,
             "args": list(value.args),
         }
-        if value.resource_root is not None:
-            payload["resource_root"] = {
-                "kind": value.resource_root.kind,
-                "id": value.resource_root.id,
+        if value.resource is not None:
+            payload["resource"] = {
+                "kind": value.resource.kind,
+                "id": value.resource.id,
             }
         return payload
 
-    def to_frozen_payload(
+    def to_execution_payload(
         self,
         value: MCPServerSpec,
-        resource_snapshot: ObjectRef | None,
+        resource_versions: "Sequence[AssetVersionRef] | None",
+        *,
+        asset_source_id: "str | None" = None,
+        execution_policy: "Mapping[str, JsonValue] | None" = None,
     ) -> "dict[str, JsonValue]":
+        """Return the MCP contract stored in an execution binding."""
         payload = self.to_payload(value)
-        if value.resource_root is None:
-            if resource_snapshot is not None:
+        if execution_policy is not None:
+            payload["execution_policy"] = _execution_policy_payload(
+                execution_policy
+            )
+        if value.resource is None:
+            if resource_versions is not None or asset_source_id is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return payload
-        if not isinstance(resource_snapshot, ObjectRef):
+        if resource_versions is None or any(
+            not isinstance(item, AssetVersionRef) for item in resource_versions
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        payload["args"] = None
-        payload["frozen_args"] = list(value.args)
-        payload["resource_snapshot"] = _object_ref_payload(resource_snapshot)
+        versions = tuple(
+            sorted(
+                resource_versions,
+                key=lambda item: (item.key.kind, item.key.id),
+            )
+        )
+        if len({item.key for item in versions}) != len(versions):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not isinstance(asset_source_id, str) or not asset_source_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["resource_versions"] = [
+            item.to_payload() for item in versions
+        ]
+        payload["asset_source_id"] = asset_source_id
         return payload
 
     def to_wire_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
         return self.to_payload(value)
 
     def from_payload(self, raw: Mapping[str, object]) -> MCPServerSpec:
-        value, resource_snapshot = self._decode_payload(raw, frozen=False)
-        if resource_snapshot is not None:
+        value, resource_versions = self._decode_payload(raw, execution=False)
+        if resource_versions is not None:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         return value
 
-    def from_frozen_payload(
+    def decode_author(
+        self,
+        data: bytes,
+        *,
+        format: Literal["json", "yaml"],
+        package_id: "str | None" = None,
+    ) -> MCPServerSpec:
+        """Decode a strict flat or package MCP declaration."""
+        if format not in {"json", "yaml"}:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        raw = (
+            decode_author_json_mapping(data)
+            if format == "json"
+            else decode_author_yaml_mapping(data)
+        )
+        payload: dict[str, object] = {
+            "version": raw.get("version", _VERSION),
+            "revision": raw.get("revision", 1),
+            "id": raw.get("id"),
+            "command": raw.get("command"),
+            "args": raw.get("args", []),
+        }
+        if "resource" in raw:
+            payload["resource"] = raw["resource"]
+        version = payload.get("version")
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version != _VERSION
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        identity = payload.get("id")
+        if package_id is None:
+            if not isinstance(identity, str) or not identity.strip():
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        elif "id" in raw and identity != package_id:
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+        resource = payload.get("resource")
+        if resource is not None and not isinstance(resource, Mapping):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if package_id is not None:
+            payload["id"] = package_id
+            package_resource = AssetKey("mcp", package_id)
+            if "resource" in payload and _decode_asset_key(
+                payload["resource"]
+            ) != package_resource:
+                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+            payload["resource"] = {
+                "kind": package_resource.kind,
+                "id": package_resource.id,
+            }
+        return self.from_payload(payload)
+
+    def from_execution_payload(
         self,
         raw: Mapping[str, object],
-    ) -> "tuple[MCPServerSpec, ObjectRef | None]":
-        return self._decode_payload(raw, frozen=True)
+    ) -> "tuple[MCPServerSpec, tuple[AssetVersionRef, ...] | None]":
+        """Decode an MCP contract carried by an execution binding."""
+        return self._decode_payload(raw, execution=True)
 
     def _decode_payload(
         self,
         raw: Mapping[str, object],
         *,
-        frozen: bool,
-    ) -> "tuple[MCPServerSpec, ObjectRef | None]":
+        execution: bool,
+    ) -> "tuple[MCPServerSpec, tuple[AssetVersionRef, ...] | None]":
         _require_v1(raw)
-        if not frozen and (
-            "resource_snapshot" in raw or "frozen_args" in raw
+        if not execution and (
+            "resource_versions" in raw
+            or "asset_source_id" in raw
+            or "execution_policy" in raw
         ):
             raise AIError(
                 ErrorCode.OUTPUT_CONTRACT_INVALID,
-                "MCP frozen resource fields are Runtime-owned",
+                "MCP execution resource fields are Runtime-owned",
             )
         identity = raw.get("id")
+        revision = _decode_revision(raw)
         command = raw.get("command")
-        resource_root = _decode_asset_key(raw.get("resource_root"))
-        raw_snapshot = raw.get("resource_snapshot") if frozen else None
-        resource_snapshot = (
-            _decode_object_ref(raw_snapshot) if raw_snapshot is not None else None
-        )
-        if resource_snapshot is None:
-            if frozen and "frozen_args" in raw:
+        resource = _decode_asset_key(raw.get("resource"))
+        resource_versions: tuple[AssetVersionRef, ...] | None = None
+        raw_versions = raw.get("resource_versions") if execution else None
+        if raw_versions is not None:
+            if not isinstance(raw_versions, list):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            args = raw.get("args", [])
+            try:
+                parsed = tuple(
+                    AssetVersionRef.from_payload(item)
+                    for item in raw_versions
+                )
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            keys = tuple(item.key for item in parsed)
+            if len(keys) != len(set(keys)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            resource_versions = tuple(
+                sorted(parsed, key=lambda item: (item.key.kind, item.key.id))
+            )
+        if execution and "execution_policy" in raw:
+            _execution_policy_payload(raw["execution_policy"])
+            if resource is not None and resource_versions is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        asset_source_id = raw.get("asset_source_id") if execution else None
+        if resource_versions is None:
+            if execution and "asset_source_id" in raw:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
-            if resource_root is None or raw.get("args") is not None:
+            if (
+                resource is None
+                or not isinstance(asset_source_id, str)
+                or not asset_source_id
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            args = raw.get("frozen_args")
+        args = raw.get("args", [])
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server id must be a non-empty string")
         if not isinstance(command, str) or not command.strip():
@@ -353,15 +585,16 @@ class MCPServerSpecCodec:
             value = MCPServerSpec(
                 identity,
                 command,
-                tuple(cast("list[str]", args)),
-                resource_root,
+                tuple(args),
+                resource,
+                revision=revision,
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid") from error
-        return value, resource_snapshot
+        return value, resource_versions
 
     def encode(self, value: MCPServerSpec) -> bytes:
-        return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
+        return _encode(self.to_wire_payload(value))
 
     def decode(self, data: bytes) -> MCPServerSpec:
         return self.from_payload(_decode(data))
@@ -371,12 +604,43 @@ def _encode(value: "dict[str, object]") -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
-def _object_ref_payload(value: ObjectRef) -> dict[str, JsonValue]:
+def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    policy = dict(value)
+    boundary = policy.get("boundary")
+    if boundary == "host-stdio":
+        if policy != {"version": 1, "boundary": "host-stdio"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return {"version": 1, "boundary": "host-stdio"}
+    expected = {
+        "version",
+        "boundary",
+        "workspace_access",
+        "hidden_paths",
+        "network",
+    }
+    workspace_access = policy.get("workspace_access")
+    hidden_paths = policy.get("hidden_paths")
+    if (
+        set(policy) != expected
+        or policy.get("version") != 1
+        or isinstance(policy.get("version"), bool)
+        or boundary != "workspace-stdio"
+        or not isinstance(workspace_access, str)
+        or workspace_access not in {"read", "read_write", "none"}
+        or policy.get("network") != "isolated"
+        or not isinstance(hidden_paths, list)
+        or any(not isinstance(path, str) or not path for path in hidden_paths)
+        or hidden_paths != sorted(set(hidden_paths))
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return {
-        "store_id": value.store_id,
-        "key": value.key,
-        "digest": value.digest,
-        "size": value.size,
+        "version": 1,
+        "boundary": "workspace-stdio",
+        "workspace_access": workspace_access,
+        "hidden_paths": list(hidden_paths),
+        "network": "isolated",
     }
 
 
@@ -384,38 +648,15 @@ def _decode_asset_key(value: object) -> AssetKey | None:
     if value is None:
         return None
     if not isinstance(value, Mapping):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid")
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource is invalid")
     kind = value.get("kind")
     identity = value.get("id")
     if not isinstance(kind, str) or not isinstance(identity, str):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid")
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource is invalid")
     try:
         return AssetKey(kind, identity)
     except ValueError as error:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid") from error
-
-
-def _decode_object_ref(value: object) -> ObjectRef | None:
-    if value is None:
-        return None
-    if not isinstance(value, Mapping):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid")
-    store_id = value.get("store_id")
-    key = value.get("key")
-    digest = value.get("digest")
-    size = value.get("size")
-    if (
-        not isinstance(store_id, str)
-        or not isinstance(key, str)
-        or not isinstance(digest, str)
-        or isinstance(size, bool)
-        or not isinstance(size, int)
-    ):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid")
-    try:
-        return ObjectRef(store_id, key, digest, size)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid") from error
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource is invalid") from error
 
 
 def _decode(data: bytes) -> "dict[str, object]":
@@ -426,6 +667,49 @@ def _decode(data: bytes) -> "dict[str, object]":
     if not isinstance(value, dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
+
+
+def decode_author_json_mapping(data: bytes) -> dict[str, object]:
+    """Decode an author JSON object while rejecting duplicate keys."""
+    try:
+        value = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=_strict_json_mapping,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+    if not isinstance(value, dict):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    return value
+
+
+def decode_author_yaml_mapping(data: bytes) -> dict[str, object]:
+    """Decode finite JSON-shaped author YAML while rejecting duplicate and merge keys."""
+    try:
+        text = data.decode("utf-8", errors="strict")
+        value = yaml.load(text, Loader=_StrictSafeLoader)
+        normalized = normalize_json_value(value)
+    except AIError:
+        raise
+    except (UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+    if not isinstance(normalized, dict):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    return normalized
+
+
+def _strict_json_mapping(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"unsupported JSON constant: {value}")
 
 
 def _require_version(raw: Mapping[str, object], supported: set[int]) -> int:
@@ -441,6 +725,16 @@ def _require_version(raw: Mapping[str, object], supported: set[int]) -> int:
 
 def _require_v1(raw: Mapping[str, object]) -> None:
     _require_version(raw, {1})
+
+
+def _decode_revision(raw: Mapping[str, object]) -> int:
+    value = raw.get("revision", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AIError(
+            ErrorCode.OUTPUT_CONTRACT_INVALID,
+            "revision must be a positive integer",
+        )
+    return value
 
 
 def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
@@ -467,6 +761,8 @@ class _StrictSafeLoader(yaml.SafeLoader):
 def _construct_mapping(loader: _StrictSafeLoader, node: yaml.nodes.MappingNode, deep: bool = False) -> dict[object, object]:
     mapping: dict[object, object] = {}
     for key_node, value_node in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            raise ValueError("YAML merge keys are not supported")
         key = loader.construct_object(key_node, deep=deep)
         if key in mapping:
             raise ValueError("duplicate YAML key")
@@ -494,20 +790,23 @@ def _parse_skill_markdown(content: str) -> dict[str, object]:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     if not isinstance(description, str) or not 1 <= len(description) <= 1024:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    for key, maximum in (("compatibility", 500),):
-        if key in frontmatter and (not isinstance(frontmatter[key], str) or not 1 <= len(cast(str, frontmatter[key])) <= maximum):
+    if "metadata" in frontmatter:
+        metadata = frontmatter["metadata"]
+        if not isinstance(metadata, Mapping):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    for key in ("license", "allowed-tools"):
-        if key in frontmatter and not isinstance(frontmatter[key], str):
+        revision = metadata.get("linktools-revision", 1)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    metadata = frontmatter.get("metadata")
-    if metadata is not None and (
-        not isinstance(metadata, Mapping)
-        or any(not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items())
-    ):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    if isinstance(metadata, Mapping) and "linktools-revision" in metadata:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        try:
+            normalized = normalize_json_value(dict(metadata))
+            frontmatter["metadata"] = dict(
+                ImmutableJsonMapping(
+                    normalized,
+                    allow_empty_keys=True,
+                )
+            )
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     return frontmatter
 
 

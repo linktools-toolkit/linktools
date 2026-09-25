@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import ExecutionRequest
@@ -18,10 +18,10 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 
-def _binding() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="default"),
-        base_model={"provider": "test", "model": "fixture"},
+        model_contract={"provider": "test", "model": "fixture"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -37,8 +37,8 @@ def _execution(*, correlation: dict[str, str | int]) -> ExecutionRecord:
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.PENDING_START,
         revision=0,
@@ -69,14 +69,14 @@ def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
     backend._restore_binding = None
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(
-            snapshot=execution.binding,
-            digest=digest,
+            binding_contract=execution.binding,
+            binding_digest=digest,
         )
     )
     return backend
 
 
-def test_local_binding_lookup_uses_semantic_digest() -> None:
+def test_local_binding_lookup_uses_binding_digest() -> None:
     durable = _binding()
     equivalent = replace(
         durable,
@@ -92,15 +92,15 @@ def test_local_binding_lookup_uses_semantic_digest() -> None:
     backend = _backend(execution)
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(
-            snapshot=equivalent,
-            digest=digest,
+            binding_contract=equivalent,
+            binding_digest=digest,
         )
     )
 
     binding = backend._execution_binding(execution)
 
-    assert binding.digest == execution.binding_digest
-    assert binding.snapshot == equivalent
+    assert binding.binding_digest == execution.binding_digest
+    assert binding.binding_contract == equivalent
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._capabilities import (
-    _RuntimeStepPersistence,
+    _RuntimeAgentRunPersistence,
 )
 from linktools.ai.runtime._history import _trace_item
 from linktools.ai.runtime._journal import ModelRequestJournal
@@ -21,7 +21,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage, RunUsage
 from linktools.ai.runtime.state._steps import (
-    StagingStepStore,
+    StagingAgentRunStore,
 )
 from linktools.ai.runtime.state._step_contracts import (
     EventKind,
@@ -81,7 +81,7 @@ def _project_event(event: StepEvent, ordinal: int = 0) -> dict[str, object] | No
 def _project_usage(usage: RequestUsage) -> dict[str, object] | None:
     return _project_event(
         StepEvent(
-            run_id="run",
+            agent_run_id="run",
             kind="model_request_completed",
             step_index=1,
             metadata=_model_usage_metadata(ModelResponse(parts=(), usage=usage)),
@@ -104,8 +104,8 @@ def _model_usage_metadata(response: ModelResponse) -> dict[str, str]:
 
 
 def _persistence(
-    store: StagingStepStore,
-    run_id: str,
+    store: StagingAgentRunStore,
+    agent_run_id: str,
     *,
     reverse_registration: bool = False,
 ) -> CombinedCapability[object]:
@@ -113,17 +113,17 @@ def _persistence(
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id=run_id,
+        agent_run_id=agent_run_id,
     )
     capture = RuntimeCaptureStore(
         store,
         execution_id=None,
-        step_run_id=run_id,
+        agent_run_id=agent_run_id,
     )
-    persistence = _RuntimeStepPersistence(
+    persistence = _RuntimeAgentRunPersistence(
         capture=capture,
         agent_name="usage-test",
-        run_id=run_id,
+        agent_run_id=agent_run_id,
     )
     observation = RuntimeModelObservationCapability(
         None,
@@ -131,7 +131,7 @@ def _persistence(
         tenant_id="tenant",
         execution_id="execution",
         session_id=None,
-        step_run_id=run_id,
+        agent_run_id=agent_run_id,
         agent_id="usage-test",
         journal=journal,
         interaction_recorder=capture,
@@ -143,9 +143,9 @@ def _persistence(
 
 
 async def _completed_usage(
-    store: StagingStepStore, run_id: str
+    store: StagingAgentRunStore, agent_run_id: str
 ) -> list[dict[str, object]]:
-    events = await store.list_events(run_id=run_id)
+    events = await store.list_events(agent_run_id=agent_run_id)
     values = [
         _project_event(event, ordinal)
         for ordinal, event in enumerate(events)
@@ -157,14 +157,14 @@ async def _completed_usage(
 
 @pytest.mark.asyncio
 async def test_model_usage_trace_does_not_depend_on_registration_order() -> None:
-    store = StagingStepStore()
-    run_id = "reverse-registration-run"
+    store = StagingAgentRunStore()
+    agent_run_id = "reverse-registration-run"
     agent = Agent(
         FunctionModel(_usage_model),
         capabilities=[
             _persistence(
                 store,
-                run_id,
+                agent_run_id,
                 reverse_registration=True,
             )
         ],
@@ -172,7 +172,7 @@ async def test_model_usage_trace_does_not_depend_on_registration_order() -> None
 
     await agent.run("hello")
 
-    events = await store.list_events(run_id=run_id)
+    events = await store.list_events(agent_run_id=agent_run_id)
     started = [
         event
         for event in events
@@ -200,7 +200,7 @@ async def test_model_usage_trace_does_not_depend_on_registration_order() -> None
 
 @pytest.mark.asyncio
 async def test_asyncio_model_cancellation_preserves_cancelled_status() -> None:
-    store = StagingStepStore()
+    store = StagingAgentRunStore()
 
     async def cancelled_model(
         messages: list[ModelMessage],
@@ -215,7 +215,7 @@ async def test_asyncio_model_cancellation_preserves_cancelled_status() -> None:
     with pytest.raises(asyncio.CancelledError):
         await agent.run("hello")
 
-    events = await store.list_events(run_id="cancelled-model-run")
+    events = await store.list_events(agent_run_id="cancelled-model-run")
     model_events = [
         event.kind for event in events if event.kind.startswith("model_request_")
     ]
@@ -317,7 +317,7 @@ def test_model_response_trace_keeps_each_request_usage_separate() -> None:
 
 def test_successful_model_response_trace_allows_missing_usage_fact() -> None:
     event = StepEvent(
-        run_id="run",
+        agent_run_id="run",
         kind="model_request_completed",
         step_index=1,
         metadata={},
@@ -335,7 +335,7 @@ def test_successful_model_response_trace_allows_missing_usage_fact() -> None:
 
 def test_successful_model_response_trace_allows_partial_usage_fact() -> None:
     event = StepEvent(
-        run_id="run",
+        agent_run_id="run",
         kind="model_request_completed",
         step_index=1,
         metadata={
@@ -359,7 +359,7 @@ def test_successful_model_response_trace_allows_partial_usage_fact() -> None:
 
 def test_model_response_trace_rejects_invalid_usage_value() -> None:
     event = StepEvent(
-        run_id="run",
+        agent_run_id="run",
         kind="model_request_completed",
         step_index=1,
         metadata={"linktools.ai.model_usage.input_tokens": "-1"},
@@ -383,7 +383,7 @@ def test_tool_trace_accepts_request_sequence_without_request_purpose(
     kind: EventKind,
 ) -> None:
     event = StepEvent(
-        run_id="run",
+        agent_run_id="run",
         kind=kind,
         step_index=1,
         tool_call_id="call",
@@ -404,7 +404,7 @@ def test_tool_trace_accepts_request_sequence_without_request_purpose(
 
 def test_model_trace_accepts_sparse_request_lineage() -> None:
     event = StepEvent(
-        run_id="run",
+        agent_run_id="run",
         kind="model_request_started",
         step_index=1,
         metadata={"linktools.ai.request_sequence": "1"},
@@ -423,7 +423,7 @@ def test_model_trace_accepts_sparse_request_lineage() -> None:
 
 def test_model_trace_preserves_unknown_request_purpose() -> None:
     event = StepEvent(
-        run_id="run",
+        agent_run_id="run",
         kind="model_request_started",
         step_index=1,
         metadata={"linktools.ai.request_purpose": "future"},
@@ -441,7 +441,7 @@ def test_model_trace_preserves_unknown_request_purpose() -> None:
 
 def test_legacy_cancelled_model_response_trace_is_normalized() -> None:
     event = StepEvent(
-        run_id="run",
+        agent_run_id="run",
         kind="model_request_failed",
         step_index=1,
         error=ErrorCode.EXECUTION_CANCELLED.value,
@@ -467,7 +467,7 @@ def test_failed_model_response_trace_has_no_request_usage(
     error_code: str | None,
 ) -> None:
     event = StepEvent(
-        run_id="run",
+        agent_run_id="run",
         kind="model_request_failed",
         step_index=1,
         error=error_code,
@@ -487,7 +487,7 @@ def test_failed_model_response_trace_has_no_request_usage(
 
 @pytest.mark.asyncio
 async def test_model_retry_records_each_request_usage() -> None:
-    store = StagingStepStore()
+    store = StagingAgentRunStore()
     agent = Agent(
         FunctionModel(_text_model),
         capabilities=[_persistence(store, "retry-run")],
@@ -512,7 +512,7 @@ async def test_model_retry_records_each_request_usage() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_loop_records_usage_before_and_after_tool() -> None:
-    store = StagingStepStore()
+    store = StagingAgentRunStore()
     agent = Agent(
         TestModel(),
         capabilities=[_persistence(store, "tool-run")],
@@ -532,7 +532,7 @@ async def test_tool_loop_records_usage_before_and_after_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_records_completed_request_usage() -> None:
-    store = StagingStepStore()
+    store = StagingAgentRunStore()
     agent = Agent(
         TestModel(custom_output_text="streamed"),
         capabilities=[_persistence(store, "stream-run")],

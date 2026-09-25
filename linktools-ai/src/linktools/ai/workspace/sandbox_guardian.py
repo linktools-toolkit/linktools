@@ -46,10 +46,15 @@ def main(argv: list[str] | None = None) -> int:
     child: subprocess.Popen[bytes] | None = None
     child_pidfd = -1
     status_fd = -1
+    stdio_control_fd = -1
     exit_code = GUARDIAN_EXIT_SESSION_FAILED
+    ready_sent = False
     try:
         runtime_pidfd = _duplicate_fd(arguments.runtime_pidfd)
         _close_fd(arguments.runtime_pidfd)
+        if arguments.stdio_control_fd >= 0:
+            stdio_control_fd = _duplicate_fd(arguments.stdio_control_fd)
+            _close_fd(arguments.stdio_control_fd)
         selector = selectors.DefaultSelector()
         selector.register(runtime_pidfd, selectors.EVENT_READ, "runtime")
         if not _pidfd_is_alive(runtime_pidfd):
@@ -58,18 +63,35 @@ def main(argv: list[str] | None = None) -> int:
         _install_signal_handlers()
         config = _read_config(arguments.config_fd, runtime_pidfd)
         _validate_config(config)
+        if config["mode"] == "stdio" and stdio_control_fd < 0:
+            raise RuntimeError("stdio control fd is unavailable")
+        if config["mode"] == "worker" and stdio_control_fd >= 0:
+            raise RuntimeError("worker has an unexpected stdio control fd")
         child, status_fd = _start_bwrap(config["bwrap_args"])
         child_pidfd = _open_child_pidfd(child.pid)
         _wait_bwrap_started(status_fd, runtime_pidfd, child)
-        exit_code = _relay(
-            selector,
-            runtime_pidfd,
-            child,
-            child_pidfd,
-            status_fd,
-        )
+        if config["mode"] == "worker":
+            exit_code = _relay(
+                selector,
+                runtime_pidfd,
+                child,
+                child_pidfd,
+                status_fd,
+            )
+        else:
+            _write_control(stdio_control_fd, {"event": "ready"})
+            ready_sent = True
+            exit_code = _relay_stdio(
+                selector,
+                runtime_pidfd,
+                child,
+                child_pidfd,
+                status_fd,
+            )
     except BaseException as error:
         _write_diagnostic(error)
+        if stdio_control_fd >= 0 and not ready_sent:
+            _write_control(stdio_control_fd, {"event": "failed"})
         exit_code = GUARDIAN_EXIT_SESSION_FAILED
     finally:
         if child is not None and child_pidfd >= 0:
@@ -78,6 +100,13 @@ def main(argv: list[str] | None = None) -> int:
             except BaseException as error:
                 _write_diagnostic(error)
                 exit_code = GUARDIAN_EXIT_CLEANUP_FAILED
+        if stdio_control_fd >= 0 and child is not None:
+            returncode = child.poll()
+            if returncode is not None:
+                _write_control(
+                    stdio_control_fd,
+                    {"event": "child_exit", "returncode": returncode},
+                )
         elif child is not None:
             try:
                 _cleanup_untracked_child(child)
@@ -90,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
         _close_fd(runtime_pidfd)
         _close_fd(arguments.config_fd)
         _close_fd(arguments.runtime_pidfd)
+        _close_fd(stdio_control_fd)
+        _close_fd(arguments.stdio_control_fd)
     return exit_code
 
 
@@ -263,12 +294,201 @@ def _relay(
             child_err_fd,
             status_fd,
         ):
-            try:
-                selector.unregister(fd)
-            except (KeyError, ValueError):
-                pass
+            _unregister(selector, fd)
 
 
+def _relay_stdio(
+    selector: selectors.BaseSelector,
+    runtime_pidfd: int,
+    child: subprocess.Popen[bytes],
+    child_pidfd: int,
+    status_fd: int,
+) -> int:
+    parent_in = sys.stdin.buffer.fileno()
+    parent_out = sys.stdout.buffer.fileno()
+    child_in = child.stdin
+    child_out = child.stdout
+    child_err = child.stderr
+    if child_in is None or child_out is None or child_err is None:
+        raise RuntimeError("Bubblewrap pipes are unavailable")
+    child_in_fd = child_in.fileno()
+    child_out_fd = child_out.fileno()
+    child_err_fd = child_err.fileno()
+    fds = (
+        runtime_pidfd,
+        child_pidfd,
+        parent_in,
+        parent_out,
+        child_in_fd,
+        child_out_fd,
+        child_err_fd,
+        status_fd,
+    )
+    for fd in fds:
+        os.set_blocking(fd, False)
+    selector.register(child_pidfd, selectors.EVENT_READ, "child-process")
+    selector.register(parent_in, selectors.EVENT_READ, "parent-in")
+    selector.register(child_out_fd, selectors.EVENT_READ, "child-out")
+    selector.register(child_err_fd, selectors.EVENT_READ, "child-err")
+    selector.register(status_fd, selectors.EVENT_READ, "bwrap-status")
+    to_child = bytearray()
+    to_parent = bytearray()
+    input_open = True
+    output_open = True
+    child_input_open = True
+    child_output_open = True
+    stderr_open = True
+    stderr_retained = 0
+    close_deadline: float | None = None
+    try:
+        while True:
+            if _shutdown_requested:
+                input_open = False
+                close_deadline = time.monotonic()
+            if (
+                child.poll() is not None
+                and not to_parent
+                and not output_open
+                and not stderr_open
+            ):
+                return GUARDIAN_EXIT_OK
+            if close_deadline is not None and time.monotonic() >= close_deadline:
+                return GUARDIAN_EXIT_OK
+            if not input_open and child_input_open and not to_child:
+                _unregister(selector, child_in_fd)
+                _close_fd(child_in_fd)
+                child_input_open = False
+            _set_write_interest(
+                selector,
+                child_in_fd,
+                "child-in",
+                child_input_open and bool(to_child),
+            )
+            _set_write_interest(
+                selector,
+                parent_out,
+                "parent-out",
+                output_open and bool(to_parent),
+            )
+            _set_read_interest(
+                selector,
+                parent_in,
+                "parent-in",
+                input_open and len(to_child) <= _MAX_BUFFER_BYTES - 64 * 1024,
+            )
+            _set_read_interest(
+                selector,
+                child_out_fd,
+                "child-out",
+                child_output_open
+                and output_open
+                and len(to_parent) <= _MAX_BUFFER_BYTES - 64 * 1024,
+            )
+            timeout = 0.25
+            if close_deadline is not None:
+                timeout = min(
+                    timeout,
+                    max(0.0, close_deadline - time.monotonic()),
+                )
+            for key, mask in selector.select(timeout):
+                tag = key.data
+                if tag == "runtime":
+                    input_open = False
+                    output_open = False
+                    close_deadline = time.monotonic()
+                    to_child.clear()
+                    to_parent.clear()
+                    _unregister(selector, parent_in)
+                    _unregister(selector, parent_out)
+                    _close_fd(parent_in)
+                    _close_fd(parent_out)
+                    continue
+                if tag == "child-process":
+                    input_open = False
+                    to_child.clear()
+                    if close_deadline is None:
+                        close_deadline = time.monotonic() + _CLOSE_SECONDS
+                    _unregister(selector, child_pidfd)
+                    _unregister(selector, parent_in)
+                    _close_fd(parent_in)
+                    if child_input_open:
+                        _unregister(selector, child_in_fd)
+                        _close_fd(child_in_fd)
+                        child_input_open = False
+                    continue
+                if tag == "parent-in" and mask & selectors.EVENT_READ:
+                    data = _read_nonblocking(parent_in)
+                    if data is None:
+                        continue
+                    if not data:
+                        input_open = False
+                        close_deadline = time.monotonic() + _CLOSE_SECONDS
+                        _unregister(selector, parent_in)
+                        _close_fd(parent_in)
+                    else:
+                        to_child.extend(data)
+                        if len(to_child) > _MAX_BUFFER_BYTES:
+                            raise RuntimeError("stdio input backpressure exceeded")
+                elif tag == "child-in" and mask & selectors.EVENT_WRITE:
+                    if not _write_nonblocking(child_in_fd, to_child):
+                        input_open = False
+                        to_child.clear()
+                        _unregister(selector, child_in_fd)
+                        _close_fd(child_in_fd)
+                        child_input_open = False
+                elif tag == "child-out" and mask & selectors.EVENT_READ:
+                    data = _read_nonblocking(child_out_fd)
+                    if data is None:
+                        continue
+                    if not data:
+                        child_output_open = False
+                        _unregister(selector, child_out_fd)
+                        _close_fd(child_out_fd)
+                    elif output_open:
+                        to_parent.extend(data)
+                        if len(to_parent) > _MAX_BUFFER_BYTES:
+                            raise RuntimeError("stdio output backpressure exceeded")
+                elif tag == "parent-out" and mask & selectors.EVENT_WRITE:
+                    if not _write_nonblocking(parent_out, to_parent):
+                        output_open = False
+                        to_parent.clear()
+                        input_open = False
+                        _unregister(selector, parent_out)
+                        _close_fd(parent_out)
+                elif tag == "child-err" and mask & selectors.EVENT_READ:
+                    data = _read_nonblocking(child_err_fd)
+                    if data is None:
+                        continue
+                    if not data:
+                        stderr_open = False
+                        _unregister(selector, child_err_fd)
+                        _close_fd(child_err_fd)
+                    else:
+                        remaining = 64 * 1024 - stderr_retained
+                        retained = data[:remaining]
+                        _write_stderr(retained)
+                        stderr_retained += len(retained)
+                elif tag == "bwrap-status" and mask & selectors.EVENT_READ:
+                    data = _read_nonblocking(status_fd)
+                    if data == b"":
+                        _unregister(selector, status_fd)
+                        _close_fd(status_fd)
+                    elif data is not None and len(data) > _MAX_CONFIG_BYTES:
+                        raise RuntimeError("Bubblewrap status is too large")
+            if not child_output_open and output_open and not to_parent:
+                _unregister(selector, parent_out)
+                _close_fd(parent_out)
+                output_open = False
+            if (
+                child.poll() is not None
+                and not output_open
+                and not stderr_open
+                and not to_parent
+            ):
+                return GUARDIAN_EXIT_OK
+    finally:
+        for fd in fds:
+            _unregister(selector, fd)
 def _start_bwrap(arguments: Any) -> tuple[subprocess.Popen[bytes], int]:
     if (
         not isinstance(arguments, list)
@@ -635,9 +855,10 @@ def _read_config(fd_value: int, runtime_pidfd: int) -> dict[str, Any]:
 def _validate_config(value: Mapping[str, Any]) -> None:
     arguments = value.get("bwrap_args")
     if (
-        set(value) != {"version", "bwrap_args"}
+        set(value) != {"version", "mode", "bwrap_args"}
         or isinstance(value.get("version"), bool)
         or value.get("version") != PROTOCOL_VERSION
+        or value.get("mode") not in {"worker", "stdio"}
         or not isinstance(arguments, list)
         or not arguments
         or any(not isinstance(argument, str) or not argument for argument in arguments)
@@ -700,6 +921,26 @@ def _set_write_interest(
         selector.unregister(fd)
 
 
+def _set_read_interest(
+    selector: selectors.BaseSelector,
+    fd: int,
+    tag: str,
+    enabled: bool,
+) -> None:
+    try:
+        key = selector.get_key(fd)
+    except KeyError:
+        if enabled:
+            selector.register(fd, selectors.EVENT_READ, tag)
+        return
+    events = key.events
+    wanted = events | selectors.EVENT_READ if enabled else events & ~selectors.EVENT_READ
+    if wanted:
+        selector.modify(fd, wanted, tag)
+    else:
+        selector.unregister(fd)
+
+
 def _unregister(selector: selectors.BaseSelector, fd: int) -> None:
     try:
         selector.unregister(fd)
@@ -735,6 +976,14 @@ def _write_diagnostic(error: BaseException) -> None:
     )
 
 
+def _write_control(fd: int, value: Mapping[str, object]) -> None:
+    payload = json.dumps(value, separators=(",", ":")).encode("utf-8") + b"\n"
+    try:
+        os.write(fd, payload)
+    except OSError:
+        pass
+
+
 def _close_fd(fd: int) -> None:
     try:
         os.close(fd)
@@ -746,6 +995,7 @@ def _parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--config-fd", type=int, required=True)
     parser.add_argument("--runtime-pidfd", type=int, required=True)
+    parser.add_argument("--stdio-control-fd", type=int, default=-1)
     return parser.parse_args(argv)
 
 

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import (
     EvaluationStatus,
     ExecutionLineageKind,
@@ -23,7 +23,7 @@ from linktools.ai.runtime.service_api import (
     ReplayEvaluationRequest,
     StartEvaluationRequest,
 )
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     EvaluationRecord,
     ExecutionRecord,
@@ -33,10 +33,10 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 
-def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding(agent_id: str = "agent") -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec(agent_id),
-        base_model={"model_identity": "test:model"},
+        model_contract={"model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -50,7 +50,7 @@ def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
 
 
 def _execution(
-    binding: AgentBindingSnapshot,
+    binding: AgentBindingContract,
     *,
     execution_id: str,
 ) -> ExecutionRecord:
@@ -60,8 +60,8 @@ def _execution(
         session_id=None,
         parent_execution_id=None,
         root_execution_id=execution_id,
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.SUCCEEDED,
         revision=1,
@@ -87,7 +87,7 @@ def _execution(
 class _RecordingExecution:
     def __init__(self) -> None:
         self.binding_digest: str | None = None
-        self.binding_snapshot: AgentBindingSnapshot | None = None
+        self.binding_contract: AgentBindingContract | None = None
         self.request: ExecutionRequest | None = None
 
     async def start(
@@ -96,11 +96,11 @@ class _RecordingExecution:
         request: ExecutionRequest,
         *,
         dependency_hold_id: str | None = None,
-        binding_snapshot: AgentBindingSnapshot | None = None,
+        binding_contract: AgentBindingContract | None = None,
     ) -> ExecutionHandle:
         del dependency_hold_id
         self.binding_digest = binding_digest
-        self.binding_snapshot = binding_snapshot
+        self.binding_contract = binding_contract
         self.request = request
         return ExecutionHandle("execution")
 
@@ -112,7 +112,7 @@ class _Allow:
 
 @pytest.mark.asyncio
 async def test_evaluation_start_persists_source_execution_identity() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     binding = _binding()
     execution = _RecordingExecution()
@@ -131,7 +131,7 @@ async def test_evaluation_start_persists_source_execution_identity() -> None:
                 "evaluation-memory",
                 "evaluation-start",
             ),
-            binding_snapshot=binding,
+            binding_contract=binding,
         )
 
         record = await state.evaluation.records.get(
@@ -140,14 +140,14 @@ async def test_evaluation_start_persists_source_execution_identity() -> None:
         )
         assert record is not None
         assert record.execution_id == "execution"
-        assert execution.binding_snapshot == binding
+        assert execution.binding_contract == binding
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
 async def test_evaluation_idempotency_includes_memory_scope() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     binding = _binding()
     service = DefaultEvaluationService(
@@ -166,7 +166,7 @@ async def test_evaluation_idempotency_includes_memory_scope() -> None:
                 "scope-a",
                 "same-key",
             ),
-            binding_snapshot=binding,
+            binding_contract=binding,
         )
 
         with pytest.raises(AIError) as raised:
@@ -178,7 +178,7 @@ async def test_evaluation_idempotency_includes_memory_scope() -> None:
                     "scope-b",
                     "same-key",
                 ),
-                binding_snapshot=binding,
+                binding_contract=binding,
             )
 
         assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
@@ -188,7 +188,7 @@ async def test_evaluation_idempotency_includes_memory_scope() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluation_replay_uses_historical_execution_binding() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     historical = _binding("agent")
     source = _execution(historical, execution_id="source-execution")
@@ -196,7 +196,7 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
     evaluation = EvaluationRecord(
         evaluation_id="evaluation",
         execution_id=source.execution_id,
-        dataset_digest="dataset",
+        dataset_id="dataset",
         status=EvaluationStatus.SUCCEEDED,
         revision=1,
         created_at=now,
@@ -225,7 +225,7 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
 
         assert replayed.execution_id == "execution"
         assert execution.binding_digest == source.binding_digest
-        assert execution.binding_snapshot == source.binding
+        assert execution.binding_contract == source.binding
         assert execution.request is not None
         assert execution.request.user_prompt == "evaluation:dataset"
     finally:
@@ -234,7 +234,7 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluation_compare_uses_source_execution_binding() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     baseline_source = _execution(_binding("agent"), execution_id="baseline-execution")
@@ -254,7 +254,7 @@ async def test_evaluation_compare_uses_source_execution_binding() -> None:
             EvaluationRecord(
                 evaluation_id=evaluation_id,
                 execution_id=source.execution_id,
-                dataset_digest="dataset",
+                dataset_id="dataset",
                 status=EvaluationStatus.SUCCEEDED,
                 revision=1,
                 created_at=now,
@@ -286,7 +286,7 @@ async def test_evaluation_compare_uses_source_execution_binding() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluation_status_cannot_lead_source_execution() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     source = replace(
         _execution(_binding("agent"), execution_id="source-execution"),
@@ -301,7 +301,7 @@ async def test_evaluation_status_cannot_lead_source_execution() -> None:
         EvaluationRecord(
             evaluation_id="state-ahead",
             execution_id=source.execution_id,
-            dataset_digest="dataset",
+            dataset_id="dataset",
             status=EvaluationStatus.RUNNING,
             revision=1,
             created_at=now,
@@ -333,14 +333,14 @@ async def test_evaluation_status_cannot_lead_source_execution() -> None:
 async def test_evaluation_missing_source_execution_fails_closed(
     status: EvaluationStatus,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     await state.evaluation.records.create(
         EvaluationRecord(
             evaluation_id="missing-source",
             execution_id="missing-execution",
-            dataset_digest="dataset",
+            dataset_id="dataset",
             status=status,
             revision=0,
             created_at=now,

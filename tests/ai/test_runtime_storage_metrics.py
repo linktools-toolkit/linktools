@@ -11,7 +11,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from pydantic_ai.models.test import TestModel
 
 
@@ -20,15 +20,15 @@ class _ModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "d" * 64
-    semantic_payload: dict[str, JsonValue] = {"provider": "test", "model": "test"}
+    model_digest = "d" * 64
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "test"}
 
     def materialize(self) -> TestModel:
         return TestModel(custom_output_text="ok")
 
 
 class _Models:
-    def snapshot(self) -> "_Models":
+    def capture(self) -> "_Models":
         return self
 
     def resolve(self, route_id: str) -> _ModelBinding:
@@ -44,7 +44,7 @@ class _Models:
     ) -> _ModelBinding:
         if (
             route_id not in {None, "default"}
-            or dict(payload) != _ModelBinding.semantic_payload
+            or dict(payload) != _ModelBinding.contract
         ):
             raise AssertionError(payload)
         return _ModelBinding()
@@ -65,7 +65,7 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
     async with Runtime.open(
         "default",
         models=_Models(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:

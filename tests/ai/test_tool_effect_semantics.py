@@ -25,7 +25,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 from linktools.ai.workspace import WorkspaceToolPermissionPolicy
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _Bridge:
@@ -103,7 +103,7 @@ async def _call(
 ) -> tuple[Any, _Bridge | None]:
     selected_bridge = bridge
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(handler, descriptor)]),),
+        (FunctionToolset([tool_with_metadata(handler, descriptor)]),),
         {handler.__name__: descriptor},
         id="test.boundary",
         workspace_policy=workspace_policy,
@@ -129,7 +129,7 @@ async def test_effect_free_tool_does_not_create_tool_operation() -> None:
         read,
         ManagedToolDescriptor(
             effect_owner="none",
-            effect="none",
+            effect_policy="none",
             tool_class="business",
         ),
     )
@@ -149,7 +149,7 @@ async def test_workspace_approval_precedes_tool_operation_admission() -> None:
             write,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="non_replay_safe",
+                effect_policy="non_replay_safe",
                 tool_class="filesystem.write",
             ),
             bridge=bridge,
@@ -169,7 +169,7 @@ async def test_replay_safe_retry_tool_call_is_terminalized() -> None:
             retry,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="replay_safe",
+                effect_policy="replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
@@ -188,7 +188,7 @@ async def test_non_replay_safe_failed_tool_call_is_terminalized() -> None:
             failed,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="non_replay_safe",
+                effect_policy="non_replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
@@ -207,7 +207,7 @@ async def test_pydantic_retry_is_not_a_linktools_effect_signal() -> None:
             retry,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="replay_safe",
+                effect_policy="replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
@@ -227,7 +227,7 @@ async def test_replay_safe_unhandled_failure_becomes_effect_unknown() -> None:
             broken,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="replay_safe",
+                effect_policy="replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
@@ -247,7 +247,7 @@ async def test_non_replay_safe_unhandled_failure_requires_effect_verification() 
             broken,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="non_replay_safe",
+                effect_policy="non_replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
@@ -267,7 +267,7 @@ async def test_replay_safe_native_deferred_call_releases_tool_operation() -> Non
             deferred,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="replay_safe",
+                effect_policy="replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
@@ -286,7 +286,7 @@ async def test_non_replay_safe_deferred_call_becomes_effect_unknown() -> None:
             deferred,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="non_replay_safe",
+                effect_policy="non_replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
@@ -306,7 +306,7 @@ async def test_external_cancellation_keeps_cancellation_control_flow() -> None:
             cancelled,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="non_replay_safe",
+                effect_policy="non_replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
@@ -324,7 +324,7 @@ async def test_cached_result_skips_raw_leaf() -> None:
         unexpected,
         ManagedToolDescriptor(
             effect_owner="tool_operation",
-            effect="replay_safe",
+            effect_policy="replay_safe",
             tool_class="business",
         ),
         bridge=bridge,
@@ -344,7 +344,7 @@ async def test_cached_failure_skips_raw_leaf() -> None:
             unexpected,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="replay_safe",
+                effect_policy="replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
@@ -357,7 +357,7 @@ def test_tool_descriptor_rejects_effect_without_owner() -> None:
     with pytest.raises(ValueError):
         ManagedToolDescriptor(
             effect_owner="none",
-            effect="replay_safe",
+            effect_policy="replay_safe",
             tool_class="business",
         )
 
@@ -366,7 +366,7 @@ def test_tool_descriptor_rejects_tool_operation_without_effect() -> None:
     with pytest.raises(ValueError):
         ManagedToolDescriptor(
             effect_owner="tool_operation",
-            effect="none",
+            effect_policy="none",
             tool_class="business",
         )
 

@@ -13,7 +13,7 @@ from pydantic_ai_harness.planning import (
     TaskStatus,
 )
 
-from ..capability import ToolCallRetry, tool_semantic_metadata
+from ..capability import ToolCallRetry, tool_metadata
 from ..errors import AIError, ErrorCode
 from ._harness import HarnessPlanStoreAdapter
 
@@ -113,7 +113,7 @@ class HarnessPlanning(Planning[None]):
         toolset = super().get_toolset()
         if toolset is not None:
             tool = toolset.tools[_PLANNING_TOOL_NAME]
-            tool.metadata = tool_semantic_metadata(
+            tool.metadata = tool_metadata(
                 base=tool.metadata,
                 plan_safe=True,
                 compaction_keep_result=True,

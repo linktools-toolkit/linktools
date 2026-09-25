@@ -241,7 +241,7 @@ async def test_recovery_reconcile_defers_unavailable_definition_per_execution() 
             execution_id = checkpoint.execution_id  # type: ignore[attr-defined]
             self.seen.append(execution_id)
             if execution_id == "unavailable":
-                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+                raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
 
     coordinator = Coordinator()
     await coordinator.reconcile()
@@ -268,14 +268,14 @@ async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
         async def reconcile_checkpoint(self, checkpoint: object) -> None:
             del checkpoint
             raise AIError(
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                ErrorCode.AGENT_BINDING_UNAVAILABLE,
                 safe_details={"reason": "workspace_mismatch"},
             )
 
     with pytest.raises(AIError) as raised:
         await Coordinator().reconcile()
 
-    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
     assert raised.value.safe_details == {"reason": "workspace_mismatch"}
 
 
@@ -290,9 +290,9 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
         parent_execution_id=None,
         root_execution_id="execution",
         parent_invocation_id=None,
-        source_execution_id=None,
-        base_execution_id=None,
-        conversation_step_run_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
+        conversation_agent_run_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         planning=False,
         thinking=False,

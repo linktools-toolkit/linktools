@@ -7,9 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output, restore_output
-from linktools.ai.asset import AssetStore, InMemoryAssetBackend
+from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -23,9 +23,10 @@ from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._agent_task import _cancel_execution
 from linktools.ai.runtime._approval import DefaultApprovalService
+from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.runtime._factory import compose_runtime_components
 from linktools.ai.runtime._subagent import SubagentDispatcher
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
@@ -81,11 +82,11 @@ class _UncertainExecution:
         return SimpleNamespace(status=ExecutionStatus.STARTED)
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="model"),
-        base_model={"route_id": "model", "model_identity": "test:model"},
+        model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -93,7 +94,7 @@ def _binding() -> AgentBindingSnapshot:
     )
 
 
-def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecord:
+def _execution(*, binding: AgentBindingContract | None = None) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     selected = binding or _binding()
     return ExecutionRecord(
@@ -101,8 +102,8 @@ def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecor
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.PENDING_START,
         revision=0,
@@ -134,7 +135,7 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
     components = await compose_runtime_components(
         "workspace",
         models=ModelRegistry.openai(model="gpt-test"),
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(group,),
     )
 
@@ -143,6 +144,41 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
     assert store.ready
     await store.close()
     await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_source_change_during_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    original_build = runtime_factory._build_local_components
+
+    async def build_then_change_source(**kwargs: object):
+        components = await original_build(**kwargs)  # type: ignore[arg-type]
+        await store.put(AssetKey("agent", "late"), b"changed")
+        return components
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_build_local_components",
+        build_then_change_source,
+    )
+    try:
+        with pytest.raises(AIError) as error:
+            await compose_runtime_components(
+                "workspace",
+                models=RuntimeUsageModels(),  # type: ignore[arg-type]
+                storage=RuntimeStorage.in_memory(),
+                capabilities=(CapabilityGroup("workspace", assets=store),),
+            )
+
+        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+        assert store.ready
+    finally:
+        await store.close()
+        await backend.close()
 
 
 @pytest.mark.asyncio
@@ -176,7 +212,6 @@ def test_output_contract_restores_only_mode_and_schema() -> None:
     assert automatic.mode == "structured"
     assert restored.mode == automatic.mode
     assert restored.schema_definition == automatic.schema_definition
-    assert restored.fingerprint == automatic.fingerprint
 
     with pytest.raises(AIError) as restore_error:
         restore_output("structured", {"type": "not-a-json-schema-type"})
@@ -256,7 +291,7 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
     async with Runtime.open(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
         result = await runtime.agent("default").run(

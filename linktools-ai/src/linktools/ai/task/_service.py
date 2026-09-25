@@ -17,7 +17,7 @@ from ._graph import (
     TaskGraphLaunch,
     TaskGraphRequest,
     TaskGraphResult,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
 )
 
@@ -49,12 +49,12 @@ class TaskGraphQueryService(Protocol):
         principal: Principal,
     ) -> TaskGraphView: ...
 
-    async def snapshot(
+    async def state(
         self,
         graph_id: str,
         *,
         principal: Principal,
-    ) -> TaskGraphSnapshot: ...
+    ) -> TaskGraphState: ...
 
     async def list_events(
         self,

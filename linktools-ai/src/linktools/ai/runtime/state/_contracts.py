@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic_ai.messages import ModelMessage
 
-from ...agent import AgentBindingSnapshot
+from ...agent import AgentBindingContract
 from ...core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -52,12 +52,12 @@ from ...core import (
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskEvent,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLaunch,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskLease,
     TaskNode,
@@ -65,7 +65,7 @@ from ...task import (
     TaskResultRecord,
     TaskTerminalRecord,
 )
-from ...workspace import normalize_workspace_path
+from ...workspace import validate_workspace_path
 from ._plan import RuntimeDomain
 
 if TYPE_CHECKING:
@@ -204,7 +204,7 @@ def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonV
 
 @dataclass(frozen=True, slots=True)
 class ConversationCursor:
-    step_run_id: str
+    agent_run_id: str
     history_id: str | None = None
     message_count: int | None = None
 
@@ -473,7 +473,7 @@ class ContextProjection:
 class ModelInteractionRecord:
     """Derived observation of one logical model request."""
 
-    run_id: str
+    agent_run_id: str
     step_index: int
     request_sequence: int
     purpose: str
@@ -490,7 +490,7 @@ class ModelInteractionRecord:
 
     def __post_init__(self) -> None:
         if (
-            not self.run_id
+            not self.agent_run_id
             or self.step_index < 0
             or self.request_sequence < 1
             or self.purpose not in {"agent", "compaction"}
@@ -515,8 +515,8 @@ class ModelInteractionRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class StoredStepSnapshot:
-    run_id: str
+class StoredAgentRunCheckpoint:
+    agent_run_id: str
     step_index: int
     timestamp: datetime
     state: str
@@ -530,7 +530,7 @@ class StoredStepSnapshot:
             or not isinstance(self.pending_request_index, int)
             or self.pending_request_index < 0
         ):
-            raise ValueError("stored snapshot pending request index is invalid")
+            raise ValueError("stored checkpoint pending request index is invalid")
 
 
 class HistoryQuality(str, Enum):
@@ -598,7 +598,7 @@ class SessionRecord:
             raise ValueError("closed session cannot have an active execution")
         if self.cwd is not None:
             try:
-                normalized_cwd = normalize_workspace_path(self.cwd)
+                normalized_cwd = validate_workspace_path(self.cwd)
             except (TypeError, ValueError) as error:
                 raise ValueError(
                     "session cwd must be a canonical workspace path"
@@ -625,8 +625,8 @@ class ExecutionRecord:
     session_id: str | None
     parent_execution_id: str | None
     root_execution_id: str
-    source_execution_id: str | None
-    base_execution_id: str | None
+    previous_execution_id: str | None
+    fork_base_execution_id: str | None
     lineage_kind: ExecutionLineageKind
     status: ExecutionStatus
     revision: int
@@ -639,13 +639,13 @@ class ExecutionRecord:
     mode: ExecutionMode | None
     planning: bool | None
     thinking: ThinkingValue | None
-    binding: AgentBindingSnapshot | TaskBindingSnapshot
+    binding: AgentBindingContract | TaskBindingContract
     principal_id: str
     principal_kind: str
     stored_user_input: StoredUserInput
     parent_invocation_id: str | None = None
     memory_scope: str | None = None
-    conversation_step_run_id: str | None = None
+    conversation_agent_run_id: str | None = None
     result: ResultRecord | None = None
     repository_instructions: RuntimePayloadRef | None = None
     error_diagnostics: ErrorDiagnostics | None = None
@@ -658,10 +658,10 @@ class ExecutionRecord:
     started_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        agent_binding = isinstance(self.binding, AgentBindingSnapshot)
-        task_binding = isinstance(self.binding, TaskBindingSnapshot)
+        agent_binding = isinstance(self.binding, AgentBindingContract)
+        task_binding = isinstance(self.binding, TaskBindingContract)
         if agent_binding == task_binding:
-            raise TypeError("execution binding snapshot is invalid")
+            raise TypeError("execution binding contract is invalid")
         if agent_binding:
             mode = normalize_execution_mode(self.mode)
             thinking = normalize_thinking(self.thinking)
@@ -683,7 +683,7 @@ class ExecutionRecord:
             if (
                 self.session_id is not None
                 or self.memory_scope is not None
-                or self.conversation_step_run_id is not None
+                or self.conversation_agent_run_id is not None
                 or self.parent_execution_id is not None
                 or self.parent_invocation_id is not None
                 or self.lineage_kind is not ExecutionLineageKind.RUN
@@ -719,8 +719,8 @@ class ExecutionRecord:
                 or not self.parent_execution_id
                 or not isinstance(self.parent_invocation_id, str)
                 or not self.parent_invocation_id
-                or self.source_execution_id is not None
-                or self.base_execution_id is not None
+                or self.previous_execution_id is not None
+                or self.fork_base_execution_id is not None
             ):
                 raise ValueError("subagent execution lineage is invalid")
         elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
@@ -747,21 +747,21 @@ class ExecutionRecord:
 
     @property
     def binding_kind(self) -> str:
-        return "agent" if isinstance(self.binding, AgentBindingSnapshot) else "task"
+        return "agent" if isinstance(self.binding, AgentBindingContract) else "task"
 
     @property
     def agent_id(self) -> str | None:
         return (
             self.binding.agent_spec.id
-            if isinstance(self.binding, AgentBindingSnapshot)
+            if isinstance(self.binding, AgentBindingContract)
             else None
         )
 
     @property
-    def task_type(self) -> str | None:
+    def task_id(self) -> str | None:
         return (
-            self.binding.task_type
-            if isinstance(self.binding, TaskBindingSnapshot)
+            self.binding.id
+            if isinstance(self.binding, TaskBindingContract)
             else None
         )
 
@@ -780,9 +780,9 @@ class ExecutionCandidatePage:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRunSealHead:
-    run_id: str
+    agent_run_id: str
     event_count: int
-    snapshot_count: int
+    checkpoint_count: int
     transcript_message_count: int
     projection_digest: str
     interaction_count: int = 0
@@ -792,13 +792,13 @@ class ExecutionRunSealHead:
             value < 0
             for value in (
                 self.event_count,
-                self.snapshot_count,
+                self.checkpoint_count,
                 self.transcript_message_count,
                 self.interaction_count,
             )
         ):
             raise ValueError("execution run seal counts cannot be negative")
-        if not self.run_id or not self.projection_digest:
+        if not self.agent_run_id or not self.projection_digest:
             raise ValueError("execution run seal identity cannot be empty")
 
 
@@ -813,8 +813,8 @@ class ExecutionHistorySealRecord:
             raise ValueError("execution history seal values are invalid")
         if not self.execution_id:
             raise ValueError("execution history seal identity cannot be empty")
-        run_ids = tuple(head.run_id for head in self.run_heads)
-        if run_ids != tuple(sorted(run_ids)) or len(run_ids) != len(set(run_ids)):
+        agent_run_ids = tuple(head.agent_run_id for head in self.run_heads)
+        if agent_run_ids != tuple(sorted(agent_run_ids)) or len(agent_run_ids) != len(set(agent_run_ids)):
             raise ValueError("execution history seal heads must be sorted and unique")
 
     @property
@@ -824,9 +824,9 @@ class ExecutionHistorySealRecord:
                 "execution_id": self.execution_id,
                 "run_heads": [
                     {
-                        "run_id": head.run_id,
+                        "agent_run_id": head.agent_run_id,
                         "event_count": head.event_count,
-                        "snapshot_count": head.snapshot_count,
+                        "checkpoint_count": head.checkpoint_count,
                         "transcript_message_count": head.transcript_message_count,
                         "interaction_count": head.interaction_count,
                         "projection_digest": head.projection_digest,
@@ -969,7 +969,7 @@ class ToolOperationRecord:
 
     tool_operation_id: str
     execution_id: str
-    step_run_id: str
+    agent_run_id: str
     tool_call_id: str
     idempotency_key_digest: str
     tool_name: str
@@ -1041,7 +1041,7 @@ class ToolOperationRecord:
 class EvaluationRecord:
     evaluation_id: str
     execution_id: str
-    dataset_digest: str
+    dataset_id: str
     status: EvaluationStatus
     revision: int
     created_at: datetime
@@ -1077,10 +1077,6 @@ class ArtifactRecord:
     @property
     def size(self) -> int:
         return self.object_ref.size
-
-    @property
-    def digest(self) -> str:
-        return self.object_ref.digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -1234,19 +1230,15 @@ class PendingDeferredCall:
         except (TypeError, ValueError) as error:
             raise ValueError("deferred call metadata is invalid") from error
 
-    @property
-    def arguments_digest(self) -> str:
-        return self.arguments_payload.digest
-
 
 @dataclass(frozen=True, slots=True)
 class PendingToolContinuation:
-    source_step_run_id: str
+    source_agent_run_id: str
     approvals: tuple[PendingDeferredCall, ...] = ()
     calls: tuple[PendingDeferredCall, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.source_step_run_id:
+        if not self.source_agent_run_id:
             raise ValueError("deferred continuation identity is invalid")
         values = (*self.approvals, *self.calls)
         ids = tuple(item.tool_call_id for item in values)
@@ -1256,23 +1248,19 @@ class PendingToolContinuation:
 
 @dataclass(frozen=True, slots=True)
 class RepositoryInstructionBarrier:
-    step_run_id: str
+    agent_run_id: str
     tool_call_id: str
     arguments_digest: str
-    resulting_overlay_digest: str
 
     def __post_init__(self) -> None:
         if not all(
             isinstance(value, str) and value
             for value in (
-                self.step_run_id,
+                self.agent_run_id,
                 self.tool_call_id,
                 self.arguments_digest,
-                self.resulting_overlay_digest,
             )
-        ) or not _is_sha256(self.arguments_digest) or not _is_sha256(
-            self.resulting_overlay_digest
-        ):
+        ) or not _is_sha256(self.arguments_digest):
             raise ValueError("repository instruction barrier is invalid")
 
 
@@ -1297,7 +1285,7 @@ class RecoveryHandoffPhase(str, Enum):
 @dataclass(frozen=True, slots=True)
 class RecoveryCheckpoint:
     execution_id: str
-    step_run_id: str | None
+    agent_run_id: str | None
     state: RecoveryCheckpointState
     revision: int
     created_at: datetime
@@ -1311,7 +1299,7 @@ class RecoveryCheckpoint:
 
     def __post_init__(self) -> None:
         if self.state is RecoveryCheckpointState.ADMITTED and (
-            self.step_run_id is not None
+            self.agent_run_id is not None
             or self.pending_operation_id is not None
             or self.pending_tools is not None
         ):
@@ -1319,12 +1307,12 @@ class RecoveryCheckpoint:
         if self.state in {
             RecoveryCheckpointState.ACTIVE,
             RecoveryCheckpointState.WAITING,
-        } and self.step_run_id is None:
+        } and self.agent_run_id is None:
             raise ValueError("active recovery checkpoint requires an attempt")
         if self.state is RecoveryCheckpointState.WAITING:
             if (
                 self.pending_tools is None
-                or self.step_run_id != self.pending_tools.source_step_run_id
+                or self.agent_run_id != self.pending_tools.source_agent_run_id
                 or self.pending_operation_id is not None
                 or self.handoff_phase is not RecoveryHandoffPhase.NONE
                 or self.terminal_handoff is not None
@@ -1341,7 +1329,7 @@ class RecoveryCheckpoint:
         if self.state is RecoveryCheckpointState.ACTIVE and self.pending_tools is not None:
             raise ValueError("active recovery checkpoint cannot retain deferred work")
         barriers = tuple(self.repository_instruction_barriers)
-        identities = tuple((item.step_run_id, item.tool_call_id) for item in barriers)
+        identities = tuple((item.agent_run_id, item.tool_call_id) for item in barriers)
         if len(identities) != len(set(identities)):
             raise ValueError("repository instruction barriers must be unique")
         object.__setattr__(self, "repository_instruction_barriers", barriers)
@@ -1430,16 +1418,16 @@ class RecoveryConversationIntent:
 @dataclass(frozen=True, slots=True)
 class RecoveryTerminalHandoff:
     outcome: RecoveryTerminalOutcome
-    source_step_run_id: str | None
+    source_agent_run_id: str | None
     conversation: RecoveryConversationIntent | None
 
     def __post_init__(self) -> None:
         if (
             self.outcome.terminal_status is ExecutionStatus.SUCCEEDED
-            and self.source_step_run_id is None
+            and self.source_agent_run_id is None
         ):
             raise ValueError("successful recovery handoff requires a source attempt")
-        if self.conversation is not None and self.source_step_run_id is None:
+        if self.conversation is not None and self.source_agent_run_id is None:
             raise ValueError("conversation recovery intent requires a source attempt")
 
 
@@ -1925,8 +1913,8 @@ class ExecutionEventAppend:
 class ToolOperationAdmission:
     execution_id: str
     tool_operation_id: str
-    step_run_id: str
-    recovery_step_run_id: str | None
+    agent_run_id: str
+    recovery_agent_run_id: str | None
     tool_call_id: str
     idempotency_key_digest: str
     tool_name: str
@@ -2149,9 +2137,9 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def get_graph(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskGraphView | None: ...
-    async def snapshot_graph(
+    async def graph_state(
         self, graph_id: str, *, tenant_id: str
-    ) -> TaskGraphSnapshot | None: ...
+    ) -> TaskGraphState | None: ...
     async def get_results(
         self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str
     ) -> Mapping[str, TaskResultRecord]: ...
@@ -2161,9 +2149,9 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def latest_event(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskEvent | None: ...
-    async def scheduler_snapshot(
+    async def scheduler_state(
         self, graph_id: str, *, tenant_id: str
-    ) -> TaskGraphSnapshot: ...
+    ) -> TaskGraphState: ...
     async def recover_graph(
         self,
         graph_id: str,
@@ -2304,14 +2292,14 @@ class ArtifactRepository(RuntimeRepository, Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ConversationState:
+class ConversationRepositories:
     sessions: SessionRepository
     histories: ConversationHistoryRepository
     operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionState:
+class ExecutionRepositories:
     executions: ExecutionRepository
     events: EventRepository
     idempotency: IdempotencyRepository
@@ -2319,33 +2307,33 @@ class ExecutionState:
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryState:
+class MemoryRepositories:
     records: MemoryRepository
     operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
-class ArtifactState:
+class ArtifactRepositories:
     records: ArtifactRepository
     operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
-class TaskState:
+class TaskRepositories:
     tasks: TaskRepository
     operations: OperationLedgerRepository
     admissions: TaskAdmissionRepository
 
 
 @dataclass(frozen=True, slots=True)
-class EvaluationState:
+class EvaluationRepositories:
     records: EvaluationRepository
     idempotency: IdempotencyRepository
     operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryState:
+class RecoveryRepositories:
     approvals: ApprovalRepository
     external_calls: ExternalCallRepository
     checkpoints: RecoveryCheckpointRepository
@@ -2359,15 +2347,15 @@ __all__ = [
     "ApprovalRepository",
     "ArtifactRecord",
     "ArtifactRepository",
-    "ArtifactState",
+    "ArtifactRepositories",
     "ContextProjection",
     "ConversationCursor",
     "ConversationHistoryRecord",
     "ConversationHistoryRepository",
-    "ConversationState",
+    "ConversationRepositories",
     "EvaluationRecord",
     "EvaluationRepository",
-    "EvaluationState",
+    "EvaluationRepositories",
     "EventRepository",
     "ExecutionCancelRequestCommit",
     "ExecutionEventAppend",
@@ -2381,7 +2369,7 @@ __all__ = [
     "ExecutionStartReservation",
     "ExecutionStartReservationResult",
     "ExecutionStartUnknownCommit",
-    "ExecutionState",
+    "ExecutionRepositories",
     "ExecutionTerminalCommit",
     "ExecutionTerminalCommitResult",
     "ExternalCallRecord",
@@ -2395,7 +2383,7 @@ __all__ = [
     "LoadedModelContext",
     "MemoryRecord",
     "MemoryRepository",
-    "MemoryState",
+    "MemoryRepositories",
     "OperationLedgerRepository",
     "OperationTerminalUpdate",
     "PendingDeferredCall",
@@ -2406,7 +2394,7 @@ __all__ = [
     "RecoveryCheckpointState",
     "RecoveryConversationIntent",
     "RecoveryHandoffPhase",
-    "RecoveryState",
+    "RecoveryRepositories",
     "RecoveryTerminalHandoff",
     "RecoveryTerminalOutcome",
     "ResultRecord",
@@ -2414,10 +2402,10 @@ __all__ = [
     "RuntimeRepository",
     "SessionRecord",
     "SessionRepository",
-    "StoredStepSnapshot",
+    "StoredAgentRunCheckpoint",
     "TaskAdmissionRepository",
     "TaskRepository",
-    "TaskState",
+    "TaskRepositories",
     "ToolOperationAdmission",
     "validate_tool_operation_failure",
     "TranscriptChunk",

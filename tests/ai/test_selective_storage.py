@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RuntimeState route and persistence checks."""
+"""RuntimeStorage route and persistence checks."""
 
 import json
 
 import pytest
 from linktools.ai.runtime.state import (
     RuntimeDomain,
-    RuntimeState,
-    RuntimeStatePlan,
-    RuntimeStateRoute,
+    RuntimeStorage,
+    RuntimeStoragePlan,
+    RuntimeStorageRoute,
 )
 
 
-def test_runtime_state_plan_routes_each_domain_explicitly(tmp_path) -> None:
+def test_runtime_storage_plan_routes_each_domain_explicitly(tmp_path) -> None:
     transaction_root = tmp_path / "state"
     conversation_root = transaction_root / "conversation"
-    plan = RuntimeStatePlan(
-        conversation=RuntimeStateRoute.filesystem(
+    plan = RuntimeStoragePlan(
+        conversation=RuntimeStorageRoute.filesystem(
             conversation_root,
             transaction_root=transaction_root,
         ),
-        execution=RuntimeStateRoute.filesystem(
+        execution=RuntimeStorageRoute.filesystem(
             transaction_root,
             transaction_root=transaction_root,
         ),
@@ -34,13 +34,13 @@ def test_runtime_state_plan_routes_each_domain_explicitly(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
     root = tmp_path / "runtime"
-    state = RuntimeState.from_plan(
-        RuntimeStatePlan(
-            conversation=RuntimeStateRoute.filesystem(
+    state = RuntimeStorage.from_plan(
+        RuntimeStoragePlan(
+            conversation=RuntimeStorageRoute.filesystem(
                 root / "conversation",
                 transaction_root=root,
             ),
-            execution=RuntimeStateRoute.filesystem(
+            execution=RuntimeStorageRoute.filesystem(
                 root,
                 transaction_root=root,
             ),

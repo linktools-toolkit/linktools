@@ -56,7 +56,7 @@ async def test_model_cancellation_records_cancelled_observation() -> None:
         tenant_id="tenant",
         execution_id="execution",
         session_id=None,
-        step_run_id="step-run",
+        agent_run_id="agent-run",
         agent_id="agent",
     )
 

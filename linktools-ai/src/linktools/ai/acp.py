@@ -27,7 +27,12 @@ from .core import (
 )
 from .errors import AIError
 from .model import ModelRegistry
-from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime, RuntimeState
+from .runtime import (
+    CancelExecutionRequest,
+    ListSessionRequest,
+    Runtime,
+    RuntimeStorage,
+)
 from .workspace import Workspace
 
 _logger = environ.get_logger("ai.acp")
@@ -146,7 +151,10 @@ class ACPAgent:
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
-        loaded = await self._runtime.session.load(session_id, principal=self._principal)
+        loaded = await self._runtime.session.reconcile(
+            session_id,
+            principal=self._principal,
+        )
         if loaded.active_execution_id is not None:
             await self._runtime.execution.cancel(
                 loaded.active_execution_id,
@@ -170,7 +178,7 @@ class ACPAgent:
 class ACPApplication:
     workspace: Workspace
     models: ModelRegistry
-    state: RuntimeState
+    storage: RuntimeStorage
 
     @classmethod
     def for_workspace(
@@ -178,15 +186,15 @@ class ACPApplication:
         workspace: Workspace,
         *,
         models: ModelRegistry,
-        state: RuntimeState,
+        storage: RuntimeStorage,
     ) -> "ACPApplication":
-        return cls(workspace, models, state)
+        return cls(workspace, models, storage)
 
     async def serve(self, *, memory_scope: str) -> None:
         async with Runtime.open(
             "default",
             models=self.models,
-            state=self.state,
+            storage=self.storage,
             capabilities=(CapabilityGroup("workspace", workspace=self.workspace),),
         ) as runtime:
             await serve_stdio(

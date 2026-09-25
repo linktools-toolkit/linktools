@@ -39,7 +39,7 @@ from .service_api import (
 )
 
 if TYPE_CHECKING:
-    from ..agent import AgentDefinition
+    from ..agent import CompiledAgent
     from ..task import TaskExpanderRef, TaskNode, TaskResultRef
     from ._runtime_service import Runtime
 
@@ -300,10 +300,10 @@ class Execution(Generic[AppT]):
 class Session(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     agent_id: str
-    _agent_digest: str
+    _agent_revision: int
     session_id: str
     _principal: "Principal | None" = None
-    _definition: "AgentDefinition | None" = None
+    _compiled_agent: "CompiledAgent | None" = None
 
     async def start(
         self,
@@ -319,7 +319,8 @@ class Session(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._start_for_agent(
-            self._agent_digest,
+            self.agent_id,
+            self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
             output=output,
@@ -331,7 +332,7 @@ class Session(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             correlation=correlation,
-            definition=self._definition,
+            compiled_agent=self._compiled_agent,
         )
 
     async def run(
@@ -375,7 +376,8 @@ class Session(Generic[AppT]):
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
         execution = await self._runtime._start_for_agent(
-            self._agent_digest,
+            self.agent_id,
+            self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
             output=output,
@@ -387,7 +389,7 @@ class Session(Generic[AppT]):
             planning=True,
             thinking=thinking,
             correlation=correlation,
-            definition=self._definition,
+            compiled_agent=self._compiled_agent,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -429,13 +431,13 @@ class Session(Generic[AppT]):
     ) -> "Session[AppT]":
         return await self._runtime._fork_session(
             self.agent_id,
-            self._agent_digest,
+            self._agent_revision,
             self.session_id,
             new_session_id,
             principal=principal or self._principal,
             idempotency_key=idempotency_key,
             cwd=cwd,
-            definition=self._definition,
+            compiled_agent=self._compiled_agent,
         )
 
     async def update(
@@ -478,8 +480,8 @@ class Session(Generic[AppT]):
 class Agent(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     id: str
-    _agent_digest: str
-    _definition: "AgentDefinition | None" = None
+    _agent_revision: int
+    _compiled_agent: "CompiledAgent | None" = None
 
     async def start(
         self,
@@ -496,7 +498,8 @@ class Agent(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._start_for_agent(
-            self._agent_digest,
+            self.id,
+            self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
             output=output,
@@ -508,7 +511,7 @@ class Agent(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             correlation=correlation,
-            definition=self._definition,
+            compiled_agent=self._compiled_agent,
         )
 
     async def run(
@@ -555,7 +558,8 @@ class Agent(Generic[AppT]):
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
         execution = await self._runtime._start_for_agent(
-            self._agent_digest,
+            self.id,
+            self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
             output=output,
@@ -567,7 +571,7 @@ class Agent(Generic[AppT]):
             planning=True,
             thinking=thinking,
             correlation=correlation,
-            definition=self._definition,
+            compiled_agent=self._compiled_agent,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -580,10 +584,10 @@ class Agent(Generic[AppT]):
         return Session(
             self._runtime,
             self.id,
-            self._agent_digest,
+            self._agent_revision,
             session_id,
             principal,
-            self._definition,
+            self._compiled_agent,
         )
 
     async def create_session(
@@ -606,10 +610,10 @@ class Agent(Generic[AppT]):
         return Session(
             self._runtime,
             self.id,
-            self._agent_digest,
+            self._agent_revision,
             session_id,
             principal,
-            self._definition,
+            self._compiled_agent,
         )
 
     async def start_evaluation(
@@ -619,20 +623,21 @@ class Agent(Generic[AppT]):
         output: "type[BaseModel] | None" = None,
     ) -> EvaluationHandle:
         return await self._runtime._start_evaluation_for_agent(
-            self._agent_digest,
+            self.id,
+            self._agent_revision,
             request,
             output=output,
-            definition=self._definition,
+            compiled_agent=self._compiled_agent,
         )
 
     async def replay_evaluation(
         self,
-        snapshot_id: str,
+        evaluation_id: str,
         request: ReplayEvaluationRequest,
     ) -> "Execution[AppT]":
         return await self._runtime._replay_evaluation_for_agent(
             self.id,
-            snapshot_id,
+            evaluation_id,
             request,
         )
 
@@ -643,7 +648,7 @@ class Agent(Generic[AppT]):
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
-        output: "type[BaseModel] | None" = None,
+        output_type: "type[BaseModel] | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         expander: "TaskExpanderRef | None" = None,
@@ -657,12 +662,13 @@ class Agent(Generic[AppT]):
         dependency_policy: str = "all_succeeded",
     ) -> "TaskNode":
         return self._runtime._task_for_agent(
-            self._agent_digest,
+            self.id,
+            self._agent_revision,
             node_id,
             validate_user_input(user_prompt),
             dependencies=dependencies,
             budget_cost=budget_cost,
-            output=output,
+            output_type=output_type,
             planning=planning,
             thinking=thinking,
             expander=expander,
@@ -674,7 +680,7 @@ class Agent(Generic[AppT]):
             session_id=session_id,
             memory_scope=memory_scope,
             dependency_policy=dependency_policy,
-            definition=self._definition,
+            compiled_agent=self._compiled_agent,
         )
 
 

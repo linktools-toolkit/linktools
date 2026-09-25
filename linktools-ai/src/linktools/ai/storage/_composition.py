@@ -28,7 +28,7 @@ from ._contracts import (
     StorageEntryStatus,
     StorageEntryStatusInfo,
     StorageOperation,
-    StorageOwnedInfo,
+    StorageLocatedInfo,
     StoragePutResult,
     StorageResetResult,
     StorageRevision,
@@ -89,18 +89,18 @@ class CacheAdapter(Protocol[KeyT, ValueT, InfoT]):
 class EffectiveMetadataState(Generic[KeyT, InfoT]):
     revision: StorageRevision
     entries: "Mapping[KeyT, InfoT]"
-    owners: "Mapping[KeyT, int]"
+    layer_indexes: "Mapping[KeyT, int]"
 
 
 @dataclass(frozen=True, slots=True)
-class _OverlaySnapshot(Generic[KeyT, InfoT]):
+class _OverlayMetadataCapture(Generic[KeyT, InfoT]):
     effective: EffectiveMetadataState[KeyT, InfoT]
     writer_state: "MetadataState[KeyT, InfoT] | None"
 
 
 @dataclass(frozen=True, slots=True)
 class StorageWriteState(Generic[InfoT]):
-    effective: "StorageOwnedInfo[InfoT] | None"
+    effective: "StorageLocatedInfo[InfoT] | None"
     writer: InfoT | None
     writer_can_own: bool
 
@@ -291,15 +291,15 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         _logger.debug("storage overlay closed")
 
     async def refresh(self) -> StorageRevision:
-        return (await self._snapshot()).effective.revision
+        return (await self._capture_metadata()).effective.revision
 
     async def _state(self) -> 'EffectiveMetadataState[KeyT, InfoT]':
-        return (await self._snapshot()).effective
+        return (await self._capture_metadata()).effective
 
-    async def _snapshot(self) -> "_OverlaySnapshot[KeyT, InfoT]":
+    async def _capture_metadata(self) -> "_OverlayMetadataCapture[KeyT, InfoT]":
         states = await asyncio.gather(*(view.refresh() for view in self._views))
         entries: dict[KeyT, InfoT] = {}
-        owners: dict[KeyT, int] = {}
+        layer_indexes: dict[KeyT, int] = {}
         revisions: list[str] = []
         for index, state in enumerate(states):
             revisions.append(str(state.revision))
@@ -308,11 +308,11 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     continue
                 if key not in entries:
                     entries[key] = info
-                    owners[key] = index
+                    layer_indexes[key] = index
         revision = self._effective_revision(revisions, states[0].revision)
         writer_state = None if self._writer_index is None else states[self._writer_index]
-        return _OverlaySnapshot(
-            EffectiveMetadataState(revision, entries, owners),
+        return _OverlayMetadataCapture(
+            EffectiveMetadataState(revision, entries, layer_indexes),
             writer_state,
         )
 
@@ -340,7 +340,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         info = state.entries.get(key)
         if info is None:
             return None
-        backend = self._views[state.owners[key]].backend
+        backend = self._views[state.layer_indexes[key]].backend
         if isinstance(backend, StorageStatReader):
             origin = await backend.stat(key)
             if origin is None:
@@ -349,7 +349,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     "storage metadata points to a missing origin",
                     safe_details={
                         "storage_key_digest": canonical_sha256(str(key)),
-                        "layer": self._owner_id(state.owners[key]),
+                        "layer": self._layer_id(state.layer_indexes[key]),
                     },
                 )
             if origin != info:
@@ -358,20 +358,20 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     "storage metadata and origin disagree",
                     safe_details={
                         "storage_key_digest": canonical_sha256(str(key)),
-                        "layer": self._owner_id(state.owners[key]),
+                        "layer": self._layer_id(state.layer_indexes[key]),
                     },
                 )
         return info
 
     async def locate(self, key: KeyT) -> 'StorageLocation[KeyT, ValueT, InfoT] | None':
-        """Return the effective owner selected by layer precedence for one key."""
+        """Return the effective layer selected by precedence for one key."""
         return (await self.locate_many((key,)))[0]
 
     async def locate_many(
         self,
         keys: 'Sequence[KeyT]',
     ) -> 'tuple[StorageLocation[KeyT, ValueT, InfoT] | None, ...]':
-        """Return effective owners for keys from one metadata snapshot."""
+        """Return effective layers for keys from one metadata capture."""
         state = await self._state()
         result: list[StorageLocation[KeyT, ValueT, InfoT] | None] = []
         for key in keys:
@@ -379,14 +379,14 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             if info is None:
                 result.append(None)
                 continue
-            owner = state.owners[key]
-            backend = self._views[owner].backend
+            layer_index = state.layer_indexes[key]
+            backend = self._views[layer_index].backend
             result.append(
                 StorageLocation(
                     key,
                     info,
                     backend,
-                    self._owner_id(owner),
+                    self._layer_id(layer_index),
                     self.is_writable_backend(backend),
                 )
             )
@@ -420,16 +420,16 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         info = state.entries.get(key)
         if info is None or _is_deleted(info):
             return None
-        owner = state.owners[key]
+        layer_index = state.layer_indexes[key]
         cache_key = self.cache_adapter.cache_key(key, info) if self.cache_adapter is not None else None
         if self.cache is not None and cache_key is not None:
             cached_value = await self._read_cache_value(key, info, cache_key)
             if cached_value is not None:
                 return cached_value
-        backend = self._views[owner].backend
+        backend = self._views[layer_index].backend
         value = await backend.get(key)
         if value is None:
-            self._views[owner].invalidate()
+            self._views[layer_index].invalidate()
             if retried:
                 _logger.error(
                     "storage metadata has no origin value: key=%s",
@@ -484,7 +484,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         for key in misses:
             raw = loaded.get(key)
             if raw is None:
-                raced.add(state.owners[key])
+                raced.add(state.layer_indexes[key])
                 missing_origins.append(key)
                 continue
             info = state.entries[key]
@@ -498,14 +498,14 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     self.cache_adapter.to_cache(value),
                 )
         if raced:
-            for owner in raced:
-                self._views[owner].invalidate()
+            for layer_index in raced:
+                self._views[layer_index].invalidate()
             if not retried:
                 refreshed = await self._state()
                 return await self._get_many_from_state(keys, refreshed, retried=True)
             for key in missing_origins:
                 _logger.error(
-                    "storage owner mismatch after batch refresh: key=%s",
+                    "storage layer mismatch after batch refresh: key=%s",
                     key,
                     extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
                 )
@@ -572,11 +572,11 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         grouped: dict[int, list[KeyT]] = {}
         for key in keys:
             if key in state.entries:
-                grouped.setdefault(state.owners[key], []).append(key)
+                grouped.setdefault(state.layer_indexes[key], []).append(key)
         semaphore = asyncio.Semaphore(self.preload_concurrency)
 
-        async def _load_group(owner: int, group: 'Sequence[KeyT]') -> None:
-            backend = self._views[owner].backend
+        async def _load_group(layer_index: int, group: 'Sequence[KeyT]') -> None:
+            backend = self._views[layer_index].backend
             if isinstance(backend, BatchStorageReader):
                 async with semaphore:
                     raw_values = await backend.get_many(group)
@@ -594,7 +594,9 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
 
             await asyncio.gather(*(_load_one(key) for key in group))
 
-        await asyncio.gather(*(_load_group(owner, group) for owner, group in grouped.items()))
+        await asyncio.gather(
+            *(_load_group(layer_index, group) for layer_index, group in grouped.items())
+        )
         return loaded
 
     async def _delete_cache(self, cache_key: str) -> None:
@@ -611,13 +613,13 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         state = await self._state()
         return tuple(state.entries[key] for key in sorted(state.entries, key=str))
 
-    async def list_info_with_owners(self) -> 'tuple[StorageOwnedInfo[InfoT], ...]':
+    async def list_info_with_locations(self) -> 'tuple[StorageLocatedInfo[InfoT], ...]':
         state = await self._state()
         return tuple(
-            StorageOwnedInfo(
+            StorageLocatedInfo(
                 state.entries[key],
-                self._owner_id(state.owners[key]),
-                self.is_writable_backend(self._views[state.owners[key]].backend),
+                self._layer_id(state.layer_indexes[key]),
+                self.is_writable_backend(self._views[state.layer_indexes[key]].backend),
             )
             for key in sorted(state.entries, key=str)
         )
@@ -627,28 +629,28 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         keys: "Sequence[KeyT]",
     ) -> "Mapping[KeyT, StorageWriteState[InfoT]]":
         self._require_writer()
-        snapshot = await self._snapshot()
-        if snapshot.writer_state is None or self._writer_index is None:
+        capture = await self._capture_metadata()
+        if capture.writer_state is None or self._writer_index is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result: dict[KeyT, StorageWriteState[InfoT]] = {}
         for key in dict.fromkeys(keys):
-            owner_index = snapshot.effective.owners.get(key)
-            effective_info = snapshot.effective.entries.get(key)
+            layer_index = capture.effective.layer_indexes.get(key)
+            effective_info = capture.effective.entries.get(key)
             effective = None
-            if effective_info is not None and owner_index is not None:
-                effective = StorageOwnedInfo(
+            if effective_info is not None and layer_index is not None:
+                effective = StorageLocatedInfo(
                     effective_info,
-                    self._owner_id(owner_index),
-                    owner_index == self._writer_index,
+                    self._layer_id(layer_index),
+                    layer_index == self._writer_index,
                 )
             result[key] = StorageWriteState(
                 effective,
-                snapshot.writer_state.entries.get(key),
-                owner_index is None or self._writer_index <= owner_index,
+                capture.writer_state.entries.get(key),
+                layer_index is None or self._writer_index <= layer_index,
             )
         return result
 
-    def _owner_id(self, index: int) -> str:
+    def _layer_id(self, index: int) -> str:
         return "primary" if index == 0 else self.layers[index - 1].id
 
     async def preload(self, keys: 'Sequence[KeyT] | None' = None) -> PreloadResult:
@@ -798,12 +800,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if isinstance(writer, BatchStorageWriter):
             writer_expected_revision = None
             if expected_revision is not None:
-                snapshot = await self._snapshot()
-                if snapshot.effective.revision != expected_revision:
+                capture = await self._capture_metadata()
+                if capture.effective.revision != expected_revision:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if snapshot.writer_state is None:
+                if capture.writer_state is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                writer_expected_revision = snapshot.writer_state.revision
+                writer_expected_revision = capture.writer_state.revision
             result = await writer.apply_batch(
                 changes,
                 expected_revision=writer_expected_revision,
@@ -962,10 +964,10 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
 
     async def list_versions(self, key: KeyT) -> 'tuple[VersionSummary, ...]':
         state = await self._state()
-        owners = tuple(range(len(self._views)))
+        layer_indexes = tuple(range(len(self._views)))
         collected: dict[tuple[int, str, StorageEntryStatus], VersionSummary] = {}
-        for owner in owners:
-            backend = self._views[owner].backend
+        for layer_index in layer_indexes:
+            backend = self._views[layer_index].backend
             if not isinstance(backend, VersionedStorage):
                 continue
             versions = tuple(await backend.list_versions(key))
@@ -973,33 +975,41 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 collected[(version.entry_revision.value, version.digest, version.status)] = version
         if collected:
             return tuple(sorted(collected.values(), key=lambda version: version.entry_revision.value, reverse=True))
-        if key not in state.owners:
-            raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
+        if key not in state.layer_indexes:
+            raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
     async def get_at_revision(self, key: KeyT, entry_revision: StorageEntryRevision) -> 'ValueT | None':
         state = await self._state()
-        owners = tuple(range(len(self._views)))
-        for owner in owners:
-            backend = self._views[owner].backend
+        layer_indexes = tuple(range(len(self._views)))
+        for layer_index in layer_indexes:
+            backend = self._views[layer_index].backend
             if not isinstance(backend, VersionedStorage):
                 continue
             versions = tuple(await backend.list_versions(key))
             if any(version.entry_revision == entry_revision for version in versions):
                 return await backend.get_at_revision(key, entry_revision)
-        raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        raise AIError(
+            ErrorCode.ASSET_VERSION_LAYER_UNKNOWN
+            if key not in state.layer_indexes
+            else ErrorCode.STORAGE_VERSION_UNSUPPORTED
+        )
 
     async def get_at_version(self, key: KeyT, version: int) -> 'ValueT | None':
         state = await self._state()
-        owners = tuple(range(len(self._views)))
-        for owner in owners:
-            backend = self._views[owner].backend
+        layer_indexes = tuple(range(len(self._views)))
+        for layer_index in layer_indexes:
+            backend = self._views[layer_index].backend
             if not isinstance(backend, VersionedStorage):
                 continue
             versions = tuple(await backend.list_versions(key))
             if any(item.entry_revision.value == version for item in versions):
                 return await backend.get_at_version(key, version)
-        raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        raise AIError(
+            ErrorCode.ASSET_VERSION_LAYER_UNKNOWN
+            if key not in state.layer_indexes
+            else ErrorCode.STORAGE_VERSION_UNSUPPORTED
+        )
 
 
 __all__ = [

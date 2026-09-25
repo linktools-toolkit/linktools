@@ -517,7 +517,7 @@ class TranscriptRepository:
 
     async def prepare_projection(
         self,
-        run_id: str,
+        agent_run_id: str,
         projection: ContextProjection,
     ) -> ContextProjection:
         require_no_run_history_lock("TranscriptRepository.prepare_projection")
@@ -572,20 +572,20 @@ class TranscriptRepository:
             history_id,
         )
 
-    def run_stream(self, step_run_id: str) -> bytes:
+    def agent_run_stream(self, agent_run_id: str) -> bytes:
         return stream_digest(
             self._namespace,
             self._tenant_id,
             self._runtime_domain.value,
             "run_transcript",
-            step_run_id,
+            agent_run_id,
         )
 
-    def transcript_stream(self, run_id: str) -> bytes:
+    def transcript_stream(self, agent_run_id: str) -> bytes:
         """Return the owner stream used by this archive's domain."""
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
-            return self.history_stream(run_id)
-        return self.run_stream(run_id)
+            return self.history_stream(agent_run_id)
+        return self.agent_run_stream(agent_run_id)
 
     async def latest_chunk(self, owner_id: str) -> TranscriptChunk | None:
         require_no_run_history_lock("TranscriptRepository.latest_chunk")
@@ -908,16 +908,16 @@ class TranscriptRepository:
     async def store_projection(
         self,
         transaction: StateTransaction,
-        run_id: str,
+        agent_run_id: str,
         projection: ContextProjection,
     ) -> None:
-        key = self._projection_key(run_id)
+        key = self._projection_key(agent_run_id)
         value = StoredRecord(
             key,
             None,
-            self._owner_key(run_id),
+            self._owner_key(agent_run_id),
             "context_projection",
-            run_id,
+            agent_run_id,
             None,
             0,
             None,
@@ -1435,7 +1435,7 @@ class TranscriptRepository:
         return (
             self.history_stream(owner_id)
             if self._runtime_domain is RuntimeDomain.CONVERSATION
-            else self.run_stream(owner_id)
+            else self.agent_run_stream(owner_id)
         )
 
     def _transcript_sequence(self, owner_id: str) -> bytes:
@@ -1449,18 +1449,18 @@ class TranscriptRepository:
             owner_id,
         )
 
-    def _projection_key(self, run_id: str) -> bytes:
+    def _projection_key(self, agent_run_id: str) -> bytes:
         return record_key_digest(
             self._namespace,
             self._tenant_id,
             self._runtime_domain.value,
             "context_projection",
-            run_id,
+            agent_run_id,
         )
 
-    def projection_key(self, run_id: str) -> bytes:
+    def projection_key(self, agent_run_id: str) -> bytes:
         """Return the physical key for one context projection."""
-        return self._projection_key(run_id)
+        return self._projection_key(agent_run_id)
 
 
 async def _one_chunk(value: bytes) -> AsyncIterator[bytes]:

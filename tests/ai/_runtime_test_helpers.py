@@ -17,7 +17,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.capability import tool_semantic_metadata
+from linktools.ai.capability import tool_metadata
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
@@ -36,15 +36,15 @@ def execution_owner_fields(prompt: str = "prompt") -> dict[str, object]:
     }
 
 
-def semantic_tool(
+def tool_with_metadata(
     function: Callable[..., Any],
     descriptor: ManagedToolDescriptor,
 ) -> Tool[Any]:
     path_fields = list(descriptor.workspace_path_fields) or None
     return Tool(
         function,
-        metadata=tool_semantic_metadata(
-            effect=descriptor.effect,
+        metadata=tool_metadata(
+            effect_policy=descriptor.effect_policy,
             tool_class=descriptor.tool_class,
             path_fields=path_fields,
         ),
@@ -94,8 +94,8 @@ class _RuntimeUsageModelBinding:
     provider = "test"
     model_identity = "test:usage"
     vision = False
-    fingerprint = "u" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "u" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "usage",
     }
@@ -105,7 +105,7 @@ class _RuntimeUsageModelBinding:
 
 
 class RuntimeUsageModels:
-    def snapshot(self) -> "RuntimeUsageModels":
+    def capture(self) -> "RuntimeUsageModels":
         return self
 
     def resolve(self, route_id: str) -> _RuntimeUsageModelBinding:
@@ -121,7 +121,7 @@ class RuntimeUsageModels:
     ) -> _RuntimeUsageModelBinding:
         if (
             route_id not in {None, "default"}
-            or dict(payload) != _RuntimeUsageModelBinding.semantic_payload
+            or dict(payload) != _RuntimeUsageModelBinding.contract
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _RuntimeUsageModelBinding()

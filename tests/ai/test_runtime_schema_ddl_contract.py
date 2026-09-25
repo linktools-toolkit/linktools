@@ -54,7 +54,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
 
 
 
-def test_runtime_state_mysql_indexes_match_reviewed_contract() -> None:
+def test_runtime_storage_mysql_indexes_match_reviewed_contract() -> None:
     metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
     expected = {
         "ai_state_records": {
@@ -126,7 +126,7 @@ def test_runtime_state_mysql_indexes_match_reviewed_contract() -> None:
             assert len(mysql_names) <= len(table.c) // 3
 
 
-def test_runtime_state_migration_contains_no_known_duplicate_indexes() -> None:
+def test_runtime_storage_migration_contains_no_known_duplicate_indexes() -> None:
     migration = (
         Path(__file__).resolve().parents[2]
         / "linktools-ai"

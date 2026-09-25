@@ -79,7 +79,7 @@ class StagedContextProjection:
 
 @dataclass(frozen=True, slots=True)
 class StagedModelInteraction:
-    run_id: str
+    agent_run_id: str
     step_index: int
     request_sequence: int
     purpose: str
@@ -96,7 +96,7 @@ class StagedModelInteraction:
 
     def __post_init__(self) -> None:
         if (
-            not self.run_id
+            not self.agent_run_id
             or self.step_index < 0
             or self.request_sequence < 1
             or self.purpose not in {"agent", "compaction"}
@@ -146,6 +146,7 @@ def build_context_projection(
     intern_payload: PayloadIntern,
     *,
     source_refs: Sequence[StagedContextSource] | None = None,
+    source_keys: Sequence[bytes] | None = None,
 ) -> StagedContextProjection:
     source_values = tuple(source)
     projected_values = tuple(projected)
@@ -156,13 +157,14 @@ def build_context_projection(
     )
     if len(refs) != len(source_values):
         raise ValueError("context source references do not match source messages")
-
-    signatures: dict[bytes, list[int]] = {}
-    for index, message in enumerate(source_values):
-        signatures.setdefault(_message_key(message), []).append(index)
-    projected_keys = tuple(
-        _message_key(message) for message in projected_values
+    keys = (
+        tuple(_message_key(message) for message in source_values)
+        if source_keys is None
+        else tuple(source_keys)
     )
+    if len(keys) != len(source_values):
+        raise ValueError("context source keys do not match source messages")
+
     items: list[StagedContextItem] = []
 
     def append_source(ref: StagedContextSource) -> bool:
@@ -204,6 +206,12 @@ def build_context_projection(
             raise TypeError("context source reference is invalid")
         return False
 
+    signatures: dict[bytes, list[int]] = {}
+    for index, key in enumerate(keys):
+        signatures.setdefault(key, []).append(index)
+    projected_keys = tuple(
+        _message_key(message) for message in projected_values
+    )
     for message, key in zip(
         projected_values,
         projected_keys,

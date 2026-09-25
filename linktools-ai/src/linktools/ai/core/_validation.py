@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Boundary size and identifier validation shared by Entries and Services."""
 
-import re
 import unicodedata
 from enum import Enum
 
@@ -60,10 +59,32 @@ def validate_idempotency_key(value: str) -> str:
     return _text(value, 256, ErrorCode.IDEMPOTENCY_KEY_INVALID)
 
 
-def validate_agent_id(value: str) -> str:
-    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", value):
-        raise AIError(ErrorCode.AGENT_ID_INVALID)
+def validate_logical_id(value: str) -> str:
+    """Validate an exact Agent or Skill identity without normalizing it."""
+    if not isinstance(value, str):
+        raise TypeError("logical id must be a string")
+    if not value or len(value) > 64:
+        raise ValueError("logical id must contain 1..64 characters")
+    if value != value.strip() or any(
+        unicodedata.category(character) == "Cc"
+        or character in {"\\", "*"}
+        for character in value
+    ):
+        raise ValueError("logical id contains a reserved character")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ValueError("logical id must be valid UTF-8") from error
+    if any(part in {"", ".", ".."} for part in value.split("/")):
+        raise ValueError("logical id contains an invalid path segment")
     return value
+
+
+def validate_agent_id(value: str) -> str:
+    try:
+        return validate_logical_id(value)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.AGENT_ID_INVALID) from error
 
 
 def validate_user_prompt(value: str) -> str:
@@ -132,6 +153,7 @@ def _text(value: str, maximum: int, code: ErrorCode) -> str:
 
 __all__ = [
     "validate_agent_id",
+    "validate_logical_id",
     "validate_asset_kind",
     "validate_asset_namespace",
     "validate_capability_provider",

@@ -17,7 +17,7 @@ from ..task import (
     TaskEvent,
     TaskGraphInfo,
     TaskGraphResult,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskEffectResolution,
     TaskEffectResolutionRequest,
@@ -122,9 +122,9 @@ class TaskGraphRun(Generic[AppT]):
     ) -> TaskGraphResult:
         if request.principal != self._principal:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        snapshot = await self._snapshot()
+        state = await self._state()
         node = next(
-            (item for item in snapshot.nodes if item.node_id == node_id),
+            (item for item in state.nodes if item.node_id == node_id),
             None,
         )
         if node is None:
@@ -145,9 +145,9 @@ class TaskGraphRun(Generic[AppT]):
     ) -> TaskGraphResult:
         if not isinstance(resolution, TaskEffectResolution):
             raise TypeError("resolution must be TaskEffectResolution")
-        snapshot = await self._snapshot()
+        state = await self._state()
         node = next(
-            (item for item in snapshot.nodes if item.node_id == node_id),
+            (item for item in state.nodes if item.node_id == node_id),
             None,
         )
         if node is None:
@@ -173,9 +173,9 @@ class TaskGraphRun(Generic[AppT]):
         )
 
     async def result_ref(self, node_id: str) -> TaskResultRef:
-        snapshot = await self._snapshot()
+        graph_state = await self._state()
         state = next(
-            (item for item in snapshot.node_states if item.node_id == node_id),
+            (item for item in graph_state.node_states if item.node_id == node_id),
             None,
         )
         if state is None:
@@ -191,9 +191,9 @@ class TaskGraphRun(Generic[AppT]):
         )
 
     async def execution(self, node_id: str) -> "Execution[AppT]":
-        snapshot = await self._snapshot()
+        graph_state = await self._state()
         state = next(
-            (item for item in snapshot.node_states if item.node_id == node_id),
+            (item for item in graph_state.node_states if item.node_id == node_id),
             None,
         )
         if state is None:
@@ -211,10 +211,10 @@ class TaskGraphRun(Generic[AppT]):
         self,
         observer: "Callable[[TaskGraphRunEvent], Awaitable[None]] | None" = None,
     ) -> TaskGraphResult:
-        snapshot = await self._snapshot()
-        result = _snapshot_result(snapshot)
+        graph_state = await self._state()
+        result = _state_result(graph_state)
         if observer is not None:
-            async for event in self._replay_events(snapshot):
+            async for event in self._replay_events(graph_state):
                 await _call_observer(observer, event)
         return result
 
@@ -224,20 +224,20 @@ class TaskGraphRun(Generic[AppT]):
             principal=self._principal,
         )
 
-    async def snapshot(
+    async def state(
         self,
         *,
         include_content: bool = False,
-    ) -> "TaskGraphInfo | TaskGraphSnapshot":
+    ) -> "TaskGraphInfo | TaskGraphState":
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        snapshot = await self._snapshot()
+        graph_state = await self._state()
         if include_content:
-            return snapshot
-        return TaskGraphInfo.from_snapshot(snapshot)
+            return graph_state
+        return TaskGraphInfo.from_state(graph_state)
 
-    async def _snapshot(self) -> TaskGraphSnapshot:
-        return await self._runtime.graph.snapshot(
+    async def _state(self) -> TaskGraphState:
+        return await self._runtime.graph.state(
             self.graph_id,
             principal=self._principal,
         )
@@ -256,7 +256,7 @@ class TaskGraphRun(Generic[AppT]):
                 force,
             ),
         )
-        return _snapshot_result(await self._snapshot())
+        return _state_result(await self._state())
 
     async def _observe(
         self,
@@ -315,14 +315,14 @@ class TaskGraphRun(Generic[AppT]):
         after_execution_sequences: Mapping[str, Mapping[str, int]],
         include_content: bool,
     ) -> AsyncIterator[TaskGraphRunEvent]:
-        snapshot = await self._snapshot()
+        graph_state = await self._state()
         cursor_graph_sequence = after_graph_sequence
         cursor_execution_sequences = {
             node_id: dict(sequences)
             for node_id, sequences in after_execution_sequences.items()
         }
-        states = {state.node_id: state for state in snapshot.node_states}
-        if len(states) != len(snapshot.node_states):
+        states = {node_state.node_id: node_state for node_state in graph_state.node_states}
+        if len(states) != len(graph_state.node_states):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if set(after_execution_sequences) - set(states):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -489,15 +489,15 @@ class TaskGraphRun(Generic[AppT]):
 
     async def _replay_events(
         self,
-        snapshot: TaskGraphSnapshot,
+        graph_state: TaskGraphState,
     ) -> AsyncIterator[TaskGraphRunEvent]:
-        graph_cutoff = snapshot.event_sequence
+        graph_cutoff = graph_state.event_sequence
         if graph_cutoff < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         captured: dict[str, tuple[str, ExecutionView, int, int]] = {}
-        for state in snapshot.node_states:
-            execution_id = state.execution_id
+        for node_state in graph_state.node_states:
+            execution_id = node_state.execution_id
             if execution_id is None:
                 continue
             try:
@@ -516,7 +516,7 @@ class TaskGraphRun(Generic[AppT]):
                     continue
                 raise
             captured[root.execution_id] = (
-                state.node_id,
+                node_state.node_id,
                 root,
                 root.event_sequence,
                 0,
@@ -533,7 +533,7 @@ class TaskGraphRun(Generic[AppT]):
                 if child.execution_id in captured:
                     continue
                 captured[child.execution_id] = (
-                    state.node_id,
+                    node_state.node_id,
                     child,
                     child.event_sequence,
                     1,
@@ -761,10 +761,10 @@ def _public_task_result(result: TaskGraphResult) -> TaskGraphResult:
     return result
 
 
-def _snapshot_result(snapshot: TaskGraphSnapshot) -> TaskGraphResult:
+def _state_result(state: TaskGraphState) -> TaskGraphResult:
     return TaskGraphResult(
-        snapshot.graph_id,
-        _public_task_status(snapshot.status, snapshot.node_states),
+        state.graph_id,
+        _public_task_status(state.status, state.node_states),
         tuple(
             TaskNodeResult(
                 state.node_id,
@@ -774,7 +774,7 @@ def _snapshot_result(snapshot: TaskGraphSnapshot) -> TaskGraphResult:
                 state.error_code,
                 state.error_digest,
             )
-            for state in snapshot.node_states
+            for state in state.node_states
         ),
     )
 

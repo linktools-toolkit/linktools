@@ -43,10 +43,10 @@ from ._journal import DURATION_NS_METADATA_KEY, REQUEST_SEQUENCE_METADATA_KEY
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
-    ContinuableSnapshot,
-    RunRecord,
-    SnapshotState,
-    StepStore,
+    AgentRunCheckpoint,
+    AgentRunRecord,
+    CheckpointState,
+    AgentRunStore,
 )
 
 if TYPE_CHECKING:
@@ -57,13 +57,13 @@ _logger = environ.get_logger("ai.runtime.capabilities")
 
 
 @dataclass(kw_only=True, eq=False)
-class _RuntimeStepPersistence(AbstractCapability[None]):
-    """Persist Runtime-owned step events, raw occurrences, and recovery snapshots."""
+class _RuntimeAgentRunPersistence(AbstractCapability[None]):
+    """Persist Runtime-owned step events, raw occurrences, and recovery checkpoints."""
 
     capture: RuntimeCaptureStore = field(repr=False, compare=False)
     agent_name: str
-    run_id: str
-    parent_run_id: str | None = None
+    agent_run_id: str
+    parent_agent_run_id: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     id: str | None = field(
         default="linktools.ai.step-persistence",
@@ -82,25 +82,25 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         repr=False,
         compare=False,
     )
-    _last_snapshot_transcript_count: int = field(
+    _last_checkpoint_transcript_count: int = field(
         default=0,
         init=False,
         repr=False,
         compare=False,
     )
-    _last_snapshot_context: tuple[ModelMessage, ...] | None = field(
+    _last_checkpoint_context: tuple[ModelMessage, ...] | None = field(
         default=None,
         init=False,
         repr=False,
         compare=False,
     )
-    _last_snapshot_state: SnapshotState | None = field(
+    _last_checkpoint_state: CheckpointState | None = field(
         default=None,
         init=False,
         repr=False,
         compare=False,
     )
-    _last_snapshot_pending_index: int | None = field(
+    _last_checkpoint_pending_index: int | None = field(
         default=None,
         init=False,
         repr=False,
@@ -123,26 +123,26 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
     def __post_init__(self) -> None:
         if not isinstance(self.capture, RuntimeCaptureStore):
             raise TypeError("capture must be RuntimeCaptureStore")
-        if not self.run_id or self.capture.step_run_id != self.run_id:
-            raise ValueError("Runtime persistence run id is invalid")
+        if not self.agent_run_id or self.capture.agent_run_id != self.agent_run_id:
+            raise ValueError("Runtime AgentRun identity is invalid")
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="innermost")
 
     async def before_run(self, ctx: PydanticRunContext[None]) -> None:
         self._live_messages = ctx.messages
-        await self.capture.register_run(
-            RunRecord(
-                run_id=self.run_id,
-                conversation_id=ctx.conversation_id,
-                parent_run_id=self.parent_run_id,
+        await self.capture.register_agent_run(
+            AgentRunRecord(
+                agent_run_id=self.agent_run_id,
+                agent_conversation_id=ctx.conversation_id,
+                parent_agent_run_id=self.parent_agent_run_id,
                 agent_name=self.agent_name,
                 metadata=dict(self.metadata),
                 started_at=datetime.now(timezone.utc),
             )
         )
         transcript = self.capture.transcript_messages()
-        self._last_snapshot_transcript_count = len(transcript)
+        self._last_checkpoint_transcript_count = len(transcript)
         self._replay_request_captured = bool(transcript and isinstance(transcript[-1], ModelRequest))
         await self.capture.record_event("run_started", ctx.run_step)
 
@@ -158,7 +158,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
                 self._replay_request_captured = False
             else:
                 self.capture.append_transcript_message(ctx.messages[-1])
-        await self._save_snapshot(ctx, messages=ctx.messages, state="complete")
+        await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
         return request_context
 
     async def after_node_run(
@@ -179,10 +179,10 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
             if response is not None:
                 self.capture.append_transcript_message(response)
                 # The exact response must be recoverable before any tool effect.
-                await self._save_snapshot(ctx, messages=ctx.messages, state="complete")
+                await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
         if isinstance(node, CallToolsNode):
             pending = result.request if isinstance(result, ModelRequestNode) else None
-            await self._save_snapshot(
+            await self._save_checkpoint(
                 ctx,
                 messages=ctx.messages,
                 pending=pending,
@@ -204,7 +204,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
             if self.deferred_pause_sink is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             self.deferred_pause_sink(self._last_observed_step_index)
-        await self._save_snapshot(
+        await self._save_checkpoint(
             ctx,
             messages=result.all_messages(),
             state="interrupted" if interrupted else "complete",
@@ -222,7 +222,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         error: BaseException,
     ) -> AgentRunResult[Any]:
         messages = self._live_messages or ctx.messages
-        await self._save_snapshot(
+        await self._save_checkpoint(
             ctx,
             messages=messages,
             state="interrupted",
@@ -318,63 +318,63 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
     ) -> None:
         self.capture.remember_context_projection(source, projected)
 
-    async def _save_snapshot(
+    async def _save_checkpoint(
         self,
         ctx: PydanticRunContext[None],
         *,
         messages: Sequence[ModelMessage],
         pending: ModelMessage | None = None,
-        state: SnapshotState,
+        state: CheckpointState,
     ) -> None:
-        context_messages, pending_index = self.capture.snapshot_context(
+        context_messages, pending_index = self.capture.checkpoint_context(
             messages,
             pending=pending,
         )
         frozen_context = tuple(context_messages)
         raw = self.capture.transcript_messages()
         if (
-            self._last_snapshot_context == frozen_context
-            and self._last_snapshot_transcript_count == len(raw)
-            and self._last_snapshot_state == state
-            and self._last_snapshot_pending_index == pending_index
+            self._last_checkpoint_context == frozen_context
+            and self._last_checkpoint_transcript_count == len(raw)
+            and self._last_checkpoint_state == state
+            and self._last_checkpoint_pending_index == pending_index
         ):
             return
-        await self.capture.save_snapshot(
-            ContinuableSnapshot(
-                run_id=self.run_id,
+        await self.capture.save_checkpoint(
+            AgentRunCheckpoint(
+                agent_run_id=self.agent_run_id,
                 step_index=ctx.run_step,
                 messages=list(raw),
-                conversation_id=ctx.conversation_id,
-                parent_run_id=self.parent_run_id,
+                agent_conversation_id=ctx.conversation_id,
+                parent_agent_run_id=self.parent_agent_run_id,
                 agent_name=self.agent_name,
                 state=state,
                 context_messages=context_messages,
-                transcript_message_count_before=self._last_snapshot_transcript_count,
+                transcript_message_count_before=self._last_checkpoint_transcript_count,
                 pending_request_index=pending_index,
             )
         )
-        self._last_snapshot_transcript_count = len(raw)
-        self._last_snapshot_context = frozen_context
-        self._last_snapshot_state = state
-        self._last_snapshot_pending_index = pending_index
+        self._last_checkpoint_transcript_count = len(raw)
+        self._last_checkpoint_context = frozen_context
+        self._last_checkpoint_state = state
+        self._last_checkpoint_pending_index = pending_index
 
 
 async def compose_platform_capabilities(
     *,
     agent_name: str,
-    step_run_id: str,
+    agent_run_id: str,
     execution_id: str | None = None,
-    segment_sequence: int | None,
+    agent_run_sequence: int | None,
     history_id: str | None,
     memory_scope: str | None,
-    step_store: StepStore,
+    run_store: AgentRunStore,
     memory_store: MemoryStore | None,
     ordinary_tool_policy: tuple[str, ...],
     compaction_policy: RuntimeCompactionPolicy,
     limits: PromptLimits,
     planning: bool,
     context_target_tokens: int | None,
-    parent_step_run_id: str | None,
+    parent_agent_run_id: str | None,
     plan_store_resolver: Callable[[PydanticRunContext[None]], RuntimePlanStore] | None,
     deferred_pause_sink: Callable[[int], None] | None = None,
     model_journal: "ModelRequestJournal | None" = None,
@@ -383,23 +383,23 @@ async def compose_platform_capabilities(
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     capture = capture_store or RuntimeCaptureStore(
-        step_store,
+        run_store,
         execution_id=execution_id,
-        step_run_id=step_run_id,
+        agent_run_id=agent_run_id,
     )
-    persistence = _RuntimeStepPersistence(
+    persistence = _RuntimeAgentRunPersistence(
         capture=capture,
         agent_name=agent_name,
-        run_id=step_run_id,
-        parent_run_id=parent_step_run_id,
+        agent_run_id=agent_run_id,
+        parent_agent_run_id=parent_agent_run_id,
         metadata={
             "capability_scope": "parent",
             "agent_name": agent_name,
             **({} if history_id is None else {"history_id": history_id}),
             **(
                 {}
-                if segment_sequence is None
-                else {"segment_sequence": str(segment_sequence)}
+                if agent_run_sequence is None
+                else {"agent_run_sequence": str(agent_run_sequence)}
             ),
         },
         deferred_pause_sink=deferred_pause_sink,
@@ -443,7 +443,7 @@ async def compose_platform_capabilities(
         "platform capabilities composed: agent=%s step=%s memory_tools=%s "
         "planning=%s compaction_policy=per-run",
         agent_name,
-        step_run_id,
+        agent_run_id,
         selected_memory,
         planning,
     )

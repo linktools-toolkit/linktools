@@ -5,9 +5,16 @@
 import asyncio
 from typing import TYPE_CHECKING
 
+from pydantic_ai import RunContext
+from pydantic_ai.capabilities import Capability
+from pydantic_ai.messages import InstructionPart
+
+from ..capability import AgentContext
 from ..capability import ToolCallRetry
+from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..workspace import RepositoryInstructions
+from ..spec import RepositoryInstructions
+from ._tool_boundary import RepositoryInstructionBoundary
 from .state._contracts import ExecutionRecord, RecoveryCheckpoint
 
 if TYPE_CHECKING:
@@ -76,10 +83,8 @@ def _validate_repository_instruction_frontier(
         return
     if overlay is None or not barriers:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if (
-        reference.payload.digest != overlay.digest
-        or barriers[-1].resulting_overlay_digest != overlay.digest
-    ):
+    overlay_digest = canonical_sha256(overlay.to_payload())
+    if reference.payload.digest != overlay_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
@@ -149,3 +154,39 @@ class _RepositoryInstructionBoundary:
                 self._overlay = next_overlay
             if reconsider:
                 raise ToolCallRetry(_REPOSITORY_INSTRUCTION_RECONSIDER)
+
+
+class _RepositoryInstructionCapability(Capability[AgentContext[object]]):
+    """Inject the persisted instruction set and its execution overlay once."""
+
+    def __init__(
+        self,
+        initial: RepositoryInstructions | None,
+        boundary: RepositoryInstructionBoundary | None,
+    ) -> None:
+        initial_text = (
+            boundary.render_initial()
+            if boundary is not None
+            else "" if initial is None else initial.render()
+        )
+        instructions = (
+            ()
+            if not initial_text
+            else (InstructionPart(content=initial_text, dynamic=False),)
+        )
+        super().__init__(
+            id="linktools.ai.repository-instructions",
+            instructions=instructions,
+        )
+        self._boundary = boundary
+        if boundary is not None:
+            self.instructions(self._render_overlay)
+
+    def _render_overlay(
+        self,
+        _context: RunContext[AgentContext[object]],
+    ) -> str | None:
+        if self._boundary is None:
+            return None
+        value = self._boundary.render_overlay()
+        return value or None

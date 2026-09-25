@@ -34,7 +34,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .state import RuntimeDomain
-from .state._contracts import MemoryRecord, MemoryState
+from .state._contracts import MemoryRecord, MemoryRepositories
 
 _logger = environ.get_logger("ai.runtime.memory")
 _MAX_CONTENT_CHARS = 65_536
@@ -55,7 +55,7 @@ class RuntimeMemoryStore:
 
     def __init__(
         self,
-        state: MemoryState,
+        state: MemoryRepositories,
         *,
         object_store: ObjectStore,
         namespace: str,

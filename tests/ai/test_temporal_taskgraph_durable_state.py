@@ -10,7 +10,7 @@ from ._task_test_helpers import admit_graph
 from linktools.ai.core import TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -23,11 +23,11 @@ async def test_reconcile_propagates_transitive_blocked_state(
 ) -> None:
     engine = None
     if backend == "memory":
-        state = RuntimeState.in_memory()
+        state = RuntimeStorage.in_memory()
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
         await provision_database(engine)
-        state = RuntimeState.sql(engine)
+        state = RuntimeStorage.sql(engine)
     await state.initialize(namespace=f"task-reconcile-{backend}", tenant_id="tenant")
     try:
         graph = TaskGraph(
@@ -40,7 +40,7 @@ async def test_reconcile_propagates_transitive_blocked_state(
         )
         repository = state.task.tasks
         await admit_graph(state, graph)
-        await repository.scheduler_snapshot("graph", tenant_id="tenant")
+        await repository.scheduler_state("graph", tenant_id="tenant")
         lease = await repository.claim(
             "graph",
             "c",
@@ -55,7 +55,7 @@ async def test_reconcile_propagates_transitive_blocked_state(
             error_digest=canonical_sha256({"node": "c"}),
         )
 
-        view = await repository.scheduler_snapshot("graph", tenant_id="tenant")
+        view = await repository.scheduler_state("graph", tenant_id="tenant")
 
         assert view.status is TaskStatus.FAILED
         nodes = {

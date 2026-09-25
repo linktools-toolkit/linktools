@@ -2,7 +2,7 @@
   "agent_spec": {
     "version": 1,
     "id": "runtime-persistence-v1",
-    "model": "default",
+    "revision": 1,
     "system_prompt": "",
     "instructions": [],
     "allow_tools": [
@@ -14,16 +14,17 @@
     "allow_subagents": [
       "*"
     ],
-    "allow_capabilities": [
+    "allow_runtime_capabilities": [
       "*"
     ],
     "usage_limits": null,
     "planning": false,
     "thinking": false,
     "tool_retries": 10000,
-    "output_retries": 3
+    "output_retries": 3,
+    "model": "default"
   },
-  "base_model": {
+  "model_contract": {
     "route_id": "default",
     "model_identity": "fixture:model"
   },

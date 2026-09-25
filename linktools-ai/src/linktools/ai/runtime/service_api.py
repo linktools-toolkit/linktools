@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, cast
 
-from ..agent import AgentBindingSnapshot
+from ..agent import AgentBindingContract
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -31,9 +31,8 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskBindingSnapshot, TaskEffectResolution, TaskEvent
+from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent
 from ._input_contract import UserPromptInput, validate_user_input
-from ._snapshot_contract import RunSnapshot
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -58,6 +57,14 @@ def _request_files(value: Sequence[str]) -> tuple[str, ...]:
     if any(not isinstance(item, str) or not item for item in files):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return files
+
+
+def _is_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +158,7 @@ class _ExecutionViewSource(Protocol):
     parent_invocation_id: str | None
     session_id: str | None
     binding_kind: str
-    task_type: str | None
+    task_id: str | None
     task_attempt: int
     task_deadline_at: datetime | None
     task_next_attempt_at: datetime | None
@@ -169,7 +176,7 @@ class ExecutionView:
     parent_invocation_id: str | None
     session_id: str | None = None
     binding_kind: str = "agent"
-    task_type: str | None = None
+    task_id: str | None = None
     task_attempt: int = 0
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
@@ -189,7 +196,7 @@ def project_execution_view(source: object) -> ExecutionView:
         parent_invocation_id=value.parent_invocation_id,
         session_id=value.session_id,
         binding_kind=value.binding_kind,
-        task_type=value.task_type,
+        task_id=value.task_id,
         task_attempt=value.task_attempt,
         task_deadline_at=value.task_deadline_at,
         task_next_attempt_at=value.task_next_attempt_at,
@@ -202,7 +209,6 @@ class ExecutionResult:
     execution_id: str
     status: ExecutionStatus
     output: JsonValue | None
-    output_fingerprint: "str | None"
     usage: UsageMetrics
     error_code: "str | None" = None
     safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
@@ -222,15 +228,13 @@ class ExecutionResult:
                 or self.error_diagnostics is not None
             ):
                 raise ValueError("successful execution result cannot carry an error")
-            if not _is_digest(self.output_fingerprint):
-                raise ValueError("successful execution result requires output contract")
             return
         if self.status is ExecutionStatus.CANCELLED:
             if self.error_code != ErrorCode.EXECUTION_CANCELLED.value:
                 raise ValueError(
                     "cancelled execution result requires EXECUTION_CANCELLED"
                 )
-            if _has_output_contract(self) or self.error_diagnostics is not None:
+            if self.output is not None or self.error_diagnostics is not None:
                 raise ValueError(
                     "cancelled execution result cannot carry output or diagnostics"
                 )
@@ -242,22 +246,10 @@ class ExecutionResult:
                 raise ValueError(
                     "failed execution result cannot carry EXECUTION_CANCELLED"
                 )
-            if _has_output_contract(self):
+            if self.output is not None:
                 raise ValueError("failed execution result cannot carry output")
             return
         raise ValueError("execution result requires a terminal status")
-
-
-def _has_output_contract(result: ExecutionResult) -> bool:
-    return result.output is not None or result.output_fingerprint is not None
-
-
-def _is_digest(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,7 +291,7 @@ class ExecutionHistoryItem:
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
     content_included: bool = True
-    segment_sequence: "int | None" = None
+    agent_run_sequence: "int | None" = None
     request_sequence: "int | None" = None
     tool_operation_id: "str | None" = None
     started_at: "datetime | None" = None
@@ -314,8 +306,8 @@ class ExecutionHistoryItem:
             raise TypeError("history content flag must be bool")
         if not self.content_included and self.content is not None:
             raise ValueError("omitted history content must be None")
-        if self.segment_sequence is not None and self.segment_sequence < 1:
-            raise ValueError("history segment sequence is invalid")
+        if self.agent_run_sequence is not None and self.agent_run_sequence < 1:
+            raise ValueError("Agent run sequence is invalid")
         if self.request_sequence is not None and self.request_sequence < 1:
             raise ValueError("history request sequence is invalid")
         if self.duration_ns is not None and self.duration_ns < 0:
@@ -325,7 +317,7 @@ class ExecutionHistoryItem:
 @dataclass(frozen=True, slots=True)
 class ModelInteractionItem:
     execution_id: str
-    segment_sequence: int
+    agent_run_sequence: int
     depth: int
     request_sequence: int
     purpose: str
@@ -345,7 +337,7 @@ class ModelInteractionItem:
     def __post_init__(self) -> None:
         if (
             not self.execution_id
-            or self.segment_sequence < 1
+            or self.agent_run_sequence < 1
             or self.depth < 0
             or self.request_sequence < 1
             or self.step_index < 0
@@ -372,7 +364,7 @@ class AttachmentFact:
     digest: str | None
     position: int
     processing_status: str = "unknown"
-    segment_sequence: int | None = None
+    agent_run_sequence: int | None = None
     request_sequence: int | None = None
     step_index: int | None = None
     call_id: str | None = None
@@ -402,7 +394,7 @@ class AttachmentFact:
             or self.processing_status != "unknown"
         ):
             raise ValueError("attachment fact is invalid")
-        for value in (self.segment_sequence, self.request_sequence):
+        for value in (self.agent_run_sequence, self.request_sequence):
             if value is not None and (
                 isinstance(value, bool)
                 or not isinstance(value, int)
@@ -429,16 +421,16 @@ class AttachmentFact:
 @dataclass(frozen=True, slots=True)
 class UsageReadCutoff:
     execution_id: str
-    segment_sequence: int
+    agent_run_sequence: int
     request_sequence: int
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.execution_id, str)
             or not self.execution_id
-            or isinstance(self.segment_sequence, bool)
-            or not isinstance(self.segment_sequence, int)
-            or self.segment_sequence < 1
+            or isinstance(self.agent_run_sequence, bool)
+            or not isinstance(self.agent_run_sequence, int)
+            or self.agent_run_sequence < 1
             or isinstance(self.request_sequence, bool)
             or not isinstance(self.request_sequence, int)
             or self.request_sequence < 0
@@ -507,13 +499,13 @@ class UsageSummary:
             self.cutoffs,
             key=lambda value: (
                 value.execution_id,
-                value.segment_sequence,
+                value.agent_run_sequence,
             ),
         ))
         if (
             any(not isinstance(value, UsageReadCutoff) for value in cutoffs)
             or len({
-                (value.execution_id, value.segment_sequence)
+                (value.execution_id, value.agent_run_sequence)
                 for value in cutoffs
             }) != len(cutoffs)
         ):
@@ -626,7 +618,7 @@ class SessionHistoryReader(Protocol):
         session_id: str,
         *,
         tenant_id: str,
-        continuation_step_run_id: "str | None",
+        continuation_agent_run_id: "str | None",
         continuation_history_id: "str | None" = None,
         cursor: "str | None",
         limit: int,
@@ -744,12 +736,12 @@ class SessionView:
 @dataclass(frozen=True, slots=True)
 class StartEvaluationRequest:
     principal: Principal
-    dataset_digest: str
+    dataset_id: str
     memory_scope: str
     idempotency_key: str = ""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.dataset_digest, str) or not self.dataset_digest.strip():
+        if not isinstance(self.dataset_id, str) or not self.dataset_id.strip():
             raise ValueError("evaluation dataset identity is required")
         validate_memory_scope(self.memory_scope)
         validate_idempotency_key(self.idempotency_key)
@@ -1128,11 +1120,11 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         dependency_hold_id: "str | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle: ...
     async def start_task(
         self,
-        binding: TaskBindingSnapshot,
+        binding: TaskBindingContract,
         *,
         principal: Principal,
         input: Mapping[str, JsonValue],
@@ -1222,7 +1214,7 @@ class ExecutionService(Protocol):
         binding_digest: str,
         request: ExecutionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> "ExecutionHandle | None": ...
     async def inspect(
         self, execution_id: str, *, principal: Principal
@@ -1252,7 +1244,7 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         timeout_seconds: "float | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionResult: ...
     async def retry(
         self, execution_id: str, request: RetryExecutionRequest
@@ -1324,6 +1316,12 @@ class SessionService(Protocol):
         self, agent_id: str, request: CreateSessionRequest
     ) -> SessionView: ...
     async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
+    async def reconcile(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> SessionView: ...
     async def list(self, request: ListSessionRequest) -> "Page[SessionView]": ...
     async def history(
         self,
@@ -1341,7 +1339,6 @@ class SessionService(Protocol):
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> "Page[SessionTurn]": ...
-    async def load(self, session_id: str, *, principal: Principal) -> SessionView: ...
     async def resume(
         self,
         agent_id: str,
@@ -1349,7 +1346,7 @@ class SessionService(Protocol):
         session_id: str,
         request: ResumeSessionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle: ...
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
@@ -1368,7 +1365,7 @@ class EvaluationService(Protocol):
         binding_digest: str,
         request: StartEvaluationRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> EvaluationHandle: ...
     async def inspect(
         self, evaluation_id: str, *, principal: Principal
@@ -1376,13 +1373,10 @@ class EvaluationService(Protocol):
     async def compare(
         self, request: CompareEvaluationRequest
     ) -> EvaluationComparison: ...
-    async def snapshot(
-        self, evaluation_id: str, *, principal: Principal
-    ) -> RunSnapshot: ...
     async def replay(
         self,
         agent_id: str,
-        snapshot_id: str,
+        evaluation_id: str,
         request: ReplayEvaluationRequest,
     ) -> ExecutionHandle: ...
 

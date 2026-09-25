@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, bind_output
+from linktools.ai.agent import AgentBindingContract, AgentCompiler, bind_output
 from linktools.ai.capability import CapabilityContribution, CapabilityGroup
 from linktools.ai.core import (
     ExecutionStatus,
@@ -34,14 +34,14 @@ from linktools.ai.runtime.state._durability import (
 from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
 from linktools.ai.runtime.state._plan import RuntimeDomain
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
-from linktools.ai.runtime.state._steps import RuntimeStepStore
+from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskEvent,
     TaskEventType,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskNode,
     TaskNodeView,
     open_local_task_graph_service,
@@ -71,7 +71,7 @@ def _compiler(
     candidates: tuple[CapabilityContribution[object], ...] = (),
 ) -> AgentCompiler:
     return AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=candidates,
         agents={"durable-contract": _spec()},
     )
@@ -85,31 +85,31 @@ def test_custom_output_restore_uses_persisted_schema() -> None:
     compiler = _compiler()
     definition = compiler.compile(_spec())
     binding = compiler.bind(definition, output=_RegisteredOutput)
-    snapshot = binding.snapshot
-    assert snapshot.output_schema == binding.output_binding.schema_definition
+    binding_contract = binding.binding_contract
+    assert binding_contract.output_schema == binding.output_binding.schema_definition
 
-    restored = _compiler().restore(snapshot)
-    assert restored.snapshot == snapshot
+    restored = _compiler().restore(binding_contract)
+    assert restored.binding_contract == binding_contract
     assert restored.output_type is not _RegisteredOutput
 
 
 def test_custom_output_restore_requires_complete_persisted_schema() -> None:
     compiler = _compiler()
     binding = compiler.bind(compiler.compile(_spec()), output=_RegisteredOutput)
-    snapshot = binding.snapshot
+    binding_contract = binding.binding_contract
     fresh = _compiler()
 
-    missing_payload = snapshot.to_payload()
+    missing_payload = binding_contract.to_payload()
     missing_payload.pop("output_schema")
     with pytest.raises(AIError) as missing_error:
-        AgentBindingSnapshot.from_payload(missing_payload)
+        AgentBindingContract.from_payload(missing_payload)
     assert missing_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-    changed_schema = dict(snapshot.output_schema)
+    changed_schema = dict(binding_contract.output_schema)
     changed_schema["title"] = "PersistedOutput"
-    changed = replace(snapshot, output_schema=changed_schema)
+    changed = replace(binding_contract, output_schema=changed_schema)
     restored = fresh.restore(changed)
-    assert restored.snapshot == changed
+    assert restored.binding_contract == changed
     assert restored.output_binding.schema_definition == changed_schema
 
 def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
@@ -122,26 +122,26 @@ def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
 @pytest.mark.asyncio
 async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -> None:
     group = CapabilityGroup[None]("durable")
-    group.capability(_RegisteredCapability(), revision=3)
-    candidates = tuple(await group.freeze())
+    group.runtime_capability(_RegisteredCapability(), revision=3)
+    candidates = (await group.capture()).contributions
     compiler = _compiler(candidates=candidates)
     binding = compiler.bind(compiler.compile(_spec()))
 
     assert (
-        _compiler(candidates=candidates).restore(binding.snapshot).snapshot
-        == binding.snapshot
+        _compiler(candidates=candidates).restore(binding.binding_contract).binding_contract
+        == binding.binding_contract
     )
 
     with pytest.raises(AIError) as missing:
-        _compiler().restore(binding.snapshot)
-    assert missing.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+        _compiler().restore(binding.binding_contract)
+    assert missing.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
     changed_group = CapabilityGroup[None]("changed")
-    changed_group.capability(_RegisteredCapability(), revision=4)
-    changed_candidates = tuple(await changed_group.freeze())
+    changed_group.runtime_capability(_RegisteredCapability(), revision=4)
+    changed_candidates = (await changed_group.capture()).contributions
     with pytest.raises(AIError) as changed:
-        _compiler(candidates=changed_candidates).restore(binding.snapshot)
-    assert changed.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+        _compiler(candidates=changed_candidates).restore(binding.binding_contract)
+    assert changed.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -236,8 +236,8 @@ async def test_durable_commit_cancellation_accepts_committed_readback() -> None:
     assert owner == set()
 
 
-def _step_store_for_preflight() -> RuntimeStepStore:
-    store = object.__new__(RuntimeStepStore)
+def _run_store_for_preflight() -> RuntimeAgentRunStore:
+    store = object.__new__(RuntimeAgentRunStore)
     store._background_tasks = set()
     store._durability_flights = {}
     store._terminal_seals = {}
@@ -247,7 +247,7 @@ def _step_store_for_preflight() -> RuntimeStepStore:
 
 @pytest.mark.asyncio
 async def test_step_preflight_rejects_flights_tasks_and_terminal_seals() -> None:
-    store = _step_store_for_preflight()
+    store = _run_store_for_preflight()
     store._durability_flights["run"] = object()
     with pytest.raises(AIError) as flight_error:
         await store.preflight_close()
@@ -328,10 +328,10 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
 
     async def release_staging_many(
         *,
-        candidate_step_run_ids: tuple[str, ...],
+        candidate_agent_run_ids: tuple[str, ...],
         execution_id: str,
     ) -> None:
-        calls.append(f"staging:{execution_id}:{candidate_step_run_ids}")
+        calls.append(f"staging:{execution_id}:{candidate_agent_run_ids}")
 
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(
@@ -342,7 +342,9 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
     )
     controller._conversation = SimpleNamespace()
     controller._namespace = "runtime"
-    controller._steps = SimpleNamespace(release_staging_many=release_staging_many)
+    controller._run_store = SimpleNamespace(
+        release_staging_many=release_staging_many
+    )
     controller._objects = SimpleNamespace()
     controller._transient_domains = frozenset()
 
@@ -417,7 +419,7 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}
-    backend._segment_only_worker_exits = set()
+    backend._agent_run_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     backend._worker_cancel_requests = set()
     backend._worker_shutdown_requests = set()
@@ -451,7 +453,7 @@ async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}
-    backend._segment_only_worker_exits = set()
+    backend._agent_run_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     backend._worker_cancel_requests = set()
     backend._worker_shutdown_requests = set()
@@ -549,7 +551,7 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
     assert await task == "terminal"
 
 
-def _running_task_snapshot() -> TaskGraphSnapshot:
+def _running_task_graph_state() -> TaskGraphState:
     node = TaskNode("node")
     state = TaskNodeView(
         "graph",
@@ -563,7 +565,7 @@ def _running_task_snapshot() -> TaskGraphSnapshot:
         None,
         None,
     )
-    return TaskGraphSnapshot(
+    return TaskGraphState(
         "graph",
         TaskStatus.RUNNING,
         (node,),
@@ -571,8 +573,8 @@ def _running_task_snapshot() -> TaskGraphSnapshot:
     )
 
 
-def _terminal_task_snapshot() -> TaskGraphSnapshot:
-    return TaskGraphSnapshot("graph", TaskStatus.SUCCEEDED, (), ())
+def _terminal_task_graph_state() -> TaskGraphState:
+    return TaskGraphState("graph", TaskStatus.SUCCEEDED, (), ())
 
 
 def _running_task_event() -> TaskEvent:
@@ -620,14 +622,14 @@ class _RunningTaskRepository:
         del graph_id, tenant_id
         return SimpleNamespace(status=TaskStatus.RUNNING)
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del graph_id, tenant_id
-        return _running_task_snapshot()
+        return _running_task_graph_state()
 
     async def latest_event(
         self,
@@ -701,14 +703,14 @@ class _TerminalTaskRepository:
             status=TaskStatus.SUCCEEDED,
         )
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del graph_id, tenant_id
-        return _terminal_task_snapshot()
+        return _terminal_task_graph_state()
 
     async def latest_event(
         self,
@@ -722,7 +724,7 @@ class _TerminalTaskRepository:
 
 class _TransitionTaskRepository(_TerminalTaskRepository):
     def __init__(self) -> None:
-        self.snapshot_reads = 0
+        self.graph_state_reads = 0
         self.event_reads = 0
 
     async def latest_event(
@@ -748,15 +750,15 @@ class _TransitionTaskRepository(_TerminalTaskRepository):
             return Page(())
         return Page((_terminal_task_event(after_sequence + 1),))
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del graph_id, tenant_id
-        self.snapshot_reads += 1
-        return _terminal_task_snapshot()
+        self.graph_state_reads += 1
+        return _terminal_task_graph_state()
 
 
 class _TerminalTaskWaiter:
@@ -807,7 +809,7 @@ def _terminal_task_service(
 
 
 @pytest.mark.asyncio
-async def test_task_wait_returns_current_terminal_snapshot_without_local_wait() -> None:
+async def test_task_wait_returns_current_terminal_graph_state_without_local_wait() -> None:
     waiter = _TerminalTaskWaiter()
     service = _terminal_task_service(waiter)
 
@@ -834,7 +836,7 @@ async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> Non
     )
 
     assert waiter.started.is_set()
-    assert repository.snapshot_reads == 1
+    assert repository.graph_state_reads == 1
     assert repository.event_reads == 2
     assert result.status is TaskStatus.SUCCEEDED
 

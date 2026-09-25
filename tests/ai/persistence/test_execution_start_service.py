@@ -8,7 +8,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionStatus,
@@ -18,7 +18,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
+from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
     CancelEffectOutcome,
@@ -30,11 +30,11 @@ from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="model"),
-        base_model={"route_id": "model", "model_identity": "test:model"},
+        model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -42,11 +42,14 @@ def _binding() -> AgentBindingSnapshot:
     )
 
 
-class _DefinitionCatalog:
+class _BindingCatalog:
     def binding(self, digest: str) -> object:
         binding = _binding()
         assert digest == binding.binding_digest
-        return SimpleNamespace(digest=binding.binding_digest, snapshot=binding)
+        return SimpleNamespace(
+            binding_digest=binding.binding_digest,
+            binding_contract=binding,
+        )
 
 
 class _History:
@@ -148,7 +151,7 @@ def _request(
 
 
 def _service(
-    state: RuntimeState,
+    state: RuntimeStorage,
     *,
     backend: _Launcher | None = None,
     operation_ids: object | None = None,
@@ -164,7 +167,7 @@ def _service(
         state.object_store(RuntimeDomain.EXECUTION),
         TenantAuthorizationPolicy(),
         sessions=state.conversation.sessions,
-        catalog=_DefinitionCatalog(),
+        catalog=_BindingCatalog(),
         compiler=object(),
         runtime_bridge=runtime_bridge,
         live_broker=LiveExecutionEventBroker(),
@@ -175,7 +178,7 @@ def _service(
 
 @pytest.mark.asyncio
 async def test_execution_start_claim_has_one_launcher_winner() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="service-start", tenant_id="tenant")
     try:
         launcher = _Launcher(state.execution.executions)
@@ -220,7 +223,7 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
 
 @pytest.mark.asyncio
 async def test_task_start_holds_immediate_terminal_execution_before_return() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="service-start-handoff", tenant_id="tenant")
     release_started = asyncio.Event()
     release_finished = asyncio.Event()
@@ -276,7 +279,7 @@ async def test_task_start_holds_immediate_terminal_execution_before_return() -> 
 async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeState.sql(engine)
+    state = RuntimeStorage.sql(engine)
     await state.initialize(namespace="sql-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
@@ -294,7 +297,7 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
 
 @pytest.mark.asyncio
 async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="filesystem-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
@@ -318,7 +321,7 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
 
 @pytest.mark.asyncio
 async def test_unbound_runtime_bridge_rejects_runtime_access() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="terminal-verifier", tenant_id="tenant")
     try:
         service = _service(state)

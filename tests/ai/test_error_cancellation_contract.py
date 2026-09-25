@@ -10,15 +10,24 @@ from unittest.mock import AsyncMock
 import pytest
 from linktools.ai.asset._sql import SqlAssetBackend
 from linktools.ai.capability import SubagentDelegate
-from linktools.ai.core import ExecutionStatus, Principal, ResourceKind, ResourceRef
+from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._execution import DefaultExecutionService
+from linktools.ai.runtime._agent_executor import (
+    _cleanup_agent_run_resources,
+    _close_mcp_resources,
+)
 from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime._mcp import materialize_mcp_capabilities
+from linktools.ai.runtime._mcp import (
+    _MCPRuntimeCapability,
+    _raise_primary_after_cleanup,
+    close_mcp_resources,
+    materialize_mcp_capabilities,
+)
 from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime._subagent import SubagentDispatcher
-from linktools.ai.spec import MCPServerSpec
+from linktools.ai.spec import MCPServerSpec, mcp_server_selector
 from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskGraphLaunch,
@@ -26,6 +35,7 @@ from linktools.ai.task import (
 )
 from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.core import Principal, PrincipalKind
+from linktools.ai.workspace import BubblewrapSandbox
 
 
 async def _no_dependency_body(_dependency: object) -> object:
@@ -42,19 +52,17 @@ def test_subagent_delegate_contract_requires_mapping_result() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
-    principal = Principal("principal", "tenant")
-    execution = ResourceRef(ResourceKind.EXECUTION, "execution", "tenant")
-
     with pytest.raises(AIError) as error:
         await materialize_mcp_capabilities(
             (MCPServerSpec("server", "echo"),),
             (),
-            principal=principal,
-            execution=execution,
-            execution_root=str(tmp_path),
+            sandbox=None,
+            sandbox_session=None,
+            host_cwd=str(tmp_path),
+            resource_bindings={},
+            projections={},
             tool_operations=None,
             tool_metrics=None,
-            background_tasks=set(),
         )
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -62,23 +70,104 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
-    principal = Principal("principal", "tenant")
-    execution = ResourceRef(ResourceKind.EXECUTION, "execution", "tenant")
-
     with pytest.raises(AIError) as error:
         await materialize_mcp_capabilities(
             (MCPServerSpec("server", "echo"),),
-            ("mcp__server__*",),
-            principal=principal,
-            execution=execution,
-            execution_root=None,
+            (mcp_server_selector("server"),),
+            sandbox=None,
+            sandbox_session=None,
+            host_cwd=None,
+            resource_bindings={},
+            projections={},
             tool_operations=None,
             tool_metrics=None,
-            background_tasks=set(),
         )
 
     assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
     assert error.value.safe_details == {"reason": "mcp_cwd_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> None:
+    sandbox = BubblewrapSandbox(
+        runtime_root=tmp_path,
+        bwrap_executable=tmp_path / "bwrap",
+    )
+    with pytest.raises(AIError) as error:
+        await materialize_mcp_capabilities(
+            (MCPServerSpec("server", "echo"),),
+            (mcp_server_selector("server"),),
+            sandbox=sandbox,
+            sandbox_session=None,
+            host_cwd=None,
+            resource_bindings={},
+            projections={},
+            tool_operations=None,
+            tool_metrics=None,
+        )
+
+    assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_mcp_cleanup_failure_keeps_the_execution_error() -> None:
+    class FailedClient:
+        async def close(self) -> None:
+            raise RuntimeError("process cleanup failed")
+
+    capability = _MCPRuntimeCapability("mcp", object(), FailedClient())
+    execution_error = ValueError("execution failed")
+
+    with pytest.raises(ValueError) as error:
+        await _close_mcp_resources((capability,), execution_error)
+
+    assert error.value is execution_error
+    assert isinstance(error.value.__cause__, AIError)
+    assert error.value.__cause__.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+
+
+@pytest.mark.asyncio
+async def test_mcp_cleanup_failure_is_typed_without_an_execution_error() -> None:
+    class FailedClient:
+        async def close(self) -> None:
+            raise RuntimeError("process cleanup failed")
+
+    capability = _MCPRuntimeCapability("mcp", object(), FailedClient())
+
+    with pytest.raises(AIError) as error:
+        await close_mcp_resources((capability,))
+
+    assert error.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+
+
+@pytest.mark.asyncio
+async def test_agent_run_cleanup_keeps_execution_error() -> None:
+    execution_error = ValueError("execution failed")
+
+    class FailedSession:
+        async def close(self) -> None:
+            raise RuntimeError("session close failed")
+
+    with pytest.raises(ValueError) as error:
+        await _cleanup_agent_run_resources(FailedSession(), execution_error)
+
+    assert error.value is execution_error
+    assert isinstance(error.value.__cause__, AIError)
+    assert error.value.__cause__.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+
+
+def test_mcp_initialization_cleanup_failure_keeps_the_primary_error() -> None:
+    primary_error = ValueError("initialization failed")
+
+    with pytest.raises(ValueError) as error:
+        _raise_primary_after_cleanup(
+            primary_error,
+            RuntimeError("cleanup failed"),
+        )
+
+    assert error.value is primary_error
+    assert isinstance(error.value.__cause__, AIError)
+    assert error.value.__cause__.code is ErrorCode.SANDBOX_CLEANUP_FAILED
 
 
 @pytest.mark.asyncio
@@ -629,7 +718,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}
-    backend._segment_only_worker_exits = set()
+    backend._agent_run_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     with pytest.raises(AIError) as close_error:
         await backend.close()

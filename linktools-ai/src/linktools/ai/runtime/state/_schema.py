@@ -15,7 +15,7 @@ from ...storage import (
     sql_table_options,
     sql_unique,
 )
-from ._plan import RuntimeDomain, RuntimeStatePlan
+from ._plan import RuntimeDomain, RuntimeStoragePlan
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -26,7 +26,7 @@ _ALIAS_COMMENT = (
     "Secondary unique lookup identities that resolve to canonical runtime records."
 )
 _FACT_COMMENT = (
-    "Immutable ordered runtime facts including events, snapshots, and effects."
+    "Immutable ordered runtime facts including events, checkpoints, and effects."
 )
 _SEQUENCE_COMMENT = (
     "Durable monotonic counters used to allocate ordered runtime sequence numbers."
@@ -35,7 +35,7 @@ _OPERATION_COMMENT = "Ordered durable operation ledger for replay, result recove
 
 
 def build_runtime_sql_metadata(
-    plan: "RuntimeStatePlan | frozenset[RuntimeDomain]",
+    plan: "RuntimeStoragePlan | frozenset[RuntimeDomain]",
     *,
     metadata: "MetaData | None" = None,
 ) -> "MetaData":
@@ -60,7 +60,7 @@ def build_runtime_sql_metadata(
         return metadata
     if isinstance(plan, frozenset) and not plan:
         raise ValueError("at least one RuntimeDomain is required")
-    if isinstance(plan, RuntimeStatePlan) and not any(
+    if isinstance(plan, RuntimeStoragePlan) and not any(
         plan.route(domain).retention.value == "durable" for domain in RuntimeDomain
     ):
         raise ValueError("at least one durable RuntimeDomain is required")
@@ -98,7 +98,7 @@ def build_runtime_sql_metadata(
             "kind",
             String(32),
             nullable=False,
-            comment="Stable persisted record kind such as session, execution, task_node, or step_run.",
+            comment="Stable persisted record kind such as session, execution, task_node, or agent_run.",
         ),
         Column(
             "sort_key",
@@ -214,7 +214,7 @@ def build_runtime_sql_metadata(
             "kind",
             String(32),
             nullable=False,
-            comment="Fact kind such as execution_event, step_event, step_snapshot, or step_effect.",
+            comment="Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.",
         ),
         Column(
             "subject_digest",
@@ -226,7 +226,7 @@ def build_runtime_sql_metadata(
             "state",
             sql_state(),
             nullable=True,
-            comment="Queryable fact state such as snapshot completeness or tool-effect lifecycle state.",
+            comment="Queryable fact state such as checkpoint completeness or tool-effect lifecycle state.",
         ),
         Column(
             "payload_json",
@@ -329,7 +329,7 @@ def build_runtime_sql_metadata(
     return metadata
 
 
-def required_runtime_sql_tables(plan: RuntimeStatePlan) -> frozenset[str]:
+def required_runtime_sql_tables(plan: RuntimeStoragePlan) -> frozenset[str]:
     """Return the stable Runtime table set for a durable plan."""
     if not any(
         plan.route(domain).retention.value == "durable" for domain in RuntimeDomain

@@ -2,20 +2,15 @@
 # -*- coding: utf-8 -*-
 """Workspace identity, discovery, policy, instructions, and sandbox contracts."""
 
-from ._instructions import (
-    LocalRepositoryInstructionResolver,
-    LocalRuleCatalog,
-    RepositoryInstructionDocument,
-    RepositoryInstructionResolver,
-    RepositoryInstructions,
-)
+from ._access import WorkspaceAccess
+from ._instructions import LocalRepositoryInstructionResolver
 from ._root import (
     PermissionDecision,
     ToolPermissionRule,
     Workspace,
     WorkspacePolicy,
     WorkspaceToolPermissionPolicy,
-    normalize_workspace_path,
+    validate_workspace_path,
 )
 from ._local_sandbox import LocalSandbox
 from ._bubblewrap import BubblewrapSandbox
@@ -25,8 +20,12 @@ from ._sandbox import (
     Sandbox,
     SandboxOperationRejected,
     SandboxResource,
+    SandboxResourcePath,
     SandboxSession,
-    normalize_workspace_path as normalize_workspace_input_path,
+    SandboxStdioProcess,
+    StdioSandbox,
+    StdioSandboxSession,
+    normalize_workspace_input_path,
 )
 
 __all__ = [
@@ -34,20 +33,21 @@ __all__ = [
     "ReadOnlySandboxPolicy",
     "BubblewrapSandbox",
     "LocalRepositoryInstructionResolver",
-    "LocalRuleCatalog",
     "PermissionDecision",
-    "RepositoryInstructionDocument",
-    "RepositoryInstructionResolver",
-    "RepositoryInstructions",
     "Sandbox",
     "SandboxOperationRejected",
     "SandboxResource",
+    "SandboxResourcePath",
     "SandboxSession",
+    "SandboxStdioProcess",
+    "StdioSandbox",
+    "StdioSandboxSession",
     "LocalSandbox",
     "ToolPermissionRule",
     "Workspace",
+    "WorkspaceAccess",
     "WorkspacePolicy",
     "WorkspaceToolPermissionPolicy",
     "normalize_workspace_input_path",
-    "normalize_workspace_path",
+    "validate_workspace_path",
 ]

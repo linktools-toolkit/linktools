@@ -26,7 +26,7 @@ from ...task import (
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLimits,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskLease,
     TaskNode,
@@ -710,11 +710,11 @@ class TaskRepositoryImpl(RepositoryBase):
             states,
         )
 
-    async def _snapshot_graph_in_transaction(
+    async def _graph_state_in_transaction(
         self,
         transaction: StateTransaction,
         graph_id: str,
-    ) -> TaskGraphSnapshot | None:
+    ) -> TaskGraphState | None:
         state = await self._event_state_in_transaction(transaction, graph_id)
         if state is None:
             return None
@@ -740,7 +740,7 @@ class TaskRepositoryImpl(RepositoryBase):
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _decode_task_event(graph_id, latest)
-        return TaskGraphSnapshot(
+        return TaskGraphState(
             state.graph.graph_id,
             _effective_graph_status(state.graph, state.node_states),
             state.graph.nodes,
@@ -897,21 +897,21 @@ class TaskRepositoryImpl(RepositoryBase):
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView | None:
         if tenant_id != self._tenant_id:
             return None
-        snapshot = await self.snapshot_graph(graph_id, tenant_id=tenant_id)
-        if snapshot is None:
+        state = await self.graph_state(graph_id, tenant_id=tenant_id)
+        if state is None:
             return None
-        return TaskGraphView(snapshot.graph_id, snapshot.status, snapshot.nodes)
+        return TaskGraphView(state.graph_id, state.status, state.nodes)
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot | None:
+    ) -> TaskGraphState | None:
         if tenant_id != self._tenant_id:
             return None
         return await self.state_store.read(
-            lambda transaction: self._snapshot_graph_in_transaction(
+            lambda transaction: self._graph_state_in_transaction(
                 transaction,
                 graph_id,
             )
@@ -1625,11 +1625,11 @@ class TaskRepositoryImpl(RepositoryBase):
                 ) from error
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
 
-    async def scheduler_snapshot(self, graph_id: str, *, tenant_id: str) -> TaskGraphSnapshot:
+    async def scheduler_state(self, graph_id: str, *, tenant_id: str) -> TaskGraphState:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
-        async def mutate(transaction: StateTransaction) -> TaskGraphSnapshot:
+        async def mutate(transaction: StateTransaction) -> TaskGraphState:
             before = await self._event_state_in_transaction(transaction, graph_id)
             if before is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -1659,13 +1659,13 @@ class TaskRepositoryImpl(RepositoryBase):
                 next_nodes,
                 next_status,
             )
-            snapshot = await self._snapshot_graph_in_transaction(
+            state = await self._graph_state_in_transaction(
                 transaction,
                 graph_id,
             )
-            if snapshot is None:
+            if state is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return snapshot
+            return state
 
         try:
             return await self._mutate_with_event_retry(mutate)
@@ -1677,13 +1677,13 @@ class TaskRepositoryImpl(RepositoryBase):
                 tenant_id=tenant_id,
             )
             if converged:
-                snapshot = await self.snapshot_graph(
+                state = await self.graph_state(
                     graph_id,
                     tenant_id=tenant_id,
                 )
-                if snapshot is None:
+                if state is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return snapshot
+                return state
             if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise AIError(
                     ErrorCode.STORAGE_RECOVERY_REQUIRED,
@@ -1733,7 +1733,7 @@ class TaskRepositoryImpl(RepositoryBase):
 
             if (
                 current.status is TaskStatus.RUNNING
-                and definition.effect == "non_replay_safe"
+                and definition.effect_policy == "non_replay_safe"
             ):
                 value = replace(
                     current,
@@ -1791,11 +1791,11 @@ class TaskRepositoryImpl(RepositoryBase):
         except AIError as error:
             if error.code not in _COMMIT_READBACK_CODES:
                 raise
-            snapshot = await self.snapshot_graph(graph_id, tenant_id=tenant_id)
-            if snapshot is None:
+            state = await self.graph_state(graph_id, tenant_id=tenant_id)
+            if state is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             current = next(
-                (node for node in snapshot.node_states if node.node_id == node_id),
+                (node for node in state.node_states if node.node_id == node_id),
                 None,
             )
             if current is None or current.execution_id != execution_id:
@@ -1807,9 +1807,9 @@ class TaskRepositoryImpl(RepositoryBase):
                 TaskStatus.FAILED,
             }:
                 return TaskGraphView(
-                    snapshot.graph_id,
-                    snapshot.status,
-                    snapshot.nodes,
+                    state.graph_id,
+                    state.status,
+                    state.nodes,
                 )
             if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise AIError(
@@ -1850,7 +1850,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 if (
                     node.status is TaskStatus.RUNNING
                     and node.execution_id is not None
-                    and definition.effect == "non_replay_safe"
+                    and definition.effect_policy == "non_replay_safe"
                 ):
                     next_values.append(
                         replace(
@@ -2791,20 +2791,20 @@ class TaskRepositoryImpl(RepositoryBase):
             if state is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             status = _effective_graph_status(state.graph, state.node_states)
-            snapshot = TaskGraphSnapshot(
+            graph_state = TaskGraphState(
                 state.graph.graph_id,
                 status,
                 state.graph.nodes,
                 state.node_states,
             )
             view = TaskGraphView(
-                state.graph.graph_id,
-                snapshot.status,
-                state.graph.nodes,
+                graph_state.graph_id,
+                graph_state.status,
+                graph_state.nodes,
             )
             graph_converged = (
-                header.status is snapshot.status
-                and graph_record.state == snapshot.status.value
+                header.status is graph_state.status
+                and graph_record.state == graph_state.status.value
             )
             return view, graph_converged
 

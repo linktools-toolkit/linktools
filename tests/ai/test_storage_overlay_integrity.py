@@ -37,7 +37,7 @@ async def test_batch_origin_mismatch_reports_the_still_missing_key() -> None:
     missing = AssetKey("sample", "missing")
     good = AssetKey("sample", "good")
     backend = _PartiallyMissingBatchBackend(
-        AssetRoot("memory", "batch-mismatch", "batch-mismatch"),
+        AssetRoot("memory", "batch-mismatch"),
         missing,
     )
     await backend.put(good, b"good")

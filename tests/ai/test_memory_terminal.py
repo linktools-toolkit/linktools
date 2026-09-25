@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionEventType,
@@ -18,7 +18,7 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     ExecutionTerminalCommit,
@@ -31,11 +31,11 @@ from linktools.ai.storage import ObjectRef, StoredPayload
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
+def _binding_contract() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("default"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
+        model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -45,7 +45,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
 
 @pytest.mark.asyncio
 async def test_execution_idempotency_repository_owns_resource_kind() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="idempotency-owner", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)
@@ -73,7 +73,7 @@ async def test_execution_idempotency_repository_owns_resource_kind() -> None:
 async def test_in_memory_terminal_commit_validates_success_result(
     payload_kind: str,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="memory-terminal", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)
@@ -82,8 +82,8 @@ async def test_in_memory_terminal_commit_validates_success_result(
             session_id=None,
             parent_execution_id=None,
             root_execution_id="execution",
-            source_execution_id=None,
-            base_execution_id=None,
+            previous_execution_id=None,
+            fork_base_execution_id=None,
             lineage_kind=ExecutionLineageKind.RUN,
             status=ExecutionStatus.STARTED,
             revision=1,
@@ -96,7 +96,7 @@ async def test_in_memory_terminal_commit_validates_success_result(
             mode="run",
             planning=False,
             thinking=False,
-            binding=_binding_snapshot(),
+            binding=_binding_contract(),
             **execution_owner_fields(),
         )
         identity = IdempotencyRecord(

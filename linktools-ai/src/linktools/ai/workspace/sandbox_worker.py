@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import ctypes
 import errno
+import hashlib
 import json
 import os
 import signal
@@ -476,16 +477,21 @@ def _resources(value: str) -> tuple[SandboxResource, ...]:
     for item in raw:
         if not isinstance(item, Mapping):
             raise RuntimeError("worker resource is invalid")
-        if set(item) != {"key", "path"}:
+        if set(item) != {"id", "path"}:
             raise RuntimeError("worker resource is invalid")
-        key = item.get("key")
+        resource_id = item.get("id")
         path = item.get("path")
-        if not isinstance(key, str) or key in seen or not isinstance(path, str):
+        if (
+            not isinstance(resource_id, str)
+            or resource_id in seen
+            or not isinstance(path, str)
+        ):
             raise RuntimeError("worker resource is invalid")
-        if path != f"/skills/{key}":
+        digest = hashlib.sha256(resource_id.encode("utf-8")).hexdigest()[:24]
+        if path != f"/resources/r{digest}":
             raise RuntimeError("worker resource is invalid")
-        resources.append(SandboxResource(key, Path(path)))
-        seen.add(key)
+        resources.append(SandboxResource(resource_id, Path(path)))
+        seen.add(resource_id)
     return tuple(resources)
 
 

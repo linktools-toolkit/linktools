@@ -7,7 +7,8 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from ..core import validate_tenant_id
+from ..core import RUNTIME_OBJECT_STORE_ID, validate_tenant_id
+from ..errors import AIError, ErrorCode
 from ..storage import (
     ObjectRef,
     ObjectStore,
@@ -58,10 +59,12 @@ async def put_runtime_object(
         yield data
 
     stat = await store.put(key, chunks(), expected_size=len(data), expected_digest=digest)
-    return ObjectRef("runtime", key, stat.digest, stat.size)
+    return ObjectRef(RUNTIME_OBJECT_STORE_ID, key, stat.digest, stat.size)
 
 
 async def read_runtime_object(store: ObjectStore, reference: ObjectRef) -> bytes:
+    if reference.store_id != RUNTIME_OBJECT_STORE_ID:
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     return await read_object(
         store,
         reference.key,

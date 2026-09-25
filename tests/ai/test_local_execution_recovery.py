@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
@@ -20,11 +20,11 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
+def _binding_contract() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("default"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
+        model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -33,16 +33,16 @@ def _binding_snapshot() -> AgentBindingSnapshot:
 
 
 def _binding() -> object:
-    snapshot = _binding_snapshot()
-    definition = SimpleNamespace(
+    binding_contract = _binding_contract()
+    compiled_agent = SimpleNamespace(
         digest="b" * 64,
         spec=SimpleNamespace(id="default"),
         selected_tools=(),
     )
     return SimpleNamespace(
-        digest=snapshot.binding_digest,
-        snapshot=snapshot,
-        definition=definition,
+        binding_digest=binding_contract.binding_digest,
+        binding_contract=binding_contract,
+        compiled_agent=compiled_agent,
     )
 
 
@@ -60,14 +60,14 @@ def _request() -> ExecutionRequest:
 
 def _record() -> ExecutionRecord:
     now = datetime.now(timezone.utc)
-    snapshot = _binding_snapshot()
+    binding_contract = _binding_contract()
     return ExecutionRecord(
         execution_id="execution",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
@@ -80,7 +80,7 @@ def _record() -> ExecutionRecord:
         mode="run",
         planning=False,
         thinking=False,
-        binding=snapshot,
+        binding=binding_contract,
         principal_id="principal",
         principal_kind="service",
         stored_user_input=StoredUserInput(
@@ -142,7 +142,7 @@ def _backend() -> LocalExecutionBackend:
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}
-    backend._segment_only_worker_exits = set()
+    backend._agent_run_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
@@ -179,7 +179,7 @@ async def test_prepare_start_persists_exact_binding_and_execution_policy() -> No
         (ValueError("business"), False),
         (AIError(ErrorCode.OUTPUT_VALIDATION_FAILED), False),
         (AIError(ErrorCode.STORAGE_INTEGRITY_ERROR), True),
-        (AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE), True),
+        (AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE), True),
         (AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE), True),
         (AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY), True),
         (AIError(ErrorCode.SERVICE_NOT_READY), True),

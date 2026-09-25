@@ -46,8 +46,8 @@ def _admission() -> ToolOperationAdmission:
     return ToolOperationAdmission(
         execution_id="execution",
         tool_operation_id="operation",
-        step_run_id="step",
-        recovery_step_run_id=None,
+        agent_run_id="step",
+        recovery_agent_run_id=None,
         tool_call_id="call",
         idempotency_key_digest=canonical_sha256({"call": "call"}),
         tool_name="tool",

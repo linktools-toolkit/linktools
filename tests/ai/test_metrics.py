@@ -24,8 +24,8 @@ from linktools.ai.observe._codec import (
     decode_definition_envelope,
     decode_observation_envelope,
     definition_envelope,
-    definition_semantic_digest,
     observation_envelope,
+    same_definition_contract,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -275,7 +275,7 @@ async def test_definition_identity_ignores_query_field_order() -> None:
         query_fields=("route", "status"),
     )
 
-    assert definition_semantic_digest(first) == definition_semantic_digest(reordered)
+    assert same_definition_contract(first, reordered)
     stored = await metrics.define(first)
     replay = await metrics.define(reordered)
     assert replay == stored

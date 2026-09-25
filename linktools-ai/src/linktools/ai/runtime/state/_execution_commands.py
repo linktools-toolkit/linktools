@@ -21,10 +21,10 @@ from ._durability import (
     DurableCommitState,
     run_durable_commit,
 )
-from ._step_contracts import ContinuableSnapshot, RunRecord, StepEvent
+from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
 from ._step_archive import (
     PreparedExecutionProjection,
-    PreparedStepSnapshotBatch,
+    PreparedAgentRunCheckpointBatch,
     StateStepArchive,
 )
 from ._store import StateStore, StateTransaction
@@ -50,26 +50,26 @@ class ExecutionStateCommands:
         self,
         commit: ExecutionTerminalCommit,
         *,
-        step_run: RunRecord | None,
+        agent_run: AgentRunRecord | None,
         step_events: Sequence[StepEvent] = (),
-        snapshots: Sequence[ContinuableSnapshot] = (),
+        checkpoints: Sequence[AgentRunCheckpoint] = (),
         audit_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionTerminalCommitResult:
-        prepared_snapshots = ()
-        if self._steps is not None and step_run is not None and snapshots:
-            prepared_snapshots = await self._steps.prepare_snapshots(
-                step_run,
-                snapshots,
+        prepared_checkpoints = ()
+        if self._steps is not None and agent_run is not None and checkpoints:
+            prepared_checkpoints = await self._steps.prepare_checkpoints(
+                agent_run,
+                checkpoints,
             )
         history_seal = _execution_history_seal(
             commit,
             audit_events=audit_events,
             projections=(),
-            current_run=step_run,
+            current_run=agent_run,
             current_events=step_events,
             current_batch=(
-                prepared_snapshots
-                if isinstance(prepared_snapshots, PreparedStepSnapshotBatch)
+                prepared_checkpoints
+                if isinstance(prepared_checkpoints, PreparedAgentRunCheckpointBatch)
                 else None
             ),
         )
@@ -94,18 +94,18 @@ class ExecutionStateCommands:
                 effective_commit = replace(effective_commit, idempotency=idempotency)
             if (
                 self._steps is None
-                and step_run is not None
-                and (step_events or snapshots)
+                and agent_run is not None
+                and (step_events or checkpoints)
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if self._steps is not None and step_run is not None:
+            if self._steps is not None and agent_run is not None:
                 await self._steps.sync_projection_in_transaction(
                     transaction,
-                    step_run,
+                    agent_run,
                     events=step_events,
-                    snapshots=(
-                        prepared_snapshots.snapshots
-                        if isinstance(prepared_snapshots, PreparedStepSnapshotBatch)
+                    checkpoints=(
+                        prepared_checkpoints.checkpoints
+                        if isinstance(prepared_checkpoints, PreparedAgentRunCheckpointBatch)
                         else ()
                     ),
                     execution_id=commit.execution.execution_id,
@@ -212,15 +212,15 @@ def _execution_history_seal(
     *,
     audit_events: Sequence[ExecutionEventAppend],
     projections: Sequence[PreparedExecutionProjection],
-    current_run: RunRecord | None,
+    current_run: AgentRunRecord | None,
     current_events: Sequence[StepEvent],
-    current_batch: PreparedStepSnapshotBatch | None,
+    current_batch: PreparedAgentRunCheckpointBatch | None,
 ) -> ExecutionHistorySealRecord:
     heads = [
         ExecutionRunSealHead(
-            projection.run.run_id,
+            projection.run.agent_run_id,
             projection.target_event_offset,
-            projection.target_snapshot_offset,
+            projection.target_checkpoint_offset,
             projection.target_transcript_message_count,
             projection.projection_digest,
             projection.target_interaction_offset,
@@ -230,19 +230,19 @@ def _execution_history_seal(
     if not projections and current_run is not None:
         heads.append(
             ExecutionRunSealHead(
-                current_run.run_id,
+                current_run.agent_run_id,
                 len(current_events),
-                0 if current_batch is None else len(current_batch.snapshots),
+                0 if current_batch is None else len(current_batch.checkpoints),
                 0
                 if current_batch is None
                 else current_batch.target_transcript_message_count,
                 "empty"
-                if current_batch is None or not current_batch.snapshots
-                else current_batch.snapshots[-1].projection.digest,
+                if current_batch is None or not current_batch.checkpoints
+                else current_batch.checkpoints[-1].projection.digest,
                 0,
             )
         )
-    ordered_heads = tuple(sorted(heads, key=lambda head: head.run_id))
+    ordered_heads = tuple(sorted(heads, key=lambda head: head.agent_run_id))
     execution_event_high_water = (
         commit.expected_event_sequence + len(audit_events) + 1
     )

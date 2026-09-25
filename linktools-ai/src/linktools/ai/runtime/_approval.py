@@ -99,7 +99,7 @@ class DefaultApprovalService:
             approval_id = approval_id_for_call(
                 principal.tenant_id,
                 execution_id,
-                checkpoint.pending_tools.source_step_run_id,
+                checkpoint.pending_tools.source_agent_run_id,
                 pending.tool_call_id,
             )
             record = await self._approvals.get(
@@ -247,7 +247,7 @@ class DefaultApprovalService:
 def approval_id_for_call(
     tenant_id: str,
     execution_id: str,
-    source_step_run_id: str,
+    source_agent_run_id: str,
     tool_call_id: str,
 ) -> str:
     """Return the deterministic id for one approval-owned deferred call."""
@@ -256,7 +256,7 @@ def approval_id_for_call(
             "contract": "approval-v1",
             "tenant_id": tenant_id,
             "execution_id": execution_id,
-            "source_step_run_id": source_step_run_id,
+            "source_agent_run_id": source_agent_run_id,
             "tool_call_id": tool_call_id,
         }
     )
@@ -274,7 +274,7 @@ def _pending_approval(
         candidate = approval_id_for_call(
             tenant_id,
             checkpoint.execution_id,
-            checkpoint.pending_tools.source_step_run_id,
+            checkpoint.pending_tools.source_agent_run_id,
             pending.tool_call_id,
         )
         if candidate == approval_id:

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.capability import CapabilityGroup, ToolCallFailed
 from linktools.ai.core import (
     ExecutionEventType,
@@ -20,7 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state._codec import (
@@ -46,8 +46,7 @@ class _DiagnosticModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:diagnostics"
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "diagnostics",
     }
@@ -57,7 +56,7 @@ class _DiagnosticModelBinding:
 
 
 class _DiagnosticModels:
-    def snapshot(self) -> "_DiagnosticModels":
+    def capture(self) -> "_DiagnosticModels":
         return self
 
     def resolve(self, route_id: str) -> _DiagnosticModelBinding:
@@ -73,15 +72,15 @@ class _DiagnosticModels:
     ) -> _DiagnosticModelBinding:
         if route_id not in {None, "default"}:
             raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _DiagnosticModelBinding.semantic_payload:
+        if dict(payload) != _DiagnosticModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _DiagnosticModelBinding()
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding_contract() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("default", model="default"),
-        base_model=dict(_DiagnosticModelBinding.semantic_payload),
+        model_contract=dict(_DiagnosticModelBinding.contract),
         selected=(),
         subagents=(),
         output_mode="text",
@@ -90,14 +89,14 @@ def _binding_snapshot() -> AgentBindingSnapshot:
 
 
 def _started_execution(now: datetime) -> ExecutionRecord:
-    binding = _binding_snapshot()
+    binding = _binding_contract()
     return ExecutionRecord(
         execution_id="execution",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
@@ -160,16 +159,16 @@ def _failed_terminal(
 async def _durable_state(
     tmp_path: Path,
     backend: str,
-) -> tuple[RuntimeState, Path]:
+) -> tuple[RuntimeStorage, Path]:
     path = tmp_path / f"runtime-{backend}"
     if backend == "filesystem":
-        return RuntimeState.filesystem(path), path
+        return RuntimeStorage.filesystem(path), path
     database = path.with_suffix(".db")
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
     await engine.dispose()
     return (
-        RuntimeState.sqlite(
+        RuntimeStorage.sqlite(
             database,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         ),
@@ -197,9 +196,9 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
         await state.close()
 
     reopened = (
-        RuntimeState.filesystem(durable_path)
+        RuntimeStorage.filesystem(durable_path)
         if backend == "filesystem"
-        else RuntimeState.sqlite(
+        else RuntimeStorage.sqlite(
             durable_path,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
@@ -208,7 +207,7 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
         async with Runtime.open(
             "default",
             models=_DiagnosticModels(),  # type: ignore[arg-type]
-            state=reopened,
+            storage=reopened,
         ) as runtime:
             result = await runtime.execution.result(
                 started.execution_id,
@@ -299,7 +298,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         namespace="diagnostics",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         binding_digest="a" * 64,
         owner="worker",
         background_tasks=set(),
@@ -316,7 +315,7 @@ def _failed_tool_record(
     return ToolOperationRecord(
         tool_operation_id="operation",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         tool_call_id="call",
         idempotency_key_digest="b" * 64,
         tool_name="tool",

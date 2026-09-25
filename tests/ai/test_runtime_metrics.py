@@ -15,7 +15,7 @@ from linktools.ai.core import ExecutionStatus, JsonValue, Page, Principal, TaskS
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
 from linktools.ai.task import (
@@ -25,7 +25,7 @@ from linktools.ai.task import (
     TaskGraph,
     TaskGraphLaunch,
     TaskGraphLimits,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskLease,
     TaskNode,
@@ -44,15 +44,14 @@ class _TextModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "d" * 64
-    semantic_payload: dict[str, JsonValue] = {"provider": "test", "model": "test"}
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "test"}
 
     def materialize(self) -> TestModel:
         return TestModel(custom_output_text="ok")
 
 
 class _TextModels:
-    def snapshot(self) -> _TextModels:
+    def capture(self) -> _TextModels:
         return self
 
     def resolve(self, route_id: str) -> _TextModelBinding:
@@ -68,7 +67,7 @@ class _TextModels:
     ) -> _TextModelBinding:
         if (
             route_id not in {None, "default"}
-            or dict(payload) != _TextModelBinding.semantic_payload
+            or dict(payload) != _TextModelBinding.contract
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _TextModelBinding()
@@ -199,7 +198,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
@@ -247,7 +246,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
@@ -301,7 +300,7 @@ async def test_model_metric_does_not_capture_prompt_or_exception_text() -> None:
         tenant_id="tenant",
         execution_id="execution",
         session_id="session",
-        step_run_id="run",
+        agent_run_id="run",
         agent_id="agent",
     )
     secret = "DO_NOT_PERSIST_THIS_SECRET"
@@ -369,14 +368,14 @@ class _CommitUnknownTaskRepository:
         )
         return TaskGraphView("graph", graph_status, (self.node,))
 
-    async def scheduler_snapshot(
+    async def scheduler_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         view = await self.reconcile_graph(graph_id, tenant_id=tenant_id)
-        return TaskGraphSnapshot(
+        return TaskGraphState(
             view.graph_id,
             view.status,
             view.nodes,
@@ -578,7 +577,10 @@ class _SuccessfulTaskRunner:
 
 @pytest.mark.asyncio
 async def test_task_commit_unknown_readback_projects_durable_terminal_history() -> None:
-    node = TaskNode("node", input={"type": "agent"})
+    node = TaskNode(
+        "node",
+        input={"task_id": "agent", "task_revision": 1},
+    )
     repository = _CommitUnknownTaskRepository(node)
     recorder = _CaptureRecorder()
     projector = _TaskMetricProjector(

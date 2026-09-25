@@ -47,14 +47,14 @@ _run_history_lock_stack: ContextVar[tuple[str, ...]] = ContextVar(
 )
 
 
-def enter_run_history_lock(run_id: str) -> Token[tuple[str, ...]]:
+def enter_run_history_lock(agent_run_id: str) -> Token[tuple[str, ...]]:
     """Mark a local run-history lock as held for runtime I/O guards."""
-    if not run_id:
-        raise ValueError("run_id is required")
+    if not agent_run_id:
+        raise ValueError("agent_run_id is required")
     stack = _run_history_lock_stack.get()
-    if stack and stack[-1] != run_id:
+    if stack and stack[-1] != agent_run_id:
         raise StateLockOrderError("one task cannot hold multiple run history locks")
-    return _run_history_lock_stack.set(stack + (run_id,))
+    return _run_history_lock_stack.set(stack + (agent_run_id,))
 
 
 def exit_run_history_lock(token: Token[tuple[str, ...]]) -> None:

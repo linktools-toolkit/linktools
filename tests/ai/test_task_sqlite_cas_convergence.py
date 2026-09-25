@@ -21,7 +21,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
 from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
@@ -34,7 +34,7 @@ from linktools.ai.task import (
     TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphRequest,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskLease,
     TaskNode,
@@ -52,8 +52,8 @@ class _TaskTestModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:task"
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "a" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "task",
     }
@@ -63,7 +63,7 @@ class _TaskTestModelBinding:
 
 
 class _TaskTestModels:
-    def snapshot(self) -> "_TaskTestModels":
+    def capture(self) -> "_TaskTestModels":
         return self
 
     def resolve(self, route_id: str) -> _TaskTestModelBinding:
@@ -79,7 +79,7 @@ class _TaskTestModels:
     ) -> _TaskTestModelBinding:
         if route_id not in {None, "default"}:
             raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _TaskTestModelBinding.semantic_payload:
+        if dict(payload) != _TaskTestModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _TaskTestModelBinding()
 
@@ -123,6 +123,48 @@ async def _noop_cancel(
 
 
 @pytest.mark.asyncio
+async def test_sqlite_state_group_serializes_mutation_callbacks(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "serialized.sqlite"
+    await _provision_sqlite(database)
+    state = RuntimeStorage.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
+    await state.initialize(namespace="sqlite-serialize", tenant_id="default")
+    store = state.task.tasks.state_store
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first(transaction):
+        await transaction.next_sequence(b"a" * 32)
+        first_entered.set()
+        await release_first.wait()
+
+    async def second(transaction):
+        second_entered.set()
+        await transaction.next_sequence(b"b" * 32)
+
+    try:
+        first_task = asyncio.create_task(store.mutate(first))
+        await asyncio.wait_for(first_entered.wait(), timeout=1)
+        second_task = asyncio.create_task(store.mutate(second))
+        await asyncio.sleep(0.05)
+        assert not second_entered.is_set()
+        release_first.set()
+        await asyncio.wait_for(
+            asyncio.gather(first_task, second_task),
+            timeout=2,
+        )
+        assert second_entered.is_set()
+    finally:
+        release_first.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -131,14 +173,14 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
     database = tmp_path / "state.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(_agent_group(),),
     ) as runtime:
         agent = runtime.agent("default")
@@ -215,14 +257,14 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
     monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
     database = tmp_path / "failure.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(_agent_group(),),
     ) as runtime:
         agent = runtime.agent("default")
@@ -278,14 +320,14 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
     monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
     database = tmp_path / "cancel.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(_agent_group(),),
     ) as runtime:
         agent = runtime.agent("default")
@@ -319,7 +361,7 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
         TaskGraphLimits(max_concurrency=1),
     )
     admission = TaskGraphAdmission.from_request(request)
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -347,13 +389,13 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
     finally:
         await state.close()
 
-    reopened = RuntimeState.sqlite(
+    reopened = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     await reopened.initialize(namespace="task-cas-recovery", tenant_id="tenant")
     try:
-        view = await reopened.task.tasks.scheduler_snapshot(
+        view = await reopened.task.tasks.scheduler_state(
             request.graph.graph_id,
             tenant_id="tenant",
         )
@@ -389,14 +431,14 @@ class _ReadOnlyTaskRepository:
         del graph_id, tenant_id
         return self.view
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del graph_id, tenant_id
-        return TaskGraphSnapshot(
+        return TaskGraphState(
             self.view.graph_id,
             self.view.status,
             self.view.nodes,
@@ -419,7 +461,7 @@ class _ReadOnlyTaskRepository:
             self.view.status,
         )
 
-    async def scheduler_snapshot(
+    async def scheduler_state(
         self,
         graph_id: str,
         *,
@@ -458,8 +500,8 @@ async def test_task_inspect_and_wait_are_read_only() -> None:
 
 async def _admitted_state(
     graph: TaskGraph,
-) -> tuple[RuntimeState, TaskGraphRequest]:
-    state = RuntimeState.in_memory()
+) -> tuple[RuntimeStorage, TaskGraphRequest]:
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-cas", tenant_id="tenant")
     request = TaskGraphRequest(
         graph,
@@ -515,7 +557,7 @@ async def test_task_node_dependency_projection_fails_closed() -> None:
     await repository.state_store.mutate(corrupt)
     try:
         with pytest.raises(AIError) as reconcile_error:
-            await repository.scheduler_snapshot(
+            await repository.scheduler_state(
                 request.graph.graph_id,
                 tenant_id="tenant",
             )
@@ -890,7 +932,7 @@ async def test_task_reconcile_conflict_uses_readback_without_retry(
         mutate_with_event_retry,
     )
     try:
-        view = await repository.scheduler_snapshot(
+        view = await repository.scheduler_state(
             request.graph.graph_id,
             tenant_id="tenant",
         )
@@ -906,7 +948,7 @@ async def test_task_reconcile_conflict_uses_readback_without_retry(
         assert nodes["a"].status is TaskStatus.SUCCEEDED
         assert nodes["b"].status is TaskStatus.PENDING
 
-        view = await repository.scheduler_snapshot(
+        view = await repository.scheduler_state(
             request.graph.graph_id,
             tenant_id="tenant",
         )

@@ -17,13 +17,13 @@ def token_seed(namespace: str) -> bytes:
     return hashlib.sha256(f"runtime-token-v1:{namespace}".encode()).digest()
 
 
-def task_capability_snapshot_key(
+def task_capability_capture_key(
     namespace: str,
     tenant_id: str,
     graph_id: str,
     request_digest: str,
 ) -> str:
-    """Return the deterministic object key for one Task capability snapshot."""
+    """Return the deterministic object key for one Task capability capture."""
     digest = canonical_sha256(
         {
             "version": 1,
@@ -33,7 +33,7 @@ def task_capability_snapshot_key(
             "request_digest": request_digest,
         }
     )
-    return f"v1/task-capability-snapshot/{digest}"
+    return f"v1/task-capability-capture/{digest}"
 
 
-__all__ = ["task_capability_snapshot_key", "token_seed"]
+__all__ = ["task_capability_capture_key", "token_seed"]

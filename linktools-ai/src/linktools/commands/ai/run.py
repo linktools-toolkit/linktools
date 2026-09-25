@@ -32,7 +32,7 @@ _logger = environ.get_logger("commands.ai.run")
 
 
 class Command(BaseCommand):
-    """Run a prompt against the Agent definitions in the current workspace."""
+    """Run a prompt against Agent specs in the current workspace."""
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("prompt", help="the prompt")
@@ -40,7 +40,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--planning",
             action="store_true",
-            help="enable planning for this execution",
+            help="enable the planning capability for this execution",
         )
         parser.add_argument(
             "--thinking",
@@ -238,7 +238,6 @@ def _result_payload(result: ExecutionResult) -> dict[str, object]:
         "execution_id": result.execution_id,
         "status": result.status.value,
         "output": result.output,
-        "output_fingerprint": result.output_fingerprint,
         "error_code": result.error_code,
         "safe_error_details": dict(result.safe_error_details),
         "error_diagnostics": (

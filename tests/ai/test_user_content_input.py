@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import BinaryContent, ImageUrl, UploadedFile
 
-from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.core import Principal, PromptLimits, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
@@ -18,7 +17,7 @@ from linktools.ai.runtime._input import (
     task_prompt_draft,
 )
 from linktools.ai.runtime._input_contract import validate_user_content
-from linktools.ai.workspace import SandboxResource, SandboxSession
+from linktools.ai.workspace import SandboxResource, SandboxSession, WorkspaceAccess
 
 
 class _CountingSession:

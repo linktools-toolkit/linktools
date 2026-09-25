@@ -33,7 +33,7 @@ class TaskExpansionContext(Protocol):
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
-        output: type[BaseModel] | None = None,
+        output_type: type[BaseModel] | None = None,
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         expander: TaskExpanderRef | None = None,
@@ -47,7 +47,7 @@ class TaskExpander(Protocol):
     def id(self) -> str: ...
 
     @property
-    def version(self) -> int: ...
+    def revision(self) -> int: ...
 
     def expand(self, context: TaskExpansionContext) -> Sequence[TaskNode]: ...
 

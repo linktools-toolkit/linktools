@@ -34,7 +34,6 @@ async def test_terminal_child_becomes_typed_tool_failure(
         "child-execution",
         status,
         None,
-        None,
         UsageMetrics(),
         error_code,
         {"phase": "agent_execution"},
@@ -77,7 +76,6 @@ async def test_existing_child_replay_does_not_require_current_definition() -> No
         "child-execution",
         ExecutionStatus.SUCCEEDED,
         {"ok": True},
-        "f" * 64,
         UsageMetrics(),
     )
     execution = SimpleNamespace(

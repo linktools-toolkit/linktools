@@ -30,7 +30,7 @@ async def test_actual_model_attempts_never_reuse_observation_identity() -> None:
         tenant_id="tenant",
         execution_id="execution",
         session_id=None,
-        step_run_id="durable-step-run",
+        agent_run_id="durable-agent-run",
         agent_id="agent",
     )
 

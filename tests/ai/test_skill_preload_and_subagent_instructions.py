@@ -80,18 +80,18 @@ def test_preloaded_skills_are_eager_instructions_on_the_skill_capability() -> No
 
 
 def test_preloaded_skill_instructions_reject_unpaired_surrogates() -> None:
-    for definition in (
-        _skill("skill", "bad\ud800content"),
-        _skill("bad\ud800id", "content"),
-    ):
-        capability = SkillCapability(
-            (definition,),
-            SkillSourceRegistry(),
-            preloaded_skill_ids=(definition.id,),
-        )
-        with pytest.raises(AIError) as error:
-            capability.instructions()
-        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    definition = _skill("skill", "bad\ud800content")
+    capability = SkillCapability(
+        (definition,),
+        SkillSourceRegistry(),
+        preloaded_skill_ids=(definition.id,),
+    )
+    with pytest.raises(AIError) as error:
+        capability.instructions()
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+    with pytest.raises(ValueError):
+        _skill("bad\ud800id", "content")
 
 
 def test_preloaded_skill_instructions_enforce_total_byte_limit() -> None:

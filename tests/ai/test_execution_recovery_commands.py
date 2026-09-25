@@ -5,7 +5,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionEventType,
@@ -19,7 +19,7 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.runtime.state._recovery_commands import RuntimeRecoveryCommands
@@ -27,11 +27,11 @@ from linktools.ai.spec import AgentSpec
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="default"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
+        model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -45,8 +45,8 @@ def _execution(now: datetime) -> ExecutionRecord:
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
@@ -68,7 +68,7 @@ def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperati
     return ToolOperationRecord(
         tool_operation_id=operation_id,
         execution_id="execution",
-        step_run_id="step-run",
+        agent_run_id="agent-run",
         tool_call_id=f"call:{operation_id}",
         idempotency_key_digest=canonical_sha256({"operation": operation_id}),
         tool_name="tool",
@@ -85,7 +85,7 @@ def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperati
     )
 
 
-def _commands(state: RuntimeState) -> RuntimeRecoveryCommands:
+def _commands(state: RuntimeStorage) -> RuntimeRecoveryCommands:
     return RuntimeRecoveryCommands(
         state.execution.executions,
         state.execution.events,
@@ -98,7 +98,7 @@ def _commands(state: RuntimeState) -> RuntimeRecoveryCommands:
 
 @pytest.mark.asyncio
 async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="execution-recovery", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -137,7 +137,7 @@ async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> No
 
 @pytest.mark.asyncio
 async def test_recovery_cancel_intent_fences_stale_resume() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="recovery-cancel", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -201,7 +201,7 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
 
 @pytest.mark.asyncio
 async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="tool-resolution", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:

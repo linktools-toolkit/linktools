@@ -25,7 +25,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime._attachment import (
     bind_tool_return_attachments,
@@ -45,9 +45,9 @@ from linktools.ai.runtime._model_interaction import (
     request_envelope,
 )
 from linktools.ai.runtime.state._model_interaction_store import (
-    ModelInteractionStagingStepStore,
+    ModelInteractionStagingAgentRunStore,
 )
-from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, RunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
 class _TextModelBinding:
@@ -55,8 +55,8 @@ class _TextModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "d" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "d" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "test",
     }
@@ -66,7 +66,7 @@ class _TextModelBinding:
 
 
 class _TextModels:
-    def snapshot(self) -> "_TextModels":
+    def capture(self) -> "_TextModels":
         return self
 
     def resolve(self, route_id: str) -> _TextModelBinding:
@@ -99,13 +99,13 @@ def _journal() -> ModelRequestJournal:
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
     )
 
 
 def _cancelled_interaction(sequence: int = 1) -> StagedModelInteraction:
     return StagedModelInteraction(
-        run_id="run",
+        agent_run_id="run",
         step_index=1,
         request_sequence=sequence,
         purpose="agent",
@@ -189,13 +189,13 @@ def test_cancelled_model_interaction_has_no_synthetic_error() -> None:
 
 @pytest.mark.asyncio
 async def test_staging_interaction_identity_is_idempotent() -> None:
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
-    await store.register_run(RunRecord("run"))
+    await store.register_agent_run(AgentRunRecord("run"))
     interaction = _cancelled_interaction()
     store.stage_model_interaction(interaction)
     store.stage_model_interaction(interaction)
-    assert await store.list_model_interactions(run_id="run") == [interaction]
+    assert await store.list_model_interactions(agent_run_id="run") == [interaction]
     with pytest.raises(AIError) as raised:
         store.stage_model_interaction(
             replace(
@@ -213,10 +213,10 @@ async def test_model_request_records_attach_files_call_identity() -> None:
 
     body = b"image"
     digest = hashlib.sha256(body).hexdigest()
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
-    await store.register_run(RunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", step_run_id="run")
+    await store.register_agent_run(AgentRunRecord("run"))
+    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
     return_value = {
         "files": [
             {
@@ -268,7 +268,7 @@ async def test_model_request_records_attach_files_call_identity() -> None:
         usage=None,
     )
 
-    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    interaction = (await store.list_model_interactions(agent_run_id="run"))[0]
     assert [value["fact"] for value in interaction.attachments] == [
         "accepted",
         "included_in_request",
@@ -287,13 +287,13 @@ async def test_model_request_records_attach_files_call_identity() -> None:
 async def test_model_request_preserves_duplicate_initial_attachment_identity() -> None:
     body = BinaryContent(b"same", media_type="image/png")
     accepted = input_attachment_views((body, body))
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
-    await store.register_run(RunRecord("run"))
+    await store.register_agent_run(AgentRunRecord("run"))
     capture = RuntimeCaptureStore(
         store,
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         initial_attachments=accepted,
     )
     message = ModelRequest(parts=[UserPromptPart([body, body])])
@@ -318,7 +318,7 @@ async def test_model_request_preserves_duplicate_initial_attachment_identity() -
         usage=None,
     )
 
-    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    interaction = (await store.list_model_interactions(agent_run_id="run"))[0]
     included = interaction.attachments
     assert len(included) == 2
     assert all(value["fact"] == "included_in_request" for value in included)
@@ -342,13 +342,13 @@ async def test_model_request_preserves_input_attachment_identifiers() -> None:
         identifier="input-b",
     )
     accepted = input_attachment_views((first, second))
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
-    await store.register_run(RunRecord("run"))
+    await store.register_agent_run(AgentRunRecord("run"))
     capture = RuntimeCaptureStore(
         store,
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         initial_attachments=accepted,
     )
     message = ModelRequest(parts=[UserPromptPart([first, second])])
@@ -373,7 +373,7 @@ async def test_model_request_preserves_input_attachment_identifiers() -> None:
         usage=None,
     )
 
-    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    interaction = (await store.list_model_interactions(agent_run_id="run"))[0]
     included = interaction.attachments
     assert [value["input_identifier"] for value in accepted] == [
         "input-a",
@@ -387,10 +387,10 @@ async def test_model_request_preserves_input_attachment_identifiers() -> None:
 
 @pytest.mark.asyncio
 async def test_success_request_does_not_stage_full_message_payloads() -> None:
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
-    await store.register_run(RunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", step_run_id="run")
+    await store.register_agent_run(AgentRunRecord("run"))
+    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
     message = ModelRequest(parts=[UserPromptPart("hello")])
     journal = _journal()
     fact = journal.begin(1)
@@ -409,7 +409,7 @@ async def test_success_request_does_not_stage_full_message_payloads() -> None:
         duration_ns=1,
         usage=None,
     )
-    staged = await store.list_model_interactions(run_id="run")
+    staged = await store.list_model_interactions(agent_run_id="run")
     assert len(staged) == 1
     assert all(
         isinstance(item, StagedContextSpan)
@@ -425,10 +425,10 @@ async def test_success_request_does_not_stage_full_message_payloads() -> None:
 
 @pytest.mark.asyncio
 async def test_failed_request_inlines_context_only_after_failure() -> None:
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
-    await store.register_run(RunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", step_run_id="run")
+    await store.register_agent_run(AgentRunRecord("run"))
+    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
     message = ModelRequest(parts=[UserPromptPart("hello")])
     journal = _journal()
     fact = journal.begin(1)
@@ -447,7 +447,7 @@ async def test_failed_request_inlines_context_only_after_failure() -> None:
         duration_ns=1,
         usage=None,
     )
-    staged = await store.list_model_interactions(run_id="run")
+    staged = await store.list_model_interactions(agent_run_id="run")
     request = staged[0].request_context  # type: ignore[union-attr]
     assert all(isinstance(item, StagedContextSpan) for item in request.items)
     assert len(store._payloads["run"]) == 1
@@ -455,10 +455,10 @@ async def test_failed_request_inlines_context_only_after_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> None:
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
-    await store.register_run(RunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", step_run_id="run")
+    await store.register_agent_run(AgentRunRecord("run"))
+    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
     business = {"timestamp": "before", "nested": {"value": 1}}
     request = ModelRequest(
         parts=[
@@ -507,7 +507,7 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
         "nested": {"value": 1},
     }
 
-    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    interaction = (await store.list_model_interactions(agent_run_id="run"))[0]
     assert interaction.response_context is not None  # type: ignore[union-attr]
     response_item = interaction.response_context.items[0]  # type: ignore[union-attr]
     assert isinstance(response_item, StagedContextInline)
@@ -519,18 +519,18 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
 
 @pytest.mark.asyncio
 async def test_parent_tool_result_round_trip_materializes_two_model_requests() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="interaction-tool-roundtrip", tenant_id="tenant")
     try:
         capture = RuntimeCaptureStore(
-            state.steps,
+            state.run_store,
             execution_id="execution",
-            step_run_id="run",
+            agent_run_id="run",
         )
-        await capture.register_run(
-            RunRecord(
+        await capture.register_agent_run(
+            AgentRunRecord(
                 "run",
-                conversation_id="conversation",
+                agent_conversation_id="conversation",
                 agent_name="parent",
             )
         )
@@ -538,7 +538,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             source_namespace="interaction-tool-roundtrip",
             tenant_id="tenant",
             execution_id="execution",
-            step_run_id="run",
+            agent_run_id="run",
         )
 
         first_request = ModelRequest(
@@ -618,24 +618,24 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             usage=None,
         )
         capture.append_transcript_message(second_response)
-        await capture.save_snapshot(
-            ContinuableSnapshot(
-                run_id="run",
+        await capture.save_checkpoint(
+            AgentRunCheckpoint(
+                agent_run_id="run",
                 step_index=2,
                 messages=list(capture.transcript_messages()),
-                conversation_id="conversation",
+                agent_conversation_id="conversation",
                 agent_name="parent",
                 state="complete",
                 transcript_message_count_before=0,
             )
         )
 
-        await state.steps.materialize_recovery_snapshot(
-            step_run_id="run",
+        await state.run_store.materialize_recovery_checkpoint(
+            agent_run_id="run",
             require_complete=True,
         )
-        archive = state.steps.read_store(RuntimeDomain.RECOVERY)
-        interactions = await archive.list_model_interactions(run_id="run")
+        archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        interactions = await archive.list_model_interactions(agent_run_id="run")
         assert [value.request_sequence for value in interactions] == [1, 2]
         resolved = await archive.resolve_model_interactions(interactions)
         second_request, second_resolved_response, _envelope = resolved[1]
@@ -654,10 +654,10 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
 
 @pytest.mark.asyncio
 async def test_compaction_request_uses_explicit_source_not_stale_projection() -> None:
-    store = ModelInteractionStagingStepStore()
+    store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
-    await store.register_run(RunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", step_run_id="run")
+    await store.register_agent_run(AgentRunRecord("run"))
+    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
     stale_source = (ModelRequest(parts=[UserPromptPart("stale")]),)
     capture.remember_context_projection(
         stale_source,
@@ -690,7 +690,7 @@ async def test_compaction_request_uses_explicit_source_not_stale_projection() ->
         duration_ns=1,
         usage=None,
     )
-    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    interaction = (await store.list_model_interactions(agent_run_id="run"))[0]
     request = interaction.request_context  # type: ignore[union-attr]
     assert isinstance(request.items[0], StagedContextSpan)
     assert request.items[0] == StagedContextSpan(0, 1)
@@ -714,7 +714,7 @@ async def test_execution_model_interactions_are_durable_and_public() -> None:
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(_agent_group(),),
         metrics=Metrics.in_memory(),
     ) as runtime:
@@ -726,7 +726,7 @@ async def test_execution_model_interactions_support_volatile_memory_state() -> N
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(_agent_group(),),
         metrics=Metrics.in_memory(),
     ) as runtime:

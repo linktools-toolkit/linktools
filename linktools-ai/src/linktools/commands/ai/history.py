@@ -23,7 +23,7 @@ from linktools.ai.runtime import (
 )
 from linktools.cli import BaseCommand
 
-from ._common import _load_workspace, _local_runtime_state, _run_async
+from ._common import _load_workspace, _local_runtime_storage, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -45,7 +45,7 @@ class Command(BaseCommand):
         async def execute() -> int:
             async with RuntimeHistory.open(
                 "default",
-                state=_local_runtime_state(workspace),
+                storage=_local_runtime_storage(workspace),
             ) as history:
                 principal = service_principal(history.tenant_id, "ai-history")
                 if args.execution_id is None:
@@ -136,7 +136,7 @@ def _execution_panel(execution: ExecutionInfo) -> Panel:
     table.add_row("Status", _status_text(execution.status.value))
     table.add_row("Kind", execution.binding_kind)
     table.add_row("Agent", execution.agent_id or "-")
-    table.add_row("Task", execution.task_type or "-")
+    table.add_row("Task", execution.task_id or "-")
     table.add_row("Session", execution.session_id or "-")
     table.add_row("Lineage", execution.lineage_kind.value)
     table.add_row("Parent", execution.parent_execution_id or "-")
@@ -150,9 +150,6 @@ def _execution_panel(execution: ExecutionInfo) -> Panel:
         "-" if execution.terminal_at is None else execution.terminal_at.isoformat(),
     )
     table.add_row("Binding", execution.binding_digest or "-")
-    table.add_row("Input", execution.input_digest or "-")
-    table.add_row("Output contract", execution.output_fingerprint or "-")
-    table.add_row("Output", execution.output_digest or "-")
     table.add_row("Usage", _usage_label(execution.usage))
     table.add_row("Error", execution.error_code or "-")
     if execution.safe_error_details:
@@ -266,7 +263,7 @@ async def _emit_model_interactions(
                 show_header=first,
             )
             table.add_column("Req", justify="right")
-            table.add_column("Seg/Depth")
+            table.add_column("Run/Depth")
             table.add_column("Purpose")
             table.add_column("Status")
             table.add_column("Model")
@@ -275,7 +272,7 @@ async def _emit_model_interactions(
             for item in items:
                 table.add_row(
                     str(item.request_sequence),
-                    f"{item.segment_sequence}/{item.depth}",
+                    f"{item.agent_run_sequence}/{item.depth}",
                     item.purpose,
                     _status_text(item.status),
                     _model_label(item.model),

@@ -12,7 +12,7 @@ from typing import Protocol, cast
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot
+from ..agent import AgentBindingContract
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -58,7 +58,7 @@ from .service_api import (
 )
 from .state._contracts import (
     ConversationCursor,
-    ConversationState,
+    ConversationRepositories,
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
@@ -90,7 +90,7 @@ class _SessionExecutionService(ExecutionService, Protocol):
         session_id: str,
         request: ExecutionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle: ...
 
 
@@ -99,7 +99,7 @@ class _SessionTranscriptStore(Protocol):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
     ) -> AsyncIterator[object]: ...
 
@@ -107,7 +107,7 @@ class _SessionTranscriptStore(Protocol):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
         start: int,
         end: int,
@@ -117,7 +117,7 @@ class _SessionTranscriptStore(Protocol):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
         message_count: int | None = None,
     ) -> tuple[object, ...]: ...
@@ -134,7 +134,7 @@ class DefaultSessionService:
 
     def __init__(
         self,
-        conversation: ConversationState,
+        conversation: ConversationRepositories,
         executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
         execution: _SessionExecutionService,
@@ -246,7 +246,7 @@ class DefaultSessionService:
                 AuthorizationAction.SESSION_READ,
             )
             continuation = (
-                None if record.continuation is None else record.continuation.step_run_id
+                None if record.continuation is None else record.continuation.agent_run_id
             )
             continuation_history_id = (
                 None
@@ -256,7 +256,7 @@ class DefaultSessionService:
             return await self._history_reader.history(
                 session_id,
                 tenant_id=principal.tenant_id,
-                continuation_step_run_id=continuation,
+                continuation_agent_run_id=continuation,
                 continuation_history_id=continuation_history_id,
                 cursor=cursor,
                 limit=limit,
@@ -347,7 +347,7 @@ class DefaultSessionService:
         )
         return Page(views, next_cursor)
 
-    async def load(self, session_id: str, *, principal: Principal) -> SessionView:
+    async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
         async with self._session_consumer(session_id, principal.tenant_id):
             record = await self._authorized(
                 session_id, principal, AuthorizationAction.SESSION_READ
@@ -370,7 +370,7 @@ class DefaultSessionService:
             history_id = record.continuation.history_id or record.history_id
             return await self._transcript_store.load_conversation_model_context(
                 history_id=history_id,
-                step_run_id=record.continuation.step_run_id,
+                agent_run_id=record.continuation.agent_run_id,
                 tenant_id=self._conversation.sessions.tenant_id,
                 message_count=record.continuation.message_count,
             )
@@ -392,13 +392,13 @@ class DefaultSessionService:
             if message_count is None:
                 messages = self._transcript_store.iter_conversation_messages(
                     history_id=history_id,
-                    step_run_id=record.continuation.step_run_id,
+                    agent_run_id=record.continuation.agent_run_id,
                     tenant_id=self._conversation.sessions.tenant_id,
                 )
             else:
                 messages = self._transcript_store.iter_conversation_message_range(
                     history_id=history_id,
-                    step_run_id=record.continuation.step_run_id,
+                    agent_run_id=record.continuation.agent_run_id,
                     tenant_id=self._conversation.sessions.tenant_id,
                     start=0,
                     end=message_count,
@@ -421,14 +421,14 @@ class DefaultSessionService:
         session_id: str,
         request: ResumeSessionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         return await self._resume(
             agent_id,
             binding_digest,
             session_id,
             request,
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
 
     async def _resume(
@@ -438,7 +438,7 @@ class DefaultSessionService:
         session_id: str,
         request: ResumeSessionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(
@@ -477,7 +477,7 @@ class DefaultSessionService:
                 binding_digest,
                 session_id,
                 execution_request,
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
 
     async def fork(

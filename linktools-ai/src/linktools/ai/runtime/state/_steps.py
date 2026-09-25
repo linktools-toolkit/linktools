@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime StepStore orchestration over durable archives."""
+"""Runtime AgentRunStore orchestration over durable archives."""
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -29,36 +29,36 @@ from ._step_archive import (
     InMemoryStepArchive,
     LockOrderError,
     PreparedExecutionProjection,
-    PreparedStepSnapshot,
-    PreparedStepSnapshotBatch,
-    StagingStepStore,
+    PreparedAgentRunCheckpoint,
+    PreparedAgentRunCheckpointBatch,
+    StagingAgentRunStore,
     StateStepArchive,
     _LocalExecutionTerminalSeal,
     _ProjectionOffset,
-    _RunDurabilityFlight,
-    _RunDurabilityKind,
-    _RunHistoryLock,
-    _RunProjectionFlight,
+    _AgentRunDurabilityFlight,
+    _AgentRunDurabilityKind,
+    _AgentRunHistoryLock,
+    _AgentRunProjectionFlight,
     _StepArchiveBatch,
-    _conversation_relocated_snapshot_matches,
-    _materialize_snapshot,
+    _conversation_relocated_checkpoint_matches,
+    _materialize_checkpoint,
     _sync_projection,
 )
-from ._step_contracts import ContinuableSnapshot, RunRecord, StepEvent, StepStore
+from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
 
-_logger = environ.get_logger("ai.runtime.state.steps")
+_logger = environ.get_logger("ai.runtime.state.run_store")
 
 
-class RuntimeStepStore(StepStore):
+class RuntimeAgentRunStore(AgentRunStore):
     """Route staging facts to their owning durable StateStore archive."""
 
     def __init__(
         self,
-        staging: StagingStepStore,
+        staging: StagingAgentRunStore,
         *,
-        conversation_archive: StepStore,
-        execution_archive: StepStore | None,
-        recovery_archive: StepStore | None,
+        conversation_archive: AgentRunStore,
+        execution_archive: AgentRunStore | None,
+        recovery_archive: AgentRunStore | None,
         conversation_retention: RuntimeRetentionMode,
         execution_retention: RuntimeRetentionMode,
         recovery_retention: RuntimeRetentionMode,
@@ -74,10 +74,10 @@ class RuntimeStepStore(StepStore):
         self._preflight = False
         self._projection_offsets: dict[str, _ProjectionOffset] = {}
         self._projection_dirty: set[str] = set()
-        self._durability_flights: dict[str, _RunDurabilityFlight] = {}
+        self._durability_flights: dict[str, _AgentRunDurabilityFlight] = {}
         self._background_tasks: set[asyncio.Task[object]] = set()
         self._terminal_seals: dict[str, _LocalExecutionTerminalSeal] = {}
-        self._history_lock = _RunHistoryLock()
+        self._history_lock = _AgentRunHistoryLock()
         for archive in self._archives.values():
             if isinstance(archive, StateStepArchive):
                 archive.bind_history_lock(self._history_lock)
@@ -100,72 +100,72 @@ class RuntimeStepStore(StepStore):
 
     def register_context_baseline(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         context: LoadedModelContext,
     ) -> None:
         for archive in self._archives.values():
             if isinstance(archive, StateStepArchive):
-                archive.register_context_baseline(step_run_id, context)
+                archive.register_context_baseline(agent_run_id, context)
 
-    async def register_run(
+    async def register_agent_run(
         self,
-        record: RunRecord,
+        record: AgentRunRecord,
         *,
         execution_id: str | None = None,
     ) -> None:
         await self._ensure_business()
         recovery = self._archives.get(RuntimeDomain.RECOVERY)
-        restored: ContinuableSnapshot | None = None
+        restored: AgentRunCheckpoint | None = None
         events: Sequence[StepEvent] = ()
         offset: _ProjectionOffset | None = None
         if recovery is not None:
-            durable = await recovery.get_run(run_id=record.run_id)
+            durable = await recovery.get_agent_run(agent_run_id=record.agent_run_id)
             if durable is not None:
-                if _run_registration_identity(durable) != _run_registration_identity(record):
+                if _agent_run_registration_identity(durable) != _agent_run_registration_identity(record):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 record = durable
-                restored = await recovery.latest_snapshot(
-                    run_id=record.run_id,
+                restored = await recovery.latest_checkpoint(
+                    agent_run_id=record.agent_run_id,
                     include_interrupted=True,
                 )
                 if restored is not None and execution_id is not None:
                     await self.materialize_from_recovery(
                         target=RuntimeDomain.EXECUTION,
-                        step_run_id=record.run_id,
+                        agent_run_id=record.agent_run_id,
                         execution_id=execution_id,
                     )
                     execution = self._archives[RuntimeDomain.EXECUTION]
-                    events = await execution.list_events(run_id=record.run_id)
+                    events = await execution.list_events(agent_run_id=record.agent_run_id)
                     offset = _ProjectionOffset(
                         events=len(events),
-                        snapshots=1,
+                        checkpoints=1,
                         transcript_messages=len(restored.messages),
                         interactions=await execution.model_interaction_count(
-                            run_id=record.run_id
+                            agent_run_id=record.agent_run_id
                         ),
                     )
-        async with self._history_lock.hold(record.run_id):
-            self._ensure_run_mutable(record.run_id)
-            new_registration = self._staging.get_run_local(record.run_id) is None
-            self._staging.register_run_local(record)
+        async with self._history_lock.hold(record.agent_run_id):
+            self._ensure_run_mutable(record.agent_run_id)
+            new_registration = self._staging.get_agent_run_local(record.agent_run_id) is None
+            self._staging.register_agent_run_local(record)
             if new_registration and restored is not None:
-                self._staging.save_snapshot_local(
+                self._staging.save_checkpoint_local(
                     replace(restored, transcript_message_count_before=0)
                 )
                 for event in events:
                     self._staging.append_event_local(event)
                 if offset is not None:
-                    self._projection_offsets[record.run_id] = offset
+                    self._projection_offsets[record.agent_run_id] = offset
 
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
+    async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
         await self._ensure_business()
-        return await self._staging.get_run(run_id=run_id)
+        return await self._staging.get_agent_run(agent_run_id=agent_run_id)
 
-    async def list_runs(
-        self, *, parent_run_id: str | None = None, conversation_id: str | None = None
-    ) -> list[RunRecord]:
+    async def list_agent_runs(
+        self, *, parent_agent_run_id: str | None = None, agent_conversation_id: str | None = None
+    ) -> list[AgentRunRecord]:
         await self._ensure_business()
-        return await self._staging.list_runs(parent_run_id=parent_run_id, conversation_id=conversation_id)
+        return await self._staging.list_agent_runs(parent_agent_run_id=parent_agent_run_id, agent_conversation_id=agent_conversation_id)
 
     async def append_event(
         self,
@@ -175,18 +175,18 @@ class RuntimeStepStore(StepStore):
     ) -> None:
         await self._ensure_business()
         del execution_id
-        async with self._history_lock.hold(event.run_id):
-            self._ensure_run_mutable(event.run_id)
+        async with self._history_lock.hold(event.agent_run_id):
+            self._ensure_run_mutable(event.agent_run_id)
             self._staging.append_event_local(event)
-            self._projection_dirty.add(event.run_id)
+            self._projection_dirty.add(event.agent_run_id)
 
-    async def list_events(self, *, run_id: str) -> list[StepEvent]:
+    async def list_events(self, *, agent_run_id: str) -> list[StepEvent]:
         await self._ensure_business()
-        return await self._staging.list_events(run_id=run_id)
+        return await self._staging.list_events(agent_run_id=agent_run_id)
 
-    async def save_snapshot(
+    async def save_checkpoint(
         self,
-        snapshot: ContinuableSnapshot,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
     ) -> None:
@@ -194,23 +194,23 @@ class RuntimeStepStore(StepStore):
         del execution_id
         while True:
             completion: asyncio.Future[None] | None = None
-            recovery: StepStore | None = None
-            recovery_run: RunRecord | None = None
-            flight: _RunDurabilityFlight | None = None
-            async with self._history_lock.hold(snapshot.run_id):
-                existing = self._durability_flights.get(snapshot.run_id)
+            recovery: AgentRunStore | None = None
+            recovery_run: AgentRunRecord | None = None
+            flight: _AgentRunDurabilityFlight | None = None
+            async with self._history_lock.hold(checkpoint.agent_run_id):
+                existing = self._durability_flights.get(checkpoint.agent_run_id)
                 if existing is not None:
                     completion = existing.completion
                 else:
-                    self._ensure_run_mutable(snapshot.run_id)
-                    self._staging.save_snapshot_local(snapshot)
-                    self._projection_dirty.add(snapshot.run_id)
+                    self._ensure_run_mutable(checkpoint.agent_run_id)
+                    self._staging.save_checkpoint_local(checkpoint)
+                    self._projection_dirty.add(checkpoint.agent_run_id)
                     recovery = self._archives.get(RuntimeDomain.RECOVERY)
-                    recovery_run = self._staging.get_run_local(snapshot.run_id)
+                    recovery_run = self._staging.get_agent_run_local(checkpoint.agent_run_id)
                     if recovery is not None:
                         flight = self._install_durability_flight_locked(
-                            snapshot.run_id,
-                            _RunDurabilityKind.SNAPSHOT,
+                            checkpoint.agent_run_id,
+                            _AgentRunDurabilityKind.CHECKPOINT,
                         )
             if completion is not None:
                 await asyncio.shield(completion)
@@ -223,117 +223,117 @@ class RuntimeStepStore(StepStore):
             prepared_interactions: tuple[ModelInteractionRecord, ...] = ()
 
             async def operation(
-                target_recovery: StepStore = recovery,
-                target_run: RunRecord = recovery_run,
-                target_snapshot: ContinuableSnapshot = snapshot,
+                target_recovery: AgentRunStore = recovery,
+                target_agent_run: AgentRunRecord = recovery_run,
+                target_checkpoint: AgentRunCheckpoint = checkpoint,
             ) -> None:
                 nonlocal prepared_interactions
                 if isinstance(target_recovery, StateStepArchive):
-                    target_snapshot = await target_recovery.relocate_run_snapshot(
-                        target_run,
-                        target_snapshot,
+                    target_checkpoint = await target_recovery.relocate_run_checkpoint(
+                        target_agent_run,
+                        target_checkpoint,
                     )
                     high_water = await target_recovery.model_interaction_count(
-                        run_id=target_run.run_id
+                        agent_run_id=target_agent_run.agent_run_id
                     )
                     staged = await self._staging.list_model_interactions(
-                        run_id=target_run.run_id,
+                        agent_run_id=target_agent_run.agent_run_id,
                         after_request_sequence=high_water,
                     )
                     prepared_interactions = await target_recovery.prepare_interactions(
-                        target_run,
+                        target_agent_run,
                         staged,
-                        lambda digest: self._staging.staged_payload(target_run.run_id, digest),
-                        local_message_count=len(target_snapshot.messages),
+                        lambda digest: self._staging.staged_payload(target_agent_run.agent_run_id, digest),
+                        local_message_count=len(target_checkpoint.messages),
                     )
-                    await target_recovery.materialize_snapshot(
-                        target_run,
-                        target_snapshot,
+                    await target_recovery.materialize_checkpoint(
+                        target_agent_run,
+                        target_checkpoint,
                         interactions=prepared_interactions,
                     )
                     return
-                await _materialize_snapshot(
+                await _materialize_checkpoint(
                     target_recovery,
-                    target_run,
-                    target_snapshot,
+                    target_agent_run,
+                    target_checkpoint,
                 )
 
             async def readback(
-                target_recovery: StepStore = recovery,
-                target_run: RunRecord = recovery_run,
-                target_snapshot: ContinuableSnapshot = snapshot,
+                target_recovery: AgentRunStore = recovery,
+                target_agent_run: AgentRunRecord = recovery_run,
+                target_checkpoint: AgentRunCheckpoint = checkpoint,
             ) -> CommitObservation[None]:
                 try:
-                    observed_run = await target_recovery.get_run(
-                        run_id=target_snapshot.run_id
+                    observed_run = await target_recovery.get_agent_run(
+                        agent_run_id=target_checkpoint.agent_run_id
                     )
                     if isinstance(target_recovery, StateStepArchive):
-                        snapshot_visible = (
-                            await target_recovery.verify_snapshot_projection(
-                                run_id=target_snapshot.run_id,
-                                snapshot=target_snapshot,
+                        checkpoint_visible = (
+                            await target_recovery.verify_checkpoint_projection(
+                                agent_run_id=target_checkpoint.agent_run_id,
+                                checkpoint=target_checkpoint,
                             )
                         )
-                        if snapshot_visible and prepared_interactions:
+                        if checkpoint_visible and prepared_interactions:
                             observed_interactions = await target_recovery.list_model_interactions(
-                                run_id=target_run.run_id,
+                                agent_run_id=target_agent_run.agent_run_id,
                                 after_request_sequence=prepared_interactions[0].request_sequence - 1,
                                 limit=len(prepared_interactions),
                             )
-                            snapshot_visible = tuple(observed_interactions) == prepared_interactions
+                            checkpoint_visible = tuple(observed_interactions) == prepared_interactions
                     else:
-                        observed_snapshot = await target_recovery.latest_snapshot(
-                            run_id=target_snapshot.run_id,
+                        observed_checkpoint = await target_recovery.latest_checkpoint(
+                            agent_run_id=target_checkpoint.agent_run_id,
                             include_interrupted=True,
                         )
-                        snapshot_visible = _relocated_snapshot_matches(
+                        checkpoint_visible = _relocated_checkpoint_matches(
                             RuntimeDomain.RECOVERY,
-                            target_snapshot,
-                            observed_snapshot,
+                            target_checkpoint,
+                            observed_checkpoint,
                         )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if observed_run == target_run and snapshot_visible:
+                if observed_run == target_agent_run and checkpoint_visible:
                     return CommitObservation(DurableCommitState.COMMITTED)
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
 
             await self._settle_durability_flight(flight, operation, readback)
             return
 
-    async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
+    async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
         await self._ensure_business()
-        return await self._staging.latest_snapshot(run_id=run_id, include_interrupted=include_interrupted)
+        return await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=include_interrupted)
 
-    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]:
-        return self._staging.intern_payload(run_id, payload)
+    def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]:
+        return self._staging.intern_payload(agent_run_id, payload)
 
-    def staged_payload(self, run_id: str, digest: str) -> bytes:
-        return self._staging.staged_payload(run_id, digest)
+    def staged_payload(self, agent_run_id: str, digest: str) -> bytes:
+        return self._staging.staged_payload(agent_run_id, digest)
 
     def stage_model_interaction(self, interaction: object) -> None:
         self._staging.stage_model_interaction(interaction)
-        run_id = getattr(interaction, "run_id", None)
-        if not isinstance(run_id, str) or not run_id:
-            raise TypeError("staged model interaction has no run id")
-        self._projection_dirty.add(run_id)
+        agent_run_id = getattr(interaction, "agent_run_id", None)
+        if not isinstance(agent_run_id, str) or not agent_run_id:
+            raise TypeError("staged model interaction has no AgentRun identity")
+        self._projection_dirty.add(agent_run_id)
 
     async def list_model_interactions(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         after_request_sequence: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
         await self._ensure_business()
         return await self._staging.list_model_interactions(
-            run_id=run_id,
+            agent_run_id=agent_run_id,
             after_request_sequence=after_request_sequence,
             limit=limit,
         )
 
-    async def model_interaction_count(self, *, run_id: str) -> int:
+    async def model_interaction_count(self, *, agent_run_id: str) -> int:
         await self._ensure_business()
-        staged = await self._staging.list_model_interactions(run_id=run_id)
+        staged = await self._staging.list_model_interactions(agent_run_id=agent_run_id)
         staged_sequences = tuple(
             value.request_sequence
             for value in staged
@@ -350,7 +350,7 @@ class RuntimeStepStore(StepStore):
         durable_high_water = (
             0
             if recovery is None
-            else await recovery.model_interaction_count(run_id=run_id)
+            else await recovery.model_interaction_count(agent_run_id=agent_run_id)
         )
         if staged_sequences and staged_sequences[0] > durable_high_water + 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -367,7 +367,7 @@ class RuntimeStepStore(StepStore):
         await self._ensure_business()
         return await self._staging.resolve_model_interactions(interactions)
 
-    def read_store(self, runtime_domain: RuntimeDomain) -> StepStore:
+    def read_store(self, runtime_domain: RuntimeDomain) -> AgentRunStore:
         if runtime_domain not in self._archives:
             return self._staging
         return self._archives[runtime_domain]
@@ -380,7 +380,7 @@ class RuntimeStepStore(StepStore):
         archive = self._archives.get(runtime_domain)
         if archive is None:
             archive = self._staging
-        if isinstance(archive, (StateStepArchive, StagingStepStore)):
+        if isinstance(archive, (StateStepArchive, StagingAgentRunStore)):
             if isinstance(archive, StateStepArchive):
                 return await archive.load_loaded_model_context(
                     owner_id=owner_id,
@@ -416,12 +416,12 @@ class RuntimeStepStore(StepStore):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
     ) -> AsyncIterator[object]:
         return self._iter_conversation_messages(
             history_id=history_id,
-            step_run_id=step_run_id,
+            agent_run_id=agent_run_id,
             tenant_id=tenant_id,
         )
 
@@ -429,7 +429,7 @@ class RuntimeStepStore(StepStore):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
     ) -> AsyncIterator[object]:
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
@@ -443,7 +443,7 @@ class RuntimeStepStore(StepStore):
                 yield message
             return
         if isinstance(archive, InMemoryStepArchive):
-            async for message in archive.iter_messages(run_id=step_run_id):
+            async for message in archive.iter_messages(agent_run_id=agent_run_id):
                 yield message
             return
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -452,7 +452,7 @@ class RuntimeStepStore(StepStore):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
     ) -> int:
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
@@ -464,21 +464,21 @@ class RuntimeStepStore(StepStore):
                 tenant_id=tenant_id,
             )
         if isinstance(archive, InMemoryStepArchive):
-            return await archive.transcript_message_count(step_run_id)
+            return await archive.transcript_message_count(agent_run_id)
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     def iter_conversation_message_range(
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
         start: int,
         end: int,
     ) -> AsyncIterator[object]:
         return self._iter_conversation_message_range(
             history_id=history_id,
-            step_run_id=step_run_id,
+            agent_run_id=agent_run_id,
             tenant_id=tenant_id,
             start=start,
             end=end,
@@ -488,7 +488,7 @@ class RuntimeStepStore(StepStore):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
         start: int,
         end: int,
@@ -507,7 +507,7 @@ class RuntimeStepStore(StepStore):
             return
         if isinstance(archive, InMemoryStepArchive):
             async for message in archive.iter_message_range(
-                run_id=step_run_id,
+                agent_run_id=agent_run_id,
                 start=start,
                 end=end,
             ):
@@ -519,7 +519,7 @@ class RuntimeStepStore(StepStore):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         message_count: int | None,
         tenant_id: str,
     ) -> LoadedModelContext:
@@ -533,12 +533,12 @@ class RuntimeStepStore(StepStore):
                 )
             return await archive.load_committed_session_model_context(
                 history_id,
-                step_run_id=step_run_id,
+                agent_run_id=agent_run_id,
                 message_count=message_count,
                 tenant_id=tenant_id,
             )
         if isinstance(archive, InMemoryStepArchive):
-            values = await archive.load_model_context(run_id=step_run_id)
+            values = await archive.load_model_context(agent_run_id=agent_run_id)
             return LoadedModelContext(
                 tuple(
                     LoadedContextMessage(value, None)
@@ -552,48 +552,48 @@ class RuntimeStepStore(StepStore):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
         message_count: int | None = None,
     ) -> tuple[object, ...]:
         context = await self.load_committed_conversation_context(
             history_id=history_id,
-            step_run_id=step_run_id,
+            agent_run_id=agent_run_id,
             message_count=message_count,
             tenant_id=tenant_id,
         )
         return context.model_messages()
 
-    async def materialize_recovery_snapshot(self, *, step_run_id: str, require_complete: bool) -> None:
-        snapshot = await self._staging.latest_snapshot(run_id=step_run_id, include_interrupted=True)
-        run = await self._staging.get_run(run_id=step_run_id)
+    async def materialize_recovery_checkpoint(self, *, agent_run_id: str, require_complete: bool) -> None:
+        checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
+        run = await self._staging.get_agent_run(agent_run_id=agent_run_id)
         archive = self._archives.get(RuntimeDomain.RECOVERY)
-        if snapshot is None or run is None:
+        if checkpoint is None or run is None:
             if require_complete:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
-        if require_complete and snapshot.state != "complete":
+        if require_complete and checkpoint.state != "complete":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if archive is not None:
             if isinstance(archive, StateStepArchive):
-                snapshot = await archive.relocate_run_snapshot(run, snapshot)
-            await _materialize_snapshot(archive, run, snapshot)
+                checkpoint = await archive.relocate_run_checkpoint(run, checkpoint)
+            await _materialize_checkpoint(archive, run, checkpoint)
             interactions = await self._staging.list_model_interactions(
-                run_id=step_run_id
+                agent_run_id=agent_run_id
             )
             if interactions and isinstance(archive, StateStepArchive):
-                head = await archive.transcript_repository.get_head(run.run_id)
+                head = await archive.transcript_repository.get_head(run.agent_run_id)
                 if head is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 local_base, local_count = _interaction_local_range(
-                    (snapshot,),
+                    (checkpoint,),
                     head.message_count,
                 )
                 prepared = await archive.prepare_interactions(
                     run,
                     tuple(interactions),
                     lambda digest: self._staging.staged_payload(
-                        step_run_id,
+                        agent_run_id,
                         digest,
                     ),
                     local_message_base=local_base,
@@ -602,56 +602,56 @@ class RuntimeStepStore(StepStore):
                 await archive.sync_projection(
                     run,
                     events=(),
-                    snapshots=(),
+                    checkpoints=(),
                     interactions=prepared,
                 )
 
-    async def materialize_conversation(self, *, step_run_id: str) -> None:
-        run = await self._staging.get_run(run_id=step_run_id)
-        snapshot = await self._staging.latest_snapshot(run_id=step_run_id)
+    async def materialize_conversation(self, *, agent_run_id: str) -> None:
+        run = await self._staging.get_agent_run(agent_run_id=agent_run_id)
+        checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id)
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
-        if run is None or snapshot is None or archive is None:
+        if run is None or checkpoint is None or archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(archive, StateStepArchive):
-            snapshot = await archive.relocate_conversation_snapshot(
+            checkpoint = await archive.relocate_conversation_checkpoint(
                 run,
-                snapshot,
+                checkpoint,
             )
-        await _materialize_snapshot(archive, run, snapshot)
+        await _materialize_checkpoint(archive, run, checkpoint)
 
     async def materialize_from_recovery(
         self,
         *,
         target: RuntimeDomain,
-        step_run_id: str,
+        agent_run_id: str,
         execution_id: str | None = None,
     ) -> None:
         recovery = self._archives.get(RuntimeDomain.RECOVERY)
         destination = self._archives.get(target)
         if recovery is None or destination is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        run = await recovery.get_run(run_id=step_run_id)
-        snapshot = await recovery.latest_snapshot(
-            run_id=step_run_id,
+        run = await recovery.get_agent_run(agent_run_id=agent_run_id)
+        checkpoint = await recovery.latest_checkpoint(
+            agent_run_id=agent_run_id,
             include_interrupted=target is RuntimeDomain.EXECUTION,
         )
-        if run is None or snapshot is None:
+        if run is None or checkpoint is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if target is RuntimeDomain.EXECUTION and execution_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         while True:
             completion: asyncio.Future[None] | None = None
-            flight: _RunDurabilityFlight | None = None
-            async with self._history_lock.hold(step_run_id):
-                existing = self._durability_flights.get(step_run_id)
+            flight: _AgentRunDurabilityFlight | None = None
+            async with self._history_lock.hold(agent_run_id):
+                existing = self._durability_flights.get(agent_run_id)
                 if existing is not None:
                     completion = existing.completion
                 else:
                     if target is RuntimeDomain.EXECUTION:
-                        self._ensure_run_mutable(step_run_id)
+                        self._ensure_run_mutable(agent_run_id)
                     flight = self._install_durability_flight_locked(
-                        step_run_id,
-                        _RunDurabilityKind.RECOVERY_MATERIALIZATION,
+                        agent_run_id,
+                        _AgentRunDurabilityKind.RECOVERY_MATERIALIZATION,
                     )
             if completion is not None:
                 await asyncio.shield(completion)
@@ -661,7 +661,7 @@ class RuntimeStepStore(StepStore):
 
             try:
                 source_values = await recovery.list_model_interactions(
-                    run_id=step_run_id
+                    agent_run_id=agent_run_id
                 )
                 source_interactions = tuple(
                     value
@@ -677,21 +677,21 @@ class RuntimeStepStore(StepStore):
                     raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
                 if isinstance(destination, StateStepArchive):
                     if target is RuntimeDomain.CONVERSATION:
-                        target_snapshot = await destination.relocate_conversation_snapshot(
-                            run, snapshot
+                        target_checkpoint = await destination.relocate_conversation_checkpoint(
+                            run, checkpoint
                         )
                     else:
-                        target_snapshot = await destination.relocate_run_snapshot(
-                            run, snapshot
+                        target_checkpoint = await destination.relocate_run_checkpoint(
+                            run, checkpoint
                         )
                 else:
                     local_message_count = await destination.transcript_message_count(
-                        step_run_id
+                        agent_run_id
                     )
-                    if local_message_count > len(snapshot.messages):
+                    if local_message_count > len(checkpoint.messages):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    target_snapshot = replace(
-                        snapshot,
+                    target_checkpoint = replace(
+                        checkpoint,
                         transcript_message_count_before=local_message_count,
                     )
                 relocated = await destination.prepare_relocated_interactions(
@@ -706,20 +706,20 @@ class RuntimeStepStore(StepStore):
                 await destination.sync_projection(
                     run,
                     events=(),
-                    snapshots=(target_snapshot,),
+                    checkpoints=(target_checkpoint,),
                     interactions=relocated,
                     execution_id=execution_id,
                 )
 
             async def readback() -> CommitObservation[None]:
                 try:
-                    observed_run = await destination.get_run(run_id=run.run_id)
-                    observed_snapshot = await destination.latest_snapshot(
-                        run_id=run.run_id,
+                    observed_run = await destination.get_agent_run(agent_run_id=run.agent_run_id)
+                    observed_checkpoint = await destination.latest_checkpoint(
+                        agent_run_id=run.agent_run_id,
                         include_interrupted=True,
                     )
                     observed_values = await destination.list_model_interactions(
-                        run_id=run.run_id
+                        agent_run_id=run.agent_run_id
                     )
                     observed_interactions = tuple(
                         value
@@ -738,14 +738,14 @@ class RuntimeStepStore(StepStore):
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                snapshot_matches = _relocated_snapshot_matches(
+                checkpoint_matches = _relocated_checkpoint_matches(
                     target,
-                    snapshot,
-                    observed_snapshot,
+                    checkpoint,
+                    observed_checkpoint,
                 )
                 if (
                     observed_run == run
-                    and snapshot_matches
+                    and checkpoint_matches
                     and tuple(
                         _interaction_semantic_header(value)
                         for value in observed_interactions
@@ -766,15 +766,15 @@ class RuntimeStepStore(StepStore):
         self,
         *,
         execution_id: str,
-        run_ids: Sequence[str],
+        agent_run_ids: Sequence[str],
         binding_digest: str,
     ) -> ExecutionTerminalSealPlan:
         await self._ensure_business()
         archive = self._archives.get(RuntimeDomain.EXECUTION)
         if not isinstance(archive, StateStepArchive):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        ordered_run_ids = tuple(sorted(dict.fromkeys(run_ids)))
-        if not ordered_run_ids:
+        ordered_agent_run_ids = tuple(sorted(dict.fromkeys(agent_run_ids)))
+        if not ordered_agent_run_ids:
             _logger.info(
                 "execution terminal seal prepared: execution=%s runs=0",
                 execution_id,
@@ -789,41 +789,41 @@ class RuntimeStepStore(StepStore):
         installed: list[str] = []
         terminal_attempt_token = uuid4().hex
         try:
-            for run_id in ordered_run_ids:
+            for agent_run_id in ordered_agent_run_ids:
                 while True:
-                    archive_run: RunRecord | None = None
+                    archive_run: AgentRunRecord | None = None
                     captured_seal: _LocalExecutionTerminalSeal | None = None
                     needs_archive_run = False
-                    async with self._history_lock.hold(run_id):
-                        existing = self._durability_flights.get(run_id)
+                    async with self._history_lock.hold(agent_run_id):
+                        existing = self._durability_flights.get(agent_run_id)
                         if existing is not None:
                             completion = existing.completion
                         else:
-                            seal = self._terminal_seals.get(run_id)
+                            seal = self._terminal_seals.get(agent_run_id)
                             if seal is None:
                                 seal = _LocalExecutionTerminalSeal(
                                     execution_id,
                                     terminal_attempt_token,
                                 )
-                                self._terminal_seals[run_id] = seal
+                                self._terminal_seals[agent_run_id] = seal
                                 self._install_durability_flight_locked(
-                                    run_id,
-                                    _RunDurabilityKind.TERMINAL,
+                                    agent_run_id,
+                                    _AgentRunDurabilityKind.TERMINAL,
                                     token=terminal_attempt_token,
                                 )
-                                installed.append(run_id)
+                                installed.append(agent_run_id)
                             elif seal.execution_id != execution_id or seal.token != terminal_attempt_token:
                                 raise AIError(ErrorCode.STORAGE_CONFLICT)
                             captured_seal = seal
-                            run = self._staging.get_run_local(run_id)
+                            run = self._staging.get_agent_run_local(agent_run_id)
                             if run is None:
                                 needs_archive_run = True
                             else:
-                                projection = self._capture_projection_snapshot_locked(run_id)
+                                projection = self._capture_projection_checkpoint_locked(agent_run_id)
                                 captured.append((seal, projection))
                                 break
                     if needs_archive_run:
-                        archive_run = await archive.get_run(run_id=run_id)
+                        archive_run = await archive.get_agent_run(agent_run_id=agent_run_id)
                         if archive_run is None:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         if captured_seal is None:
@@ -851,49 +851,49 @@ class RuntimeStepStore(StepStore):
                     await asyncio.shield(completion)
             prepared: list[PreparedExecutionProjection] = []
             durable_heads = await archive.execution_history_heads(
-                tuple(projection.run.run_id for _seal, projection in captured)
+                tuple(projection.run.agent_run_id for _seal, projection in captured)
             )
             for _seal, projection in captured:
-                durable_head = durable_heads.get(projection.run.run_id)
+                durable_head = durable_heads.get(projection.run.agent_run_id)
                 if durable_head is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                batch = await archive.prepare_snapshots_after_seal(
+                batch = await archive.prepare_checkpoints_after_seal(
                     projection.run,
-                    projection.snapshots,
+                    projection.checkpoints,
                 )
-                latest_staged_snapshot = await self._staging.latest_snapshot(
-                    run_id=projection.run.run_id,
+                latest_staged_checkpoint = await self._staging.latest_checkpoint(
+                    agent_run_id=projection.run.agent_run_id,
                     include_interrupted=True,
                 )
                 local_base, local_count = _interaction_local_range(
-                    projection.snapshots,
+                    projection.checkpoints,
                     batch.target_transcript_message_count,
                     fallback_local_count=(
                         0
-                        if latest_staged_snapshot is None
-                        else len(latest_staged_snapshot.messages)
+                        if latest_staged_checkpoint is None
+                        else len(latest_staged_checkpoint.messages)
                     ),
                 )
                 prepared.append(
                     PreparedExecutionProjection(
                         projection.run,
                         projection.events,
-                        batch.snapshots,
+                        batch.checkpoints,
                         projection.base_event_offset,
-                        projection.base_snapshot_offset,
+                        projection.base_checkpoint_offset,
                         durable_head.event_count
                         + projection.target_event_offset
                         - projection.base_event_offset,
-                        durable_head.snapshot_count
-                        + projection.target_snapshot_offset
-                        - projection.base_snapshot_offset,
+                        durable_head.checkpoint_count
+                        + projection.target_checkpoint_offset
+                        - projection.base_checkpoint_offset,
                         batch.target_transcript_message_count,
                         "empty"
-                        if not batch.snapshots
+                        if not batch.checkpoints
                         and durable_head.projection_digest == "empty"
                         else (
-                            batch.snapshots[-1].projection.digest
-                            if batch.snapshots
+                            batch.checkpoints[-1].projection.digest
+                            if batch.checkpoints
                             else durable_head.projection_digest
                         ),
                         tuple(
@@ -901,8 +901,8 @@ class RuntimeStepStore(StepStore):
                                 projection.run,
                                 projection.interactions,
                                 lambda digest,
-                                run_id=projection.run.run_id: self._staging.staged_payload(
-                                    run_id,
+                                agent_run_id=projection.run.agent_run_id: self._staging.staged_payload(
+                                    agent_run_id,
                                     digest,
                                 ),
                                 local_message_base=local_base,
@@ -921,7 +921,7 @@ class RuntimeStepStore(StepStore):
                 binding_digest,
                 tuple(prepared),
                 tuple(
-                    (projection.run.run_id, seal.token)
+                    (projection.run.agent_run_id, seal.token)
                     for seal, projection in captured
                 ),
                 terminal_attempt_token,
@@ -933,9 +933,9 @@ class RuntimeStepStore(StepStore):
             )
             return plan
         except BaseException:
-            for run_id in installed:
+            for agent_run_id in installed:
                 await self._release_terminal_seal_if_owned(
-                    run_id,
+                    agent_run_id,
                     execution_id=execution_id,
                     token=terminal_attempt_token,
                 )
@@ -984,12 +984,12 @@ class RuntimeStepStore(StepStore):
         *,
         require_owned: bool,
     ) -> None:
-        run_id = projection.run.run_id
-        token = plan.token_for(run_id)
+        agent_run_id = projection.run.agent_run_id
+        token = plan.token_for(agent_run_id)
         completion: asyncio.Future[None] | None = None
-        async with self._history_lock.hold(run_id):
-            seal = self._terminal_seals.get(run_id)
-            flight = self._durability_flights.get(run_id)
+        async with self._history_lock.hold(agent_run_id):
+            seal = self._terminal_seals.get(agent_run_id)
+            flight = self._durability_flights.get(agent_run_id)
             if require_owned and (seal is None or flight is None):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if (seal is None) != (flight is None):
@@ -1000,21 +1000,21 @@ class RuntimeStepStore(StepStore):
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if flight is not None and (
-                flight.kind is not _RunDurabilityKind.TERMINAL
+                flight.kind is not _AgentRunDurabilityKind.TERMINAL
                 or flight.token != token
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if flight is not None:
-                del self._durability_flights[run_id]
+                del self._durability_flights[agent_run_id]
                 completion = flight.completion
             if seal is not None:
-                del self._terminal_seals[run_id]
+                del self._terminal_seals[agent_run_id]
             offset = self._projection_offsets.setdefault(
-                run_id,
+                agent_run_id,
                 _ProjectionOffset(),
             )
             offset.events = max(offset.events, projection.target_event_offset)
-            offset.snapshots = max(offset.snapshots, projection.target_snapshot_offset)
+            offset.checkpoints = max(offset.checkpoints, projection.target_checkpoint_offset)
             offset.transcript_messages = max(
                 offset.transcript_messages,
                 projection.target_transcript_message_count,
@@ -1023,7 +1023,7 @@ class RuntimeStepStore(StepStore):
                 offset.interactions,
                 projection.target_interaction_offset,
             )
-            self._projection_dirty.discard(run_id)
+            self._projection_dirty.discard(agent_run_id)
         if completion is not None and not completion.done():
             completion.set_result(None)
 
@@ -1031,114 +1031,114 @@ class RuntimeStepStore(StepStore):
         self,
         plan: ExecutionTerminalSealPlan,
     ) -> None:
-        for run_id in dict.fromkeys(
-            projection.run.run_id for projection in plan.projections
+        for agent_run_id in dict.fromkeys(
+            projection.run.agent_run_id for projection in plan.projections
         ):
             await self._release_terminal_seal_if_owned(
-                run_id,
+                agent_run_id,
                 execution_id=plan.execution_id,
-                token=plan.token_for(run_id),
+                token=plan.token_for(agent_run_id),
             )
 
     async def _release_terminal_seal_if_owned(
         self,
-        run_id: str,
+        agent_run_id: str,
         *,
         execution_id: str,
         token: str,
     ) -> None:
         """Release one run's terminal seal only when this attempt owns it."""
         completion: asyncio.Future[None] | None = None
-        async with self._history_lock.hold(run_id):
-            seal = self._terminal_seals.get(run_id)
+        async with self._history_lock.hold(agent_run_id):
+            seal = self._terminal_seals.get(agent_run_id)
             if seal is None:
                 return
             if seal.execution_id != execution_id or seal.token != token:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            flight = self._durability_flights.get(run_id)
+            flight = self._durability_flights.get(agent_run_id)
             if flight is not None:
                 if (
-                    flight.kind is not _RunDurabilityKind.TERMINAL
+                    flight.kind is not _AgentRunDurabilityKind.TERMINAL
                     or flight.token != token
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                del self._durability_flights[run_id]
+                del self._durability_flights[agent_run_id]
                 completion = flight.completion
-            del self._terminal_seals[run_id]
+            del self._terminal_seals[agent_run_id]
         if completion is not None and not completion.done():
             completion.set_result(None)
 
-    def _capture_projection_snapshot_locked(
+    def _capture_projection_checkpoint_locked(
         self,
-        run_id: str,
+        agent_run_id: str,
     ) -> ExecutionProjectionBatch:
-        offset = self._projection_offsets.setdefault(run_id, _ProjectionOffset())
-        projection = self._staging.capture_projection_local(run_id, offset)
+        offset = self._projection_offsets.setdefault(agent_run_id, _ProjectionOffset())
+        projection = self._staging.capture_projection_local(agent_run_id, offset)
         if projection is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return projection
 
-    def _ensure_run_mutable(self, run_id: str) -> None:
-        if run_id in self._terminal_seals:
+    def _ensure_run_mutable(self, agent_run_id: str) -> None:
+        if agent_run_id in self._terminal_seals:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def capture_execution_projection(
         self,
-        step_run_id: str,
-    ) -> "tuple[CapturedExecutionProjection, _RunProjectionFlight] | None":
-        """CAPTURE: snapshot staged state under the run lock with no durable I/O."""
+        agent_run_id: str,
+    ) -> "tuple[CapturedExecutionProjection, _AgentRunProjectionFlight] | None":
+        """CAPTURE: checkpoint staged state under the run lock with no durable I/O."""
         await self._ensure_business()
         while True:
             completion: asyncio.Future[None] | None = None
-            async with self._history_lock.hold(step_run_id):
-                existing = self._durability_flights.get(step_run_id)
+            async with self._history_lock.hold(agent_run_id):
+                existing = self._durability_flights.get(agent_run_id)
                 if existing is not None:
                     completion = existing.completion
                 else:
-                    self._ensure_run_mutable(step_run_id)
+                    self._ensure_run_mutable(agent_run_id)
                     offset = self._projection_offsets.setdefault(
-                        step_run_id,
+                        agent_run_id,
                         _ProjectionOffset(),
                     )
                     projection = self._staging.capture_projection_local(
-                        step_run_id,
+                        agent_run_id,
                         offset,
                     )
                     if projection is None:
                         return None
                     flight = self._install_durability_flight_locked(
-                        step_run_id,
-                        _RunDurabilityKind.PROJECTION,
+                        agent_run_id,
+                        _AgentRunDurabilityKind.PROJECTION,
                     )
                     captured = CapturedExecutionProjection(
                         projection.run,
                         projection.events,
-                        projection.snapshots,
+                        projection.checkpoints,
                         projection.base_event_offset,
-                        projection.base_snapshot_offset,
+                        projection.base_checkpoint_offset,
                         projection.target_event_offset,
-                        projection.target_snapshot_offset,
+                        projection.target_checkpoint_offset,
                         projection.interactions,
                         projection.base_interaction_offset,
                         projection.target_interaction_offset,
                     )
                     _logger.debug(
-                        "projection flight captured: run=%s token=%s "
-                        "events=%s snapshots=%s",
-                        step_run_id,
+                        "projection flight captured: agent_run=%s token=%s "
+                        "events=%s checkpoints=%s",
+                        agent_run_id,
                         flight.token,
                         len(captured.events),
-                        len(captured.snapshots),
+                        len(captured.checkpoints),
                     )
                     return captured, flight
             await asyncio.shield(completion)
 
-    async def wait_projection_flight(self, step_run_id: str) -> None:
+    async def wait_projection_flight(self, agent_run_id: str) -> None:
         """Wait for an active flight without holding the run lock."""
         await self._ensure_business()
         while True:
-            async with self._history_lock.hold(step_run_id):
-                existing = self._durability_flights.get(step_run_id)
+            async with self._history_lock.hold(agent_run_id):
+                existing = self._durability_flights.get(agent_run_id)
                 if existing is None:
                     return
                 completion = existing.completion
@@ -1146,39 +1146,39 @@ class RuntimeStepStore(StepStore):
 
     async def abandon_execution_projection(
         self,
-        flight: _RunProjectionFlight,
+        flight: _AgentRunProjectionFlight,
     ) -> None:
         """Remove a flight after a definitely-not-committed outcome."""
-        async with self._history_lock.hold(flight.run_id):
-            if self._durability_flights.get(flight.run_id) is not flight:
+        async with self._history_lock.hold(flight.agent_run_id):
+            if self._durability_flights.get(flight.agent_run_id) is not flight:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            del self._durability_flights[flight.run_id]
+            del self._durability_flights[flight.agent_run_id]
         if not flight.completion.done():
             flight.completion.set_result(None)
         _logger.info(
-            "projection flight abandoned: run=%s token=%s",
-            flight.run_id,
+            "projection flight abandoned: agent_run=%s token=%s",
+            flight.agent_run_id,
             flight.token,
         )
 
     async def finalize_execution_projection(
         self,
-        flight: _RunProjectionFlight,
+        flight: _AgentRunProjectionFlight,
         captured: CapturedExecutionProjection,
         *,
         target_transcript_message_count: int | None = None,
     ) -> None:
         """FINALIZE: advance offsets and clear dirty state after durable success."""
-        async with self._history_lock.hold(flight.run_id):
-            if self._durability_flights.get(flight.run_id) is not flight:
+        async with self._history_lock.hold(flight.agent_run_id):
+            if self._durability_flights.get(flight.agent_run_id) is not flight:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            del self._durability_flights[flight.run_id]
+            del self._durability_flights[flight.agent_run_id]
             offset = self._projection_offsets.setdefault(
-                flight.run_id,
+                flight.agent_run_id,
                 _ProjectionOffset(),
             )
             offset.events = max(offset.events, captured.target_event_offset)
-            offset.snapshots = max(offset.snapshots, captured.target_snapshot_offset)
+            offset.checkpoints = max(offset.checkpoints, captured.target_checkpoint_offset)
             offset.interactions = max(
                 offset.interactions,
                 captured.target_interaction_offset,
@@ -1188,21 +1188,21 @@ class RuntimeStepStore(StepStore):
                     offset.transcript_messages,
                     target_transcript_message_count,
                 )
-            self._projection_dirty.discard(flight.run_id)
+            self._projection_dirty.discard(flight.agent_run_id)
         if not flight.completion.done():
             flight.completion.set_result(None)
         _logger.debug(
-            "projection flight finalized: run=%s token=%s events=%s snapshots=%s",
-            flight.run_id,
+            "projection flight finalized: agent_run=%s token=%s events=%s checkpoints=%s",
+            flight.agent_run_id,
             flight.token,
             captured.target_event_offset,
-            captured.target_snapshot_offset,
+            captured.target_checkpoint_offset,
         )
 
     async def commit_captured_execution_projection(
         self,
         captured: CapturedExecutionProjection,
-        flight: _RunProjectionFlight,
+        flight: _AgentRunProjectionFlight,
         *,
         execution_id: str,
     ) -> None:
@@ -1218,23 +1218,23 @@ class RuntimeStepStore(StepStore):
                     archive,
                     captured.run,
                     captured.events,
-                    captured.snapshots,
+                    captured.checkpoints,
                     captured.interactions,
                     execution_id=execution_id,
                 )
 
             async def readback() -> CommitObservation[None]:
                 try:
-                    stored_run = await archive.get_run(run_id=captured.run.run_id)
+                    stored_run = await archive.get_agent_run(agent_run_id=captured.run.agent_run_id)
                     stored_events = await archive.list_events(
-                        run_id=captured.run.run_id
+                        agent_run_id=captured.run.agent_run_id
                     )
-                    stored_snapshot = await archive.latest_snapshot(
-                        run_id=captured.run.run_id,
+                    stored_checkpoint = await archive.latest_checkpoint(
+                        agent_run_id=captured.run.agent_run_id,
                         include_interrupted=True,
                     )
                     stored_interactions = await archive.list_model_interactions(
-                        run_id=captured.run.run_id
+                        agent_run_id=captured.run.agent_run_id
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
@@ -1242,7 +1242,7 @@ class RuntimeStepStore(StepStore):
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 if captured.events and tuple(stored_events[-len(captured.events) :]) != captured.events:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                if captured.snapshots and stored_snapshot != captured.snapshots[-1]:
+                if captured.checkpoints and stored_checkpoint != captured.checkpoints[-1]:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 if captured.interactions and tuple(
                     stored_interactions[-len(captured.interactions) :]
@@ -1278,8 +1278,8 @@ class RuntimeStepStore(StepStore):
                     "projection commit left partial durable state",
                 ) from result.error
             _logger.error(
-                "projection commit unresolved; flight retained: run=%s token=%s",
-                flight.run_id,
+                "projection commit unresolved; flight retained: agent_run=%s token=%s",
+                flight.agent_run_id,
                 flight.token,
             )
             unknown = AIError(
@@ -1288,33 +1288,33 @@ class RuntimeStepStore(StepStore):
             )
             await self._fence_durability_flight(flight, unknown)
             raise unknown from result.error
-        if not captured.events and not captured.snapshots and not captured.interactions:
+        if not captured.events and not captured.checkpoints and not captured.interactions:
             await self.finalize_execution_projection(flight, captured)
             return
         started = monotonic()
         try:
-            prepared = await archive.prepare_snapshots(
+            prepared = await archive.prepare_checkpoints(
                 captured.run,
-                captured.snapshots,
+                captured.checkpoints,
             )
-            latest_staged_snapshot = await self._staging.latest_snapshot(
-                run_id=captured.run.run_id,
+            latest_staged_checkpoint = await self._staging.latest_checkpoint(
+                agent_run_id=captured.run.agent_run_id,
                 include_interrupted=True,
             )
             local_base, local_count = _interaction_local_range(
-                captured.snapshots,
+                captured.checkpoints,
                 prepared.target_transcript_message_count,
                 fallback_local_count=(
                     0
-                    if latest_staged_snapshot is None
-                    else len(latest_staged_snapshot.messages)
+                    if latest_staged_checkpoint is None
+                    else len(latest_staged_checkpoint.messages)
                 ),
             )
             interactions = await archive.prepare_interactions(
                 captured.run,
                 captured.interactions,
                 lambda digest: self._staging.staged_payload(
-                    captured.run.run_id,
+                    captured.run.agent_run_id,
                     digest,
                 ),
                 local_message_base=local_base,
@@ -1324,15 +1324,15 @@ class RuntimeStepStore(StepStore):
             await self.abandon_execution_projection(flight)
             raise
         durable_head = await archive.execution_history_head_record(
-            captured.run.run_id
+            captured.run.agent_run_id
         )
         expected_head = ExecutionRunSealHead(
-            captured.run.run_id,
+            captured.run.agent_run_id,
             durable_head.event_count + len(captured.events),
-            durable_head.snapshot_count + len(prepared.snapshots),
+            durable_head.checkpoint_count + len(prepared.checkpoints),
             prepared.target_transcript_message_count,
-            prepared.snapshots[-1].projection.digest
-            if prepared.snapshots
+            prepared.checkpoints[-1].projection.digest
+            if prepared.checkpoints
             else "empty",
             durable_head.interaction_count + len(interactions),
         )
@@ -1341,27 +1341,27 @@ class RuntimeStepStore(StepStore):
             await archive.sync_prepared_projection(
                 captured.run,
                 events=captured.events,
-                snapshots=prepared.snapshots,
+                checkpoints=prepared.checkpoints,
                 interactions=interactions,
                 execution_id=execution_id,
             )
-            head = await archive.execution_history_head_record(captured.run.run_id)
+            head = await archive.execution_history_head_record(captured.run.agent_run_id)
             if (
                 head.event_count != expected_head.event_count
-                or head.snapshot_count != expected_head.snapshot_count
+                or head.checkpoint_count != expected_head.checkpoint_count
                 or head.transcript_message_count
                 != expected_head.transcript_message_count
                 or head.interaction_count != expected_head.interaction_count
                 or (
-                    prepared.snapshots
+                    prepared.checkpoints
                     and head.projection_digest != expected_head.projection_digest
                 )
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return ExecutionRunSealHead(
-                captured.run.run_id,
+                captured.run.agent_run_id,
                 head.event_count,
-                head.snapshot_count,
+                head.checkpoint_count,
                 head.transcript_message_count,
                 head.projection_digest,
                 head.interaction_count,
@@ -1370,7 +1370,7 @@ class RuntimeStepStore(StepStore):
         async def readback() -> CommitObservation[ExecutionRunSealHead]:
             try:
                 head = await archive.execution_history_head_record(
-                    captured.run.run_id
+                    captured.run.agent_run_id
                 )
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
@@ -1381,13 +1381,13 @@ class RuntimeStepStore(StepStore):
                 return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
             if head.event_count != expected_head.event_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if head.snapshot_count != expected_head.snapshot_count:
+            if head.checkpoint_count != expected_head.checkpoint_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             if head.transcript_message_count != expected_head.transcript_message_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             if head.interaction_count != expected_head.interaction_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if prepared.snapshots and head.projection_digest != expected_head.projection_digest:
+            if prepared.checkpoints and head.projection_digest != expected_head.projection_digest:
                 return CommitObservation(
                     DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                     error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
@@ -1395,9 +1395,9 @@ class RuntimeStepStore(StepStore):
             return CommitObservation(
                 DurableCommitState.COMMITTED,
                 value=ExecutionRunSealHead(
-                    captured.run.run_id,
+                    captured.run.agent_run_id,
                     head.event_count,
-                    head.snapshot_count,
+                    head.checkpoint_count,
                     head.transcript_message_count,
                     head.projection_digest,
                     head.interaction_count,
@@ -1433,8 +1433,8 @@ class RuntimeStepStore(StepStore):
             raise integrity from result.error
         else:
             _logger.error(
-                "projection commit unresolved; flight retained: run=%s token=%s",
-                flight.run_id,
+                "projection commit unresolved; flight retained: agent_run=%s token=%s",
+                flight.agent_run_id,
                 flight.token,
             )
             unknown = AIError(
@@ -1444,23 +1444,23 @@ class RuntimeStepStore(StepStore):
             await self._fence_durability_flight(flight, unknown)
             raise unknown from result.error
         _logger.debug(
-            "step projection flushed: domain=%s backend=%s run=%s "
-            "events=%s snapshots=%s duration_ms=%.3f",
+            "step projection flushed: domain=%s backend=%s agent_run=%s "
+            "events=%s checkpoints=%s duration_ms=%.3f",
             RuntimeDomain.EXECUTION.value,
             type(archive).__name__,
-            flight.run_id,
+            flight.agent_run_id,
             len(captured.events),
-            len(captured.snapshots),
+            len(captured.checkpoints),
             (monotonic() - started) * 1000,
         )
 
     async def flush_execution_projection(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         *,
         execution_id: str,
     ) -> None:
-        captured = await self.capture_execution_projection(step_run_id)
+        captured = await self.capture_execution_projection(agent_run_id)
         if captured is None:
             return
         projection, flight = captured
@@ -1471,53 +1471,53 @@ class RuntimeStepStore(StepStore):
         )
 
     async def flush_dirty_execution_projections(self, *, execution_id: str) -> None:
-        for run_id in tuple(self._projection_dirty):
-            await self.flush_execution_projection(run_id, execution_id=execution_id)
+        for agent_run_id in tuple(self._projection_dirty):
+            await self.flush_execution_projection(agent_run_id, execution_id=execution_id)
 
 
     async def verify_terminal_attempts(
-        self, *, candidate_step_run_ids: tuple[str, ...], required_step_run_id: str | None
+        self, *, candidate_agent_run_ids: tuple[str, ...], required_agent_run_id: str | None
     ) -> None:
-        for run_id in dict.fromkeys(candidate_step_run_ids):
-            if required_step_run_id != run_id:
+        for agent_run_id in dict.fromkeys(candidate_agent_run_ids):
+            if required_agent_run_id != agent_run_id:
                 continue
-            snapshot = await self._staging.latest_snapshot(run_id=run_id, include_interrupted=True)
-            if snapshot is None:
+            checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
+            if checkpoint is None:
                 for archive in self._archives.values():
-                    snapshot = await archive.latest_snapshot(
-                        run_id=run_id,
+                    checkpoint = await archive.latest_checkpoint(
+                        agent_run_id=agent_run_id,
                         include_interrupted=True,
                     )
-                    if snapshot is not None:
+                    if checkpoint is not None:
                         break
-            if snapshot is None or snapshot.state != "complete":
+            if checkpoint is None or checkpoint.state != "complete":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def release_staging_many(
         self,
         *,
-        candidate_step_run_ids: tuple[str, ...],
+        candidate_agent_run_ids: tuple[str, ...],
         execution_id: "str | None" = None,
     ) -> None:
-        for run_id in dict.fromkeys(candidate_step_run_ids):
+        for agent_run_id in dict.fromkeys(candidate_agent_run_ids):
             while True:
                 completion: asyncio.Future[None] | None = None
                 seal_owner: str | None = None
                 seal_token: str | None = None
-                async with self._history_lock.hold(run_id):
-                    existing = self._durability_flights.get(run_id)
+                async with self._history_lock.hold(agent_run_id):
+                    existing = self._durability_flights.get(agent_run_id)
                     if existing is not None:
                         completion = existing.completion
                     else:
-                        if run_id in self._projection_dirty:
+                        if agent_run_id in self._projection_dirty:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        self._staging.release_run_local(run_id)
-                        self._projection_offsets.pop(run_id, None)
-                        self._projection_dirty.discard(run_id)
+                        self._staging.release_agent_run_local(agent_run_id)
+                        self._projection_offsets.pop(agent_run_id, None)
+                        self._projection_dirty.discard(agent_run_id)
                         for archive in self._archives.values():
                             if isinstance(archive, StateStepArchive):
-                                archive.release_runtime_cache(run_id)
-                        seal = self._terminal_seals.get(run_id)
+                                archive.release_runtime_cache(agent_run_id)
+                        seal = self._terminal_seals.get(agent_run_id)
                         if seal is not None and seal.execution_id == execution_id:
                             seal_owner = seal.execution_id
                             seal_token = seal.token
@@ -1526,21 +1526,21 @@ class RuntimeStepStore(StepStore):
                 await asyncio.shield(completion)
             if seal_owner is not None and seal_token is not None:
                 await self._release_terminal_seal_if_owned(
-                    run_id,
+                    agent_run_id,
                     execution_id=seal_owner,
                     token=seal_token,
                 )
                 _logger.warning(
-                    "terminal seal discarded on staging release: run=%s "
+                    "terminal seal discarded on staging release: agent_run=%s "
                     "execution=%s",
-                    run_id,
+                    agent_run_id,
                     seal_owner,
                 )
 
     async def release_archive(
         self,
         runtime_domain: RuntimeDomain,
-        step_run_id: str,
+        agent_run_id: str,
         *,
         execution_id: str | None = None,
     ) -> None:
@@ -1549,19 +1549,19 @@ class RuntimeStepStore(StepStore):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         while True:
             completion: asyncio.Future[None] | None = None
-            flight: _RunDurabilityFlight | None = None
-            async with self._history_lock.hold(step_run_id):
-                existing = self._durability_flights.get(step_run_id)
+            flight: _AgentRunDurabilityFlight | None = None
+            async with self._history_lock.hold(agent_run_id):
+                existing = self._durability_flights.get(agent_run_id)
                 if existing is not None:
                     completion = existing.completion
                 else:
                     if runtime_domain is RuntimeDomain.EXECUTION:
-                        self._ensure_run_mutable(step_run_id)
-                    self._projection_offsets.pop(step_run_id, None)
-                    self._projection_dirty.discard(step_run_id)
+                        self._ensure_run_mutable(agent_run_id)
+                    self._projection_offsets.pop(agent_run_id, None)
+                    self._projection_dirty.discard(agent_run_id)
                     flight = self._install_durability_flight_locked(
-                        step_run_id,
-                        _RunDurabilityKind.RELEASE,
+                        agent_run_id,
+                        _AgentRunDurabilityKind.RELEASE,
                     )
             if completion is not None:
                 await asyncio.shield(completion)
@@ -1570,14 +1570,14 @@ class RuntimeStepStore(StepStore):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
             async def operation() -> None:
-                await archive.release_run(
-                    step_run_id,
+                await archive.release_agent_run(
+                    agent_run_id,
                     execution_id=execution_id,
                 )
 
             async def readback() -> CommitObservation[None]:
                 try:
-                    observed = await archive.get_run(run_id=step_run_id)
+                    observed = await archive.get_agent_run(agent_run_id=agent_run_id)
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
                 return (
@@ -1591,24 +1591,24 @@ class RuntimeStepStore(StepStore):
 
     def _install_durability_flight_locked(
         self,
-        run_id: str,
-        kind: _RunDurabilityKind,
+        agent_run_id: str,
+        kind: _AgentRunDurabilityKind,
         *,
         token: str | None = None,
-    ) -> _RunDurabilityFlight:
-        existing = self._durability_flights.get(run_id)
+    ) -> _AgentRunDurabilityFlight:
+        existing = self._durability_flights.get(agent_run_id)
         if existing is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        flight = _RunDurabilityFlight(
-            run_id,
+        flight = _AgentRunDurabilityFlight(
+            agent_run_id,
             token or uuid4().hex,
             kind,
             asyncio.get_running_loop().create_future(),
         )
-        self._durability_flights[run_id] = flight
+        self._durability_flights[agent_run_id] = flight
         _logger.debug(
-            "durability flight captured: run=%s token=%s kind=%s",
-            run_id,
+            "durability flight captured: agent_run=%s token=%s kind=%s",
+            agent_run_id,
             flight.token,
             kind.value,
         )
@@ -1616,45 +1616,45 @@ class RuntimeStepStore(StepStore):
 
     async def _finalize_durability_flight(
         self,
-        flight: _RunDurabilityFlight,
+        flight: _AgentRunDurabilityFlight,
     ) -> None:
-        async with self._history_lock.hold(flight.run_id):
-            if self._durability_flights.get(flight.run_id) is not flight:
+        async with self._history_lock.hold(flight.agent_run_id):
+            if self._durability_flights.get(flight.agent_run_id) is not flight:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            del self._durability_flights[flight.run_id]
+            del self._durability_flights[flight.agent_run_id]
         if not flight.completion.done():
             flight.completion.set_result(None)
         _logger.debug(
-            "durability flight finalized: run=%s token=%s kind=%s",
-            flight.run_id,
+            "durability flight finalized: agent_run=%s token=%s kind=%s",
+            flight.agent_run_id,
             flight.token,
             flight.kind.value,
         )
 
     async def _abandon_durability_flight(
         self,
-        flight: _RunDurabilityFlight,
+        flight: _AgentRunDurabilityFlight,
     ) -> None:
-        async with self._history_lock.hold(flight.run_id):
-            if self._durability_flights.get(flight.run_id) is not flight:
+        async with self._history_lock.hold(flight.agent_run_id):
+            if self._durability_flights.get(flight.agent_run_id) is not flight:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            del self._durability_flights[flight.run_id]
+            del self._durability_flights[flight.agent_run_id]
         if not flight.completion.done():
             flight.completion.set_result(None)
         _logger.info(
-            "durability flight abandoned: run=%s token=%s kind=%s",
-            flight.run_id,
+            "durability flight abandoned: agent_run=%s token=%s kind=%s",
+            flight.agent_run_id,
             flight.token,
             flight.kind.value,
         )
 
     async def _fence_durability_flight(
         self,
-        flight: _RunDurabilityFlight,
+        flight: _AgentRunDurabilityFlight,
         error: AIError,
     ) -> None:
-        async with self._history_lock.hold(flight.run_id):
-            current = self._durability_flights.get(flight.run_id)
+        async with self._history_lock.hold(flight.agent_run_id):
+            current = self._durability_flights.get(flight.agent_run_id)
             if current is not flight or current.token != flight.token:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             completion = flight.completion
@@ -1666,8 +1666,8 @@ class RuntimeStepStore(StepStore):
 
             completion.add_done_callback(consume)
         _logger.error(
-            "durability flight fenced: run=%s token=%s kind=%s code=%s",
-            flight.run_id,
+            "durability flight fenced: agent_run=%s token=%s kind=%s code=%s",
+            flight.agent_run_id,
             flight.token,
             flight.kind.value,
             error.code.value,
@@ -1675,7 +1675,7 @@ class RuntimeStepStore(StepStore):
 
     async def _settle_durability_flight(
         self,
-        flight: _RunDurabilityFlight,
+        flight: _AgentRunDurabilityFlight,
         operation: Callable[[], Awaitable[None]],
         readback: Callable[[], Awaitable[CommitObservation[None]]],
     ) -> None:
@@ -1702,8 +1702,8 @@ class RuntimeStepStore(StepStore):
             await self._fence_durability_flight(flight, integrity)
             raise integrity from result.error
         _logger.error(
-            "durability flight unresolved: run=%s token=%s kind=%s",
-            flight.run_id,
+            "durability flight unresolved: agent_run=%s token=%s kind=%s",
+            flight.agent_run_id,
             flight.token,
             flight.kind.value,
         )
@@ -1743,15 +1743,15 @@ class RuntimeStepStore(StepStore):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
-def _relocated_snapshot_matches(
+def _relocated_checkpoint_matches(
     target: RuntimeDomain,
-    source: ContinuableSnapshot,
-    observed: ContinuableSnapshot | None,
+    source: AgentRunCheckpoint,
+    observed: AgentRunCheckpoint | None,
 ) -> bool:
     if observed is None:
         return False
     if target is RuntimeDomain.CONVERSATION:
-        return _conversation_relocated_snapshot_matches(source, observed)
+        return _conversation_relocated_checkpoint_matches(source, observed)
     return replace(
         observed,
         transcript_message_count_before=None,
@@ -1761,11 +1761,11 @@ def _relocated_snapshot_matches(
     )
 
 
-def _run_registration_identity(run: RunRecord) -> tuple[object, ...]:
+def _agent_run_registration_identity(run: AgentRunRecord) -> tuple[object, ...]:
     return (
-        run.run_id,
-        run.conversation_id,
-        run.parent_run_id,
+        run.agent_run_id,
+        run.agent_conversation_id,
+        run.parent_agent_run_id,
         run.agent_name,
         tuple(sorted(run.metadata.items())),
         run.registration_id,
@@ -1776,7 +1776,7 @@ def _interaction_semantic_header(
     interaction: ModelInteractionRecord,
 ) -> tuple[object, ...]:
     return (
-        interaction.run_id,
+        interaction.agent_run_id,
         interaction.step_index,
         interaction.request_sequence,
         interaction.purpose,
@@ -1791,7 +1791,7 @@ def _interaction_semantic_header(
 
 
 def _interaction_local_range(
-    snapshots: Sequence[ContinuableSnapshot],
+    checkpoints: Sequence[AgentRunCheckpoint],
     target_transcript_message_count: int,
     *,
     fallback_local_count: int = 0,
@@ -1802,8 +1802,8 @@ def _interaction_local_range(
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     local_count = (
-        len(snapshots[-1].messages)
-        if snapshots
+        len(checkpoints[-1].messages)
+        if checkpoints
         else fallback_local_count
     )
     local_base = target_transcript_message_count - local_count
@@ -1818,9 +1818,9 @@ __all__ = [
     "InMemoryStepArchive",
     "LockOrderError",
     "PreparedExecutionProjection",
-    "PreparedStepSnapshot",
-    "PreparedStepSnapshotBatch",
-    "RuntimeStepStore",
-    "StagingStepStore",
+    "PreparedAgentRunCheckpoint",
+    "PreparedAgentRunCheckpointBatch",
+    "RuntimeAgentRunStore",
+    "StagingAgentRunStore",
     "StateStepArchive",
 ]

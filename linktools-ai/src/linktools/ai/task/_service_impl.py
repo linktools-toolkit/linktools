@@ -39,7 +39,7 @@ from ._graph import (
     TaskGraphLaunch,
     TaskGraphRequest,
     TaskGraphResult,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskInputSupplyRequest,
     TaskNode,
@@ -83,7 +83,7 @@ class _LocalTaskWaiter(Protocol):
 
 
 class _TaskGraphPreflight(Protocol):
-    def validate_request(self, graph: TaskGraph) -> None: ...
+    def admit_request(self, graph: TaskGraph) -> TaskGraph: ...
 
     async def capture_admission(
         self,
@@ -96,18 +96,18 @@ class _TaskGraphPreflight(Protocol):
         admission: TaskGraphAdmission,
     ) -> None: ...
 
-    def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None: ...
+    def validate_recovery(self, state: TaskGraphState) -> None: ...
 
     async def prepare_graph(
         self,
-        snapshot: TaskGraphSnapshot,
+        state: TaskGraphState,
         *,
         principal: Principal,
     ) -> None: ...
 
     async def release_graph_dependencies(
         self,
-        snapshot: TaskGraphSnapshot,
+        state: TaskGraphState,
         *,
         tenant_id: str,
     ) -> None: ...
@@ -136,12 +136,12 @@ class _TaskRepository(Protocol):
         tenant_id: str,
     ) -> TaskGraphView | None: ...
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot | None: ...
+    ) -> TaskGraphState | None: ...
 
     async def list_events(
         self,
@@ -159,12 +159,12 @@ class _TaskRepository(Protocol):
         tenant_id: str,
     ) -> TaskEvent | None: ...
 
-    async def scheduler_snapshot(
+    async def scheduler_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot: ...
+    ) -> TaskGraphState: ...
 
     async def recover_graph(
         self,
@@ -335,13 +335,20 @@ class DefaultTaskGraphService(TaskGraphService):
             AuthorizationAction.TASK_RUN,
             ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id),
         )
+        graph = request.graph
         if self._preflight is not None:
-            self._preflight.validate_request(request.graph)
+            graph = self._preflight.admit_request(graph)
+            request = TaskGraphRequest(
+                graph,
+                request.principal,
+                request.idempotency_key,
+                request.limits,
+                request.correlation,
+            )
         admission = TaskGraphAdmission.from_request(request)
         existing = await self._persistence.admissions.get(
             graph_id, tenant_id=tenant_id,
         )
-        graph = request.graph
         if self._preflight is not None and existing is None:
             graph = await self._preflight.capture_admission(
                 admission,
@@ -356,16 +363,16 @@ class DefaultTaskGraphService(TaskGraphService):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if self._preflight is not None:
             await self._preflight.load_admission(durable_admission)
-        snapshot = await self._persistence.tasks.scheduler_snapshot(
+        state = await self._persistence.tasks.scheduler_state(
             graph_id,
             tenant_id=tenant_id,
         )
         if _terminal(view.status):
-            await self._observe_metric_history(snapshot, tenant_id=tenant_id)
+            await self._observe_metric_history(state, tenant_id=tenant_id)
         else:
             if self._preflight is not None:
                 await self._preflight.prepare_graph(
-                    snapshot,
+                    state,
                     principal=request.principal,
                 )
             if view.status is not TaskStatus.RECOVERY_REQUIRED:
@@ -431,27 +438,27 @@ class DefaultTaskGraphService(TaskGraphService):
                 )
                 if admission is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                snapshot = await self._persistence.tasks.scheduler_snapshot(
+                state = await self._persistence.tasks.scheduler_state(
                     launch.graph_id,
                     tenant_id=launch.principal.tenant_id,
                 )
                 if self._preflight is not None:
                     await self._preflight.load_admission(admission)
-                    self._preflight.validate_recovery(snapshot)
+                    self._preflight.validate_recovery(state)
                 view = TaskGraphView(
-                    snapshot.graph_id,
-                    snapshot.status,
-                    snapshot.nodes,
+                    state.graph_id,
+                    state.status,
+                    state.nodes,
                 )
                 if _terminal(view.status):
                     await self._observe_metric_history(
-                        snapshot,
+                        state,
                         tenant_id=launch.principal.tenant_id,
                     )
                     continue
                 if self._preflight is not None:
                     await self._preflight.prepare_graph(
-                        snapshot,
+                        state,
                         principal=launch.principal,
                     )
                 if view.status is TaskStatus.RECOVERY_REQUIRED:
@@ -565,15 +572,15 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             if admission is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            snapshot = await self._persistence.tasks.scheduler_snapshot(
+            state = await self._persistence.tasks.scheduler_state(
                 graph_id,
                 tenant_id=tenant_id,
             )
             if self._preflight is not None:
                 await self._preflight.load_admission(admission)
-                self._preflight.validate_recovery(snapshot)
+                self._preflight.validate_recovery(state)
                 await self._preflight.prepare_graph(
-                    snapshot,
+                    state,
                     principal=request.principal,
                 )
             await self._arm_graph(admission.launch())
@@ -612,18 +619,18 @@ class DefaultTaskGraphService(TaskGraphService):
             AuthorizationAction.TASK_RUN,
             header,
         )
-        snapshot = await self._persistence.tasks.snapshot_graph(
+        graph_state = await self._persistence.tasks.graph_state(
             graph_id,
             tenant_id=tenant_id,
         )
-        if snapshot is None:
+        if graph_state is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         state = next(
-            (item for item in snapshot.node_states if item.node_id == node_id),
+            (item for item in graph_state.node_states if item.node_id == node_id),
             None,
         )
         node = next(
-            (item for item in snapshot.nodes if item.node_id == node_id),
+            (item for item in graph_state.nodes if item.node_id == node_id),
             None,
         )
         if state is None or node is None:
@@ -703,7 +710,7 @@ class DefaultTaskGraphService(TaskGraphService):
         if operation.status is not OperationStatus.RUNNING:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        latest = await self._persistence.tasks.snapshot_graph(
+        latest = await self._persistence.tasks.graph_state(
             graph_id,
             tenant_id=tenant_id,
         )
@@ -780,7 +787,7 @@ class DefaultTaskGraphService(TaskGraphService):
         }:
             if self._preflight is not None:
                 self._preflight.validate_recovery(
-                    await self._persistence.tasks.scheduler_snapshot(
+                    await self._persistence.tasks.scheduler_state(
                         graph_id,
                         tenant_id=tenant_id,
                     )
@@ -813,18 +820,18 @@ class DefaultTaskGraphService(TaskGraphService):
             AuthorizationAction.TASK_RUN,
             header,
         )
-        snapshot = await self._persistence.tasks.snapshot_graph(
+        graph_state = await self._persistence.tasks.graph_state(
             graph_id,
             tenant_id=tenant_id,
         )
-        if snapshot is None:
+        if graph_state is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         state = next(
-            (item for item in snapshot.node_states if item.node_id == node_id),
+            (item for item in graph_state.node_states if item.node_id == node_id),
             None,
         )
         node = next(
-            (item for item in snapshot.nodes if item.node_id == node_id),
+            (item for item in graph_state.nodes if item.node_id == node_id),
             None,
         )
         if state is None or node is None:
@@ -910,7 +917,7 @@ class DefaultTaskGraphService(TaskGraphService):
         if operation.status is not OperationStatus.RUNNING:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        latest = await self._persistence.tasks.snapshot_graph(
+        latest = await self._persistence.tasks.graph_state(
             graph_id,
             tenant_id=tenant_id,
         )
@@ -955,7 +962,7 @@ class DefaultTaskGraphService(TaskGraphService):
         }:
             if self._preflight is not None:
                 self._preflight.validate_recovery(
-                    await self._persistence.tasks.scheduler_snapshot(
+                    await self._persistence.tasks.scheduler_state(
                         graph_id,
                         tenant_id=tenant_id,
                     )
@@ -1108,12 +1115,12 @@ class DefaultTaskGraphService(TaskGraphService):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return view
 
-    async def snapshot(
+    async def state(
         self,
         graph_id: str,
         *,
         principal: Principal,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         header = await self._persistence.tasks.get_header(
             graph_id,
             tenant_id=principal.tenant_id,
@@ -1125,13 +1132,13 @@ class DefaultTaskGraphService(TaskGraphService):
             AuthorizationAction.TASK_READ,
             header,
         )
-        snapshot = await self._persistence.tasks.snapshot_graph(
+        state = await self._persistence.tasks.graph_state(
             graph_id,
             tenant_id=principal.tenant_id,
         )
-        if snapshot is None:
+        if state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return snapshot
+        return state
 
     async def list_events(
         self,
@@ -1343,14 +1350,14 @@ class DefaultTaskGraphService(TaskGraphService):
             if latest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if latest.status is TaskStatus.WAITING:
-                initial_snapshot = await self._persistence.tasks.snapshot_graph(
+                initial_state = await self._persistence.tasks.graph_state(
                     graph_id,
                     tenant_id=tenant_id,
                 )
-                if initial_snapshot is None:
+                if initial_state is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if _stable_waiting_snapshot(initial_snapshot):
-                    return _snapshot_result(initial_snapshot)
+                if _stable_waiting_state(initial_state):
+                    return _state_result(initial_state)
             if not (
                 latest.node_id is None
                 and _observation_boundary(latest.status)
@@ -1364,15 +1371,15 @@ class DefaultTaskGraphService(TaskGraphService):
                         break
                 else:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            snapshot = await self._persistence.tasks.snapshot_graph(
+            state = await self._persistence.tasks.graph_state(
                 graph_id,
                 tenant_id=tenant_id,
             )
-            if snapshot is None or not _observation_boundary(snapshot.status):
+            if state is None or not _observation_boundary(state.status):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if _terminal(snapshot.status):
-                await self._observe_metric_history(snapshot, tenant_id=tenant_id)
-            return _snapshot_result(snapshot)
+            if _terminal(state.status):
+                await self._observe_metric_history(state, tenant_id=tenant_id)
+            return _state_result(state)
 
         try:
             if timeout_seconds is None:
@@ -1409,14 +1416,14 @@ class DefaultTaskGraphService(TaskGraphService):
             tenant_id=tenant_id,
             execution_id=execution_id,
         )
-        snapshot = await self._persistence.tasks.snapshot_graph(
+        graph_state = await self._persistence.tasks.graph_state(
             graph_id,
             tenant_id=tenant_id,
         )
-        if snapshot is None:
+        if graph_state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         state = next(
-            (item for item in snapshot.node_states if item.node_id == node_id),
+            (item for item in graph_state.node_states if item.node_id == node_id),
             None,
         )
         if state is None or state.execution_id != execution_id:
@@ -1932,21 +1939,21 @@ class DefaultTaskGraphService(TaskGraphService):
 
     async def _observe_metric_history(
         self,
-        view: TaskGraphView | TaskGraphSnapshot,
+        view: TaskGraphView | TaskGraphState,
         *,
         tenant_id: str,
     ) -> None:
         if _terminal(view.status) and self._preflight is not None:
-            snapshot = (
+            state = (
                 view
-                if isinstance(view, TaskGraphSnapshot)
-                else await self._persistence.tasks.scheduler_snapshot(
+                if isinstance(view, TaskGraphState)
+                else await self._persistence.tasks.scheduler_state(
                     view.graph_id,
                     tenant_id=tenant_id,
                 )
             )
             await self._preflight.release_graph_dependencies(
-                snapshot,
+                state,
                 tenant_id=tenant_id,
             )
         if self._metric_projector is not None:
@@ -2107,10 +2114,10 @@ def _observation_boundary(status: TaskStatus) -> bool:
     )
 
 
-def _stable_waiting_snapshot(snapshot: TaskGraphSnapshot) -> bool:
+def _stable_waiting_state(state: TaskGraphState) -> bool:
     unfinished = tuple(
         state
-        for state in snapshot.node_states
+        for state in state.node_states
         if state.status not in {
             TaskStatus.SUCCEEDED,
             TaskStatus.FAILED,
@@ -2126,8 +2133,8 @@ def _stable_waiting_snapshot(snapshot: TaskGraphSnapshot) -> bool:
     )
 
 
-def _snapshot_result(snapshot: TaskGraphSnapshot) -> TaskGraphResult:
-    return _node_result(snapshot.graph_id, snapshot.status, snapshot.node_states)
+def _state_result(state: TaskGraphState) -> TaskGraphResult:
+    return _node_result(state.graph_id, state.status, state.node_states)
 
 
 def _node_result(

@@ -12,21 +12,40 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Runtime dependencies must remain acyclic; annotation-only back-references belong under `TYPE_CHECKING`.
 - Keep lower-level infrastructure independent from higher-level composition and SDK semantics. Do not introduce duplicate abstractions that compete for the same ownership.
 - Keep vendor-specific behavior out of vendor-neutral core abstractions.
-- Architecture and release gates encode long-lived invariants only. Do not freeze current package names, module depth, class names, or layout as policy.
+- Keep authoring adapters separate from durable codecs. Fill defaults before
+  canonical decoding; explicit values always win, and persistence stores
+  resolved execution meaning.
+- Capture a CapabilityGroup declaration once and reuse it for host
+  inspection and Runtime composition. Bind cross-source reads to the captured
+  revision or an immutable reference.
+- Resource immutability belongs to AssetStore/AssetVersionRef. Skill and MCP contracts may carry Asset version references plus their own execution semantics, but must not define a separate frozen lifecycle or duplicate Asset ownership.
+- AssetKey.id is an opaque logical identity. Only the owning path adapter or capability contract may interpret it hierarchically; Workspace paths and host filesystem paths must not become Asset identity.
+- Workspace tool/input paths are canonical Workspace-relative POSIX strings. Workspace.root plus host and sandbox guest paths are physical deployment details and must not become logical path or durable semantic identity.
+- Keep visibility, execution authorization, and OS isolation as separate
+  boundaries. A successful close for a restricted child process requires
+  proof that its owned process tree is quiescent.
+- Architecture and release gates encode long-lived invariants only. Do not encode current package names, module depth, class names, or layout as policy.
 - Build/release tooling must not become a second owner of Runtime semantic truth.
 
 ### Durable contracts and identity
 
+- Named behavior uses explicit `id + revision`; reserve `version` for wire or schema format versions.
+- `Spec` is an authoring declaration, `Compiled` is Runtime-resolved behavior, `Contract` is durable execution semantics, `Capture` is an immutable view of mutable sources, `Checkpoint` is a recoverable execution point, and `Snapshot` is reserved for portable point-in-time state.
+- Storage layer identity, resource ownership, tenant identity, and caller identity use distinct names. Do not reuse `source`, `owner`, or `state` for unrelated layers.
+- Authoring-only values must not remain as a second source of truth after a durable contract has been produced.
+
 - Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation. A local SQLite state backend is the explicit exception and may initialize its own local schema when that state store is created or opened.
-- Durable wire formats and semantic identities are explicit LinkTools contracts. Honor published or explicitly committed compatibility obligations. Without such an obligation, remove obsolete pre-release readers, aliases, defaults and migrations while updating current writers, readers and verification together. Do not prebuild compatibility paths for hypothetical versions.
-- Define each semantic or idempotency digest from one explicit minimal projection owned by the contract. Include only inputs needed to distinguish execution meaning, accepted request behavior or safe reuse/recovery. Non-semantic additions and default fields must not change that identity; whole-object reflection, incidental wire payloads and dependency serialization must not define it.
-- Separate semantic identity from byte integrity and storage addressing. Physical locators, credentials, transport tuning and pure display/diagnostic data do not enter semantic identity. Complete stored bytes still require complete integrity checks. Preserve logical scope, effect policy, model-visible instructions/schema and provenance when the specific contract needs them.
-- Use stable protocol discriminators, not Python class/module names or dependency/build versions. Normalize only equivalences established by the owning contract; preserve ordered inputs and effective business parameters. Identity-affecting data must remain stable after its contract is frozen, and identity comparisons must use the same projection as the digest.
+- Durable wire formats and named behavior identities are explicit LinkTools contracts. Honor published or explicitly committed compatibility obligations. Without such an obligation, remove obsolete pre-release readers, aliases, defaults and migrations while updating current writers, readers and verification together. Do not prebuild compatibility paths for hypothetical versions.
+- Named behavior identity is the explicit `(kind, id, revision)` reference. Do not hash it or maintain a second identity representation. Agent, Tool, Skill, MCP, generic Capability, Task, TaskExpander, and named Metric definitions keep full contracts for restore and validation; any behavior change under the same named contract requires an explicit revision bump.
+- Digests are reserved for anonymous/composite values, byte integrity, and request/idempotency contracts. Define each digest from one explicit minimal projection owned by that contract. Non-contract additions and default fields must not change it; whole-object reflection, incidental wire payloads and dependency serialization must not define it.
+- Separate named identity from contract validation, byte integrity, and storage addressing. Physical locators, credentials, transport tuning and pure display/diagnostic data do not enter named identity. Complete stored bytes still require complete integrity checks. Preserve logical scope, effect policy, model-visible instructions/schema and provenance when the specific contract needs them.
+- Use stable protocol discriminators, not Python class/module names or dependency/build versions. Normalize only equivalences established by the owning contract; preserve ordered inputs and effective business parameters. Named identity comparisons use the explicit reference directly; digest comparisons use the owning digest projection.
 - Every current writer output must be accepted by its matching reader. Define omitted optional fields in that wire contract, not through changing runtime defaults. Reject corrupt or unsupported durable data with typed errors; never guess, silently repair or reinterpret unknown execution semantics. Verify original stored bytes before adapting decoded values.
 
 ### Persistence and concurrency
 
 - A semantic fact must have one durable owner. Any persisted duplicate used as an index, projection, or cache must be explicitly derived and must not become an independent source of truth or define conflicting recovery semantics.
+- Asset history belongs to AssetStore. Durable Runtime bindings may persist Asset version references and resource/content digests, but must not copy Asset resource bytes into Runtime ObjectStore merely to pin execution dependencies.
 - Caller cancellation does not determine durable truth. Resolve commit/readback state before reporting an unknown outcome.
 - Filesystem coordination uses `filelock`. Database concurrency must avoid pessimistic locking.
 
@@ -54,7 +73,7 @@ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ### Verification scope
 
 - Simplifying or consolidating tests must preserve every independent accepted contract and regression obligation. Remove duplicate examples, not distinct backend, concurrency, recovery, external-effect, or failure semantics.
-- Semantic identity changes require paired verification: non-semantic changes must preserve identity, semantic changes must alter it, and current durable writers must round-trip through current readers or current golden fixtures.
+- Named behavior changes require paired verification: unchanged revisions preserve identity, behavior changes require a revision bump, same-revision contract drift is rejected where current definitions are required, and current durable writers round-trip through current readers or current golden fixtures.
 
 ## Guidance
 

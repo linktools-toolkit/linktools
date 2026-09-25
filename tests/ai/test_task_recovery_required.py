@@ -5,7 +5,7 @@ import pytest
 
 from linktools.ai.core import Principal, TaskStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
@@ -34,7 +34,7 @@ def _recovery_digest(code: ErrorCode) -> str:
 
 @pytest.mark.asyncio
 async def test_task_recovery_required_is_durable_and_not_dependency_failure() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-recovery", tenant_id="tenant")
     try:
         request = _request("graph")
@@ -62,7 +62,7 @@ async def test_task_recovery_required_is_durable_and_not_dependency_failure() ->
             graph_id="graph",
             node_id="root",
         )
-        snapshot = await state.task.tasks.snapshot_graph(
+        graph_state = await state.task.tasks.graph_state(
             "graph",
             tenant_id="tenant",
         )
@@ -76,9 +76,9 @@ async def test_task_recovery_required_is_durable_and_not_dependency_failure() ->
         assert recovered.lease_expires_at is None
         assert recovered.fence == lease.fence
         assert recovered.execution_id == "execution"
-        assert snapshot is not None
-        assert snapshot.status is TaskStatus.RECOVERY_REQUIRED
-        by_id = {node.node_id: node for node in snapshot.node_states}
+        assert graph_state is not None
+        assert graph_state.status is TaskStatus.RECOVERY_REQUIRED
+        by_id = {node.node_id: node for node in graph_state.node_states}
         assert by_id["root"].status is TaskStatus.RECOVERY_REQUIRED
         assert by_id["dependent"].status is TaskStatus.PENDING
         assert page.items == ()
@@ -98,7 +98,7 @@ async def test_task_recovery_required_is_durable_and_not_dependency_failure() ->
 
 @pytest.mark.asyncio
 async def test_task_recovery_preserves_execution_reference_for_waiting_attach() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-recovery", tenant_id="tenant")
     try:
         request = _request("recover")
@@ -132,13 +132,13 @@ async def test_task_recovery_preserves_execution_reference_for_waiting_attach() 
             "recover",
             tenant_id="tenant",
         )
-        snapshot = await state.task.tasks.snapshot_graph(
+        graph_state = await state.task.tasks.graph_state(
             "recover",
             tenant_id="tenant",
         )
         assert view.status is TaskStatus.RUNNING
-        assert snapshot is not None
-        root = {node.node_id: node for node in snapshot.node_states}["root"]
+        assert graph_state is not None
+        root = {node.node_id: node for node in graph_state.node_states}["root"]
         assert root.status is TaskStatus.WAITING
         assert root.fence == first.fence
         assert root.execution_id == "execution"
@@ -151,7 +151,7 @@ async def test_task_recovery_preserves_execution_reference_for_waiting_attach() 
 
 @pytest.mark.asyncio
 async def test_cancel_does_not_overwrite_recovery_required() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-recovery", tenant_id="tenant")
     try:
         request = _request("cancel")
@@ -178,12 +178,12 @@ async def test_cancel_does_not_overwrite_recovery_required() -> None:
             tenant_id="tenant",
         )
         assert cancelled.status is TaskStatus.RECOVERY_REQUIRED
-        snapshot = await state.task.tasks.snapshot_graph(
+        graph_state = await state.task.tasks.graph_state(
             "cancel",
             tenant_id="tenant",
         )
-        assert snapshot is not None
-        by_id = {node.node_id: node for node in snapshot.node_states}
+        assert graph_state is not None
+        by_id = {node.node_id: node for node in graph_state.node_states}
         assert by_id["root"].status is TaskStatus.RECOVERY_REQUIRED
         assert by_id["dependent"].status is TaskStatus.CANCELLED
 
@@ -193,7 +193,7 @@ async def test_cancel_does_not_overwrite_recovery_required() -> None:
             cancel_requested=True,
         )
         assert final.status is TaskStatus.CANCELLED
-        terminal = await state.task.tasks.snapshot_graph(
+        terminal = await state.task.tasks.graph_state(
             "cancel",
             tenant_id="tenant",
         )

@@ -12,13 +12,13 @@ import pytest
 from filelock import FileLock
 import linktools.ai.storage._files as files_module
 import linktools.ai.storage._lock as lock_module
-from linktools.ai.runtime.state._steps import _RunHistoryLock
+from linktools.ai.runtime.state._steps import _AgentRunHistoryLock
 from linktools.ai.storage import FilesystemLeaseCoordinator, KeyedAsyncLock, Lease
 
 
 @pytest.mark.asyncio
 async def test_cancelled_run_history_waiter_does_not_clear_holder_state() -> None:
-    history_lock = _RunHistoryLock()
+    history_lock = _AgentRunHistoryLock()
     holder_ready = asyncio.Event()
     waiter_started = asyncio.Event()
     waiter_cancelled = asyncio.Event()

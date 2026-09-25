@@ -3,7 +3,7 @@
 """Shared Task test admission helpers."""
 
 from linktools.ai.core import Principal
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
@@ -14,7 +14,7 @@ from linktools.ai.task import (
 
 
 async def admit_graph(
-    state: RuntimeState,
+    state: RuntimeStorage,
     graph: TaskGraph,
     *,
     tenant_id: str = "tenant",

@@ -6,7 +6,7 @@ from inspect import signature
 import pytest
 from pydantic_ai.messages import BinaryContent
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import ExecutionLineageKind, Principal
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import _request_digest
@@ -16,10 +16,10 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 
-def _binding() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="model"),
-        base_model={"route_id": "model", "model_identity": "test:model"},
+        model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -44,8 +44,8 @@ def _execution_request_digest(request: ExecutionRequest) -> str:
         request,
         _binding().binding_digest,
         session_id=None,
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         parent_execution_id=None,
         root_execution_id=None,
         parent_invocation_id=None,

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpoint,
     RecoveryCheckpointState,
@@ -25,7 +25,7 @@ def _checkpoint(
     active = state is RecoveryCheckpointState.ACTIVE
     return RecoveryCheckpoint(
         execution_id=execution_id,
-        step_run_id="run-1" if active else None,
+        agent_run_id="run-1" if active else None,
         state=state,
         revision=revision,
         created_at=now,
@@ -36,7 +36,7 @@ def _checkpoint(
 
 @pytest.mark.asyncio
 async def test_recoverable_checkpoint_is_visible_from_first_write() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="recovery-integrity", tenant_id="tenant")
     try:
         repository = state.recovery.checkpoints
@@ -55,7 +55,7 @@ async def test_recoverable_checkpoint_is_visible_from_first_write() -> None:
 
 @pytest.mark.asyncio
 async def test_completed_transition_removes_recoverable_checkpoint() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="recovery-complete", tenant_id="tenant")
     try:
         repository = state.recovery.checkpoints
@@ -69,7 +69,7 @@ async def test_completed_transition_removes_recoverable_checkpoint() -> None:
             next_record=replace(
                 created,
                 state=RecoveryCheckpointState.COMPLETED,
-                step_run_id=None,
+                agent_run_id=None,
                 revision=created.revision + 1,
                 updated_at=datetime.now(timezone.utc),
             ),
@@ -86,7 +86,7 @@ async def test_completed_transition_removes_recoverable_checkpoint() -> None:
 
 @pytest.mark.asyncio
 async def test_missing_checkpoint_cannot_be_updated_as_recoverable() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="recovery-missing", tenant_id="tenant")
     try:
         with pytest.raises(AIError) as raised:

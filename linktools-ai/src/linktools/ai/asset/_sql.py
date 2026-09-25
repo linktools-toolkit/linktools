@@ -62,7 +62,7 @@ _ASSET_INFO_VERSION = 1
 _ASSET_INFO_FIELDS = frozenset(
     {
         "kind", "id", "revision", "store_revision", "etag", "size", "status",
-        "root_digest", "modified_at", "metadata", "content",
+        "modified_at", "metadata", "content",
     }
 )
 
@@ -215,11 +215,7 @@ class SqlAssetBackend:
         dialect_for_name(engine.dialect.name)
         self._namespace = namespace
         self._namespace_digest = hashlib.sha256(namespace.encode("utf-8")).digest()
-        self._root = AssetRoot(
-            "sql",
-            namespace,
-            self._namespace_digest.hex(),
-        )
+        self._root = AssetRoot("sql", namespace)
         self._context = create_sql_storage_context(engine)
         self._metadata = build_asset_sql_metadata()
         self._object_store = object_store or SqlObjectStore.from_context(self._context)
@@ -260,7 +256,7 @@ class SqlAssetBackend:
 
         await self._context.run_mutation(initialize_head)
         self._ready = True
-        _logger.info("SQL Asset backend initialized: namespace=%s", self._root.digest[:16])
+        _logger.info("SQL Asset backend initialized")
 
     async def close(self) -> None:
         self._ready = False
@@ -779,7 +775,7 @@ class SqlAssetBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if head_revision > 0 and (not store_revisions or max(store_revisions) != head_revision):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _logger.info("SQL Asset integrity validated: namespace=%s", self._root.digest[:16])
+        _logger.info("SQL Asset integrity validated")
 
     def _audit_info(self, row: Mapping[str, object], head: int) -> AssetInfo:
         try:
@@ -787,8 +783,6 @@ class SqlAssetBackend:
             if str(row["key_digest"]) != _asset_key_digest(self._namespace_digest, info.key).hex():
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if int(row["entry_revision"]) != info.revision.value:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if info.root_digest != self._root.digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             store_revision = int(info.store_revision.value)
             if store_revision < 1 or store_revision > head:
@@ -821,7 +815,6 @@ def _info_data(info: AssetInfo) -> dict[str, JsonValue]:
             "etag": info.etag,
             "size": info.size,
             "status": info.status.value,
-            "root_digest": info.root_digest,
             "modified_at": info.modified_at.isoformat(),
             "metadata": dict(info.metadata),
             "content": None if info.content is None else info.content.to_json(),
@@ -882,7 +875,6 @@ def _info_from_data(data: Mapping[str, object]) -> AssetInfo:
             _asset_text(value["etag"]),
             _asset_int(value["size"], minimum=0),
             StorageEntryStatus(_asset_text(value["status"])),
-            _asset_text(value["root_digest"]),
             _asset_datetime(value["modified_at"]),
             dict(metadata),
             None if content is None else StoredPayload.from_json(content),
@@ -917,7 +909,6 @@ def _next_info(
         hashlib.sha256(value).hexdigest(),
         len(value),
         status,
-        root.digest,
         datetime.now(timezone.utc),
         change.metadata,
     )

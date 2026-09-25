@@ -23,6 +23,21 @@ from linktools.ai.workspace import (
 pytestmark = pytest.mark.asyncio
 
 
+async def test_canonicalize_path_does_not_apply_read_authorization(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "allowed").mkdir()
+    (tmp_path / "allowed" / "visible.py").write_text("ok", encoding="utf-8")
+    session = await LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(("allowed/*.py",))
+    ).open(root=tmp_path)
+    try:
+        assert await session.canonicalize_path("allowed") == "allowed"
+        assert "visible.py" in await session.list_directory("allowed")
+    finally:
+        await session.close()
+
+
 async def test_file_info_does_not_authorize_a_file_as_a_directory(tmp_path: Path) -> None:
     (tmp_path / "secret").write_text("private contents", encoding="utf-8")
     policy = ReadOnlySandboxPolicy(("secret/allowed.txt",))
@@ -47,9 +62,7 @@ async def test_read_only_policy_hides_unauthorized_resource_root(
         resources=(SandboxResource("resource", resource),),
     )
     try:
-        with pytest.raises(AIError) as raised:
-            session.resource_path("resource")
-        assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert session.resource_path("resource") is None
     finally:
         await session.close()
 
@@ -70,6 +83,24 @@ async def test_read_only_policy_exposes_authorized_resource_root(
     )
     try:
         assert session.resource_path("resource") == str(resource.resolve())
+    finally:
+        await session.close()
+
+
+async def test_local_sandbox_keeps_non_native_resource_virtual(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = tmp_path / "run.py"
+    source.write_text("print('ready')\n", encoding="utf-8")
+
+    session = await LocalSandbox().open(
+        root=workspace,
+        resources=(SandboxResource("skill", files={"script.py": source}),),
+    )
+    try:
+        assert session.resource_path("skill") is None
     finally:
         await session.close()
 

@@ -182,7 +182,7 @@ def _encode_message(message: ModelMessage) -> dict[str, JsonValue]:
             "timestamp": _encode_datetime(message.timestamp),
             "instructions": message.instructions,
             "run_id": message.run_id,
-            "conversation_id": message.conversation_id,
+            "agent_conversation_id": message.conversation_id,
             "metadata": _encode_optional_mapping(message.metadata),
             "state": message.state,
         }
@@ -200,7 +200,7 @@ def _encode_message(message: ModelMessage) -> dict[str, JsonValue]:
             "provider_response_id": message.provider_response_id,
             "finish_reason": message.finish_reason,
             "run_id": message.run_id,
-            "conversation_id": message.conversation_id,
+            "agent_conversation_id": message.conversation_id,
             "metadata": _encode_optional_mapping(message.metadata),
             "state": message.state,
         }
@@ -226,7 +226,7 @@ def _decode_message(value: object) -> ModelMessage:
                 "timestamp",
                 "instructions",
                 "run_id",
-                "conversation_id",
+                "agent_conversation_id",
                 "metadata",
                 "state",
             },
@@ -242,7 +242,7 @@ def _decode_message(value: object) -> ModelMessage:
             timestamp=_decode_optional_datetime(value["timestamp"]),
             instructions=_optional_string(value["instructions"]),
             run_id=_optional_string(value["run_id"]),
-            conversation_id=_optional_string(value["conversation_id"]),
+            conversation_id=_optional_string(value["agent_conversation_id"]),
             metadata=_decode_optional_mapping(value["metadata"]),
             state=cast(object, state),
         )
@@ -262,7 +262,7 @@ def _decode_message(value: object) -> ModelMessage:
                 "provider_response_id",
                 "finish_reason",
                 "run_id",
-                "conversation_id",
+                "agent_conversation_id",
                 "metadata",
                 "state",
             },
@@ -290,7 +290,7 @@ def _decode_message(value: object) -> ModelMessage:
             provider_response_id=_optional_string(value["provider_response_id"]),
             finish_reason=cast(object, finish_reason),
             run_id=_optional_string(value["run_id"]),
-            conversation_id=_optional_string(value["conversation_id"]),
+            conversation_id=_optional_string(value["agent_conversation_id"]),
             metadata=_decode_optional_mapping(value["metadata"]),
             state=cast(object, state),
         )

@@ -17,7 +17,7 @@ from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
@@ -30,8 +30,7 @@ class _CompositionModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "test",
     }
@@ -44,7 +43,7 @@ class _CompositionModelBinding:
 
 
 class _CompositionModels:
-    def snapshot(self) -> "_CompositionModels":
+    def capture(self) -> "_CompositionModels":
         return self
 
     def resolve(self, route_id: str) -> _CompositionModelBinding:
@@ -60,7 +59,7 @@ class _CompositionModels:
     ) -> _CompositionModelBinding:
         if (
             route_id not in {None, "default"}
-            or dict(payload) != _CompositionModelBinding.semantic_payload
+            or dict(payload) != _CompositionModelBinding.contract
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _CompositionModelBinding()
@@ -87,15 +86,15 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     tmp_path: Path,
 ) -> None:
     application = CapabilityGroup[None]("application")
-    application.tool(_business_tool, name="business", effect="replay_safe")
-    application.capability(_FailingCapability())
+    application.tool(_business_tool, name="business", effect_policy="replay_safe")
+    application.runtime_capability(_FailingCapability())
     application.agent(
         "default",
         model="default",
         allow_tools=("business", "read_file"),
         allow_skills=(),
         allow_subagents=(),
-        allow_capabilities=("application.failing-capability",),
+        allow_runtime_capabilities=("application.failing-capability",),
         tool_retries=0,
         output_retries=0,
     )
@@ -108,13 +107,13 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
             tool_permissions=WorkspaceToolPermissionPolicy(default="deny")
         ),
     )
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     started = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     async with Runtime.open(
         "default",
         models=_CompositionModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
         metrics=metrics,
     ) as runtime:

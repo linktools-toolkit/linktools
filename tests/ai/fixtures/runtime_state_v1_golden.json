@@ -42,7 +42,7 @@
     "resource_ref",
     "result_record",
     "session_record",
-    "stored_step_snapshot",
+    "stored_agent_run_checkpoint",
     "object_ref",
     "stored_payload",
     "history_quality",
@@ -51,7 +51,7 @@
     "loaded_model_context",
     "runtime_payload_ref",
     "stored_user_input",
-    "task_binding_snapshot",
+    "task_binding_contract",
     "transcript_chunk",
     "transcript_head",
     "transcript_message_ref",
@@ -74,7 +74,7 @@
     "task_terminal",
     "tool_operation",
     "usage_metrics",
-    "run_record",
+    "agent_run_record",
     "step_event"
   ],
   "enum_wire_type_ids": [
@@ -111,7 +111,7 @@
         "payload": {
           "$dataclass": "conversation_cursor",
           "fields": {
-            "step_run_id": "run",
+            "agent_run_id": "run",
             "history_id": null,
             "message_count": 0
           }

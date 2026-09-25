@@ -9,7 +9,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
 
@@ -31,12 +31,12 @@ from ..storage import (
     StorageOverlay,
     StorageResetResult,
     StorageRevision,
-    StorageOwnedInfo,
+    StorageLocatedInfo,
     StorageWriteState,
     VersionSummary,
 )
 from ..storage import ObjectRef, ObjectStore, read_object
-from ._domain import AssetInfo, AssetKey
+from ._domain import AssetBackend, AssetInfo, AssetKey, AssetVersionRef
 
 _logger = environ.get_logger("ai.asset.store")
 _SNAPSHOT_VERSION = 1
@@ -47,6 +47,37 @@ class _LocalPathAssetBackend(Protocol):
     def local_path(self, key: AssetKey) -> Path: ...
 
 
+@runtime_checkable
+class AssetStoreReader(Protocol):
+    """Read-only AssetStore operations used by declaration captures."""
+
+    async def current_revision(self) -> StorageRevision: ...
+
+    async def get(self, key: AssetKey) -> "bytes | None": ...
+
+    async def get_many(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[bytes | None, ...]": ...
+
+    async def local_paths(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[Path | None, ...]": ...
+
+    async def capture_metadata(self) -> "tuple[AssetInfo, ...]": ...
+
+    async def resolve_versions(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[AssetVersionRef, ...]": ...
+
+    async def read_versions(
+        self,
+        refs: Sequence[AssetVersionRef],
+    ) -> "tuple[bytes, ...]": ...
+
+
 class AssetCacheAdapter:
     """Cache raw Asset file bytes using immutable metadata."""
 
@@ -54,7 +85,6 @@ class AssetCacheAdapter:
         return ":".join(
             (
                 "asset",
-                info.root_digest,
                 key.kind,
                 key.id,
                 str(info.revision.value),
@@ -79,6 +109,10 @@ class AssetStore:
         storage: "StorageOverlay[AssetKey, bytes, AssetInfo]",
     ) -> None:
         """Create a raw Asset file store from one storage overlay."""
+        if not isinstance(storage, StorageOverlay):
+            raise TypeError("storage must be StorageOverlay")
+        if any(not isinstance(backend, AssetBackend) for backend in storage.backends):
+            raise TypeError("AssetStore backends must implement AssetBackend")
         self._storage = storage
         self._ready = False
         self._closing = False
@@ -145,7 +179,7 @@ class AssetStore:
         self,
         keys: "Sequence[AssetKey]",
     ) -> "tuple[Path | None, ...]":
-        """Return effective native file paths from one storage metadata snapshot."""
+        """Return effective native file paths from one storage metadata read."""
         self._ensure_ready()
         locations = await self._storage.locate_many(keys)
         result: list[Path | None] = []
@@ -303,8 +337,8 @@ class AssetStore:
         )
         return Page(selected, _make_cursor(revision, kind, prefix, next_key))
 
-    async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
-        """Return one stable, active metadata snapshot for a freeze operation."""
+    async def capture_metadata(self) -> "tuple[AssetInfo, ...]":
+        """Capture one stable set of active metadata for a freeze operation."""
         self._ensure_ready()
         values = await self._storage.list_info()
         return tuple(
@@ -318,26 +352,83 @@ class AssetStore:
             )
         )
 
-    async def list_info_with_owners(
+    async def resolve_versions(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[AssetVersionRef, ...]":
+        """Resolve current effective Assets to immutable version references."""
+        self._ensure_ready()
+        requested = tuple(keys)
+        locations = await self._storage.locate_many(requested)
+        result: list[AssetVersionRef] = []
+        for key, location in zip(requested, locations, strict=True):
+            if location is None or location.info.status is not StorageEntryStatus.NORMAL:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            info = location.info
+            result.append(
+                AssetVersionRef(
+                    key,
+                    location.layer,
+                    info.revision,
+                    info.etag,
+                    info.size,
+                )
+            )
+        return tuple(result)
+
+    async def read_versions(
+        self,
+        refs: Sequence[AssetVersionRef],
+    ) -> "tuple[bytes, ...]":
+        """Read referenced Asset bytes and verify their size and digest."""
+        self._ensure_ready()
+        values: list[bytes] = []
+        for ref in refs:
+            if not isinstance(ref, AssetVersionRef):
+                raise TypeError("refs must contain AssetVersionRef values")
+            if ref.layer_id == "primary":
+                backend = self._storage.primary
+            else:
+                matches = tuple(
+                    layer.backend
+                    for layer in self._storage.layers
+                    if layer.id == ref.layer_id
+                )
+                if len(matches) != 1:
+                    raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
+                backend = matches[0]
+            value = await backend.get_at_revision(
+                ref.key,
+                ref.revision,
+            )
+            if value is None:
+                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+            data = bytes(value)
+            if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.etag:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values.append(data)
+        return tuple(values)
+
+    async def list_info_with_locations(
         self,
         *,
         kind: "str | None" = None,
         prefix: "str | None" = None,
         cursor: "str | None" = None,
         limit: int = 100,
-    ) -> "Page[StorageOwnedInfo[AssetInfo]]":
-        """Page active file metadata together with its effective storage owner."""
+    ) -> "Page[StorageLocatedInfo[AssetInfo]]":
+        """Page active file metadata together with its effective storage layer."""
         self._ensure_ready()
         limit = validate_page_limit(limit)
         values = [
-            owned
-            for owned in await self._storage.list_info_with_owners()
-            if owned.info.status is StorageEntryStatus.NORMAL
-            and (kind is None or owned.info.key.kind == kind)
-            and (prefix is None or owned.info.key.id.startswith(prefix))
+            located
+            for located in await self._storage.list_info_with_locations()
+            if located.info.status is StorageEntryStatus.NORMAL
+            and (kind is None or located.info.key.kind == kind)
+            and (prefix is None or located.info.key.id.startswith(prefix))
         ]
         ordered = tuple(
-            sorted(values, key=lambda owned: (owned.info.key.kind, owned.info.key.id))
+            sorted(values, key=lambda located: (located.info.key.kind, located.info.key.id))
         )
         revision = await self._storage.current_revision()
         start = _cursor_start(cursor, revision, kind, prefix, ordered)
@@ -385,15 +476,25 @@ class AssetStore:
         selected = tuple(keys)
         if len(set(selected)) != len(selected):
             raise ValueError("asset snapshot keys must be unique")
-        infos = {info.key: info for info in await self.metadata_snapshot()}
+        infos = {info.key: info for info in await self.capture_metadata()}
+        ordered = tuple(sorted(selected, key=lambda item: (item.kind, item.id)))
+        if any(key not in infos for key in ordered):
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        refs = await self.resolve_versions(ordered)
+        if len(refs) != len(ordered):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if any(
+            not ref.matches_info(infos[key])
+            for key, ref in zip(ordered, refs, strict=True)
+        ):
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         entries: list[dict[str, JsonValue]] = []
-        for key in sorted(selected, key=lambda item: (item.kind, item.id)):
-            info = infos.get(key)
-            if info is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            value = await self.get(key)
-            if value is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        for key, ref in zip(ordered, refs, strict=True):
+            values = await self.read_versions((ref,))
+            if len(values) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value = values[0]
+            info = infos[key]
             content_key = f"v{_SNAPSHOT_VERSION}/asset-content/{info.etag}"
             await _put_snapshot_object(object_store, content_key, value)
             entries.append(_snapshot_entry(info, content_key))
@@ -427,10 +528,9 @@ class AssetStore:
         """Create a read-only AssetStore backed only by a snapshot manifest."""
         if not isinstance(ref, ObjectRef):
             raise TypeError("asset snapshot reference is invalid")
-        return cast(
-            "AssetStore",
-            _SnapshotAssetStore(ref, object_store),
-        )
+        if ref.store_id != object_store.store_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return _SnapshotAssetStore(ref, object_store)
 
     def _ensure_ready(self) -> None:
         if not self._ready:
@@ -488,7 +588,6 @@ async def _put_snapshot_object(
 def _snapshot_entry(info: AssetInfo, content_key: str) -> dict[str, JsonValue]:
     return {
         "key": {"kind": info.key.kind, "id": info.key.id},
-        "source": {"root_digest": info.root_digest},
         "entry_revision": info.revision.value,
         "store_revision": info.store_revision.value,
         "etag": info.etag,
@@ -640,7 +739,7 @@ class _SnapshotAssetStore(AssetStore):
         )
         return Page(selected, next_cursor)
 
-    async def metadata_snapshot(self) -> tuple[AssetInfo, ...]:
+    async def capture_metadata(self) -> tuple[AssetInfo, ...]:
         self._ensure_ready()
         return tuple(
             sorted(
@@ -649,14 +748,62 @@ class _SnapshotAssetStore(AssetStore):
             )
         )
 
-    async def list_info_with_owners(
+    async def local_paths(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> tuple[Path | None, ...]:
+        self._ensure_ready()
+        return tuple(None for _key in keys)
+
+    async def resolve_versions(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> tuple[AssetVersionRef, ...]:
+        self._ensure_ready()
+        result: list[AssetVersionRef] = []
+        for key in keys:
+            info = self._entries.get(key)
+            if info is None or info.status is not StorageEntryStatus.NORMAL:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            result.append(
+                AssetVersionRef(
+                    key,
+                    "snapshot",
+                    info.revision,
+                    info.etag,
+                    info.size,
+                )
+            )
+        return tuple(result)
+
+    async def read_versions(
+        self,
+        refs: Sequence[AssetVersionRef],
+    ) -> tuple[bytes, ...]:
+        self._ensure_ready()
+        values: list[bytes] = []
+        for ref in refs:
+            if not isinstance(ref, AssetVersionRef):
+                raise TypeError("refs must contain AssetVersionRef values")
+            if ref.layer_id != "snapshot":
+                raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
+            info = self._entries.get(ref.key)
+            if info is None or not ref.matches_info(info):
+                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+            value = await self.get(ref.key)
+            if value is None:
+                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+            values.append(value)
+        return tuple(values)
+
+    async def list_info_with_locations(
         self,
         *,
         kind: str | None = None,
         prefix: str | None = None,
         cursor: str | None = None,
         limit: int = 100,
-    ) -> Page[StorageOwnedInfo[AssetInfo]]:
+    ) -> Page[StorageLocatedInfo[AssetInfo]]:
         page = await self.list_info(
             kind=kind,
             prefix=prefix,
@@ -664,7 +811,7 @@ class _SnapshotAssetStore(AssetStore):
             limit=limit,
         )
         return Page(
-            tuple(StorageOwnedInfo(info, "snapshot", False) for info in page.items),
+            tuple(StorageLocatedInfo(info, "snapshot", False) for info in page.items),
             page.next_cursor,
         )
 
@@ -677,7 +824,7 @@ class _SnapshotAssetStore(AssetStore):
             key: StorageWriteState(
                 None
                 if (info := self._entries.get(key)) is None
-                else StorageOwnedInfo(info, "snapshot", False),
+                else StorageLocatedInfo(info, "snapshot", False),
                 info,
                 False,
             )
@@ -802,12 +949,10 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
     if not isinstance(raw, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     key_payload = raw.get("key")
-    source = raw.get("source")
     content = raw.get("content")
     try:
         if (
             not isinstance(key_payload, Mapping)
-            or not isinstance(source, Mapping)
             or not isinstance(content, Mapping)
         ):
             raise ValueError
@@ -821,9 +966,8 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
             etag=etag,
             size=size,
             status=StorageEntryStatus(str(raw["status"])),
-            root_digest=str(source["root_digest"]),
             modified_at=datetime.fromisoformat(str(raw["modified_at"])),
-            metadata=cast(Mapping[str, JsonValue], raw.get("metadata", {})),
+            metadata=raw.get("metadata", {}),
         )
         if (
             content.get("store_id") != "snapshot"
@@ -874,7 +1018,7 @@ def _cursor_start(
     revision: StorageRevision,
     kind: "str | None",
     prefix: "str | None",
-    values: "Sequence[AssetInfo | StorageOwnedInfo[AssetInfo]]",
+    values: "Sequence[AssetInfo | StorageLocatedInfo[AssetInfo]]",
 ) -> int:
     if cursor is None:
         return 0
@@ -913,8 +1057,8 @@ def _cursor_start(
     )
 
 
-def _info_key(value: "AssetInfo | StorageOwnedInfo[AssetInfo]") -> AssetKey:
-    return value.info.key if isinstance(value, StorageOwnedInfo) else value.key
+def _info_key(value: "AssetInfo | StorageLocatedInfo[AssetInfo]") -> AssetKey:
+    return value.info.key if isinstance(value, StorageLocatedInfo) else value.key
 
 
 __all__ = ["AssetCacheAdapter", "AssetStore"]

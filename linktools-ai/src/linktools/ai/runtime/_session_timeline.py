@@ -24,7 +24,7 @@ from ._cursor import encode_cursor as encode_runtime_cursor
 from ._input import stored_user_input_view
 from .service_api import SessionTurn, SessionTurnItem
 from .state._contracts import (
-    ConversationState,
+    ConversationRepositories,
     ExecutionRepository,
     SessionRecord,
     SessionTurnCommitRef,
@@ -41,7 +41,7 @@ class SessionTimelineTranscriptStore(Protocol):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
         start: int,
         end: int,
@@ -142,7 +142,7 @@ def _decode_timeline_cursor(
 
 
 async def _timeline_blocks(
-    conversation: ConversationState,
+    conversation: ConversationRepositories,
     root: SessionRecord,
     *,
     coordinate: "tuple[str, int] | None",
@@ -211,7 +211,7 @@ async def _timeline_blocks(
 
 
 async def project_session_timeline(
-    conversation: ConversationState,
+    conversation: ConversationRepositories,
     executions: ExecutionRepository,
     authorization: AuthorizationPolicy,
     cursor_signer: CursorSigner,
@@ -289,7 +289,7 @@ async def project_session_timeline(
                     item
                     async for item in transcript_store.iter_conversation_message_range(
                         history_id=record.history_id,
-                        step_run_id=record.continuation.step_run_id,
+                        agent_run_id=record.continuation.agent_run_id,
                         tenant_id=conversation.sessions.tenant_id,
                         start=range_start,
                         end=range_end,

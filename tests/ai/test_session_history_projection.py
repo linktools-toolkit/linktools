@@ -10,12 +10,12 @@ from linktools.ai.core import (
     Principal,
     SessionStatus,
     TenantAuthorizationPolicy,
-    step_conversation_id,
-    step_run_id,
+    agent_conversation_id as make_agent_conversation_id,
+    agent_run_id as make_agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import ForkSessionRequest, RuntimeState
+from linktools.ai.runtime import ForkSessionRequest, RuntimeStorage
 from linktools.ai.runtime._history import StepSessionHistoryReader
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state import RuntimeDomain
@@ -32,8 +32,8 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from linktools.ai.runtime.state._step_contracts import (
-    ContinuableSnapshot,
-    RunRecord,
+    AgentRunCheckpoint,
+    AgentRunRecord,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -55,16 +55,16 @@ def _session(session_id: str = "session") -> SessionRecord:
     )
 
 
-def _reader(state: RuntimeState) -> StepSessionHistoryReader:
+def _reader(state: RuntimeStorage) -> StepSessionHistoryReader:
     return StepSessionHistoryReader(
-        store=state.steps.read_store(RuntimeDomain.CONVERSATION),
+        store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
         cursor_signer=HmacCursorSigner("session-history", b"session-history-key"),
         sessions=state.conversation.sessions,
     )
 
 
 async def _advance(
-    state: RuntimeState,
+    state: RuntimeStorage,
     expected: ConversationCursor | None,
     next_cursor: ConversationCursor,
 ) -> None:
@@ -73,15 +73,15 @@ async def _advance(
     assert session is not None and session.history_id is not None
     effective_expected = expected
     if expected is not None and session.continuation is not None:
-        assert session.continuation.step_run_id == expected.step_run_id
+        assert session.continuation.agent_run_id == expected.agent_run_id
         effective_expected = session.continuation
-    message_count = await state.steps.conversation_message_count(
+    message_count = await state.run_store.conversation_message_count(
         history_id=session.history_id,
-        step_run_id=next_cursor.step_run_id,
+        agent_run_id=next_cursor.agent_run_id,
         tenant_id="tenant",
     )
     effective_next = ConversationCursor(
-        next_cursor.step_run_id,
+        next_cursor.agent_run_id,
         history_id=session.history_id,
         message_count=message_count,
     )
@@ -107,7 +107,7 @@ async def _advance(
         )
 
 
-def _service(state: RuntimeState) -> DefaultSessionService:
+def _service(state: RuntimeStorage) -> DefaultSessionService:
     return DefaultSessionService(
         state.conversation,
         state.execution.executions,
@@ -119,24 +119,24 @@ def _service(state: RuntimeState) -> DefaultSessionService:
 
 
 async def _materialize(
-    state: RuntimeState,
-    run_id: str,
+    state: RuntimeStorage,
+    agent_run_id: str,
     prompts: tuple[str, ...],
     messages: list[object] | None = None,
 ) -> None:
-    conversation_id = step_conversation_id(
+    agent_conversation_id = make_agent_conversation_id(
         namespace="session-history",
         tenant_id="tenant",
-        execution_id=run_id,
+        execution_id=agent_run_id,
     )
     now = datetime.now(timezone.utc)
     session = await state.conversation.sessions.get("session", tenant_id="tenant")
     assert session is not None and session.history_id is not None
-    await state.steps.register_run(
-        RunRecord(
-            run_id=run_id,
-            conversation_id=conversation_id,
-            parent_run_id=None,
+    await state.run_store.register_agent_run(
+        AgentRunRecord(
+            agent_run_id=agent_run_id,
+            agent_conversation_id=agent_conversation_id,
+            parent_agent_run_id=None,
             agent_name="default",
             metadata={
                 "agent_name": "default",
@@ -145,40 +145,40 @@ async def _materialize(
             started_at=now,
         )
     )
-    snapshot_messages = messages or []
-    if not snapshot_messages:
+    checkpoint_messages = messages or []
+    if not checkpoint_messages:
         for prompt in prompts:
-            snapshot_messages.extend(
+            checkpoint_messages.extend(
                 (
                     ModelRequest(
                         parts=[UserPromptPart(content=prompt)],
-                        conversation_id=conversation_id,
+                        conversation_id=agent_conversation_id,
                     ),
                     ModelResponse(
                         parts=[TextPart(content=f"answer:{prompt}")],
-                        conversation_id=conversation_id,
+                        conversation_id=agent_conversation_id,
                     ),
                 )
             )
-    await state.steps.save_snapshot(
-        ContinuableSnapshot(
-            run_id=run_id,
-            step_index=len(snapshot_messages),
-            messages=snapshot_messages,
-            conversation_id=conversation_id,
-            parent_run_id=None,
+    await state.run_store.save_checkpoint(
+        AgentRunCheckpoint(
+            agent_run_id=agent_run_id,
+            step_index=len(checkpoint_messages),
+            messages=checkpoint_messages,
+            agent_conversation_id=agent_conversation_id,
+            parent_agent_run_id=None,
             agent_name="default",
             timestamp=now,
             state="complete",
             transcript_message_count_before=0,
         )
     )
-    await state.steps.materialize_conversation(step_run_id=run_id)
+    await state.run_store.materialize_conversation(agent_run_id=agent_run_id)
 
 
 @pytest.mark.asyncio
 async def test_empty_and_committed_session_history_use_continuation_only() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -196,14 +196,14 @@ async def test_empty_and_committed_session_history_use_continuation_only() -> No
             )
         assert error.value.code is ErrorCode.CURSOR_INVALID
 
-        run_id = step_run_id(
+        agent_run_id = make_agent_run_id(
             namespace="session-history",
             tenant_id="tenant",
             execution_id="execution",
-            segment_sequence=1,
+            agent_run_sequence=1,
         )
-        await _materialize(state, run_id, ('  {"question":"你好\\nworld"}  ',))
-        await _advance(state, None, ConversationCursor(run_id))
+        await _materialize(state, agent_run_id, ('  {"question":"你好\\nworld"}  ',))
+        await _advance(state, None, ConversationCursor(agent_run_id))
 
         page = await service.history("session", principal=principal)
         assert [(item.item_kind, item.content) for item in page.items] == [
@@ -217,7 +217,7 @@ async def test_empty_and_committed_session_history_use_continuation_only() -> No
 
 @pytest.mark.asyncio
 async def test_session_history_cursor_binds_to_current_continuation() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-cursor", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -251,19 +251,19 @@ async def test_session_history_cursor_binds_to_current_continuation() -> None:
 
 @pytest.mark.asyncio
 async def test_session_history_uses_projection_v1_mapping_and_empty_strings() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-projection", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
-        run_id = "session-history-projection-run"
-        conversation_id = step_conversation_id(
+        agent_run_id = "session-history-projection-run"
+        agent_conversation_id = make_agent_conversation_id(
             namespace="session-history-projection",
             tenant_id="tenant",
-            execution_id=run_id,
+            execution_id=agent_run_id,
         )
         await _materialize(
             state,
-            run_id,
+            agent_run_id,
             (),
             messages=[
                 ModelRequest(
@@ -280,7 +280,7 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
                         ),
                         RetryPromptPart(content="retry"),
                     ],
-                    conversation_id=conversation_id,
+                    conversation_id=agent_conversation_id,
                 ),
                 ModelResponse(
                     parts=[
@@ -292,11 +292,11 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
                             args={"query": "value"},
                         ),
                     ],
-                    conversation_id=conversation_id,
+                    conversation_id=agent_conversation_id,
                 ),
             ],
         )
-        await _advance(state, None, ConversationCursor(run_id))
+        await _advance(state, None, ConversationCursor(agent_run_id))
 
         page = await _service(state).history(
             "session",
@@ -334,7 +334,7 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
 
 @pytest.mark.asyncio
 async def test_session_fork_excludes_uncommitted_physical_tail() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-uncommitted-fork", tenant_id="tenant")
     try:
         source = await state.conversation.sessions.create(_session())
@@ -375,13 +375,13 @@ async def test_session_fork_excludes_uncommitted_physical_tail() -> None:
 async def test_session_history_fork_copies_continuation_without_execution_lookup() -> (
     None
 ):
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-fork", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
-        run_id = "session-history-fork-run"
-        await _materialize(state, run_id, ("A",))
-        await _advance(state, None, ConversationCursor(run_id))
+        agent_run_id = "session-history-fork-run"
+        await _materialize(state, agent_run_id, ("A",))
+        await _advance(state, None, ConversationCursor(agent_run_id))
         service = _service(state)
         principal = Principal("owner", "tenant")
         await service.fork(
@@ -398,8 +398,8 @@ async def test_session_history_fork_copies_continuation_without_execution_lookup
 
 
 @pytest.mark.asyncio
-async def test_session_history_reports_missing_committed_snapshot() -> None:
-    state = RuntimeState.in_memory()
+async def test_session_history_reports_missing_committed_checkpoint() -> None:
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-missing", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -415,20 +415,20 @@ async def test_session_history_reports_missing_committed_snapshot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_durable_session_history_survives_runtime_state_reopen(tmp_path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+async def test_durable_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="session-history-durable", tenant_id="tenant")
-    run_id = "session-history-durable-run"
+    agent_run_id = "session-history-durable-run"
     await state.conversation.sessions.create(_session())
-    await _materialize(state, run_id, ("A", "B"))
-    await _advance(state, None, ConversationCursor(run_id))
+    await _materialize(state, agent_run_id, ("A", "B"))
+    await _advance(state, None, ConversationCursor(agent_run_id))
     before_close = await _service(state).history(
         "session",
         principal=Principal("owner", "tenant"),
     )
     await state.close()
 
-    reopened = RuntimeState.filesystem(tmp_path / "runtime")
+    reopened = RuntimeStorage.filesystem(tmp_path / "runtime")
     await reopened.initialize(namespace="session-history-durable", tenant_id="tenant")
     try:
         after_reopen = await _service(reopened).history(
@@ -441,23 +441,23 @@ async def test_durable_session_history_survives_runtime_state_reopen(tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_sql_session_history_survives_runtime_state_reopen(tmp_path) -> None:
+async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeState.sql(engine)
+    state = RuntimeStorage.sql(engine)
     await state.initialize(namespace="session-history-sql", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
-        run_id = "session-history-sql-run"
-        await _materialize(state, run_id, ("SQL",))
-        await _advance(state, None, ConversationCursor(run_id))
+        agent_run_id = "session-history-sql-run"
+        await _materialize(state, agent_run_id, ("SQL",))
+        await _advance(state, None, ConversationCursor(agent_run_id))
         before_close = await _service(state).history(
             "session",
             principal=Principal("owner", "tenant"),
         )
         await state.close()
 
-        reopened = RuntimeState.sql(engine)
+        reopened = RuntimeStorage.sql(engine)
         await reopened.initialize(namespace="session-history-sql", tenant_id="tenant")
         try:
             after_reopen = await _service(reopened).history(

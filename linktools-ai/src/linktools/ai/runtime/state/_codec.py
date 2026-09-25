@@ -29,8 +29,9 @@ from typing import (
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
-from ...agent import AgentBindingSnapshot
+from ...agent import AgentBindingContract
 from ...core import (
+    RUNTIME_OBJECT_STORE_ID,
     ApprovalDecision,
     ApprovalStatus,
     EvaluationStatus,
@@ -55,10 +56,9 @@ from ...core import (
     canonical_json_bytes,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
-from ...spec import MCPServerSpecCodec
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskExpanderRef,
     TaskGraph,
     TaskGraphAdmission,
@@ -118,7 +118,7 @@ from ._contracts import (
     ResultRecord,
     RuntimePayloadRef,
     SessionRecord,
-    StoredStepSnapshot,
+    StoredAgentRunCheckpoint,
     StoredUserInput,
     ToolOperationAdmission,
     ToolOperationRecord,
@@ -133,7 +133,7 @@ from ._contracts import (
 )
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._step_contracts import (
-    RunRecord,
+    AgentRunRecord,
     StepEvent,
 )
 from ._store import (
@@ -191,7 +191,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("resource_ref", ResourceRef),
     ("result_record", ResultRecord),
     ("session_record", SessionRecord),
-    ("stored_step_snapshot", StoredStepSnapshot),
+    ("stored_agent_run_checkpoint", StoredAgentRunCheckpoint),
     ("object_ref", ObjectRef),
     ("stored_payload", StoredPayload),
     ("history_quality", HistoryQuality),
@@ -200,7 +200,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("loaded_model_context", LoadedModelContext),
     ("runtime_payload_ref", RuntimePayloadRef),
     ("stored_user_input", StoredUserInput),
-    ("task_binding_snapshot", TaskBindingSnapshot),
+    ("task_binding_contract", TaskBindingContract),
     ("transcript_chunk", TranscriptChunk),
     ("transcript_head", TranscriptHeadRecord),
     ("transcript_message_ref", TranscriptMessageRef),
@@ -223,7 +223,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("task_terminal", TaskTerminalRecord),
     ("tool_operation", ToolOperationRecord),
     ("usage_metrics", UsageMetrics),
-    ("run_record", RunRecord),
+    ("agent_run_record", AgentRunRecord),
     ("step_event", StepEvent),
 )
 _V1_WIRE_IDS = MappingProxyType(
@@ -274,19 +274,19 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "approval_record": ("approval_id", "execution_id", "status", "idempotency_key_digest", "decision", "decided_by", "decision_digest", "created_at", "decided_at", "decision_message", "resolution_metadata"),
         "agent_attempt_claim": ("execution_id", "expected_execution_revision", "expected_agent_run_sequence", "expected_recovery_revision", "expected_recovery_state"),
         "artifact_record": ("artifact_id", "execution_id", "producer", "media_type", "object_ref", "created_at"),
-        "conversation_cursor": ("step_run_id", "history_id", "message_count"),
+        "conversation_cursor": ("agent_run_id", "history_id", "message_count"),
         "conversation_history_index_node": ("node_id", "segment", "tree_segment_count", "tree_message_count", "left_tree_id", "right_tree_id", "next_forest_id"),
         "conversation_history": ("history_id", "session_id", "parent_history_id", "prefix_index_head_id", "inherited_message_count"),
         "conversation_history_segment": ("owner_history_id", "through_local_message_count"),
         "context_projection": ("items",),
         "error_diagnostics": ("exception_type", "exception_message", "cause_digest"),
-        "evaluation_record": ("evaluation_id", "execution_id", "dataset_digest", "status", "revision", "created_at", "updated_at"),
+        "evaluation_record": ("evaluation_id", "execution_id", "dataset_id", "status", "revision", "created_at", "updated_at"),
         "execution_event": ("execution_id", "sequence", "event_type", "payload"),
         "execution_history_head": ("execution_id", "state", "revision", "seal_digest"),
         "execution_history_seal": ("execution_id", "run_heads", "execution_event_high_water"),
-        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "source_execution_id", "base_execution_id", "lineage_kind", "status", "revision", "event_sequence", "agent_run_sequence", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_step_run_id", "result", "repository_instructions", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "retention_closed", "started_at"),
-        "execution_run_seal_head": ("run_id", "event_count", "snapshot_count", "transcript_message_count", "projection_digest", "interaction_count"),
-        "model_interaction": ("run_id", "step_index", "request_sequence", "purpose", "output_retry_index", "model", "request_context", "request_envelope", "response_context", "status", "error_code", "duration_ns", "usage", "attachments"),
+        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "previous_execution_id", "fork_base_execution_id", "lineage_kind", "status", "revision", "event_sequence", "agent_run_sequence", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_agent_run_id", "result", "repository_instructions", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "retention_closed", "started_at"),
+        "execution_run_seal_head": ("agent_run_id", "event_count", "checkpoint_count", "transcript_message_count", "projection_digest", "interaction_count"),
+        "model_interaction": ("agent_run_id", "step_index", "request_sequence", "purpose", "output_retry_index", "model", "request_context", "request_envelope", "response_context", "status", "error_code", "duration_ns", "usage", "attachments"),
         "execution_start_claim": ("execution_id", "expected_revision", "expected_event_sequence", "scope", "idempotency_key_digest", "request_digest", "started_at"),
         "execution_start_unknown_commit": ("execution_id", "expected_revision", "expected_event_sequence", "scope", "idempotency_key_digest", "request_digest", "occurred_at"),
         "execution_cancel_request_commit": ("execution_id", "expected_revision", "expected_event_sequence", "operation_id", "requested_at"),
@@ -302,38 +302,38 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "operation_ledger_record": ("operation_id", "tenant_id", "resource_kind", "resource_id", "execution_id", "operation_kind", "status", "request_digest", "result_ref", "result_digest", "error_code", "compactable", "sequence", "created_at", "updated_at"),
         "principal": ("principal_id", "tenant_id", "kind"),
         "pending_deferred_call": ("tool_call_id", "tool_name", "arguments_payload", "metadata"),
-        "pending_tool_continuation": ("source_step_run_id", "approvals", "calls"),
-        "recovery_checkpoint": ("execution_id", "step_run_id", "state", "revision", "created_at", "updated_at", "pending_tools", "repository_instruction_overlay", "repository_instruction_barriers", "handoff_phase", "terminal_handoff", "pending_operation_id"),
+        "pending_tool_continuation": ("source_agent_run_id", "approvals", "calls"),
+        "recovery_checkpoint": ("execution_id", "agent_run_id", "state", "revision", "created_at", "updated_at", "pending_tools", "repository_instruction_overlay", "repository_instruction_barriers", "handoff_phase", "terminal_handoff", "pending_operation_id"),
         "recovery_conversation_intent": ("session_id", "expected_cursor", "next_cursor"),
-        "recovery_terminal_handoff": ("outcome", "source_step_run_id", "conversation"),
+        "recovery_terminal_handoff": ("outcome", "source_agent_run_id", "conversation"),
         "recovery_terminal_outcome": ("terminal_status", "error_code", "safe_error_details", "stop_reason", "output", "object_source_domain", "usage", "terminal_event_type", "terminal_event_payload", "result_created_at", "error_diagnostics"),
-        "repository_instruction_barrier": ("step_run_id", "tool_call_id", "arguments_digest", "resulting_overlay_digest"),
+        "repository_instruction_barrier": ("agent_run_id", "tool_call_id", "arguments_digest"),
         "resource_ref": ("kind", "id", "tenant_id", "owner_principal_id"),
         "result_record": ("output", "stop_reason", "usage", "created_at"),
         "session_record": ("session_id", "owner_principal_id", "status", "revision", "cwd", "metadata", "created_at", "updated_at", "closed_at", "active_execution_id", "agent_id", "continuation", "history_quality", "history_id", "timeline_parent_session_id", "timeline_parent_turn_sequence"),
-        "stored_step_snapshot": ("run_id", "step_index", "timestamp", "state", "projection_digest", "has_context_projection", "pending_request_index"),
+        "stored_agent_run_checkpoint": ("agent_run_id", "step_index", "timestamp", "state", "projection_digest", "has_context_projection", "pending_request_index"),
         "stored_payload": ("kind", "encoding", "digest", "size", "value", "ref"),
         "inline_context_block": ("content",),
         "loaded_context_message": ("message", "source"),
         "loaded_model_context": ("messages",),
         "runtime_payload_ref": ("payload", "source_domain"),
-        "task_binding_snapshot": ("task_type", "task_version", "effect", "output_contract", "timeout_seconds", "max_attempts", "retry_delay_seconds", "reconcile"),
+        "task_binding_contract": ("version", "id", "revision", "effect_policy", "output_contract", "timeout_seconds", "max_attempts", "retry_delay_seconds", "reconcile"),
         "transcript_chunk": ("owner_id", "first_message_index", "message_count", "origin", "codec", "raw_digest", "raw_size", "content"),
         "transcript_head": ("owner_domain", "owner_id", "message_count", "chunk_count", "quality"),
         "transcript_message_ref": ("source_domain", "owner_id", "message_index"),
         "transcript_seek": ("owner_id", "dimension", "block_start", "fact_sequence", "chunk_first_message_index"),
         "transcript_span_ref": ("source_domain", "owner_id", "start", "end"),
-        "tool_operation_admission": ("execution_id", "tool_operation_id", "step_run_id", "recovery_step_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "owner", "lease_seconds", "arguments_payload"),
+        "tool_operation_admission": ("execution_id", "tool_operation_id", "agent_run_id", "recovery_agent_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "owner", "lease_seconds", "arguments_payload"),
         "task_graph": ("graph_id", "nodes"),
         "task_graph_admission": ("version", "graph_id", "principal", "limits", "operation_id", "initial_request_digest", "correlation"),
         "task_graph_limits": ("max_concurrency", "max_depth", "max_nodes", "max_budget"),
         "task_lease": ("graph_id", "node_id", "tenant_id", "owner", "fence", "lease_expires_at", "execution_id"),
-        "task_expander_ref": ("id", "version"),
+        "task_expander_ref": ("id", "revision"),
         "task_terminal": ("node_id", "owner", "fence", "status", "result_digest", "error_code", "error_digest", "completed_at", "execution_id"),
-        "tool_operation": ("tool_operation_id", "execution_id", "step_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "status", "owner", "fence", "lease_expires_at", "error_code", "created_at", "updated_at", "arguments_payload", "result_payload", "error_payload"),
+        "tool_operation": ("tool_operation_id", "execution_id", "agent_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "status", "owner", "fence", "lease_expires_at", "error_code", "created_at", "updated_at", "arguments_payload", "result_payload", "error_payload"),
         "usage_metrics": ("model_requests", "tool_calls", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"),
-        "run_record": ("run_id", "conversation_id", "parent_run_id", "agent_name", "metadata", "started_at", "registration_id"),
-        "step_event": ("run_id", "kind", "step_index", "timestamp", "conversation_id", "parent_run_id", "agent_name", "tool_call_id", "tool_name", "error", "metadata", "idempotency_key", "event_index"),
+        "agent_run_record": ("agent_run_id", "agent_conversation_id", "parent_agent_run_id", "agent_name", "metadata", "started_at", "registration_id"),
+        "step_event": ("agent_run_id", "kind", "step_index", "timestamp", "agent_conversation_id", "parent_agent_run_id", "agent_name", "tool_call_id", "tool_name", "error", "metadata", "idempotency_key", "event_index"),
     }
 )
 
@@ -407,6 +407,8 @@ def _encode_v1_task_node_fields(
         ),
         "expander": _encode_domain(value.expander, codec, persisted=persisted),
     }
+    if value.output_type is not None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if value.input_refs:
         fields["input_refs"] = [
             [
@@ -429,8 +431,10 @@ def _encode_v1_task_node_fields(
         fields["retry_delay_seconds"] = value.retry_delay_seconds
     if value.output_contract is not None:
         fields["output_contract"] = dict(value.output_contract)
-    if value.effect != "none":
-        fields["effect"] = value.effect
+    if value.effect_policy != "none":
+        fields["effect_policy"] = value.effect_policy
+    if value.reconcile:
+        fields["reconcile"] = True
     return fields
 
 
@@ -454,18 +458,8 @@ def _decode_v1_task_node(
     required = frozenset(
         {"node_id", "dependencies", "input", "budget_cost", "expander"}
     )
-    optional = frozenset(
-        {
-            "input_refs",
-            "timeout_seconds",
-            "max_attempts",
-            "retry_delay_seconds",
-            "output_contract",
-            "effect",
-        }
-    )
     keys = set(raw_fields)
-    if not required.issubset(keys) or (not persisted and not keys <= required | optional):
+    if not required.issubset(keys):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raw_refs = raw_fields.get("input_refs", [])
     if not isinstance(raw_refs, list):
@@ -477,7 +471,7 @@ def _decode_v1_task_node(
         name, raw_reference = item
         if not isinstance(name, str) or not isinstance(raw_reference, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _require_exact_keys(
+        _require_required_keys(
             raw_reference,
             frozenset(
                 {"namespace", "tenant_id", "graph_id", "node_id", "result_digest"}
@@ -507,8 +501,22 @@ def _decode_v1_task_node(
     output_contract = raw_fields.get("output_contract")
     if output_contract is not None and not isinstance(output_contract, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    effect = raw_fields.get("effect", "none")
-    if not isinstance(effect, str):
+    optional = frozenset(
+        {
+            "input_refs",
+            "timeout_seconds",
+            "max_attempts",
+            "retry_delay_seconds",
+            "output_contract",
+            "effect_policy",
+            "reconcile",
+        }
+    )
+    if keys - required - optional:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    effect_policy = raw_fields.get("effect_policy", "none")
+    reconcile = raw_fields.get("reconcile", False)
+    if not isinstance(effect_policy, str) or not isinstance(reconcile, bool):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return TaskNode(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
@@ -548,7 +556,8 @@ def _decode_v1_task_node(
             Mapping[str, JsonValue] | None,
             output_contract,
         ),
-        effect=effect,
+        effect_policy=effect_policy,
+        reconcile=reconcile,
         dependency_policy="all_succeeded",
     )
 
@@ -581,9 +590,9 @@ def _decode_v1_terminal_task_node(
         timeout_seconds=node.timeout_seconds,
         max_attempts=node.max_attempts,
         retry_delay_seconds=node.retry_delay_seconds,
-        output_schema=node.output_schema,
         output_contract=node.output_contract,
-        effect=node.effect,
+        effect_policy=node.effect_policy,
+        reconcile=node.reconcile,
         dependency_policy="all_terminal",
     )
 
@@ -612,7 +621,7 @@ def _decode_v1_task_graph_view(
     expected = frozenset({"graph_id", "status"}) if persisted else frozenset(
         {"graph_id", "status", "nodes"}
     )
-    _require_contract_fields(raw_fields, expected, persisted=persisted)
+    _require_required_keys(raw_fields, expected)
     nodes = () if persisted else tuple(
         _decode_domain(raw_fields["nodes"], tuple[TaskNode, ...], codec, persisted=persisted)
     )
@@ -684,7 +693,7 @@ def _decode_v1_task_node_view(
     }
     if not persisted:
         expected.update({"dependencies", "owner", "fence", "lease_expires_at"})
-    _require_contract_fields(raw_fields, frozenset(expected), persisted=persisted)
+    _require_required_keys(raw_fields, frozenset(expected))
     return TaskNodeView(
         cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
@@ -840,9 +849,6 @@ def _decode_v1_task_result(
     )
 
 
-_RUNTIME_OBJECT_STORE_ID = "runtime"
-
-
 def _encode_v1_object_ref(
     value: object,
     codec: "_VersionCodec",
@@ -872,9 +878,9 @@ def _decode_v1_object_ref(
         if persisted
         else frozenset({"store_id", "key", "digest", "size"})
     )
-    _require_contract_fields(raw_fields, expected, persisted=persisted)
+    _require_required_keys(raw_fields, expected)
     store_id = (
-        _RUNTIME_OBJECT_STORE_ID
+        RUNTIME_OBJECT_STORE_ID
         if persisted
         else cast(
             str,
@@ -919,10 +925,9 @@ def _decode_v1_stored_user_input(
     required = frozenset({"codec", "payload"})
     if "view" in raw_fields:
         required = frozenset({"codec", "payload", "view"})
-    _require_contract_fields(
+    _require_required_keys(
         raw_fields,
         required,
-        persisted=persisted,
     )
     codec_name = _decode_domain(
         raw_fields["codec"], str, codec, persisted=persisted
@@ -983,7 +988,7 @@ _V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
         OperationTerminalUpdate: (
             "linktools.ai.runtime.state.OperationTerminalUpdate"
         ),
-        AgentBindingSnapshot: "linktools.ai.agent.AgentBindingSnapshot@1",
+        AgentBindingContract: "linktools.ai.agent.AgentBindingContract@1",
         ModelRequest: "pydantic_ai.messages.ModelRequest",
         ModelResponse: "pydantic_ai.messages.ModelResponse",
     }
@@ -1012,29 +1017,18 @@ class CanonicalEnvelope:
     value: Mapping[str, JsonValue]
 
 
-def _require_exact_keys(
-    value: Mapping[str, object],
-    expected: frozenset[str],
-) -> None:
-    if set(value.keys()) != expected:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-def _require_contract_fields(
+def _require_required_keys(
     value: Mapping[str, object],
     required: frozenset[str],
-    *,
-    persisted: bool,
 ) -> None:
-    keys = set(value.keys())
-    if not required.issubset(keys) or (not persisted and keys != required):
+    if not required.issubset(value):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _unwrap_tagged_list(value: object, tag: str) -> list[object]:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(value, frozenset({tag}))
+    _require_required_keys(value, frozenset({tag}))
     items = value[tag]
     if not isinstance(items, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1059,7 +1053,7 @@ def parse_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
             ErrorCode.STORAGE_INTEGRITY_ERROR,
             "canonical data must be an object",
         )
-    _require_exact_keys(value, frozenset({"v", "value"}))
+    _require_required_keys(value, frozenset({"v", "value"}))
     version = value.get("v")
     payload = value.get("value")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
@@ -1120,11 +1114,11 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             "data",
         }
     )
-    _require_exact_keys(value, current_keys)
+    _require_required_keys(value, current_keys)
     lease = value["lease"]
     if not isinstance(lease, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(lease, frozenset({"owner", "fence", "expires_at"}))
+    _require_required_keys(lease, frozenset({"owner", "fence", "expires_at"}))
     data = value["data"]
     if not isinstance(data, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1166,7 +1160,7 @@ def encode_fact(fact: StoredFact) -> dict[str, JsonValue]:
 def decode_fact(value: Mapping[str, JsonValue]) -> StoredFact:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(
+    _require_required_keys(
         value,
         frozenset(
             {"stream", "sequence", "owner", "kind", "subject", "state", "data"}
@@ -1203,7 +1197,7 @@ def encode_operation(operation: StoredOperation) -> dict[str, JsonValue]:
 def decode_operation(value: Mapping[str, JsonValue]) -> StoredOperation:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(
+    _require_required_keys(
         value,
         frozenset({"key", "stream", "sequence", "state", "compactable", "data"}),
     )
@@ -1233,7 +1227,7 @@ def encode_alias(alias: StoredAlias) -> dict[str, JsonValue]:
 def decode_alias(value: Mapping[str, JsonValue]) -> StoredAlias:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(value, frozenset({"alias", "record"}))
+    _require_required_keys(value, frozenset({"alias", "record"}))
     try:
         return StoredAlias(
             _digest_wire(_string(value, "alias")),
@@ -1281,7 +1275,7 @@ def _codec_wire_type_id(
 def _encode_external(value: object, codec: _VersionCodec) -> JsonValue:
     if type(value) not in codec.external_schema_types:
         raise TypeError(f"unsupported external type: {type(value).__name__}")
-    if isinstance(value, AgentBindingSnapshot):
+    if isinstance(value, AgentBindingContract):
         return value.to_payload()
     if isinstance(value, IdempotencyTerminalUpdate):
         return {
@@ -1324,9 +1318,9 @@ def _decode_external(
 ) -> object:
     if target not in codec.external_schema_types:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if target is AgentBindingSnapshot:
+    if target is AgentBindingContract:
         try:
-            return AgentBindingSnapshot.from_payload(value)
+            return AgentBindingContract.from_payload(value)
         except AIError:
             raise
         except (TypeError, ValueError, KeyError) as error:
@@ -1345,7 +1339,7 @@ def _decode_external(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if target is IdempotencyTerminalUpdate:
-        _require_contract_fields(
+        _require_required_keys(
             value,
             frozenset(
                 {
@@ -1358,7 +1352,6 @@ def _decode_external(
                     "error_code",
                 }
             ),
-            persisted=persisted,
         )
         return IdempotencyTerminalUpdate(
             scope=cast(str, _decode_domain(value["scope"], str, codec)),
@@ -1390,7 +1383,7 @@ def _decode_external(
             ),
         )
     if target is OperationTerminalUpdate:
-        _require_contract_fields(
+        _require_required_keys(
             value,
             frozenset(
                 {
@@ -1402,7 +1395,6 @@ def _decode_external(
                     "error_code",
                 }
             ),
-            persisted=persisted,
         )
         return OperationTerminalUpdate(
             operation_id=cast(
@@ -1606,7 +1598,7 @@ def _decode_enveloped_domain(
 ) -> DomainT:
     """Decode persisted domain data without losing its envelope version."""
     envelope = decode_envelope(value)
-    _require_exact_keys(envelope.value, frozenset({"type", "payload"}))
+    _require_required_keys(envelope.value, frozenset({"type", "payload"}))
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1640,7 +1632,7 @@ def _iter_enveloped_runtime_object_refs(
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
     """Traverse object references using the envelope's own version codec."""
     envelope = decode_envelope(value)
-    _require_exact_keys(envelope.value, frozenset({"type", "payload"}))
+    _require_required_keys(envelope.value, frozenset({"type", "payload"}))
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1648,60 +1640,6 @@ def _iter_enveloped_runtime_object_refs(
     if payload is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     yield from _iter_runtime_object_refs(payload, default_domain, codec)
-
-
-def _iter_agent_binding_object_refs(
-    snapshot: AgentBindingSnapshot,
-    domain: RuntimeDomain,
-) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
-    for pin in snapshot.selected:
-        if pin.kind == "mcp":
-            try:
-                _server, resource_snapshot = MCPServerSpecCodec().from_frozen_payload(
-                    pin.contract
-                )
-            except AIError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if resource_snapshot is not None:
-                yield domain, resource_snapshot
-            continue
-        if pin.kind != "skill":
-            continue
-        source = pin.contract.get("source")
-        if source is None:
-            continue
-        if not isinstance(source, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        raw = source.get("snapshot")
-        if raw is None:
-            continue
-        required = {"key", "digest", "size"}
-        if not isinstance(raw, Mapping) or not required.issubset(raw):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        store_id = raw.get("store_id", "runtime")
-        key = raw["key"]
-        digest = raw["digest"]
-        size = raw["size"]
-        if (
-            not isinstance(store_id, str)
-            or not store_id
-            or not isinstance(key, str)
-            or not key
-            or not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-            or isinstance(size, bool)
-            or not isinstance(size, int)
-            or size < 0
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            reference = ObjectRef(store_id, key, digest, size)
-        except ValueError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        yield domain, reference
-    for child in snapshot.subagent_bindings:
-        yield from _iter_agent_binding_object_refs(child, domain)
 
 
 def iter_runtime_object_dependencies(
@@ -1716,38 +1654,6 @@ def iter_runtime_object_dependencies(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(manifest, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    if reference.key.startswith("v1/skill-source-snapshot/"):
-        if (
-            manifest.get("kind") != "skill-source-snapshot"
-            or manifest.get("format_version") != 1
-            or not isinstance(manifest.get("resources"), list)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for item in cast(list[object], manifest["resources"]):
-            if not isinstance(item, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            content = item.get("content")
-            if not isinstance(content, Mapping) or set(content) != {
-                "key",
-                "digest",
-                "size",
-            }:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            size = content["size"]
-            if isinstance(size, bool) or not isinstance(size, int):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                nested = ObjectRef(
-                    reference.store_id,
-                    cast(str, content["key"]),
-                    cast(str, content["digest"]),
-                    size,
-                )
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            yield default_domain, nested
-        return
 
     if reference.key.startswith("v1/asset-snapshot/"):
         if (
@@ -1781,9 +1687,9 @@ def iter_runtime_object_dependencies(
             yield default_domain, nested
         return
 
-    if reference.key.startswith("v1/task-capability-snapshot/"):
+    if reference.key.startswith("v1/task-capability-capture/"):
         if (
-            manifest.get("kind") != "task-capability-snapshot"
+            manifest.get("kind") != "task-capability-capture"
             or manifest.get("format_version") != 1
             or not isinstance(manifest.get("roots"), Mapping)
             or not isinstance(manifest.get("bindings"), Mapping)
@@ -1791,11 +1697,7 @@ def iter_runtime_object_dependencies(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for values in (manifest["roots"], manifest["bindings"]):
             for raw in cast("Mapping[object, object]", values).values():
-                snapshot = AgentBindingSnapshot.from_payload(raw)
-                yield from _iter_agent_binding_object_refs(
-                    snapshot,
-                    RuntimeDomain.EXECUTION,
-                )
+                AgentBindingContract.from_payload(raw)
         return
 
     return
@@ -1817,8 +1719,7 @@ def _iter_runtime_object_refs(
         source_domain = value.source_domain or domain
         yield from _iter_runtime_object_refs(value.payload, source_domain, codec)
         return
-    if isinstance(value, AgentBindingSnapshot):
-        yield from _iter_agent_binding_object_refs(value, domain)
+    if isinstance(value, AgentBindingContract):
         return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
@@ -1829,7 +1730,7 @@ def _iter_runtime_object_refs(
             node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted=True))
             prompt = node.input.get("user_prompt")
             if (
-                node.input.get("type") == "linktools.ai.agent"
+                node.input.get("task_id") == "linktools.ai.agent"
                 and isinstance(prompt, Mapping)
                 and prompt.get("kind") == "stored-user-content-v1"
             ):
@@ -1852,13 +1753,12 @@ def _iter_runtime_object_refs(
                 ):
                     binding = _decode_external(
                         item,
-                        AgentBindingSnapshot,
+                        AgentBindingContract,
                         codec,
                         persisted=True,
                     )
-                    if not isinstance(binding, AgentBindingSnapshot):
+                    if not isinstance(binding, AgentBindingContract):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    yield from _iter_agent_binding_object_refs(binding, domain)
                     continue
                 yield from _iter_runtime_object_refs(item, domain, codec)
             return
@@ -2036,7 +1936,7 @@ def _decode_domain(
     if target is datetime:
         if not isinstance(value, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _require_exact_keys(value, frozenset({"$datetime"}))
+        _require_required_keys(value, frozenset({"$datetime"}))
         raw = value["$datetime"]
         if not isinstance(raw, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2055,7 +1955,7 @@ def _decode_domain(
     if target is bytes:
         if not isinstance(value, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _require_exact_keys(value, frozenset({"$bytes"}))
+        _require_required_keys(value, frozenset({"$bytes"}))
         raw = value["$bytes"]
         if not isinstance(raw, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2111,7 +2011,7 @@ def _decode_enum(
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(value, frozenset({"$enum", "value"}))
+    _require_required_keys(value, frozenset({"$enum", "value"}))
     wire_id = value["$enum"]
     if not isinstance(wire_id, str) or wire_id != expected_wire_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2145,11 +2045,11 @@ def _decode_dataclass(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if persisted:
-        _require_exact_keys(
+        _require_required_keys(
             value, frozenset({"$dataclass", "schema", "fields"})
         )
     else:
-        _require_exact_keys(value, frozenset({"$dataclass", "fields"}))
+        _require_required_keys(value, frozenset({"$dataclass", "fields"}))
 
     wire_id = value.get("$dataclass")
     if not isinstance(wire_id, str):
@@ -2183,10 +2083,7 @@ def _decode_dataclass(
     if frozen_names is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     frozen_name_set = frozenset(frozen_names)
-    if persisted:
-        if not frozen_name_set.issubset(raw_fields):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    elif set(raw_fields) != frozen_name_set:
+    if not frozen_name_set.issubset(raw_fields):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         hints = get_type_hints(target)
@@ -2463,7 +2360,7 @@ def _encode_step_envelope(value: object) -> dict[str, JsonValue]:
 
 def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     envelope = decode_envelope(value)
-    _require_exact_keys(envelope.value, frozenset({"type", "payload"}))
+    _require_required_keys(envelope.value, frozenset({"type", "payload"}))
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -2471,9 +2368,9 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     if not isinstance(kind, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     targets = {
-        "run_record": RunRecord,
+        "agent_run_record": AgentRunRecord,
         "step_event": StepEvent,
-        "stored_step_snapshot": StoredStepSnapshot,
+        "stored_agent_run_checkpoint": StoredAgentRunCheckpoint,
         "model_interaction": ModelInteractionRecord,
     }
     target = targets.get(kind)
@@ -2548,9 +2445,10 @@ def _validate_v1_codec_definition() -> None:
         "timeout_seconds",
         "max_attempts",
         "retry_delay_seconds",
-        "output_schema",
+        "output_type",
         "output_contract",
-        "effect",
+        "effect_policy",
+        "reconcile",
         "dependency_policy",
         "_input",
     ):

@@ -26,7 +26,7 @@ from pydantic_ai_harness.compaction import (
 
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
-from ..workspace import normalize_workspace_path
+from ..workspace import validate_workspace_path
 from ._journal import ModelRequestFact, ModelRequestJournal
 from ._message import binary_content_usage, project_transient_binary_content
 
@@ -379,7 +379,7 @@ def _workspace_file_key(call: ToolCallPart) -> str | None:
     if not isinstance(path, str):
         return None
     try:
-        normalized = normalize_workspace_path(path)
+        normalized = validate_workspace_path(path)
     except (TypeError, ValueError, AIError):
         return None
     offset = arguments.get("offset", 0)

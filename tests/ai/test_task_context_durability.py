@@ -4,7 +4,7 @@
 
 import pytest
 from linktools.ai.core import Principal, TaskStatus
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -57,8 +57,8 @@ def _request(
 
 
 @pytest.mark.asyncio
-async def test_task_admission_correlation_is_durable_but_not_semantic_identity() -> None:
-    state = RuntimeState.in_memory()
+async def test_task_admission_correlation_is_durable_but_not_request_identity() -> None:
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-correlation-durable", tenant_id="tenant")
     try:
         graph = TaskGraph("task-correlation-durable", (TaskNode("node"),))
@@ -85,7 +85,7 @@ async def test_task_admission_correlation_is_durable_but_not_semantic_identity()
 
 @pytest.mark.asyncio
 async def test_task_admission_correlation_drift_reuses_durable_admission() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-correlation-replay", tenant_id="tenant")
     try:
         graph = TaskGraph("task-correlation-replay", (TaskNode("node"),))
@@ -110,7 +110,7 @@ async def test_task_admission_correlation_drift_reuses_durable_admission() -> No
 
 @pytest.mark.asyncio
 async def test_task_service_replay_uses_first_durable_correlation() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-correlation-service-replay", tenant_id="tenant")
     launcher = _CaptureLauncher()
     try:
@@ -138,7 +138,7 @@ async def test_task_service_replay_uses_first_durable_correlation() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_cleanup_restores_durable_submission_principal_and_correlation() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-correlation-cancel", tenant_id="tenant")
     launcher = _CaptureLauncher()
     try:

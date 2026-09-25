@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -17,7 +17,7 @@ from linktools.ai.core import (
     Principal,
     TenantAuthorizationPolicy,
 )
-from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
+from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
     CancelEffectOutcome,
@@ -26,17 +26,20 @@ from linktools.ai.runtime._execution import (
 )
 from linktools.ai.runtime._object import RuntimeObjectKeyFactory
 from linktools.ai.runtime.state._contracts import ExecutionRecord, RuntimePayloadRef
-from linktools.ai.spec import AgentSpec
+from linktools.ai.spec import (
+    AgentSpec,
+    RepositoryInstructionDocument,
+    RepositoryInstructions,
+)
 from linktools.ai.storage import PayloadPolicy, StoredPayload
-from linktools.ai.workspace import RepositoryInstructionDocument, RepositoryInstructions
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model="model"),
-        base_model={"route_id": "model", "model_identity": "test:model"},
+        model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -48,7 +51,10 @@ class _Catalog:
     def binding(self, digest: str) -> object:
         binding = _binding()
         assert digest == binding.binding_digest
-        return SimpleNamespace(digest=binding.binding_digest, snapshot=binding)
+        return SimpleNamespace(
+            binding_digest=binding.binding_digest,
+            binding_contract=binding,
+        )
 
 
 class _History:
@@ -140,8 +146,8 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
         session_id=None,
         parent_execution_id=None,
         root_execution_id="parent",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
@@ -161,7 +167,7 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
 
 
 def _service(
-    state: RuntimeState,
+    state: RuntimeStorage,
     *,
     resolver: _Resolver | None,
     ids: tuple[str, ...],
@@ -193,7 +199,7 @@ def _service(
 
 @pytest.mark.asyncio
 async def test_new_child_inherits_exact_parent_structured_pin_without_live_resolution() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="subagent-inherit", tenant_id="tenant")
     try:
         _, parent_pin = _pin("parent-v1")
@@ -217,7 +223,7 @@ async def test_new_child_inherits_exact_parent_structured_pin_without_live_resol
 
 @pytest.mark.asyncio
 async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="subagent-root", tenant_id="tenant")
     try:
         await state.execution.executions.create(_parent(None))
@@ -233,7 +239,9 @@ async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -
         )
         child = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
         assert child is not None and child.repository_instructions is not None
-        assert child.repository_instructions.payload.digest == root.digest
+        assert child.repository_instructions.payload.digest == StoredPayload.inline_json(
+            root.to_payload()
+        ).digest
         assert resolver.calls == ["."]
     finally:
         await state.close()
@@ -242,7 +250,7 @@ async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_parent_pin", [False, True])
 async def test_standalone_service_without_resolver_never_assigns_child_pin(with_parent_pin: bool) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace=f"subagent-standalone-{with_parent_pin}", tenant_id="tenant")
     try:
         parent_pin = _pin("parent-v1")[1] if with_parent_pin else None
@@ -264,7 +272,7 @@ async def test_standalone_service_without_resolver_never_assigns_child_pin(with_
 
 @pytest.mark.asyncio
 async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_root_changes() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="subagent-replay", tenant_id="tenant")
     try:
         await state.execution.executions.create(_parent(None))

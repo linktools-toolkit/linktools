@@ -18,6 +18,7 @@ from filelock import FileLock, Timeout
 from linktools.core import environ
 
 from ..core import (
+    RUNTIME_OBJECT_STORE_ID,
     JsonValue,
     canonical_json_bytes,
     canonical_sha256,
@@ -32,9 +33,8 @@ from ..storage import (
     ObjectStore,
     read_object,
 )
-from ._snapshot_contract import RunSnapshot, snapshot_digest
 from ._runtime_history import RuntimeHistory
-from .state import SnapshotExclusiveGuard, RuntimeState, SnapshotLimits
+from .state import SnapshotExclusiveGuard, RuntimeStorage, SnapshotLimits
 
 if TYPE_CHECKING:
     from ..workspace import Workspace
@@ -54,7 +54,7 @@ class RestoredRuntime:
     snapshot_digest: str
     namespace: str
     tenant_id: str
-    state_root: Path
+    storage_root: Path
     workspace_root: Path | None
     generation: str
 
@@ -62,7 +62,7 @@ class RestoredRuntime:
         """Return a read-only RuntimeHistory context for this generation."""
         return RuntimeHistory.open(
             self.namespace,
-            state=RuntimeState.from_root(self.state_root),
+            storage=RuntimeStorage.from_root(self.storage_root),
             tenant_id=self.tenant_id,
         )
 
@@ -76,13 +76,13 @@ class RuntimeSnapshot:
         namespace: str,
         *,
         tenant_id: str,
-        state: "RuntimeState",
+        storage: "RuntimeStorage",
         object_store: ObjectStore,
         workspace: "Workspace | None" = None,
         exclusive: SnapshotExclusiveGuard,
         limits: SnapshotLimits,
     ) -> ObjectRef:
-        """Capture state and Workspace under a caller-owned quiescence boundary."""
+        """Capture storage and Workspace under a caller-owned quiescence boundary."""
         resolved_namespace = validate_persistence_namespace(namespace)
         resolved_tenant = validate_tenant_id(tenant_id)
         if not isinstance(limits, SnapshotLimits):
@@ -90,38 +90,38 @@ class RuntimeSnapshot:
         async def publish() -> ObjectRef:
             initialized = False
             try:
-                if state.ready:
+                if storage.ready:
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                await state.initialize(
+                await storage.initialize(
                     namespace=resolved_namespace,
                     tenant_id=resolved_tenant,
                     read_only=True,
                 )
                 initialized = True
                 if (
-                    state.namespace != resolved_namespace
-                    or state.tenant_id != resolved_tenant
+                    storage.namespace != resolved_namespace
+                    or storage.tenant_id != resolved_tenant
                 ):
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                state_ref = await state.export_snapshot(
+                storage_ref = await storage.export_snapshot(
                     object_store=object_store,
                     limits=limits,
                 )
-                if state_ref.size > limits.max_bytes:
+                if storage_ref.size > limits.max_bytes:
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                state_payload = await read_object(
+                storage_payload = await read_object(
                     object_store,
-                    state_ref.key,
-                    expected_digest=state_ref.digest,
-                    expected_size=state_ref.size,
+                    storage_ref.key,
+                    expected_digest=storage_ref.digest,
+                    expected_size=storage_ref.size,
                 )
-                state_manifest = _parse_state_manifest(state_payload)
-                state_entries, state_object_bytes = _state_snapshot_usage(
-                    state_manifest
+                storage_manifest = _parse_storage_manifest(storage_payload)
+                storage_entries, storage_object_bytes = _storage_snapshot_usage(
+                    storage_manifest
                 )
                 workspace_entries = await _capture_workspace(
                     workspace,
-                    state=state,
+                    storage=storage,
                     object_store=object_store,
                     limits=limits,
                 )
@@ -130,7 +130,7 @@ class RuntimeSnapshot:
                     "format_version": 1,
                     "namespace": resolved_namespace,
                     "tenant_id": resolved_tenant,
-                    "state": _object_ref_payload(state_ref),
+                    "storage": _object_ref_payload(storage_ref),
                     "workspace": workspace_entries,
                 }
                 payload = canonical_json_bytes(manifest)
@@ -138,10 +138,10 @@ class RuntimeSnapshot:
                     workspace_entries
                 )
                 if (
-                    state_entries + workspace_count > limits.max_entries
+                    storage_entries + workspace_count > limits.max_entries
                     or len(payload)
-                    + state_ref.size
-                    + state_object_bytes
+                    + storage_ref.size
+                    + storage_object_bytes
                     + workspace_bytes
                     > limits.max_bytes
                 ):
@@ -158,7 +158,7 @@ class RuntimeSnapshot:
                 return ObjectRef(object_store.store_id, key, digest, len(payload))
             finally:
                 if initialized:
-                    await state.close()
+                    await storage.close()
 
         async with exclusive.offline_exclusivity():
             return await publish()
@@ -172,25 +172,25 @@ class RuntimeSnapshot:
         limits: SnapshotLimits,
     ) -> None:
         manifest = await _read_manifest(ref, object_store, limits)
-        state = _object_ref_from_payload(manifest["state"])
-        if state.size > limits.max_bytes:
+        storage = _object_ref_from_payload(manifest["storage"])
+        if storage.size > limits.max_bytes:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        state_payload = await read_object(
+        storage_payload = await read_object(
             object_store,
-            state.key,
-            expected_digest=state.digest,
-            expected_size=state.size,
+            storage.key,
+            expected_digest=storage.digest,
+            expected_size=storage.size,
         )
-        state_manifest = _parse_state_manifest(state_payload)
+        storage_manifest = _parse_storage_manifest(storage_payload)
         if (
-            state_manifest.get("namespace") != manifest.get("namespace")
-            or state_manifest.get("tenant_id") != manifest.get("tenant_id")
+            storage_manifest.get("namespace") != manifest.get("namespace")
+            or storage_manifest.get("tenant_id") != manifest.get("tenant_id")
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        state_entries, state_object_bytes = _state_snapshot_usage(
-            state_manifest
+        storage_entries, storage_object_bytes = _storage_snapshot_usage(
+            storage_manifest
         )
-        state_objects = cast(list[object], state_manifest["objects"])
+        storage_objects = cast(list[object], storage_manifest["objects"])
 
         workspace = manifest.get("workspace")
         if not isinstance(workspace, Mapping):
@@ -208,16 +208,16 @@ class RuntimeSnapshot:
         workspace_count, workspace_bytes = _workspace_snapshot_usage(workspace)
         total_bytes = (
             len(canonical_json_bytes(cast(JsonValue, manifest)))
-            + state.size
-            + state_object_bytes
+            + storage.size
+            + storage_object_bytes
             + workspace_bytes
         )
         if (
-            state_entries + workspace_count > limits.max_entries
+            storage_entries + workspace_count > limits.max_entries
             or total_bytes > limits.max_bytes
         ):
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        for raw_object in state_objects:
+        for raw_object in storage_objects:
             if not isinstance(raw_object, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             source = _object_ref_from_payload(raw_object.get("source"))
@@ -245,21 +245,21 @@ class RuntimeSnapshot:
     ) -> ObjectRef:
         manifest = await _read_manifest(ref, source_store, limits)
         await cls.verify(ref, object_store=source_store, limits=limits)
-        state_ref = _object_ref_from_payload(manifest["state"])
-        state_payload = await read_object(
+        storage_ref = _object_ref_from_payload(manifest["storage"])
+        storage_payload = await read_object(
             source_store,
-            state_ref.key,
-            expected_digest=state_ref.digest,
-            expected_size=state_ref.size,
+            storage_ref.key,
+            expected_digest=storage_ref.digest,
+            expected_size=storage_ref.size,
         )
-        refs = [state_ref]
-        state_manifest = _parse_state_manifest(state_payload)
-        state_objects = state_manifest.get("objects", [])
-        if not isinstance(state_objects, list):
+        refs = [storage_ref]
+        storage_manifest = _parse_storage_manifest(storage_payload)
+        storage_objects = storage_manifest.get("objects", [])
+        if not isinstance(storage_objects, list):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         refs.extend(
             _object_ref_from_payload(cast(Mapping[str, object], entry)["content"])
-            for entry in state_objects
+            for entry in storage_objects
             if isinstance(entry, Mapping)
         )
         raw_workspace = manifest.get("workspace")
@@ -338,11 +338,17 @@ class RuntimeSnapshot:
                     generation,
                     encoding="utf-8",
                 )
-                state_root = staging / "state"
-                await RuntimeState.restore_snapshot(
-                    _object_ref_from_payload(manifest["state"]),
+                storage_root = staging / "storage"
+                logical_storage_ref = _object_ref_from_payload(manifest["storage"])
+                await RuntimeStorage.restore_snapshot(
+                    ObjectRef(
+                        object_store.store_id,
+                        logical_storage_ref.key,
+                        logical_storage_ref.digest,
+                        logical_storage_ref.size,
+                    ),
                     object_store=object_store,
-                    root=state_root,
+                    root=storage_root,
                     limits=limits,
                 )
                 workspace_root = await _restore_workspace(
@@ -403,7 +409,7 @@ class RuntimeSnapshot:
                             "generation": generation,
                             "namespace": resolved_namespace,
                             "tenant_id": resolved_tenant,
-                            "state_root": str(generation_root / "state"),
+                            "storage_root": str(generation_root / "storage"),
                             "workspace_root": (
                                 None
                                 if workspace_root is None
@@ -524,7 +530,7 @@ class RuntimeSnapshot:
 async def _capture_workspace(
     workspace: "Workspace | None",
     *,
-    state: "RuntimeState",
+    storage: "RuntimeStorage",
     object_store: ObjectStore,
     limits: SnapshotLimits,
 ) -> dict[str, JsonValue]:
@@ -536,7 +542,7 @@ async def _capture_workspace(
     root = workspace.root.resolve()
     excluded = tuple(
         path.resolve()
-        for path in (*state.local_paths(), *object_store.local_paths())
+        for path in (*storage.local_paths(), *object_store.local_paths())
     )
     if any(path == root for path in excluded):
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
@@ -612,7 +618,7 @@ async def _capture_workspace(
                 "path": relative,
                 "mode": after_publish.st_mode & 0o111,
                 "content": {
-                    "store_id": "runtime",
+                    "store_id": RUNTIME_OBJECT_STORE_ID,
                     "key": key,
                     "digest": digest,
                     "size": size,
@@ -874,22 +880,22 @@ async def _verify_restored_generation(
     object_store: ObjectStore,
     limits: SnapshotLimits,
 ) -> None:
-    state_root = root / "state"
-    if not state_root.is_dir():
+    storage_root = root / "storage"
+    if not storage_root.is_dir():
         raise AIError(ErrorCode.STORAGE_CONFLICT)
     namespace = manifest.get("namespace")
     tenant_id = manifest.get("tenant_id")
     if not isinstance(namespace, str) or not isinstance(tenant_id, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    restored_state = RuntimeState.from_root(state_root)
+    restored_storage = RuntimeStorage.from_root(storage_root)
     probe_store = InMemoryObjectStore("snapshot-freshness")
     try:
-        await restored_state.initialize(
+        await restored_storage.initialize(
             namespace=namespace,
             tenant_id=tenant_id,
             read_only=True,
         )
-        actual_ref = await restored_state.export_snapshot(
+        actual_ref = await restored_storage.export_snapshot(
             object_store=probe_store,
             limits=limits,
         )
@@ -899,16 +905,16 @@ async def _verify_restored_generation(
             expected_digest=actual_ref.digest,
             expected_size=actual_ref.size,
         )
-        actual_manifest = _parse_state_manifest(actual_payload)
-        expected_ref = _object_ref_from_payload(manifest.get("state"))
+        actual_manifest = _parse_storage_manifest(actual_payload)
+        expected_ref = _object_ref_from_payload(manifest.get("storage"))
         expected_payload = await read_object(
             object_store,
             expected_ref.key,
             expected_digest=expected_ref.digest,
             expected_size=expected_ref.size,
         )
-        expected_manifest = _parse_state_manifest(expected_payload)
-        if _state_manifest_identity(actual_manifest) != _state_manifest_identity(
+        expected_manifest = _parse_storage_manifest(expected_payload)
+        if _storage_manifest_identity(actual_manifest) != _storage_manifest_identity(
             expected_manifest
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -917,8 +923,8 @@ async def _verify_restored_generation(
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
         raise
     finally:
-        if restored_state.ready:
-            await restored_state.close()
+        if restored_storage.ready:
+            await restored_storage.close()
 
     workspace_root = root / "workspace"
     workspace = manifest.get("workspace")
@@ -996,7 +1002,7 @@ def _read_generation_manifest(root: Path) -> Mapping[str, object]:
     return value
 
 
-def _state_manifest_identity(
+def _storage_manifest_identity(
     manifest: Mapping[str, object],
 ) -> str:
     domains = manifest.get("domains")
@@ -1046,7 +1052,7 @@ def _state_manifest_identity(
     )
 
 
-def _state_snapshot_usage(
+def _storage_snapshot_usage(
     manifest: Mapping[str, object],
 ) -> tuple[int, int]:
     domains = manifest.get("domains")
@@ -1089,14 +1095,14 @@ def _workspace_snapshot_usage(
     return len(entries), total_bytes
 
 
-def _parse_state_manifest(payload: bytes) -> Mapping[str, object]:
+def _parse_storage_manifest(payload: bytes) -> Mapping[str, object]:
     try:
         value = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if value.get("kind") != "runtime-state-snapshot":
+    if value.get("kind") != "runtime-storage-snapshot":
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     _require_snapshot_format_version(value.get("format_version"))
     if not isinstance(value.get("domains"), Mapping):
@@ -1217,6 +1223,8 @@ async def _read_manifest(
 ) -> Mapping[str, object]:
     if not isinstance(limits, SnapshotLimits):
         raise TypeError("limits must be SnapshotLimits")
+    if ref.store_id != object_store.store_id:
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     if ref.size > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
     payload = await read_object(
@@ -1262,8 +1270,7 @@ def _object_ref_from_payload(value: object) -> ObjectRef:
     digest = value["digest"]
     size = value["size"]
     if (
-        not isinstance(store_id, str)
-        or not store_id
+        store_id != RUNTIME_OBJECT_STORE_ID
         or not isinstance(key, str)
         or not key
         or not isinstance(digest, str)
@@ -1373,7 +1380,7 @@ def _restored_runtime(root: Path, value: Mapping[str, object]) -> RestoredRuntim
         cast(str, value["snapshot_digest"]),
         cast(str, value["namespace"]),
         cast(str, value["tenant_id"]),
-        Path(cast(str, value["state_root"])),
+        Path(cast(str, value["storage_root"])),
         (
             None
             if value.get("workspace_root") is None
@@ -1385,10 +1392,8 @@ def _restored_runtime(root: Path, value: Mapping[str, object]) -> RestoredRuntim
 
 __all__ = [
     "RestoredRuntime",
-    "RunSnapshot",
     "RuntimeSnapshot",
     "SnapshotExclusiveGuard",
     "SnapshotLimits",
     "SnapshotTargetInspection",
-    "snapshot_digest",
 ]

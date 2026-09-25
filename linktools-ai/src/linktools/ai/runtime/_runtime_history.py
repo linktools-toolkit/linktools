@@ -11,7 +11,7 @@ from datetime import datetime
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot, restore_output
+from ..agent import AgentBindingContract
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -35,7 +35,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import ObjectStore, StoredPayload, read_object
 from ..task import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskEvent,
     TaskGraphInfo,
     TaskResultRecord,
@@ -69,9 +69,9 @@ from .service_api import (
     UsageReadCutoff,
     UsageSummary,
 )
-from .state import RuntimeDomain, RuntimeState
+from .state import RuntimeDomain, RuntimeStorage
 from .state._contracts import (
-    ConversationState,
+    ConversationRepositories,
     EventRepository,
     ExecutionRecord,
     ExecutionRepository,
@@ -90,7 +90,7 @@ class ExecutionInfo:
     execution_id: str
     binding_kind: str
     agent_id: str | None
-    task_type: str | None
+    task_id: str | None
     status: ExecutionStatus
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
@@ -105,9 +105,6 @@ class ExecutionInfo:
     started_at: datetime | None = None
     terminal_at: datetime | None = None
     binding_digest: str | None = None
-    input_digest: str | None = None
-    output_fingerprint: str | None = None
-    output_digest: str | None = None
     usage: UsageSummary | None = None
 
     def __post_init__(self) -> None:
@@ -199,7 +196,7 @@ def _project_execution_info(
         execution_id=record.execution_id,
         binding_kind=record.binding_kind,
         agent_id=record.agent_id,
-        task_type=record.task_type,
+        task_id=record.task_id,
         status=record.status,
         lineage_kind=record.lineage_kind,
         parent_execution_id=record.parent_execution_id,
@@ -211,13 +208,6 @@ def _project_execution_info(
         started_at=record.started_at,
         terminal_at=None if result is None else result.created_at,
         binding_digest=record.binding_digest,
-        input_digest=record.stored_user_input.digest,
-        output_fingerprint=_output_fingerprint(record),
-        output_digest=(
-            None
-            if result is None or result.output is None
-            else result.output.digest
-        ),
         usage=usage,
         error_code=record.error_code,
         safe_error_details=record.safe_error_details,
@@ -243,7 +233,7 @@ class RuntimeHistory:
         execution_objects: "ObjectStore | None" = None,
         task_objects: "ObjectStore | None" = None,
         artifacts: "ArtifactService | None" = None,
-        conversation: "ConversationState | None" = None,
+        conversation: "ConversationRepositories | None" = None,
         session_transcript_store: "SessionTimelineTranscriptStore | None" = None,
     ) -> None:
         self._service = service
@@ -317,7 +307,6 @@ class RuntimeHistory:
                 record.execution_id,
                 record.status,
                 None,
-                None,
                 stored.usage,
                 error_code,
                 record.safe_error_details,
@@ -334,7 +323,6 @@ class RuntimeHistory:
             record.execution_id,
             record.status,
             output,
-            _output_fingerprint(record),
             stored.usage,
         )
 
@@ -472,13 +460,13 @@ class RuntimeHistory:
             AuthorizationAction.TASK_READ,
             header,
         )
-        snapshot = await tasks.snapshot_graph(
+        state = await tasks.graph_state(
             graph_id,
             tenant_id=principal.tenant_id,
         )
-        if snapshot is None:
+        if state is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        return TaskGraphInfo.from_snapshot(snapshot)
+        return TaskGraphInfo.from_state(state)
 
     async def task_events(
         self,
@@ -850,13 +838,13 @@ class RuntimeHistory:
         cls,
         namespace: str,
         *,
-        state: RuntimeState,
+        storage: RuntimeStorage,
         tenant_id: "str | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
     ) -> AbstractAsyncContextManager["RuntimeHistory"]:
         return _open_runtime_history(
             namespace,
-            state=state,
+            storage=storage,
             tenant_id=tenant_id,
             authorization=authorization,
         )
@@ -1061,7 +1049,7 @@ class RuntimeHistory:
 async def _open_runtime_history(
     namespace: str,
     *,
-    state: RuntimeState,
+    storage: RuntimeStorage,
     tenant_id: "str | None",
     authorization: "AuthorizationPolicy | None",
 ) -> AsyncIterator[RuntimeHistory]:
@@ -1069,32 +1057,32 @@ async def _open_runtime_history(
     effective_tenant_id = (
         "default" if tenant_id is None else validate_tenant_id(tenant_id)
     )
-    if not isinstance(state, RuntimeState):
-        raise TypeError("state must be RuntimeState")
-    selected_state = state
+    if not isinstance(storage, RuntimeStorage):
+        raise TypeError("storage must be RuntimeStorage")
+    selected_storage = storage
     initialized = False
     body_error: BaseException | None = None
     try:
-        await selected_state.initialize(
+        await selected_storage.initialize(
             namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
             read_only=True,
         )
         initialized = True
         if (
-            selected_state.namespace != resolved_namespace
-            or selected_state.tenant_id != effective_tenant_id
+            selected_storage.namespace != resolved_namespace
+            or selected_storage.tenant_id != effective_tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         reader = StepExecutionHistoryReader(
             namespace=resolved_namespace,
-            executions=selected_state.execution.executions,
-            store=selected_state.steps.read_store(RuntimeDomain.EXECUTION),
+            executions=selected_storage.execution.executions,
+            store=selected_storage.run_store.read_store(RuntimeDomain.EXECUTION),
             cursor_signer=HmacCursorSigner(
                 "execution-history",
                 token_seed(resolved_namespace),
             ),
-            tool_operations=selected_state.recovery.tools,
+            tool_operations=selected_storage.recovery.tools,
         )
         effective_authorization = (
             TenantAuthorizationPolicy(effective_tenant_id)
@@ -1102,13 +1090,13 @@ async def _open_runtime_history(
             else authorization
         )
         service = DefaultExecutionHistoryService(
-            selected_state.execution.executions,
+            selected_storage.execution.executions,
             effective_authorization,
             reader,
             cursor_signer=HmacCursorSigner("execution", token_seed(resolved_namespace)),
         )
         artifacts = DefaultArtifactService(
-            selected_state.artifact,
+            selected_storage.artifact,
             effective_authorization,
             token_seed=token_seed(resolved_namespace),
             cursor_signer=HmacCursorSigner("artifact", token_seed(resolved_namespace)),
@@ -1116,21 +1104,21 @@ async def _open_runtime_history(
         yield RuntimeHistory(
             service,
             tenant_id=effective_tenant_id,
-            executions=selected_state.execution.executions,
-            events=selected_state.execution.events,
-            sessions=selected_state.conversation.sessions,
-            tasks=selected_state.task.tasks,
+            executions=selected_storage.execution.executions,
+            events=selected_storage.execution.events,
+            sessions=selected_storage.conversation.sessions,
+            tasks=selected_storage.task.tasks,
             authorization=effective_authorization,
             namespace=resolved_namespace,
-            execution_objects=selected_state.object_store(RuntimeDomain.EXECUTION),
-            task_objects=selected_state.object_store(RuntimeDomain.TASK),
+            execution_objects=selected_storage.object_store(RuntimeDomain.EXECUTION),
+            task_objects=selected_storage.object_store(RuntimeDomain.TASK),
             artifacts=artifacts,
             cursor_signer=HmacCursorSigner(
                 "runtime-history",
                 token_seed(resolved_namespace),
             ),
-            conversation=selected_state.conversation,
-            session_transcript_store=selected_state.steps,
+            conversation=selected_storage.conversation,
+            session_transcript_store=selected_storage.run_store,
         )
     except BaseException as error:
         body_error = error
@@ -1138,7 +1126,7 @@ async def _open_runtime_history(
     finally:
         if initialized:
             try:
-                await selected_state.close()
+                await selected_storage.close()
             except BaseException as error:
                 if body_error is None:
                     raise
@@ -1153,15 +1141,6 @@ def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
         code,
         type(error).__name__,
     )
-
-
-def _output_fingerprint(record: ExecutionRecord) -> str:
-    binding = record.binding
-    if isinstance(binding, TaskBindingSnapshot):
-        return binding.output_fingerprint
-    if isinstance(binding, AgentBindingSnapshot):
-        return restore_output(binding.output_mode, binding.output_schema).fingerprint
-    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _terminal_error_code(record: ExecutionRecord) -> str:
