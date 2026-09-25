@@ -146,11 +146,7 @@ async def compose_runtime_components(
     if len(sandbox_groups) > 1:
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
     workspace = None if not workspace_groups else workspace_groups[0].workspace
-    sandbox = (
-        sandbox_groups[0].sandbox
-        if sandbox_groups
-        else LocalSandbox() if workspace is not None else None
-    )
+    sandbox = sandbox_groups[0].sandbox if sandbox_groups else LocalSandbox()
     if workspace is not None:
         workspace.policy.validate()
 
