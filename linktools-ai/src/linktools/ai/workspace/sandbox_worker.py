@@ -488,7 +488,7 @@ def _resources(value: str) -> tuple[SandboxResource, ...]:
         ):
             raise RuntimeError("worker resource is invalid")
         digest = hashlib.sha256(resource_id.encode("utf-8")).hexdigest()[:24]
-        if path != f"/skills/r{digest}":
+        if path != f"/resources/r{digest}":
             raise RuntimeError("worker resource is invalid")
         resources.append(SandboxResource(resource_id, Path(path)))
         seen.add(resource_id)
