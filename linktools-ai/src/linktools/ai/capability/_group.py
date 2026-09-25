@@ -245,7 +245,7 @@ class CapabilityGroup(Generic[AppT]):
         name: str,
         *,
         revision: int = 1,
-        model_route: str = "default",
+        model: str = "default",
         system_prompt: str = "",
         instructions: "str | Sequence[str]" = (),
         allow_tools: Sequence[str] = ("*",),
@@ -265,7 +265,7 @@ class CapabilityGroup(Generic[AppT]):
         values = (instructions,) if isinstance(instructions, str) else tuple(instructions)
         spec = AgentSpec(
             id=name,
-            model_route=model_route,
+            model=model,
             system_prompt=system_prompt,
             instructions=values,
             allow_tools=tuple(allow_tools),

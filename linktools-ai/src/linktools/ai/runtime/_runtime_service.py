@@ -383,7 +383,7 @@ class Runtime(Generic[AppT]):
         self,
         agent_id: str = "default",
         *,
-        model_route: "str | None" = None,
+        model: "str | None" = None,
         system_prompt: "str | None" = None,
         instructions: "Sequence[str] | None" = None,
         allow_tools: "Sequence[str] | None" = None,
@@ -396,7 +396,7 @@ class Runtime(Generic[AppT]):
         if all(
             value is None
             for value in (
-                model_route,
+                model,
                 system_prompt,
                 instructions,
                 allow_tools,
@@ -405,8 +405,8 @@ class Runtime(Generic[AppT]):
         ):
             return Agent(self, root.spec.id, root.spec.revision)
         changes: dict[str, object] = {}
-        if model_route is not None:
-            changes["model_route"] = model_route
+        if model is not None:
+            changes["model"] = model
         if system_prompt is not None:
             changes["system_prompt"] = system_prompt
         if instructions is not None:

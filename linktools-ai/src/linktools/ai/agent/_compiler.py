@@ -83,7 +83,7 @@ class AgentCompiler:
         """Compile one current declaration from the captured candidate universe."""
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
-        model = self._models.resolve(spec.model_route)
+        model = self._models.resolve(spec.model)
         selected_tools, selected_mcp, ordinary_policy, mcp_policy = self._select_tools(spec)
         selected_skills = self._select_exact_kind("skill", spec.allow_skills)
         selected_subagents = self._select_subagents(spec)
@@ -176,7 +176,7 @@ class AgentCompiler:
         try:
             model = self._models.restore(
                 binding_contract.model_contract,
-                route_id=binding_contract.agent_spec.model_route,
+                route_id=binding_contract.agent_spec.model,
             )
             selected = self._restore_selected(binding_contract.selected)
             ordinary_policy, mcp_policy = self._restore_policies(
