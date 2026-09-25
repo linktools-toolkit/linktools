@@ -49,7 +49,6 @@ from ._tool_semantic import (
 )
 from ._workspace import (
     WorkspaceToolDeclaration,
-    WorkspaceAccess,
     workspace_capabilities,
     workspace_tool_declarations,
 )
@@ -87,7 +86,6 @@ __all__ = [
     "TaskExpansionContext",
     "ToolCallFailed",
     "ToolCallRetry",
-    "WorkspaceAccess",
     "mcp_resource_path",
     "mcp_server_selector",
     "mcp_tool_selector",
