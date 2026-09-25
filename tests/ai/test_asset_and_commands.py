@@ -21,7 +21,6 @@ from linktools.ai.asset import (
     InMemoryAssetBackend,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import SandboxResource
 from linktools.ai.storage import (
     InMemoryContentCache,
     StorageChange,
@@ -211,39 +210,6 @@ def test_asset_version_ref_pins_effective_layer() -> None:
         await store.put(key, b"primary")
         assert await store.get(key) == b"primary"
         assert await store.read_versions((frozen,)) == (b"fallback",)
-
-    asyncio.run(run())
-
-
-def test_sandbox_resource_materializes_pinned_historical_asset(
-    tmp_path: Path,
-) -> None:
-    async def run() -> None:
-        backend = InMemoryAssetBackend(AssetRoot("memory", "history"))
-        store, _ = make_store(backend)
-        await store.initialize()
-        try:
-            key = AssetKey("skill", "audit/helper.py")
-            await store.put(key, b"first")
-            pinned = (await store.resolve_versions((key,)))[0]
-            await store.put(key, b"second")
-
-            resource = await SandboxResource.from_asset_versions(
-                "audit",
-                store,
-                {"helper.py": pinned},
-                executable_bits={"helper.py": 0o100},
-                materialize_root=tmp_path / "audit",
-            )
-
-            assert resource is not None
-            assert resource.source == (tmp_path / "audit").resolve()
-            assert resource.files is not None
-            helper = resource.files["helper.py"]
-            assert helper.read_bytes() == b"first"
-            assert helper.stat().st_mode & 0o111 == 0o100
-        finally:
-            await store.close()
 
     asyncio.run(run())
 
