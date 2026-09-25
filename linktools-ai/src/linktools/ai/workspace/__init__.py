@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Workspace identity, discovery, policy, instructions, and sandbox contracts."""
 
+from ._access import WorkspaceAccess
 from ._instructions import LocalRepositoryInstructionResolver
 from ._root import (
     PermissionDecision,
@@ -44,6 +45,7 @@ __all__ = [
     "LocalSandbox",
     "ToolPermissionRule",
     "Workspace",
+    "WorkspaceAccess",
     "WorkspacePolicy",
     "WorkspaceToolPermissionPolicy",
     "normalize_workspace_input_path",
