@@ -50,7 +50,7 @@ async def test_runtime_memory_store_implements_harness_path_storage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_capability_is_harness_owned_over_runtime_state() -> None:
+async def test_memory_capability_is_harness_owned_over_runtime_storage() -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="memory-capability", tenant_id="tenant")
     try:
@@ -199,7 +199,7 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     ]
 
 
-def _workspace_runtime_state(workspace: Workspace) -> RuntimeStorage:
+def _workspace_runtime_storage(workspace: Workspace) -> RuntimeStorage:
     return RuntimeStorage.from_root(workspace.storage_root / "runtime")
 
 
@@ -210,7 +210,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     async with Runtime.open(
         "default",
         models=models,
-        storage=_workspace_runtime_state(workspace),
+        storage=_workspace_runtime_storage(workspace),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         assert runtime.tenant_id == "default"
@@ -228,7 +228,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         "default",
         context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
-        storage=_workspace_runtime_state(workspace),
+        storage=_workspace_runtime_storage(workspace),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
@@ -238,7 +238,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     async with Runtime.open(
         "default",
         models=models,
-        storage=_workspace_runtime_state(workspace),
+        storage=_workspace_runtime_storage(workspace),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         loaded = await runtime.session.get(

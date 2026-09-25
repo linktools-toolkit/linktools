@@ -408,7 +408,7 @@ async def test_compose_cleanup_continues_after_independent_resource_failure(
     state = _CloseCounter()
 
     await factory._cleanup_compose_resources(
-        selected_state=state,
+        selected_storage=state,
         initialized=True,
         input_materializer=(
             failing if resource_name == "input" else None

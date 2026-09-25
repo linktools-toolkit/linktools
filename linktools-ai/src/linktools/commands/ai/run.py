@@ -40,7 +40,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--planning",
             action="store_true",
-            help="enable planning for this execution",
+            help="enable the planning capability for this execution",
         )
         parser.add_argument(
             "--thinking",

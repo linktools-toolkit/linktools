@@ -4,9 +4,15 @@
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import DisabledSandbox, SandboxResource, SandboxSession, Workspace
+from linktools.ai.workspace import (
+    DisabledSandbox,
+    SandboxResource,
+    SandboxSession,
+    LocalSandbox,
+    Workspace,
+    WorkspaceAccess,
+)
 
 
 class _ByteSession:
@@ -66,7 +72,10 @@ async def test_workspace_access_lazily_opens_one_custom_session(tmp_path: Path) 
 @pytest.mark.asyncio
 async def test_workspace_access_uses_local_workspace_boundary(tmp_path: Path) -> None:
     (tmp_path / "evidence.bin").write_bytes(b"evidence")
-    access = WorkspaceAccess.for_workspace(Workspace.load(tmp_path))
+    access = WorkspaceAccess.for_workspace(
+        Workspace.load(tmp_path),
+        sandbox=LocalSandbox(),
+    )
     try:
         assert await access.read_bytes("evidence.bin") == b"evidence"
     finally:

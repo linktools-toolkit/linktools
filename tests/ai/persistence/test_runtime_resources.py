@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 
 @pytest.mark.asyncio
-async def test_sqlite_runtime_state_owns_and_reopens_database(tmp_path) -> None:
+async def test_sqlite_runtime_storage_owns_and_reopens_database(tmp_path) -> None:
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
@@ -33,7 +33,7 @@ async def test_sqlite_runtime_state_owns_and_reopens_database(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_transient_runtime_state_closes_repository_and_object_domains() -> None:
+async def test_transient_runtime_storage_closes_repository_and_object_domains() -> None:
     plan = RuntimeStoragePlan(
         **{
             domain.value: RuntimeStorageRoute.transient()
@@ -49,7 +49,7 @@ async def test_transient_runtime_state_closes_repository_and_object_domains() ->
 
 
 @pytest.mark.asyncio
-async def test_runtime_state_close_cursor_retries_failed_action_and_survives_cancellation() -> None:
+async def test_runtime_storage_close_cursor_retries_failed_action_and_survives_cancellation() -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="close-cursor", tenant_id="tenant")
     calls: list[str] = []

@@ -342,7 +342,9 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
     )
     controller._conversation = SimpleNamespace()
     controller._namespace = "runtime"
-    controller._steps = SimpleNamespace(release_staging_many=release_staging_many)
+    controller._run_store = SimpleNamespace(
+        release_staging_many=release_staging_many
+    )
     controller._objects = SimpleNamespace()
     controller._transient_domains = frozenset()
 

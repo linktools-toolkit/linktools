@@ -224,7 +224,11 @@ class SubagentDispatcher:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             child_binding = self._compiler.restore(frozen_binding)
             compiled_agent = child_binding.compiled_agent
-        child_planning = True if child_mode == "plan" else compiled_agent.spec.planning
+        child_planning = (
+            True
+            if child_mode == "plan"
+            else compiled_agent.spec.planning
+        )
         request = ExecutionRequest(
             user_prompt=user_prompt,
             principal=principal,

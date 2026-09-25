@@ -40,7 +40,7 @@ def _binding() -> object:
         selected_tools=(),
     )
     return SimpleNamespace(
-        digest=binding_contract.binding_digest,
+        binding_digest=binding_contract.binding_digest,
         binding_contract=binding_contract,
         compiled_agent=compiled_agent,
     )
@@ -66,8 +66,8 @@ def _record() -> ExecutionRecord:
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,

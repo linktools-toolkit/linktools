@@ -14,7 +14,7 @@
         "timestamp": "2026-01-01T00:00:00Z"
       }
     ],
-    "agent_run_id": null,
+    "run_id": null,
     "state": "complete",
     "timestamp": null,
     "version": 1

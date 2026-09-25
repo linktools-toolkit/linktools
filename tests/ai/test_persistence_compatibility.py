@@ -90,7 +90,6 @@ def test_output_binding_round_trips_from_durable_contract() -> None:
     binding = bind_output()
     restored = restore_output(binding.mode, binding.schema_definition)
     assert restored == binding
-    assert restored.contract_digest == binding.contract_digest
 
 
 def _model_message_values() -> tuple[ModelRequest, ...]:
@@ -206,12 +205,12 @@ def test_custom_wire_v1_fixture_matches_current_shape() -> None:
     assert value == _custom_wire_values()
 
 
-def test_current_evaluation_requires_dataset_digest() -> None:
+def test_current_evaluation_requires_dataset_id() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     current = EvaluationRecord(
         evaluation_id="evaluation",
         execution_id="execution",
-        dataset_digest="dataset-digest",
+        dataset_id="dataset",
         status=EvaluationStatus.SUCCEEDED,
         revision=2,
         created_at=now,
@@ -221,7 +220,7 @@ def test_current_evaluation_requires_dataset_digest() -> None:
         dict[str, object],
         runtime_codec._encode_persisted_domain(current),
     )
-    payload["fields"].pop("dataset_digest")
+    payload["fields"].pop("dataset_id")
 
     with pytest.raises(AIError) as raised:
         runtime_codec._decode_enveloped_domain(

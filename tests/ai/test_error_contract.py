@@ -94,17 +94,14 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
         "success",
         ExecutionStatus.SUCCEEDED,
         {"ok": True},
-        "a" * 64,
         usage,
     )
-    assert succeeded.output_contract_digest == "a" * 64
     assert succeeded.error_code is None
     assert succeeded.safe_error_details == {}
 
     failed = ExecutionResult(
         "failed",
         ExecutionStatus.FAILED,
-        None,
         None,
         usage,
         ErrorCode.MODEL_REQUEST_REJECTED.value,
@@ -117,7 +114,6 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
         "cancelled",
         ExecutionStatus.CANCELLED,
         None,
-        None,
         usage,
         ErrorCode.EXECUTION_CANCELLED.value,
     )
@@ -128,14 +124,12 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
             "invalid",
             ExecutionStatus.FAILED,
             None,
-            None,
             usage,
             ErrorCode.EXECUTION_CANCELLED.value,
         )
     unknown = ExecutionResult(
         "unknown",
         ExecutionStatus.FAILED,
-        None,
         None,
         usage,
         "NOT_A_REAL_ERROR",
@@ -146,16 +140,14 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
             "failed-with-output",
             ExecutionStatus.FAILED,
             {"unexpected": True},
-            "a" * 64,
             usage,
             ErrorCode.INTERNAL_ERROR.value,
         )
     with pytest.raises(ValueError):
         ExecutionResult(
-            "cancelled-with-output-contract",
+            "cancelled-with-output",
             ExecutionStatus.CANCELLED,
-            None,
-            "a" * 64,
+            {"unexpected": True},
             usage,
             ErrorCode.EXECUTION_CANCELLED.value,
         )

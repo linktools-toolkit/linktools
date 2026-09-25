@@ -293,7 +293,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
 
         async def execute(call_id: str) -> object:
             context = RunContext(
-                deps=None, model=TestModel(), usage=RunUsage(), agent_run_id=agent_run_id
+                deps=None, model=TestModel(), usage=RunUsage(), run_id=agent_run_id
             )
             call = ToolCallPart("tool", {}, tool_call_id=call_id)
             tool_def = ToolDefinition(

@@ -60,8 +60,8 @@ def _execution(
         session_id=None,
         parent_execution_id=None,
         root_execution_id=execution_id,
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.SUCCEEDED,
         revision=1,
@@ -196,7 +196,7 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
     evaluation = EvaluationRecord(
         evaluation_id="evaluation",
         execution_id=source.execution_id,
-        dataset_digest="dataset",
+        dataset_id="dataset",
         status=EvaluationStatus.SUCCEEDED,
         revision=1,
         created_at=now,
@@ -254,7 +254,7 @@ async def test_evaluation_compare_uses_source_execution_binding() -> None:
             EvaluationRecord(
                 evaluation_id=evaluation_id,
                 execution_id=source.execution_id,
-                dataset_digest="dataset",
+                dataset_id="dataset",
                 status=EvaluationStatus.SUCCEEDED,
                 revision=1,
                 created_at=now,
@@ -301,7 +301,7 @@ async def test_evaluation_status_cannot_lead_source_execution() -> None:
         EvaluationRecord(
             evaluation_id="state-ahead",
             execution_id=source.execution_id,
-            dataset_digest="dataset",
+            dataset_id="dataset",
             status=EvaluationStatus.RUNNING,
             revision=1,
             created_at=now,
@@ -340,7 +340,7 @@ async def test_evaluation_missing_source_execution_fails_closed(
         EvaluationRecord(
             evaluation_id="missing-source",
             execution_id="missing-execution",
-            dataset_digest="dataset",
+            dataset_id="dataset",
             status=status,
             revision=0,
             created_at=now,

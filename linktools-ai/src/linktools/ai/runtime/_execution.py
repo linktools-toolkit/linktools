@@ -704,8 +704,8 @@ class DefaultExecutionService:
             {
                 "version": 1,
                 "kind": "task",
-                "task_id": binding.task_id,
-                "task_revision": binding.task_revision,
+                "task_id": binding.id,
+                "task_revision": binding.revision,
             },
         )
         scope = "execution.task"
@@ -724,8 +724,8 @@ class DefaultExecutionService:
             session_id=None,
             parent_execution_id=None,
             root_execution_id=execution_id,
-            source_execution_id=None,
-            base_execution_id=None,
+            previous_execution_id=None,
+            fork_base_execution_id=None,
             lineage_kind=ExecutionLineageKind.RUN,
             status=ExecutionStatus.PENDING_START,
             revision=0,
@@ -1479,8 +1479,8 @@ class DefaultExecutionService:
             request,
             binding_digest,
             session_id=None,
-            source_execution_id=None,
-            base_execution_id=None,
+            previous_execution_id=None,
+            fork_base_execution_id=None,
             parent_execution_id=None,
             root_execution_id=None,
             parent_invocation_id=None,
@@ -1675,8 +1675,8 @@ class DefaultExecutionService:
         *,
         session_id: "str | None" = None,
         session_agent_id: "str | None" = None,
-        source_execution_id: "str | None" = None,
-        base_execution_id: "str | None" = None,
+        previous_execution_id: "str | None" = None,
+        fork_base_execution_id: "str | None" = None,
         conversation_agent_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
         root_execution_id: "str | None" = None,
@@ -1693,8 +1693,8 @@ class DefaultExecutionService:
                 request,
                 session_id=session_id,
                 session_agent_id=session_agent_id,
-                source_execution_id=source_execution_id,
-                base_execution_id=base_execution_id,
+                previous_execution_id=previous_execution_id,
+                fork_base_execution_id=fork_base_execution_id,
                 conversation_agent_run_id=conversation_agent_run_id,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
@@ -1711,8 +1711,8 @@ class DefaultExecutionService:
                 request,
                 session_id=session_id,
                 session_agent_id=session_agent_id,
-                source_execution_id=source_execution_id,
-                base_execution_id=base_execution_id,
+                previous_execution_id=previous_execution_id,
+                fork_base_execution_id=fork_base_execution_id,
                 conversation_agent_run_id=conversation_agent_run_id,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
@@ -1731,8 +1731,8 @@ class DefaultExecutionService:
         *,
         session_id: "str | None" = None,
         session_agent_id: "str | None" = None,
-        source_execution_id: "str | None" = None,
-        base_execution_id: "str | None" = None,
+        previous_execution_id: "str | None" = None,
+        fork_base_execution_id: "str | None" = None,
         conversation_agent_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
         root_execution_id: "str | None" = None,
@@ -1767,7 +1767,7 @@ class DefaultExecutionService:
             request = replace(request, correlation=parent.correlation)
         conversation_agent_run_id = conversation_agent_run_id
         session = None
-        if session_id is not None and source_execution_id is None:
+        if session_id is not None and previous_execution_id is None:
             session = await self._sessions.get(
                 session_id, tenant_id=request.principal.tenant_id
             )
@@ -1789,7 +1789,7 @@ class DefaultExecutionService:
                 if session.continuation is None
                 else session.continuation.agent_run_id
             )
-            base_execution_id = None
+            fork_base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
         execution_id = self._operation_ids()
         resource = ResourceRef(
@@ -1803,8 +1803,8 @@ class DefaultExecutionService:
             request,
             binding_digest,
             session_id=session_id,
-            source_execution_id=source_execution_id,
-            base_execution_id=base_execution_id,
+            previous_execution_id=previous_execution_id,
+            fork_base_execution_id=fork_base_execution_id,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
             parent_invocation_id=parent_invocation_id,
@@ -1974,8 +1974,8 @@ class DefaultExecutionService:
             safe_error_details={},
             created_at=now,
             updated_at=now,
-            source_execution_id=source_execution_id,
-            base_execution_id=base_execution_id,
+            previous_execution_id=previous_execution_id,
+            fork_base_execution_id=fork_base_execution_id,
             lineage_kind=lineage_kind,
             agent_run_sequence=0,
             memory_scope=request.memory_scope,
@@ -2647,9 +2647,9 @@ class DefaultExecutionService:
             parent_execution_id=previous.parent_execution_id,
             root_execution_id=previous.root_execution_id,
             scope="execution.retry",
-            source_execution_id=previous.execution_id,
+            previous_execution_id=previous.execution_id,
             lineage_kind=ExecutionLineageKind.RETRY,
-            base_execution_id=previous.base_execution_id,
+            fork_base_execution_id=previous.fork_base_execution_id,
             conversation_agent_run_id=previous.conversation_agent_run_id,
             binding_contract=previous.binding,
         )
@@ -2689,9 +2689,9 @@ class DefaultExecutionService:
             parent_execution_id=previous.parent_execution_id,
             root_execution_id=previous.root_execution_id,
             scope="execution.fork",
-            source_execution_id=previous.execution_id,
+            previous_execution_id=previous.execution_id,
             lineage_kind=ExecutionLineageKind.FORK,
-            base_execution_id=previous.execution_id,
+            fork_base_execution_id=previous.execution_id,
             binding_contract=previous.binding,
         )
 
@@ -3550,8 +3550,8 @@ def _request_digest(
     binding_digest: str,
     *,
     session_id: str | None,
-    source_execution_id: str | None,
-    base_execution_id: str | None,
+    previous_execution_id: str | None,
+    fork_base_execution_id: str | None,
     parent_execution_id: str | None,
     root_execution_id: str | None,
     parent_invocation_id: str | None,
@@ -3572,8 +3572,8 @@ def _request_digest(
             "scope": session_id or "execution",
             "principal": principal_identity_payload(request.principal),
             "session_id": session_id,
-            "source_execution_id": source_execution_id,
-            "base_execution_id": base_execution_id,
+            "previous_execution_id": previous_execution_id,
+            "fork_base_execution_id": fork_base_execution_id,
             "parent_execution_id": parent_execution_id,
             "parent_invocation_id": parent_invocation_id,
             "root_identity": root_execution_id or "$self",

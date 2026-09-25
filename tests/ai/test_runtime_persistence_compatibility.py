@@ -184,15 +184,17 @@ def test_unknown_enum_value_is_unsupported() -> None:
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_persisted_custom_dataclass_allows_additive_field() -> None:
+def test_persisted_task_node_rejects_unknown_field() -> None:
     node = TaskNode("node", (), input={"key": "value"}, budget_cost=1)
     payload = copy.deepcopy(_encode_persisted_domain(node))
     payload["fields"]["future_metadata"] = {"future": True}
 
-    assert _decode_enveloped_domain(
-        _envelope(payload, wire_id="task_node"),
-        TaskNode,
-    ) == node
+    with pytest.raises(AIError) as error:
+        _decode_enveloped_domain(
+            _envelope(payload, wire_id="task_node"),
+            TaskNode,
+        )
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_persisted_model_interaction_accepts_legacy_attachment_without_identifier() -> None:

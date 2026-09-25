@@ -313,7 +313,7 @@ async def test_model_metric_does_not_capture_prompt_or_exception_text() -> None:
         deps=type("Deps", (), {"correlation": {}})(),
         model=model,
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
         run_step=1,
     )
     request_context = ModelRequestContext(

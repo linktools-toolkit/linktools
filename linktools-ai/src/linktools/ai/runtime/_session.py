@@ -347,7 +347,7 @@ class DefaultSessionService:
         )
         return Page(views, next_cursor)
 
-    async def load(self, session_id: str, *, principal: Principal) -> SessionView:
+    async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
         async with self._session_consumer(session_id, principal.tenant_id):
             record = await self._authorized(
                 session_id, principal, AuthorizationAction.SESSION_READ

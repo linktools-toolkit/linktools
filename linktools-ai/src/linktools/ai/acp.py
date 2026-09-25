@@ -5,7 +5,7 @@
 import asyncio
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Protocol
+from typing import Protocol, cast
 from uuid import uuid4
 
 from linktools.core import environ
@@ -27,7 +27,13 @@ from .core import (
 )
 from .errors import AIError
 from .model import ModelRegistry
-from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime, RuntimeStorage
+from .runtime import (
+    CancelExecutionRequest,
+    ListSessionRequest,
+    Runtime,
+    RuntimeStorage,
+    SessionView,
+)
 from .workspace import Workspace
 
 _logger = environ.get_logger("ai.acp")
@@ -39,6 +45,15 @@ class ACPConnection(Protocol):
 
 class ACPTextContent(Protocol):
     text: str
+
+
+class _SessionReconciliationPort(Protocol):
+    async def reconcile(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> SessionView: ...
 
 
 class ACPAgent:
@@ -146,7 +161,8 @@ class ACPAgent:
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
-        loaded = await self._runtime.session.load(session_id, principal=self._principal)
+        session = cast(_SessionReconciliationPort, self._runtime.session)
+        loaded = await session.reconcile(session_id, principal=self._principal)
         if loaded.active_execution_id is not None:
             await self._runtime.execution.cancel(
                 loaded.active_execution_id,

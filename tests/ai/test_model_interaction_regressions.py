@@ -244,8 +244,8 @@ def test_interaction_projection_keeps_exact_stamped_request_content() -> None:
     projected = replace(
         source,
         timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        agent_run_id="run",
-        agent_conversation_id="conversation",
+        run_id="run",
+        conversation_id="conversation",
         instructions="instruction",
     )
     store = StagingAgentRunStore()

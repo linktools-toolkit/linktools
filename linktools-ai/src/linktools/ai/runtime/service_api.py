@@ -1333,7 +1333,6 @@ class SessionService(Protocol):
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> "Page[SessionTurn]": ...
-    async def load(self, session_id: str, *, principal: Principal) -> SessionView: ...
     async def resume(
         self,
         agent_id: str,

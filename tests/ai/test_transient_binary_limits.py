@@ -32,7 +32,7 @@ def _contexts() -> tuple[RunContext[AgentContext[None]], ModelRequestContext]:
         deps=deps,
         model=model,
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
     )
     request_context = ModelRequestContext(
         model=model,

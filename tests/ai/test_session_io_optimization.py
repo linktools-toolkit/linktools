@@ -173,7 +173,7 @@ async def test_session_load_reuses_reconciled_active_execution() -> None:
         history_reader=object(),  # type: ignore[arg-type]
     )
 
-    loaded = await service.load(
+    loaded = await service.reconcile(
         "session",
         principal=Principal("principal", "tenant"),
     )

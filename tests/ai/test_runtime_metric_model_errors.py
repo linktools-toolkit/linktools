@@ -68,7 +68,7 @@ async def test_model_cancellation_records_cancelled_observation() -> None:
         deps=type("Deps", (), {"correlation": {}})(),
         model=model,
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
         run_step=1,
     )
     request_context = ModelRequestContext(

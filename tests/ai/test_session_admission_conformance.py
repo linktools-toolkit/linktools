@@ -216,7 +216,7 @@ class _BindingCatalog:
         binding = _binding()
         assert digest == binding.binding_digest
         return SimpleNamespace(
-            digest=binding.binding_digest,
+            binding_digest=binding.binding_digest,
             compiled_agent=SimpleNamespace(digest="b" * 64),
             binding_contract=binding,
         )

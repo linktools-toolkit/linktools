@@ -102,8 +102,8 @@ def _execution(*, binding: AgentBindingContract | None = None) -> ExecutionRecor
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.PENDING_START,
         revision=0,
@@ -212,7 +212,6 @@ def test_output_contract_restores_only_mode_and_schema() -> None:
     assert automatic.mode == "structured"
     assert restored.mode == automatic.mode
     assert restored.schema_definition == automatic.schema_definition
-    assert restored.contract_digest == automatic.contract_digest
 
     with pytest.raises(AIError) as restore_error:
         restore_output("structured", {"type": "not-a-json-schema-type"})

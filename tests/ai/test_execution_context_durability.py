@@ -37,8 +37,8 @@ def _execution(*, correlation: dict[str, str | int]) -> ExecutionRecord:
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.PENDING_START,
         revision=0,
@@ -70,13 +70,13 @@ def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(
             binding_contract=execution.binding,
-            digest=digest,
+            binding_digest=digest,
         )
     )
     return backend
 
 
-def test_local_binding_lookup_uses_semantic_digest() -> None:
+def test_local_binding_lookup_uses_binding_digest() -> None:
     durable = _binding()
     equivalent = replace(
         durable,

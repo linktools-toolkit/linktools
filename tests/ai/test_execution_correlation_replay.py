@@ -59,7 +59,7 @@ def test_execution_replay_uses_binding_digest() -> None:
         binding=durable,
     )
     binding = SimpleNamespace(
-        digest=replayed.binding_digest,
+        binding_digest=replayed.binding_digest,
         binding_contract=replayed,
     )
     request = SimpleNamespace(planning=False, thinking=False)

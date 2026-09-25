@@ -3,7 +3,6 @@
 """Session timeline recovery handoff regressions."""
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
@@ -22,6 +21,9 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
+    RecoveryCheckpoint,
+    RecoveryCheckpointState,
+    RecoveryHandoffPhase,
     SessionRecord,
 )
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
@@ -69,7 +71,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             metadata={"history_id": session.history_id},
             started_at=now,
         )
-        checkpoint = AgentRunCheckpoint(
+        agent_run_checkpoint = AgentRunCheckpoint(
             agent_run_id="run",
             step_index=1,
             messages=[
@@ -90,15 +92,19 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
                     "target": RuntimeDomain.CONVERSATION,
                     "agent_run_id": "run",
                 }
-                await archive.materialize_checkpoint(run, checkpoint)
+                await archive.materialize_checkpoint(run, agent_run_checkpoint)
 
         backend = object.__new__(LocalExecutionBackend)
         backend._tenant_id = "tenant"
         backend._conversation = state.conversation
         backend._conversation_durable = True
-        backend._step_reads = {RuntimeDomain.CONVERSATION: archive}
-        backend._steps = state.run_store
-        backend._step_lifecycle = Lifecycle()
+        backend._run_stores = {
+            RuntimeDomain.CONVERSATION: archive,
+            RuntimeDomain.EXECUTION: object(),
+            RuntimeDomain.RECOVERY: object(),
+        }
+        backend._run_store = state.run_store
+        backend._agent_run_lifecycle = Lifecycle()
 
         intent = RecoveryConversationIntent(
             "session",
@@ -121,12 +127,18 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             "run",
             intent,
         )
-        checkpoint = SimpleNamespace(
+        recovery_checkpoint = RecoveryCheckpoint(
             execution_id="execution",
-            tenant_id="tenant",
+            agent_run_id="run",
+            state=RecoveryCheckpointState.HANDOFF,
+            revision=0,
+            created_at=now,
+            updated_at=now,
+            handoff_phase=RecoveryHandoffPhase.PREPARED,
+            terminal_handoff=handoff,
         )
 
-        await backend._resolve_handoff_conversation(checkpoint, handoff)
+        await backend._resolve_handoff_conversation(recovery_checkpoint, handoff)
 
         resolved = await state.conversation.sessions.get("session", tenant_id="tenant")
         assert resolved is not None

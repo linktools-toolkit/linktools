@@ -20,6 +20,7 @@ from linktools.ai.runtime.state._codec import (
     decode_fact,
     decode_operation,
     decode_record,
+    encode_domain,
     encode_record,
     parse_envelope,
     wire_type_id,
@@ -30,6 +31,7 @@ from linktools.ai.runtime.state._contracts import (
     StoredAgentRunCheckpoint,
     TranscriptMessageRef,
 )
+from linktools.ai.task import TaskBindingContract
 
 
 def _fixture() -> dict[str, object]:
@@ -82,6 +84,27 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     assert decode_alias(primitives["alias"]).record_key_digest == bytes.fromhex(
         "77" * 32
     )
+
+
+def test_task_binding_contract_uses_wire_version_and_behavior_reference() -> None:
+    contract = TaskBindingContract(
+        "example.task",
+        3,
+        "replay_safe",
+        {"kind": "json"},
+        None,
+        2,
+        0.5,
+    )
+    encoded = encode_domain(contract)
+    fields = encoded["fields"]
+
+    assert fields["version"] == 1
+    assert fields["id"] == "example.task"
+    assert fields["revision"] == 3
+    assert "task_id" not in fields
+    assert "task_revision" not in fields
+    assert decode_domain(encoded, TaskBindingContract) == contract
 
 
 def test_record_reader_ignores_additive_fields() -> None:

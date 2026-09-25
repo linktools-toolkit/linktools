@@ -625,8 +625,8 @@ class ExecutionRecord:
     session_id: str | None
     parent_execution_id: str | None
     root_execution_id: str
-    source_execution_id: str | None
-    base_execution_id: str | None
+    previous_execution_id: str | None
+    fork_base_execution_id: str | None
     lineage_kind: ExecutionLineageKind
     status: ExecutionStatus
     revision: int
@@ -719,8 +719,8 @@ class ExecutionRecord:
                 or not self.parent_execution_id
                 or not isinstance(self.parent_invocation_id, str)
                 or not self.parent_invocation_id
-                or self.source_execution_id is not None
-                or self.base_execution_id is not None
+                or self.previous_execution_id is not None
+                or self.fork_base_execution_id is not None
             ):
                 raise ValueError("subagent execution lineage is invalid")
         elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
@@ -760,7 +760,7 @@ class ExecutionRecord:
     @property
     def task_id(self) -> str | None:
         return (
-            self.binding.task_id
+            self.binding.id
             if isinstance(self.binding, TaskBindingContract)
             else None
         )

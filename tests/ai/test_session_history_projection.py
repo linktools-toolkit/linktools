@@ -415,7 +415,7 @@ async def test_session_history_reports_missing_committed_checkpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_durable_session_history_survives_runtime_state_reopen(tmp_path) -> None:
+async def test_durable_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
     state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="session-history-durable", tenant_id="tenant")
     agent_run_id = "session-history-durable-run"
@@ -441,7 +441,7 @@ async def test_durable_session_history_survives_runtime_state_reopen(tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_sql_session_history_survives_runtime_state_reopen(tmp_path) -> None:
+async def test_sql_session_history_survives_runtime_storage_reopen(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
     state = RuntimeStorage.sql(engine)

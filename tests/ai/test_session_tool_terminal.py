@@ -448,7 +448,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             deps=None,
             model=TestModel(),
             usage=RunUsage(),
-            agent_run_id="run-1",
+            run_id="run-1",
         )
         call = ToolCallPart("lookup", {}, tool_call_id="call-1")
         tool = ToolDefinition(name="lookup")
@@ -487,7 +487,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             deps=None,
             model=TestModel(),
             usage=RunUsage(),
-            agent_run_id="run-2",
+            run_id="run-2",
         )
         replay = await replay_bridge.begin(
             replay_context,

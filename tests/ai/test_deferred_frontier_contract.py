@@ -22,7 +22,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import DeferredToolRequests, RunContext
 from pydantic_ai.usage import RunUsage
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _Bridge:
@@ -97,7 +97,7 @@ def _context() -> RunContext[None]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
         tool_call_id="call",
     )
 
@@ -123,7 +123,7 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
 
     ctx = SimpleNamespace(
         run_step=7,
-        agent_conversation_id=None,
+        conversation_id=None,
         messages=[],
         emit=emit,
     )
@@ -184,7 +184,7 @@ async def test_ask_boundary_defers_before_runtime_operation() -> None:
         tool_class="filesystem.read",
     )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(read_file, descriptor)]),),
+        (FunctionToolset([tool_with_metadata(read_file, descriptor)]),),
         {
             "read_file": descriptor
         },

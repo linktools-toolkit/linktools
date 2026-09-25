@@ -51,8 +51,8 @@ def _record(*, subagent: bool, parent_invocation_id: str | None) -> ExecutionRec
         session_id=None,
         parent_execution_id="root" if subagent else None,
         root_execution_id="root",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=(
             ExecutionLineageKind.SUBAGENT
             if subagent

@@ -111,8 +111,8 @@ def _record(
     agent_id: str,
     session_id: str | None = None,
     parent_execution_id: str | None = None,
-    source_execution_id: str | None = None,
-    base_execution_id: str | None = None,
+    previous_execution_id: str | None = None,
+    fork_base_execution_id: str | None = None,
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     is_child = parent_execution_id is not None
@@ -121,8 +121,8 @@ def _record(
         session_id=session_id,
         parent_execution_id=parent_execution_id,
         root_execution_id="exec-001" if is_child else execution_id,
-        source_execution_id=source_execution_id,
-        base_execution_id=base_execution_id,
+        previous_execution_id=previous_execution_id,
+        fork_base_execution_id=fork_base_execution_id,
         lineage_kind=(
             ExecutionLineageKind.SUBAGENT
             if is_child
@@ -188,8 +188,8 @@ async def test_execution_list_applies_tenant_filters_and_direct_parent() -> None
             _record(
                 "exec-005",
                 agent_id="agent-a",
-                source_execution_id="exec-001",
-                base_execution_id="exec-001",
+                previous_execution_id="exec-001",
+                fork_base_execution_id="exec-001",
             ),
         )
         for record in records:

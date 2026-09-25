@@ -77,7 +77,6 @@ def _failed_result(
         execution_id,
         ExecutionStatus.FAILED,
         None,
-        None,
         UsageMetrics(),
         code.value,
         details or {"provider": "test"},
@@ -408,7 +407,6 @@ class _StreamingExecution:
             self.execution_id,
             ExecutionStatus.SUCCEEDED,
             {"text": "hello"},
-            "a" * 64,
             UsageMetrics(),
         )
 
@@ -450,7 +448,6 @@ async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["error_code"] == ErrorCode.MODEL_RATE_LIMITED.value
     assert payload["safe_error_details"] == {"status_code": 429}
-    assert payload["output_contract_digest"] is None
 
 
 @pytest.mark.asyncio

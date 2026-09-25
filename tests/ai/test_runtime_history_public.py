@@ -565,8 +565,6 @@ async def test_runtime_history_inspection_uses_safe_durable_summaries() -> None:
     assert info.terminal_at == executions.result.created_at
     assert info.terminal_at != executions.record.updated_at
     assert info.binding_digest == executions.binding.binding_digest
-    assert info.input_digest == executions.record.stored_user_input.digest
-    assert info.output_digest == executions.result.output.digest
     assert info.usage == UsageSummary(
         logical_requests=1,
         succeeded_requests=1,
@@ -594,7 +592,7 @@ class _TaskResults:
             None,
             "execution",
         )
-        self.graph_state = TaskGraphState(
+        self._graph_state = TaskGraphState(
             "graph",
             TaskStatus.SUCCEEDED,
             TaskGraph("graph", (node,)).nodes,
@@ -624,7 +622,7 @@ class _TaskResults:
         tenant_id: str,
     ) -> TaskGraphState | None:
         if graph_id == "graph" and tenant_id == "tenant":
-            return self.graph_state
+            return self._graph_state
         return None
 
     async def get_results(

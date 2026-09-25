@@ -27,7 +27,7 @@ from linktools.ai.runtime._tool_boundary import (
 from linktools.ai.workspace import (
     WorkspaceToolPermissionPolicy,
 )
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _Bridge:
@@ -90,7 +90,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
         tool_class="filesystem.read",
     )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(_read_file, descriptor)]),),
+        (FunctionToolset([tool_with_metadata(_read_file, descriptor)]),),
         {
             "_read_file": descriptor
         },
@@ -103,7 +103,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id=agent_run_id,
+        run_id=agent_run_id,
         tool_call_id="call",
     )
     tools = await boundary.get_tools(context)
@@ -137,7 +137,7 @@ async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
 
     result = await agent.run(
         "finish",
-        agent_run_id=agent_run_id,
+        run_id=agent_run_id,
         capabilities=(persistence,),
     )
 

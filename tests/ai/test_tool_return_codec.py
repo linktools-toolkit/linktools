@@ -153,7 +153,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
             self.get_agent_run_calls += 1
             if self.get_agent_run_calls == 1:
                 return None
-            return SimpleNamespace(conversation_id="conversation")
+            return SimpleNamespace(agent_conversation_id="conversation")
 
         async def latest_checkpoint(self, *, agent_run_id: str) -> object:
             assert agent_run_id == "agent-run"
@@ -166,7 +166,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
     compiled_agent = SimpleNamespace(
         digest="compiled-agent",
         model=SimpleNamespace(materialize=lambda: TestModel()),
-        spec=SimpleNamespace(id="agent"),
+        spec=SimpleNamespace(id="agent", revision=1),
         selected_tools=(),
     )
     binding = SimpleNamespace(

@@ -50,8 +50,8 @@ def _record(
         session_id=None,
         parent_execution_id=parent_execution_id,
         root_execution_id=root_execution_id or execution_id,
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=(
             ExecutionLineageKind.SUBAGENT if subagent else ExecutionLineageKind.RUN
         ),

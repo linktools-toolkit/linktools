@@ -7,20 +7,20 @@ import pytest
 from linktools.ai.runtime import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 
 
-def test_runtime_state_sqlite_route_normalizes_paths(tmp_path) -> None:
+def test_runtime_storage_sqlite_route_normalizes_paths(tmp_path) -> None:
     route = RuntimeStorageRoute.sqlite(tmp_path / "runtime.db")
 
     assert route.path == (tmp_path / "runtime.db").resolve()
     assert RuntimeStorage.sqlite(tmp_path / "runtime.db").plan.durable_domains
 
 
-def test_runtime_state_sqlite_uses_builtin_object_store_by_default(tmp_path) -> None:
+def test_runtime_storage_sqlite_uses_builtin_object_store_by_default(tmp_path) -> None:
     state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
 
     assert state.plan.durable_domains
 
 
-def test_runtime_state_plan_allows_sqlite_without_an_explicit_object_store(
+def test_runtime_storage_plan_allows_sqlite_without_an_explicit_object_store(
     tmp_path,
 ) -> None:
     route = RuntimeStorageRoute.sqlite(tmp_path / "runtime.db")

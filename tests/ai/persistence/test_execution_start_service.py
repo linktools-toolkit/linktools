@@ -46,7 +46,10 @@ class _BindingCatalog:
     def binding(self, digest: str) -> object:
         binding = _binding()
         assert digest == binding.binding_digest
-        return SimpleNamespace(digest=binding.binding_digest, binding_contract=binding)
+        return SimpleNamespace(
+            binding_digest=binding.binding_digest,
+            binding_contract=binding,
+        )
 
 
 class _History:

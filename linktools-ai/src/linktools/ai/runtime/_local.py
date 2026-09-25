@@ -3259,10 +3259,10 @@ class LocalExecutionBackend:
                 )
             except LookupError as error:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
-        if execution.base_execution_id is None:
+        if execution.fork_base_execution_id is None:
             return []
         base = await self._execution.executions.get(
-            execution.base_execution_id, tenant_id=self._tenant_id
+            execution.fork_base_execution_id, tenant_id=self._tenant_id
         )
         if base is None or base.agent_run_sequence < 1:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
@@ -3448,10 +3448,10 @@ class LocalExecutionBackend:
                 execution.conversation_agent_run_id,
                 history_id=history_id,
             )
-        if execution.base_execution_id is None:
+        if execution.fork_base_execution_id is None:
             return None
         base = await self._execution.executions.get(
-            execution.base_execution_id,
+            execution.fork_base_execution_id,
             tenant_id=self._tenant_id,
         )
         if base is None:

@@ -77,8 +77,8 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=status,
         revision=0,
@@ -395,10 +395,13 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
 
     lifecycle = Lifecycle()
     backend = object.__new__(LocalExecutionBackend)
-    backend._step_reads = {
+    backend._run_stores = {
         RuntimeDomain.EXECUTION: object.__new__(StateStepArchive),
+        RuntimeDomain.CONVERSATION: object(),
+        RuntimeDomain.RECOVERY: object(),
     }
-    backend._step_lifecycle = lifecycle
+    backend._run_store = object()
+    backend._agent_run_lifecycle = lifecycle
     backend._checkpoint_tasks = set()
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}

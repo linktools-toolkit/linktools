@@ -65,7 +65,7 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
     )
     assert tuple(await toolset.get_tools(context)) == ("write_plan",)
 
@@ -82,7 +82,7 @@ async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> Non
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
     )
     request_context = ModelRequestContext(
         model=TestModel(),
