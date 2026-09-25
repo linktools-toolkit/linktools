@@ -1011,18 +1011,18 @@ async def _materialize_agent(
     if base_instructions:
         runtime_instructions.append(base_instructions)
     agent = PydanticAgent(
-            model,
-            name=compiled_agent.spec.id,
-            system_prompt=compiled_agent.spec.system_prompt,
-            instructions=runtime_instructions,
-            output_type=output_type,
-            deps_type=AgentContext,
-            retries={
-                "tools": compiled_agent.spec.tool_retries,
-                "output": compiled_agent.spec.output_retries,
-            },
-            toolsets=tuple(raw_toolsets),
-        )
+        model,
+        name=compiled_agent.spec.id,
+        system_prompt=compiled_agent.spec.system_prompt,
+        instructions=runtime_instructions,
+        output_type=output_type,
+        deps_type=AgentContext,
+        retries={
+            "tools": compiled_agent.spec.tool_retries,
+            "output": compiled_agent.spec.output_retries,
+        },
+        toolsets=tuple(raw_toolsets),
+    )
     return agent, tuple(capabilities)
 
 
