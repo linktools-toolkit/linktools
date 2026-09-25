@@ -35,6 +35,7 @@ from linktools.ai.spec import (
     AgentSpecCodec,
     MCPServerSpec,
     MCPServerSpecCodec,
+    SkillMarkdownSpecCodec,
     SkillSpec,
     SkillSpecCodec,
     SubagentRef,
