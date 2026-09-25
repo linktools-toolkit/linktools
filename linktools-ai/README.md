@@ -224,8 +224,7 @@ can be observed by an already running process.
 
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
 `resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
-value starts with `resource:` then name files below that root. The MCP loader
-binds selected files to Asset version references in the same group capture,
+value starts with `resource:` then name files below that root. CapabilityGroup capture binds selected MCP files to Asset version references in the same group capture,
 rejecting absolute paths, traversal, and missing files. Runtime preserves those
 refs and adds only the execution policy required by the selected Sandbox.
 `resource:` arguments require local Asset files: LocalSandbox receives their
