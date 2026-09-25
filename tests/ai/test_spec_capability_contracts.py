@@ -546,6 +546,22 @@ def test_durable_spec_readers_ignore_additive_fields() -> None:
     assert mcp_codec.from_execution_payload(execution_payload) == (server, None)
 
 
+def test_mcp_execution_policy_rejects_non_string_workspace_access() -> None:
+    codec = MCPServerSpecCodec()
+    payload = codec.to_payload(MCPServerSpec("server", "command"))
+    payload["execution_policy"] = {
+        "version": 1,
+        "boundary": "workspace-stdio",
+        "workspace_access": [],
+        "hidden_paths": [],
+        "network": "isolated",
+    }
+
+    with pytest.raises(AIError) as error:
+        codec.from_execution_payload(payload)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_mcp_execution_resource_contract_rejects_missing_versions() -> None:
     codec = MCPServerSpecCodec()
     server = MCPServerSpec(
