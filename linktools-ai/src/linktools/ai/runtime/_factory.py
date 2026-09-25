@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import TypeVar
 
 from linktools.core import environ
 
@@ -134,7 +134,7 @@ async def compose_runtime_components(
             else source
         )
         await capture.verify_source_revision()
-        captures.append(cast(CapabilityGroupCapture[AppT], capture))
+        captures.append(capture)
     groups = tuple(captures)
     group_ids = tuple(group.group_id for group in groups)
     if len(group_ids) != len(set(group_ids)):
@@ -177,18 +177,18 @@ async def compose_runtime_components(
         )
         rules = RepositoryInstructions(instruction_documents)
         task_handlers = tuple(
-            cast("TaskNodeHandler[object]", candidate.value)
+            candidate.value
             for candidate in candidates
             if candidate.kind == "task"
         )
         task_expanders = tuple(
-            cast(TaskExpander, candidate.value)
+            candidate.value
             for candidate in candidates
             if candidate.kind == "task_expander"
         )
 
         agents = {
-            candidate.id: cast(AgentSpec, candidate.value)
+            candidate.id: candidate.value
             for candidate in candidates
             if candidate.kind == "agent"
         }
@@ -799,7 +799,7 @@ async def _build_local_components(
         artifact=artifact,
         tenant_id=tenant_id,
         close_callback=coordinator.close,
-        task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
+        task_node_runtime=task_runner,
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
         binding_resolver=binding_resolver,
