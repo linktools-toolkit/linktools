@@ -273,6 +273,11 @@ class CapabilityLoadContext:
                     ErrorCode.ASSET_VERSION_LAYER_UNKNOWN,
                 }:
                     raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
+                if (
+                    error.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+                    and await self._store.current_revision() != self._source_revision
+                ):
+                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
                 raise
             for key, data in zip(pending, values, strict=True):
                 self._cache[key] = data
