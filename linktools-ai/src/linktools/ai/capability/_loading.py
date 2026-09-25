@@ -177,12 +177,15 @@ class CapabilityLoadContext:
         if not store.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         source_revision = await store.current_revision()
-        if not isinstance(source_revision, StorageRevision):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         metadata = await store.capture_metadata()
-        versions = await store.resolve_versions(
-            tuple(info.key for info in metadata)
-        )
+        try:
+            versions = await store.resolve_versions(
+                tuple(info.key for info in metadata)
+            )
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_NOT_FOUND:
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
+            raise
         if len(versions) != len(metadata) or any(
             not ref.matches_info(info)
             for info, ref in zip(metadata, versions, strict=True)
@@ -268,7 +271,6 @@ class CapabilityLoadContext:
                 if error.code in {
                     ErrorCode.ASSET_VERSION_NOT_FOUND,
                     ErrorCode.ASSET_VERSION_LAYER_UNKNOWN,
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
                 }:
                     raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
                 raise
