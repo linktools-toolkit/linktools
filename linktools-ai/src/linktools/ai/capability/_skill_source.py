@@ -188,10 +188,23 @@ class AssetSkillResourceSource:
 
     async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
         binding = self._binding(source)
-        return SkillResourceView(
-            SkillLocation("virtual", f"{self._id}/resources/{binding.root}"),
-            tuple(item.path for item in binding.resource_versions),
+        resources = tuple(item.path for item in binding.resource_versions)
+        location = SkillLocation(
+            "virtual",
+            f"{self._id}/resources/{binding.root}",
         )
+        if binding.resource_versions:
+            paths = await self._asset_reader.local_paths(
+                tuple(item.asset.key for item in binding.resource_versions)
+            )
+            if all(path is not None for path in paths):
+                package = _resolve_local_skill_package(
+                    resources,
+                    tuple(path for path in paths if path is not None),
+                )
+                if package is not None:
+                    location = SkillLocation("local", str(package))
+        return SkillResourceView(location, resources)
 
     async def read(self, source: SkillSourceRef, path: str) -> bytes:
         binding = self._binding(source)
@@ -201,6 +214,33 @@ class AssetSkillResourceSource:
                 return (await self._asset_reader.read_versions((item.asset,)))[0]
         raise AIError(ErrorCode.ASSET_NOT_FOUND)
 
+
+
+def _resolve_local_skill_package(
+    relatives: Sequence[str],
+    paths: Sequence[Path],
+) -> "Path | None":
+    if not relatives or len(relatives) != len(paths):
+        return None
+    package = paths[0]
+    for _part in PurePosixPath(relatives[0]).parts:
+        package = package.parent
+    for relative, path in zip(relatives, paths, strict=True):
+        expected = package.joinpath(*PurePosixPath(relative).parts)
+        if path != expected:
+            return None
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(package.resolve(strict=True))
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not resolved.is_file():
+            return None
+    try:
+        resolved_package = package.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return resolved_package if resolved_package.is_dir() else None
 
 def _validate_resource_mode(mode: object) -> None:
     if (
