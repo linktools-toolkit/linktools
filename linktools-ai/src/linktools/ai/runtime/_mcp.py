@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, NoReturn, cast
+from typing import Any, NoReturn
 
 from fastmcp import Client
 from linktools.core import environ
@@ -355,18 +355,13 @@ async def materialize_mcp_capabilities(
                 cache_tools=True,
             )
             mapped = _MCPModelToolset(
-                cast("AbstractToolset[object]", toolset),
+                toolset,
                 server.id,
                 allowed,
                 required.get(server.id, frozenset()),
             )
             boundary = RuntimeToolBoundaryToolset(
-                (
-                    cast(
-                        "AbstractToolset[AgentContext[object]]",
-                        mapped,
-                    ),
-                ),
+                (mapped,),
                 {},
                 id=f"linktools.mcp.{server.id}",
                 descriptor=descriptor,
