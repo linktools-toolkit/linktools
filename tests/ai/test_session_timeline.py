@@ -31,7 +31,7 @@ from linktools.ai.core import (
 import linktools.ai.runtime._session_timeline as timeline_module
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.service_api import ExecutionView, SessionHistoryItem
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
     ExecutionRecord,
@@ -145,7 +145,7 @@ class _ExecutionService:
 
 
 async def _materialize_conversation(
-    state: RuntimeState, history_id: str
+    state: RuntimeStorage, history_id: str
 ) -> tuple[str, int]:
     agent_run_id = "timeline-conversation-run"
     agent_conversation_id = make_agent_conversation_id(
@@ -203,7 +203,7 @@ async def _materialize_conversation(
 
 @pytest.mark.asyncio
 async def test_session_timeline_restores_original_prompt_without_runtime_instructions() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-timeline", tenant_id="tenant")
     try:
         created = await state.conversation.sessions.create(_session())

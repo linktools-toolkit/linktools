@@ -202,7 +202,7 @@ class SqlStateStorageGroup:
                 TimeoutError as SqlAlchemyTimeoutError,
             )
 
-            internal_details = {"phase": "runtime_state_sql_mutation"}
+            internal_details = {"phase": "runtime_storage_sql_mutation"}
             if isinstance(error, IntegrityError):
                 violation = self._context.dialect.classify_integrity_error(error)
                 code = (
@@ -229,7 +229,7 @@ class SqlStateStorageGroup:
                 code = ErrorCode.INTERNAL_ERROR
 
             _logger.error(
-                "SQL Runtime state mutation error mapped: error_type=%s code=%s",
+                "SQL Runtime storage mutation error mapped: error_type=%s code=%s",
                 type(error).__name__,
                 code.value,
             )

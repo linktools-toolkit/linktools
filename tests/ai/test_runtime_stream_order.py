@@ -23,7 +23,7 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState, TaskGraphRun, TaskGraphRunEvent
+from linktools.ai.runtime import RuntimeStorage, TaskGraphRun, TaskGraphRunEvent
 from linktools.ai.runtime._event import (
     DefaultEventService,
     ExecutionDelta,
@@ -651,7 +651,7 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path: Path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="stream-order", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)

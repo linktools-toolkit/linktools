@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state._contracts import ArtifactRecord
 from linktools.ai.storage import ObjectRef
 from linktools.ai.workspace import Workspace
@@ -64,7 +64,7 @@ def _runtime_bootstrap_worker(database: str, barrier) -> None:
     barrier.wait()
 
     async def run() -> None:
-        state = RuntimeState.sqlite(Path(database))
+        state = RuntimeStorage.sqlite(Path(database))
         await state.initialize(namespace=_NAMESPACE, tenant_id=_TENANT_ID)
         await state.close()
 
@@ -75,7 +75,7 @@ def _artifact_write_worker(database: str, barrier) -> None:
     barrier.wait()
 
     async def run() -> None:
-        state = RuntimeState.sqlite(Path(database))
+        state = RuntimeStorage.sqlite(Path(database))
         await state.initialize(namespace=_NAMESPACE, tenant_id=_TENANT_ID)
         try:
             created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -150,7 +150,7 @@ async def test_runtime_sqlite_bootstrap_converges_across_processes(
 
     _join_processes(processes)
 
-    state = RuntimeState.sqlite(database)
+    state = RuntimeStorage.sqlite(database)
     await state.initialize(
         namespace=_NAMESPACE,
         tenant_id=_TENANT_ID,
@@ -164,7 +164,7 @@ async def test_runtime_sqlite_concurrent_idempotent_writes_converge(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "runtime.db"
-    initial = RuntimeState.sqlite(database)
+    initial = RuntimeStorage.sqlite(database)
     await initial.initialize(namespace=_NAMESPACE, tenant_id=_TENANT_ID)
     await initial.close()
 
@@ -180,7 +180,7 @@ async def test_runtime_sqlite_concurrent_idempotent_writes_converge(
 
     _join_processes(processes)
 
-    state = RuntimeState.sqlite(database)
+    state = RuntimeStorage.sqlite(database)
     await state.initialize(
         namespace=_NAMESPACE,
         tenant_id=_TENANT_ID,

@@ -14,7 +14,7 @@ from linktools.ai.asset import (
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import (
@@ -47,7 +47,7 @@ async def test_workspace_less_runtime_runs_session_and_history() -> None:
     async with Runtime.open(
         "web-chat",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
     ) as runtime:
         assert runtime.namespace == "web-chat"
         session = await runtime.agent("default").create_session("chat")
@@ -63,7 +63,7 @@ async def test_workspace_less_runtime_rejects_files_and_explicit_cwd() -> None:
     async with Runtime.open(
         "web-chat",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
     ) as runtime:
         with pytest.raises(AIError) as files_error:
             await runtime.agent("default").run(
@@ -102,7 +102,7 @@ async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> N
     async with Runtime.open(
         "workspace-sandbox",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(group,),
     ) as runtime:
         with pytest.raises(AIError) as error:
@@ -125,7 +125,7 @@ async def test_sandbox_group_can_be_composed_without_workspace() -> None:
     async with Runtime.open(
         "sandbox-only",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(group,),
     ) as runtime:
         result = await runtime.agent("default").run("hello", timeout_seconds=10)
@@ -162,7 +162,7 @@ async def test_sandbox_without_workspace_exposes_local_skill_resources(
         async with Runtime.open(
             "sandbox-skill",
             models=RuntimeUsageModels(),  # type: ignore[arg-type]
-            state=RuntimeState.in_memory(),
+            storage=RuntimeStorage.in_memory(),
             capabilities=(
                 CapabilityGroup("assets", assets=store),
                 CapabilityGroup("sandbox", sandbox=sandbox),
@@ -191,7 +191,7 @@ async def test_separate_sandbox_group_controls_workspace_input_reads(
     async with Runtime.open(
         "separate-sandbox",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(
             CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),
             CapabilityGroup("sandbox", sandbox=DisabledSandbox()),
@@ -211,7 +211,7 @@ async def test_multiple_sandbox_groups_conflict() -> None:
         async with Runtime.open(
             "sandbox-conflict",
             models=RuntimeUsageModels(),  # type: ignore[arg-type]
-            state=RuntimeState.in_memory(),
+            storage=RuntimeStorage.in_memory(),
             capabilities=(
                 CapabilityGroup("first", sandbox=DisabledSandbox()),
                 CapabilityGroup("second", sandbox=DisabledSandbox()),
@@ -228,12 +228,12 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
     project = tmp_path / "project"
     project.mkdir()
     workspace = Workspace.load(project)
-    state_root = tmp_path / "runtime"
+    storage_root = tmp_path / "runtime"
 
     async with Runtime.open(
         "workspace",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.from_root(state_root),
+        storage=RuntimeStorage.from_root(storage_root),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         await runtime.agent("default").create_session(
@@ -244,7 +244,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
     async with Runtime.open(
         "workspace",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.from_root(state_root),
+        storage=RuntimeStorage.from_root(storage_root),
     ) as runtime:
         with pytest.raises(AIError) as error:
             await runtime.agent("default").run(
@@ -268,7 +268,7 @@ async def test_workspace_less_runtime_does_not_require_host_cwd(
     components = await runtime_factory.compose_runtime_components(
         "web-chat",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
     )
     try:
         backend = components.execution.runtime_backend()

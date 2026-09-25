@@ -27,7 +27,7 @@ from .core import (
 )
 from .errors import AIError
 from .model import ModelRegistry
-from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime, RuntimeState
+from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime, RuntimeStorage
 from .workspace import Workspace
 
 _logger = environ.get_logger("ai.acp")
@@ -170,7 +170,7 @@ class ACPAgent:
 class ACPApplication:
     workspace: Workspace
     models: ModelRegistry
-    state: RuntimeState
+    storage: RuntimeStorage
 
     @classmethod
     def for_workspace(
@@ -178,15 +178,15 @@ class ACPApplication:
         workspace: Workspace,
         *,
         models: ModelRegistry,
-        state: RuntimeState,
+        storage: RuntimeStorage,
     ) -> "ACPApplication":
-        return cls(workspace, models, state)
+        return cls(workspace, models, storage)
 
     async def serve(self, *, memory_scope: str) -> None:
         async with Runtime.open(
             "default",
             models=self.models,
-            state=self.state,
+            storage=self.storage,
             capabilities=(CapabilityGroup("workspace", workspace=self.workspace),),
         ) as runtime:
             await serve_stdio(

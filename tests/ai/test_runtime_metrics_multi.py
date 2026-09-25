@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared Metrics integration across RuntimeState backends."""
+"""Shared Metrics integration across RuntimeStorage backends."""
 
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -12,7 +12,7 @@ from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import FilesystemObjectStore
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -65,7 +65,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
     metrics = Metrics.in_memory(namespace="multi-runtime")
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
-    filesystem_state = RuntimeState.filesystem(tmp_path / "filesystem-state")
+    filesystem_state = RuntimeStorage.filesystem(tmp_path / "filesystem-state")
 
     sqlite_state_path = tmp_path / "sqlite-state.db"
     sqlite_provision_engine = create_async_engine(
@@ -73,7 +73,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
     )
     await provision_runtime_database(sqlite_provision_engine)
     await sqlite_provision_engine.dispose()
-    sqlite_state = RuntimeState.sqlite(
+    sqlite_state = RuntimeStorage.sqlite(
         sqlite_state_path,
         object_store=FilesystemObjectStore(tmp_path / "sqlite-objects"),
     )
@@ -81,7 +81,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
     sql_state_path = tmp_path / "sql-state.db"
     sql_engine = create_async_engine(f"sqlite+aiosqlite:///{sql_state_path}")
     await provision_runtime_database(sql_engine)
-    sql_state = RuntimeState.sql(sql_engine)
+    sql_state = RuntimeStorage.sql(sql_engine)
 
     cases = (
         (filesystem_state, "filesystem"),
@@ -94,7 +94,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
             async with Runtime.open(
                 "default",
                 models=_Models(),  # type: ignore[arg-type]
-                state=state,
+                storage=state,
                 capabilities=(_agent_group(),),
                 metrics=metrics,
             ) as runtime:

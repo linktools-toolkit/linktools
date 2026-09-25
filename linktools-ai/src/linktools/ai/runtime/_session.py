@@ -58,7 +58,7 @@ from .service_api import (
 )
 from .state._contracts import (
     ConversationCursor,
-    ConversationState,
+    ConversationRepositories,
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
@@ -134,7 +134,7 @@ class DefaultSessionService:
 
     def __init__(
         self,
-        conversation: ConversationState,
+        conversation: ConversationRepositories,
         executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
         execution: _SessionExecutionService,

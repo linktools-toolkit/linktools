@@ -102,7 +102,7 @@ from .state._contracts import (
     ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartUnknownCommit,
-    ExecutionState,
+    ExecutionRepositories,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     IdempotencyRecord,
@@ -344,7 +344,7 @@ class DefaultExecutionService:
 
     def __init__(
         self,
-        state: ExecutionState,
+        state: ExecutionRepositories,
         object_store: ObjectStore,
         authorization: AuthorizationPolicy,
         *,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Local Runtime state I/O layout."""
+"""Local Runtime storage I/O layout."""
 
 import hashlib
 import sqlite3
@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 
@@ -24,7 +24,7 @@ async def test_local_sqlite_uses_builtin_object_store_and_self_provisions_schema
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "runtime.sqlite"
-    state = RuntimeState.sqlite(database)
+    state = RuntimeStorage.sqlite(database)
 
     await state.initialize(namespace="sqlite-io", tenant_id="tenant")
     try:
@@ -65,7 +65,7 @@ async def test_existing_incompatible_sqlite_is_not_implicitly_migrated(
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
 
-    state = RuntimeState.sqlite(database)
+    state = RuntimeStorage.sqlite(database)
     with pytest.raises(AIError) as error:
         await state.initialize(namespace="sqlite-existing", tenant_id="tenant")
 
@@ -87,7 +87,7 @@ async def test_from_root_uses_runtime_sqlite_and_filesystem_objects(
     runtime_root = tmp_path / "runtime"
     database = runtime_root / "runtime.db"
     objects_path = runtime_root / "objects"
-    state = RuntimeState.from_root(runtime_root)
+    state = RuntimeStorage.from_root(runtime_root)
 
     assert all(
         state.plan.route(domain).kind == "sqlite"

@@ -24,7 +24,7 @@ from ._cursor import encode_cursor as encode_runtime_cursor
 from ._input import stored_user_input_view
 from .service_api import SessionTurn, SessionTurnItem
 from .state._contracts import (
-    ConversationState,
+    ConversationRepositories,
     ExecutionRepository,
     SessionRecord,
     SessionTurnCommitRef,
@@ -142,7 +142,7 @@ def _decode_timeline_cursor(
 
 
 async def _timeline_blocks(
-    conversation: ConversationState,
+    conversation: ConversationRepositories,
     root: SessionRecord,
     *,
     coordinate: "tuple[str, int] | None",
@@ -211,7 +211,7 @@ async def _timeline_blocks(
 
 
 async def project_session_timeline(
-    conversation: ConversationState,
+    conversation: ConversationRepositories,
     executions: ExecutionRepository,
     authorization: AuthorizationPolicy,
     cursor_signer: CursorSigner,

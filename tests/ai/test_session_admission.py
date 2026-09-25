@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -32,7 +32,7 @@ def _session() -> SessionRecord:
     )
 
 
-async def _assert_admission_contract(state: RuntimeState) -> None:
+async def _assert_admission_contract(state: RuntimeStorage) -> None:
     await state.initialize(namespace="admission", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -154,14 +154,14 @@ async def _assert_admission_contract(state: RuntimeState) -> None:
 
 @pytest.mark.asyncio
 async def test_memory_session_admission_contract() -> None:
-    await _assert_admission_contract(RuntimeState.in_memory())
+    await _assert_admission_contract(RuntimeStorage.in_memory())
 
 
 @pytest.mark.asyncio
 async def test_sql_session_admission_contract(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeState.sql(engine)
+    state = RuntimeStorage.sql(engine)
     try:
         await _assert_admission_contract(state)
     finally:
@@ -170,7 +170,7 @@ async def test_sql_session_admission_contract(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_concurrent_admission_has_single_owner() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="admission-concurrent", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())

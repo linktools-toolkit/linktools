@@ -16,7 +16,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import (
     TaskFunction,
@@ -59,7 +59,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         "submit:reopen-expired",
         TaskGraphLimits(max_concurrency=1),
     )
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -119,14 +119,14 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
 
     await asyncio.sleep(1.05)
 
-    reopened = RuntimeState.sqlite(
+    reopened = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     async with Runtime.open(
         "default",
         models=ModelRegistry.openai(model="gpt-test"),
-        state=reopened,
+        storage=reopened,
         capabilities=(capabilities,),
     ) as runtime:
         result = await runtime.graph.wait(

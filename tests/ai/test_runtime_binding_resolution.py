@@ -30,7 +30,7 @@ from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_capture import TaskCapabilityCaptureStore
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, SnapshotLimits
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, SnapshotLimits
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import (
     AgentSpec,
@@ -445,8 +445,8 @@ async def test_runtime_state_snapshot_preserves_asset_version_refs(
     tmp_path: Path,
 ) -> None:
     fixture = await _fixture()
-    state_root = tmp_path / "state"
-    state = RuntimeState.filesystem(state_root)
+    storage_root = tmp_path / "state"
+    state = RuntimeStorage.filesystem(storage_root)
     await state.initialize(namespace="namespace", tenant_id="tenant")
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
@@ -490,7 +490,7 @@ async def test_runtime_state_snapshot_preserves_asset_version_refs(
     )
 
     snapshot_store = InMemoryObjectStore("snapshot")
-    read_state = RuntimeState.filesystem(state_root)
+    read_state = RuntimeStorage.filesystem(storage_root)
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -505,13 +505,13 @@ async def test_runtime_state_snapshot_preserves_asset_version_refs(
         await read_state.close()
 
     restored_root = tmp_path / "restored"
-    await RuntimeState.restore_snapshot(
+    await RuntimeStorage.restore_snapshot(
         snapshot_ref,
         object_store=snapshot_store,
         root=restored_root,
         limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
     )
-    restored = RuntimeState.from_root(restored_root)
+    restored = RuntimeStorage.from_root(restored_root)
     await restored.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -536,8 +536,8 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
     tmp_path: Path,
 ) -> None:
     fixture = await _fixture()
-    state_root = tmp_path / "task-state"
-    state = RuntimeState.filesystem(state_root)
+    storage_root = tmp_path / "task-state"
+    state = RuntimeStorage.filesystem(storage_root)
     await state.initialize(namespace="namespace", tenant_id="tenant")
     graph = TaskGraph(
         "graph",
@@ -577,7 +577,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
         await state.close()
 
     snapshot_store = InMemoryObjectStore("task-snapshot")
-    read_state = RuntimeState.filesystem(state_root)
+    read_state = RuntimeStorage.filesystem(storage_root)
     await read_state.initialize(
         namespace="namespace",
         tenant_id="tenant",
@@ -592,13 +592,13 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
         await read_state.close()
 
     restored_root = tmp_path / "task-restored"
-    await RuntimeState.restore_snapshot(
+    await RuntimeStorage.restore_snapshot(
         snapshot_ref,
         object_store=snapshot_store,
         root=restored_root,
         limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
     )
-    restored = RuntimeState.from_root(restored_root)
+    restored = RuntimeStorage.from_root(restored_root)
     await restored.initialize(
         namespace="namespace",
         tenant_id="tenant",

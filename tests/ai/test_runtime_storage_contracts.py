@@ -19,7 +19,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
-from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
 from linktools.ai.runtime.state._filesystem import (
@@ -129,7 +129,7 @@ async def test_sql_state_group_maps_programming_failure_to_internal(
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -144,7 +144,7 @@ async def test_sql_state_group_maps_programming_failure_to_internal(
             await store.storage_group.mutate((store,), fail)
         assert raised.value.code is ErrorCode.INTERNAL_ERROR
         assert raised.value.retryable is False
-        assert raised.value.safe_details == {"phase": "runtime_state_sql_mutation"}
+        assert raised.value.safe_details == {"phase": "runtime_storage_sql_mutation"}
     finally:
         await state.close()
         await engine.dispose()
@@ -236,7 +236,7 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
 
 
 def _runtime_commands(
-    state: RuntimeState,
+    state: RuntimeStorage,
     namespace: str,
     background_tasks: "set[asyncio.Task[object]] | None" = None,
 ) -> RuntimeStateCommands:
@@ -263,7 +263,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
     provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(provisioning_engine)
     await provisioning_engine.dispose()
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -730,7 +730,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
 
 
 async def test_operation_compaction_keeps_one_stream_anchor() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="operation-anchor", tenant_id="tenant")
     now = datetime.now(timezone.utc)
 

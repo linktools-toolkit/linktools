@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RuntimeState lifecycle owner."""
+"""RuntimeStorage lifecycle owner."""
 
 import asyncio
 import hashlib
@@ -21,19 +21,19 @@ from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, read_objec
 from ...task import TaskGraphAdmission
 from .._runtime_identity import task_capability_capture_key
 from ._contracts import (
-    ArtifactState,
-    ConversationState,
-    EvaluationState,
-    ExecutionState,
-    MemoryState,
-    RecoveryState,
-    TaskState,
+    ArtifactRepositories,
+    ConversationRepositories,
+    EvaluationRepositories,
+    ExecutionRepositories,
+    MemoryRepositories,
+    RecoveryRepositories,
+    TaskRepositories,
 )
 from ._plan import (
     RuntimeDomain,
     RuntimeRetentionMode,
-    RuntimeStatePlan,
-    RuntimeStateRoute,
+    RuntimeStoragePlan,
+    RuntimeStorageRoute,
     runtime_domain_uses_object_store,
 )
 from ._store import (
@@ -64,13 +64,13 @@ from ._codec import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from ._materializer import _MaterializedRuntimeState
+    from ._materializer import _MaterializedRuntimeStorage
     from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
     from ._steps import RuntimeAgentRunStore
 
 
-class _RuntimeStateLifecycle(str, Enum):
+class _RuntimeStorageLifecycle(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
     NEW = "new"
@@ -80,32 +80,32 @@ class _RuntimeStateLifecycle(str, Enum):
     CLOSED = "closed"
 
 
-class RuntimeState:
-    """Own materialized domain states and every resource acquired for them."""
+class RuntimeStorage:
+    """Own materialized domain repositories and every resource acquired for them."""
 
     def __init__(
         self,
-        plan: RuntimeStatePlan,
+        plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
     ) -> None:
-        _validate_state_configuration(plan, object_store)
+        _validate_storage_configuration(plan, object_store)
         self._plan = plan
         self._external_object_store = object_store
-        self._lifecycle = _RuntimeStateLifecycle.NEW
+        self._lifecycle = _RuntimeStorageLifecycle.NEW
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         self._close_cursor = 0
         self._close_actions: tuple[Callable[[], Awaitable[None]], ...] = ()
         self._namespace: str | None = None
         self._tenant_id: str | None = None
-        self._conversation: ConversationState | None = None
-        self._execution: ExecutionState | None = None
-        self._memory: MemoryState | None = None
-        self._artifact: ArtifactState | None = None
-        self._task: TaskState | None = None
-        self._evaluation: EvaluationState | None = None
-        self._recovery: RecoveryState | None = None
+        self._conversation: ConversationRepositories | None = None
+        self._execution: ExecutionRepositories | None = None
+        self._memory: MemoryRepositories | None = None
+        self._artifact: ArtifactRepositories | None = None
+        self._task: TaskRepositories | None = None
+        self._evaluation: EvaluationRepositories | None = None
+        self._recovery: RecoveryRepositories | None = None
         self._objects: _RuntimeObjectRouter | None = None
         self._run_store: RuntimeAgentRunStore | None = None
         self._retention: RuntimeRetentionController | None = None
@@ -113,8 +113,8 @@ class RuntimeState:
         self._read_only = False
 
     @classmethod
-    def in_memory(cls) -> "RuntimeState":
-        return cls(RuntimeStatePlan())
+    def in_memory(cls) -> "RuntimeStorage":
+        return cls(RuntimeStoragePlan())
 
     @classmethod
     def filesystem(
@@ -122,12 +122,12 @@ class RuntimeState:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-    ) -> "RuntimeState":
+    ) -> "RuntimeStorage":
         base = _normalize_path(path)
         return cls(
-            RuntimeStatePlan(
+            RuntimeStoragePlan(
                 **{
-                    domain.value: RuntimeStateRoute.filesystem(
+                    domain.value: RuntimeStorageRoute.filesystem(
                         base if domain is RuntimeDomain.EXECUTION else base / domain.value,
                         transaction_root=base,
                     )
@@ -144,10 +144,10 @@ class RuntimeState:
         path: "str | Path",
         *,
         object_store: "ObjectStore | None" = None,
-    ) -> "RuntimeState":
-        route = RuntimeStateRoute.sqlite(path)
+    ) -> "RuntimeStorage":
+        route = RuntimeStorageRoute.sqlite(path)
         return cls(
-            RuntimeStatePlan(
+            RuntimeStoragePlan(
                 **{
                     domain.value: route
                     for domain in RuntimeDomain
@@ -158,7 +158,7 @@ class RuntimeState:
         )
 
     @classmethod
-    def from_root(cls, root: "str | Path") -> "RuntimeState":
+    def from_root(cls, root: "str | Path") -> "RuntimeStorage":
         base = _normalize_path(root)
         return cls.sqlite(
             base / "runtime.db",
@@ -171,10 +171,10 @@ class RuntimeState:
         engine: "AsyncEngine",
         *,
         object_store: "ObjectStore | None" = None,
-    ) -> "RuntimeState":
-        route = RuntimeStateRoute.sql(engine)
+    ) -> "RuntimeStorage":
+        route = RuntimeStorageRoute.sql(engine)
         return cls(
-            RuntimeStatePlan(
+            RuntimeStoragePlan(
                 **{
                     domain.value: route
                     for domain in RuntimeDomain
@@ -187,19 +187,19 @@ class RuntimeState:
     @classmethod
     def from_plan(
         cls,
-        plan: RuntimeStatePlan,
+        plan: RuntimeStoragePlan,
         *,
         object_store: "ObjectStore | None" = None,
-    ) -> "RuntimeState":
+    ) -> "RuntimeStorage":
         return cls(plan, object_store=object_store)
 
     @property
-    def plan(self) -> RuntimeStatePlan:
+    def plan(self) -> RuntimeStoragePlan:
         return self._plan
 
     @property
     def ready(self) -> bool:
-        return self._lifecycle is _RuntimeStateLifecycle.READY
+        return self._lifecycle is _RuntimeStorageLifecycle.READY
 
     @property
     def read_only(self) -> bool:
@@ -220,40 +220,40 @@ class RuntimeState:
         return self._tenant_id
 
     @property
-    def conversation(self) -> ConversationState:
-        return self._require_state(self._conversation)
+    def conversation(self) -> ConversationRepositories:
+        return self._require_materialized(self._conversation)
 
     @property
-    def execution(self) -> ExecutionState:
-        return self._require_state(self._execution)
+    def execution(self) -> ExecutionRepositories:
+        return self._require_materialized(self._execution)
 
     @property
-    def memory(self) -> MemoryState:
-        return self._require_state(self._memory)
+    def memory(self) -> MemoryRepositories:
+        return self._require_materialized(self._memory)
 
     @property
-    def artifact(self) -> ArtifactState:
-        return self._require_state(self._artifact)
+    def artifact(self) -> ArtifactRepositories:
+        return self._require_materialized(self._artifact)
 
     @property
-    def task(self) -> TaskState:
-        return self._require_state(self._task)
+    def task(self) -> TaskRepositories:
+        return self._require_materialized(self._task)
 
     @property
-    def evaluation(self) -> EvaluationState:
-        return self._require_state(self._evaluation)
+    def evaluation(self) -> EvaluationRepositories:
+        return self._require_materialized(self._evaluation)
 
     @property
-    def recovery(self) -> RecoveryState:
-        return self._require_state(self._recovery)
+    def recovery(self) -> RecoveryRepositories:
+        return self._require_materialized(self._recovery)
 
     @property
     def run_store(self) -> "RuntimeAgentRunStore":
-        return self._require_state(self._run_store)
+        return self._require_materialized(self._run_store)
 
     @property
     def retention(self) -> "RuntimeRetentionController":
-        return self._require_state(self._retention)
+        return self._require_materialized(self._retention)
 
     async def initialize(
         self,
@@ -263,21 +263,21 @@ class RuntimeState:
         read_only: bool = False,
     ) -> None:
         async with self._lock:
-            if self._lifecycle is not _RuntimeStateLifecycle.NEW:
+            if self._lifecycle is not _RuntimeStorageLifecycle.NEW:
                 raise AIError(
                     ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                    "RuntimeState must be NEW",
+                    "RuntimeStorage must be NEW",
                 )
             validate_persistence_namespace(namespace)
             if not tenant_id.strip():
                 raise ValueError("tenant_id is required")
             if not isinstance(read_only, bool):
                 raise TypeError("read_only must be bool")
-            self._lifecycle = _RuntimeStateLifecycle.INITIALIZING
+            self._lifecycle = _RuntimeStorageLifecycle.INITIALIZING
             try:
-                from ._materializer import materialize_runtime_state
+                from ._materializer import materialize_runtime_storage
 
-                materialized = await materialize_runtime_state(
+                materialized = await materialize_runtime_storage(
                     self._plan,
                     namespace=namespace,
                     tenant_id=tenant_id,
@@ -290,24 +290,24 @@ class RuntimeState:
                     tenant_id,
                 )
                 self._read_only = read_only
-                self._lifecycle = _RuntimeStateLifecycle.READY
+                self._lifecycle = _RuntimeStorageLifecycle.READY
             except BaseException:
-                self._lifecycle = _RuntimeStateLifecycle.CLOSED
+                self._lifecycle = _RuntimeStorageLifecycle.CLOSED
                 raise
 
     async def close(self) -> None:
         async with self._lock:
-            if self._lifecycle is _RuntimeStateLifecycle.NEW:
-                self._lifecycle = _RuntimeStateLifecycle.CLOSED
+            if self._lifecycle is _RuntimeStorageLifecycle.NEW:
+                self._lifecycle = _RuntimeStorageLifecycle.CLOSED
                 return
-            if self._lifecycle is _RuntimeStateLifecycle.CLOSED:
+            if self._lifecycle is _RuntimeStorageLifecycle.CLOSED:
                 return
-            self._lifecycle = _RuntimeStateLifecycle.CLOSING
+            self._lifecycle = _RuntimeStorageLifecycle.CLOSING
             task = self._close_task
             if task is None or task.done():
                 task = asyncio.create_task(
                     self._run_close_actions(),
-                    name="linktools-runtime-state-close",
+                    name="linktools-runtime-storage-close",
                 )
                 task.add_done_callback(self._consume_close_result)
                 self._close_task = task
@@ -331,11 +331,11 @@ class RuntimeState:
             action = self._close_actions[self._close_cursor]
             await action()
             self._close_cursor += 1
-        self._lifecycle = _RuntimeStateLifecycle.CLOSED
+        self._lifecycle = _RuntimeStorageLifecycle.CLOSED
 
     def _assign_materialized(
         self,
-        value: "_MaterializedRuntimeState",
+        value: "_MaterializedRuntimeStorage",
         namespace: str,
         tenant_id: str,
     ) -> None:
@@ -355,18 +355,18 @@ class RuntimeState:
         self._tenant_id = tenant_id
 
     def _require_ready(self) -> None:
-        if self._lifecycle is not _RuntimeStateLifecycle.READY:
+        if self._lifecycle is not _RuntimeStorageLifecycle.READY:
             raise AIError(
                 ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                "RuntimeState is not ready",
+                "RuntimeStorage is not ready",
             )
 
-    def _require_state(self, value: object) -> object:
+    def _require_materialized(self, value: object) -> object:
         self._require_ready()
         if value is None:
             raise AIError(
                 ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                "RuntimeState is not ready",
+                "RuntimeStorage is not ready",
             )
         return value
 
@@ -458,7 +458,7 @@ class RuntimeState:
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             source_store = self.object_store(source_domain)
             key = (
-                "v1/runtime-state-object/"
+                "v1/runtime-storage-object/"
                 f"{source_domain.value}/{reference.digest}"
             )
             await object_store.put(
@@ -631,7 +631,7 @@ class RuntimeState:
             domains[domain.value] = raw_domain
 
         manifest = {
-            "kind": "runtime-state-snapshot",
+            "kind": "runtime-storage-snapshot",
             "format_version": 1,
             "namespace": self.namespace,
             "tenant_id": self.tenant_id,
@@ -642,7 +642,7 @@ class RuntimeState:
         if len(payload) + object_bytes > limits.max_bytes:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         digest = hashlib.sha256(payload).hexdigest()
-        key = f"v1/runtime-state-snapshot/{digest}"
+        key = f"v1/runtime-storage-snapshot/{digest}"
         await _put_snapshot_object(object_store, key, payload)
         return ObjectRef(object_store.store_id, key, digest, len(payload))
 
@@ -655,7 +655,7 @@ class RuntimeState:
         root: str | Path,
         limits: SnapshotLimits,
     ) -> None:
-        """Restore a bounded logical state snapshot into a new local RuntimeState."""
+        """Restore a bounded logical state snapshot into a new local RuntimeStorage."""
         if not isinstance(limits, SnapshotLimits):
             raise TypeError("limits must be SnapshotLimits")
         if ref.store_id != object_store.store_id:
@@ -674,7 +674,7 @@ class RuntimeState:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if not isinstance(manifest, dict):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if manifest.get("kind") != "runtime-state-snapshot":
+        if manifest.get("kind") != "runtime-storage-snapshot":
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         format_version = manifest.get("format_version")
         if (
@@ -892,11 +892,11 @@ class RuntimeState:
         target = Path(root).expanduser().resolve(strict=False)
         if target.exists() and any(target.iterdir()):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        state = cls.from_root(root)
-        await state.initialize(namespace=namespace, tenant_id=tenant_id)
+        storage = cls.from_root(root)
+        await storage.initialize(namespace=namespace, tenant_id=tenant_id)
         try:
             for domain, source, content_ref in decoded_objects:
-                destination = state.object_store(domain)
+                destination = storage.object_store(domain)
                 current = await destination.stat(source.key)
                 if current is not None:
                     if current.digest != source.digest or current.size != source.size:
@@ -911,7 +911,7 @@ class RuntimeState:
 
             for domain, values in decoded_domains.items():
                 records, aliases, facts, operations, sequences = values
-                await state._stores[domain].mutate(
+                await storage._stores[domain].mutate(
                     lambda transaction, records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences: _insert_snapshot_values(
                         transaction,
                         records,
@@ -922,15 +922,15 @@ class RuntimeState:
                     )
                 )
         finally:
-            await state.close()
+            await storage.close()
 
 
-def _validate_state_configuration(
-    plan: RuntimeStatePlan,
+def _validate_storage_configuration(
+    plan: RuntimeStoragePlan,
     object_store: "ObjectStore | None",
 ) -> None:
-    if not isinstance(plan, RuntimeStatePlan):
-        raise TypeError("plan must be a RuntimeStatePlan")
+    if not isinstance(plan, RuntimeStoragePlan):
+        raise TypeError("plan must be a RuntimeStoragePlan")
     if object_store is not None and not any(
         runtime_domain_uses_object_store(domain)
         and plan.route(domain).retention is RuntimeRetentionMode.DURABLE
@@ -964,7 +964,7 @@ def _validate_state_configuration(
 
 def _normalize_path(value: "str | Path") -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
-        raise ValueError("RuntimeState path is required")
+        raise ValueError("RuntimeStorage path is required")
     return Path(value).expanduser().resolve(strict=False)
 
 
@@ -1105,4 +1105,4 @@ async def _put_snapshot_object(
     )
 
 
-__all__ = ["RuntimeState"]
+__all__ = ["RuntimeStorage"]

@@ -5,7 +5,7 @@
 import pytest
 
 from linktools.ai.core import Principal, TaskStatus
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskNode
 
 
@@ -19,7 +19,7 @@ def _request(graph_id: str) -> TaskGraphRequest:
 
 @pytest.mark.asyncio
 async def test_terminal_graph_is_removed_from_recovery_index_after_reconcile() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-recovery-index", tenant_id="tenant")
     try:
         request = _request("terminal-index")
@@ -59,7 +59,7 @@ async def test_terminal_graph_is_removed_from_recovery_index_after_reconcile() -
 async def test_recovery_index_filters_by_graph_header_without_topology_hydration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-recovery-header-index", tenant_id="tenant")
     try:
         terminal_request = _request("terminal-history")
@@ -107,7 +107,7 @@ async def test_recovery_index_filters_by_graph_header_without_topology_hydration
 
 @pytest.mark.asyncio
 async def test_exact_submit_replay_repairs_running_and_terminal_projections() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-replay-projection", tenant_id="tenant")
     try:
         request = _request("replay-projection")

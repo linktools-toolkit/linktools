@@ -96,9 +96,9 @@ from .service_api import (
 from .state import (
     RuntimeDomain,
     RuntimeRetentionMode,
-    RuntimeState,
-    RuntimeStatePlan,
-    RuntimeStateRoute,
+    RuntimeStorage,
+    RuntimeStoragePlan,
+    RuntimeStorageRoute,
 )
 
 __all__ = [
@@ -164,9 +164,9 @@ __all__ = [
     "RuntimeMetricFlushResult",
     "RuntimeMetricStatus",
     "RuntimeRetentionMode",
-    "RuntimeState",
-    "RuntimeStatePlan",
-    "RuntimeStateRoute",
+    "RuntimeStorage",
+    "RuntimeStoragePlan",
+    "RuntimeStorageRoute",
     "RestoredRuntime",
     "RuntimeSnapshot",
     "SnapshotExclusiveGuard",

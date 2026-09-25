@@ -12,7 +12,7 @@ from ._model_interaction_store import (
     ModelInteractionStateStepArchive,
 )
 from ._object_router import _RuntimeObjectRouter
-from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
+from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStoragePlan
 from ._step_archive import StateStepArchive
 from ._steps import RuntimeAgentRunStore
 
@@ -24,7 +24,7 @@ _STEP_DOMAINS = (
 
 
 def build_runtime_agent_run_store(
-    plan: RuntimeStatePlan,
+    plan: RuntimeStoragePlan,
     stores: Mapping[RuntimeDomain, object],
     objects: _RuntimeObjectRouter,
     history_repository: object,

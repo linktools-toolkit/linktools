@@ -18,7 +18,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.service_api import ForkSessionRequest
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     SessionRecord,
@@ -115,7 +115,7 @@ class _ExecutionService:
 
 @pytest.mark.asyncio
 async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-timeline-fork", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session("source"))

@@ -21,7 +21,7 @@ from linktools.ai.capability import AgentContext, CapabilityGroup
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import RuntimeDomain
@@ -87,11 +87,11 @@ class _ToolModels:
 async def _state(
     backend: str,
     tmp_path: Path,
-) -> tuple[RuntimeState, AsyncEngine | None]:
+) -> tuple[RuntimeStorage, AsyncEngine | None]:
     if backend == "memory":
-        return RuntimeState.in_memory(), None
+        return RuntimeStorage.in_memory(), None
     if backend == "sqlite":
-        return RuntimeState.sqlite(tmp_path / "runtime-sqlite.db"), None
+        return RuntimeStorage.sqlite(tmp_path / "runtime-sqlite.db"), None
     if backend == "sql":
         engine = create_async_engine(
             URL.create(
@@ -100,7 +100,7 @@ async def _state(
             )
         )
         await provision_runtime_database(engine)
-        return RuntimeState.sql(engine), engine
+        return RuntimeStorage.sql(engine), engine
     raise AssertionError(backend)
 
 
@@ -155,7 +155,7 @@ async def test_session_tool_turn_commits_terminal_and_history(
         async with Runtime.open(
             "session-tool-terminal",
             models=_ToolModels(),  # type: ignore[arg-type]
-            state=state,
+            storage=state,
             capabilities=(application,),
         ) as runtime:
             await runtime.agent("default").create_session("session")
@@ -274,7 +274,7 @@ async def test_session_tool_turn_commits_terminal_and_history(
 async def test_durable_terminal_survives_local_seal_finalization_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     calls: list[str] = []
     application = _application(calls)
 
@@ -293,7 +293,7 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
         async with Runtime.open(
             "session-tool-terminal-finalize",
             models=_ToolModels(),  # type: ignore[arg-type]
-            state=state,
+            storage=state,
             capabilities=(application,),
         ) as runtime:
             await runtime.agent("default").create_session("session")
@@ -376,7 +376,7 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
     async with Runtime.open(
         "session-tool-terminal-failure",
         models=_ToolModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
         await runtime.agent("default").create_session("session")
@@ -423,13 +423,13 @@ async def test_completed_tool_operation_is_reused_after_reopen(
     database = tmp_path / f"tool-replay-{backend}.db"
     first_engine: AsyncEngine | None = None
     if backend == "sqlite":
-        first = RuntimeState.sqlite(database)
+        first = RuntimeStorage.sqlite(database)
     else:
         first_engine = create_async_engine(
             URL.create("sqlite+aiosqlite", database=str(database))
         )
         await provision_runtime_database(first_engine)
-        first = RuntimeState.sql(first_engine)
+        first = RuntimeStorage.sql(first_engine)
     await first.initialize(namespace="tool-replay", tenant_id="tenant")
     try:
         first_bridge = RuntimeToolOperationBridge(
@@ -462,12 +462,12 @@ async def test_completed_tool_operation_is_reused_after_reopen(
 
     second_engine: AsyncEngine | None = None
     if backend == "sqlite":
-        second = RuntimeState.sqlite(database)
+        second = RuntimeStorage.sqlite(database)
     else:
         second_engine = create_async_engine(
             URL.create("sqlite+aiosqlite", database=str(database))
         )
-        second = RuntimeState.sql(second_engine)
+        second = RuntimeStorage.sql(second_engine)
     await second.initialize(namespace="tool-replay", tenant_id="tenant")
     try:
         replay_bridge = RuntimeToolOperationBridge(
@@ -571,21 +571,21 @@ def _crash_session_process(
 
     async def run() -> None:
         if backend == "sqlite":
-            state = RuntimeState.sqlite(database)
+            state = RuntimeStorage.sqlite(database)
         else:
             engine = create_async_engine(
                 URL.create("sqlite+aiosqlite", database=database)
             )
             if phase != "recovered_before_terminal":
                 await provision_runtime_database(engine)
-            state = RuntimeState.sql(engine)
+            state = RuntimeStorage.sql(engine)
         application = _application(
             [], effect_policy="non_replay_safe", effect_log=Path(effect_log)
         )
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),
-            state=state,
+            storage=state,
             capabilities=(application,),
         ) as runtime:
             if phase != "recovered_before_terminal":
@@ -644,19 +644,19 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     execution_id = committed_effects[0]
     engine = None
     if backend == "sqlite":
-        state = RuntimeState.sqlite(database)
+        state = RuntimeStorage.sqlite(database)
     else:
         engine = create_async_engine(
             URL.create("sqlite+aiosqlite", database=str(database))
         )
-        state = RuntimeState.sql(engine)
+        state = RuntimeStorage.sql(engine)
     calls: list[str] = []
     application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
     try:
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),
-            state=state,
+            storage=state,
             capabilities=(application,),
         ) as runtime:
             session = runtime.agent("default").session("session")
@@ -711,7 +711,7 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
 async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="checkpoint-readback", tenant_id="tenant")
     original = StateStepArchive.materialize_checkpoint
     injected = False
@@ -775,7 +775,7 @@ async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
 
 @pytest.mark.asyncio
 async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="run-checkpoint-relocation", tenant_id="tenant")
     try:
         recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
@@ -845,7 +845,7 @@ async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() ->
 
 @pytest.mark.asyncio
 async def test_recovery_to_conversation_rebases_cumulative_tool_checkpoint() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-tool-recovery", tenant_id="tenant")
     try:
         recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
@@ -944,7 +944,7 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
     async with Runtime.open(
         "session-tool-crash",
         models=_ToolModels(),
-        state=RuntimeState.sqlite(database),
+        storage=RuntimeStorage.sqlite(database),
         capabilities=(
             _application(calls, effect_policy="non_replay_safe", effect_log=effect_log),
         ),
@@ -1000,7 +1000,7 @@ async def test_tool_effect_waits_for_durable_response_checkpoint(
         async with Runtime.open(
             "pre-effect-checkpoint",
             models=_ToolModels(),
-            state=RuntimeState.in_memory(),
+            storage=RuntimeStorage.in_memory(),
             capabilities=(_application(calls),),
         ) as runtime:
             await runtime.agent("default").create_session("session")
@@ -1046,7 +1046,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
         async with Runtime.open(
             "session-atomic-terminal",
             models=_ToolModels(),
-            state=state,
+            storage=state,
             capabilities=(_application(calls),),
         ) as runtime:
             await runtime.agent("default").create_session("session")
@@ -1081,7 +1081,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
 async def test_recovery_preparation_failure_releases_its_owned_flight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="recovery-preparation", tenant_id="tenant")
     recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
     run = AgentRunRecord(

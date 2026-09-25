@@ -5,23 +5,23 @@
 from ._plan import (
     RuntimeDomain,
     RuntimeRetentionMode,
-    RuntimeStatePlan,
-    RuntimeStateRoute,
+    RuntimeStoragePlan,
+    RuntimeStorageRoute,
     runtime_domain_uses_object_store,
 )
 from ._snapshot import SnapshotExclusiveGuard, SnapshotLimits
-from ._root import RuntimeState
-from ._contracts import ArtifactRecord, ArtifactState
+from ._root import RuntimeStorage
+from ._contracts import ArtifactRecord, ArtifactRepositories
 
 __all__ = [
     "SnapshotExclusiveGuard",
     "RuntimeDomain",
     "RuntimeRetentionMode",
-    "RuntimeState",
+    "RuntimeStorage",
     "ArtifactRecord",
-    "ArtifactState",
-    "RuntimeStatePlan",
-    "RuntimeStateRoute",
+    "ArtifactRepositories",
+    "RuntimeStoragePlan",
+    "RuntimeStorageRoute",
     "SnapshotLimits",
     "runtime_domain_uses_object_store",
 ]

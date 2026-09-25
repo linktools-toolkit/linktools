@@ -82,7 +82,7 @@ from ._task_capability_capture import (
     TaskCapabilityCaptureStore,
 )
 from .service_api import ExecutionService, SessionService
-from .state import ArtifactRecord, ArtifactState, RuntimeDomain
+from .state import ArtifactRecord, ArtifactRepositories, RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.planner")
 AppT = TypeVar("AppT")
@@ -111,7 +111,7 @@ class _DeferredInputHandler:
 class _TaskArtifactPublisher:
     def __init__(
         self,
-        state: ArtifactState,
+        state: ArtifactRepositories,
         object_store: ObjectStore,
         object_key_factory: RuntimeObjectKeyFactory,
         *,
@@ -317,7 +317,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         authorization: AuthorizationPolicy,
         task_state: _TaskStateReader,
         task_objects: ObjectStore,
-        artifact_state: ArtifactState | None = None,
+        artifact_state: ArtifactRepositories | None = None,
         artifact_objects: ObjectStore | None = None,
         object_key_factory: RuntimeObjectKeyFactory,
         capability_captures: TaskCapabilityCaptureStore,

@@ -18,7 +18,7 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     ExecutionTerminalCommit,
@@ -45,7 +45,7 @@ def _binding_contract() -> AgentBindingContract:
 
 @pytest.mark.asyncio
 async def test_execution_idempotency_repository_owns_resource_kind() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="idempotency-owner", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)
@@ -73,7 +73,7 @@ async def test_execution_idempotency_repository_owns_resource_kind() -> None:
 async def test_in_memory_terminal_commit_validates_success_result(
     payload_kind: str,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="memory-terminal", tenant_id="tenant")
     try:
         now = datetime.now(timezone.utc)

@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._plan import (
     PlanItem as RuntimePlanItem,
     RuntimePlanStore,
@@ -130,7 +130,7 @@ async def test_runtime_plan_persistence_adds_no_arbitrary_size_limit() -> None:
 
 
 async def test_runtime_plan_persists_only_the_current_payload_shape() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="plan-shape", tenant_id="tenant")
     try:
         store = RuntimePlanStore(

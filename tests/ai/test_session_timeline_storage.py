@@ -9,7 +9,7 @@ import pytest
 
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._runtime_commands import _timeline_turn_message_range
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
@@ -38,7 +38,7 @@ def _session() -> SessionRecord:
 
 @pytest.mark.asyncio
 async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-timeline-storage", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -125,7 +125,7 @@ def test_timeline_range_allows_root_recovery_after_transcript_materialization() 
 
 @pytest.mark.asyncio
 async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-timeline-duplicate", tenant_id="tenant")
     try:
         repository = state.conversation.sessions

@@ -25,7 +25,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_metrics_sqlite, validate_metrics_sqlite
 from linktools.ai.model import ModelRegistry
 from linktools.ai.observe import Metrics
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import FilesystemMutationLock, StorageOverlay
 from linktools.ai.workspace import Workspace
 
@@ -83,8 +83,8 @@ def _local_runtime_assets(workspace: Workspace) -> AssetStore:
     )
 
 
-def _local_runtime_state(workspace: Workspace) -> RuntimeState:
-    return RuntimeState.from_root(_local_runtime_root(workspace))
+def _local_runtime_storage(workspace: Workspace) -> RuntimeStorage:
+    return RuntimeStorage.from_root(_local_runtime_root(workspace))
 
 
 async def _local_metrics(workspace: Workspace) -> Metrics:
@@ -172,7 +172,7 @@ async def _open_local_runtime(
     try:
         async with Runtime.open(
             "default",
-            state=_local_runtime_state(workspace),
+            storage=_local_runtime_storage(workspace),
             metrics=await _local_metrics(workspace),
             models=_local_models(workspace) if models is None else models,
             capabilities=(

@@ -8,8 +8,8 @@ from linktools.core import environ
 
 from ...core import agent_run_id
 from ...storage import ObjectStore
-from ._contracts import ConversationCursor, ConversationState, ExecutionState
-from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
+from ._contracts import ConversationCursor, ConversationRepositories, ExecutionRepositories
+from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStoragePlan
 from ._steps import RuntimeAgentRunStore
 
 _logger = environ.get_logger("ai.runtime.state.retention")
@@ -27,11 +27,11 @@ class RuntimeRetentionController:
     def __init__(
         self,
         *,
-        conversation: ConversationState,
-        execution: ExecutionState,
+        conversation: ConversationRepositories,
+        execution: ExecutionRepositories,
         objects: _RuntimeObjectRouter,
         run_store: RuntimeAgentRunStore,
-        plan: RuntimeStatePlan,
+        plan: RuntimeStoragePlan,
         namespace: str,
     ) -> None:
         self._conversation = conversation

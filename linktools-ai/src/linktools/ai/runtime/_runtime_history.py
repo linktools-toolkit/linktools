@@ -69,9 +69,9 @@ from .service_api import (
     UsageReadCutoff,
     UsageSummary,
 )
-from .state import RuntimeDomain, RuntimeState
+from .state import RuntimeDomain, RuntimeStorage
 from .state._contracts import (
-    ConversationState,
+    ConversationRepositories,
     EventRepository,
     ExecutionRecord,
     ExecutionRepository,
@@ -233,7 +233,7 @@ class RuntimeHistory:
         execution_objects: "ObjectStore | None" = None,
         task_objects: "ObjectStore | None" = None,
         artifacts: "ArtifactService | None" = None,
-        conversation: "ConversationState | None" = None,
+        conversation: "ConversationRepositories | None" = None,
         session_transcript_store: "SessionTimelineTranscriptStore | None" = None,
     ) -> None:
         self._service = service
@@ -838,13 +838,13 @@ class RuntimeHistory:
         cls,
         namespace: str,
         *,
-        state: RuntimeState,
+        storage: RuntimeStorage,
         tenant_id: "str | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
     ) -> AbstractAsyncContextManager["RuntimeHistory"]:
         return _open_runtime_history(
             namespace,
-            state=state,
+            storage=storage,
             tenant_id=tenant_id,
             authorization=authorization,
         )
@@ -1049,7 +1049,7 @@ class RuntimeHistory:
 async def _open_runtime_history(
     namespace: str,
     *,
-    state: RuntimeState,
+    storage: RuntimeStorage,
     tenant_id: "str | None",
     authorization: "AuthorizationPolicy | None",
 ) -> AsyncIterator[RuntimeHistory]:
@@ -1057,32 +1057,32 @@ async def _open_runtime_history(
     effective_tenant_id = (
         "default" if tenant_id is None else validate_tenant_id(tenant_id)
     )
-    if not isinstance(state, RuntimeState):
-        raise TypeError("state must be RuntimeState")
-    selected_state = state
+    if not isinstance(storage, RuntimeStorage):
+        raise TypeError("storage must be RuntimeStorage")
+    selected_storage = storage
     initialized = False
     body_error: BaseException | None = None
     try:
-        await selected_state.initialize(
+        await selected_storage.initialize(
             namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
             read_only=True,
         )
         initialized = True
         if (
-            selected_state.namespace != resolved_namespace
-            or selected_state.tenant_id != effective_tenant_id
+            selected_storage.namespace != resolved_namespace
+            or selected_storage.tenant_id != effective_tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         reader = StepExecutionHistoryReader(
             namespace=resolved_namespace,
-            executions=selected_state.execution.executions,
-            store=selected_state.run_store.read_store(RuntimeDomain.EXECUTION),
+            executions=selected_storage.execution.executions,
+            store=selected_storage.run_store.read_store(RuntimeDomain.EXECUTION),
             cursor_signer=HmacCursorSigner(
                 "execution-history",
                 token_seed(resolved_namespace),
             ),
-            tool_operations=selected_state.recovery.tools,
+            tool_operations=selected_storage.recovery.tools,
         )
         effective_authorization = (
             TenantAuthorizationPolicy(effective_tenant_id)
@@ -1090,13 +1090,13 @@ async def _open_runtime_history(
             else authorization
         )
         service = DefaultExecutionHistoryService(
-            selected_state.execution.executions,
+            selected_storage.execution.executions,
             effective_authorization,
             reader,
             cursor_signer=HmacCursorSigner("execution", token_seed(resolved_namespace)),
         )
         artifacts = DefaultArtifactService(
-            selected_state.artifact,
+            selected_storage.artifact,
             effective_authorization,
             token_seed=token_seed(resolved_namespace),
             cursor_signer=HmacCursorSigner("artifact", token_seed(resolved_namespace)),
@@ -1104,21 +1104,21 @@ async def _open_runtime_history(
         yield RuntimeHistory(
             service,
             tenant_id=effective_tenant_id,
-            executions=selected_state.execution.executions,
-            events=selected_state.execution.events,
-            sessions=selected_state.conversation.sessions,
-            tasks=selected_state.task.tasks,
+            executions=selected_storage.execution.executions,
+            events=selected_storage.execution.events,
+            sessions=selected_storage.conversation.sessions,
+            tasks=selected_storage.task.tasks,
             authorization=effective_authorization,
             namespace=resolved_namespace,
-            execution_objects=selected_state.object_store(RuntimeDomain.EXECUTION),
-            task_objects=selected_state.object_store(RuntimeDomain.TASK),
+            execution_objects=selected_storage.object_store(RuntimeDomain.EXECUTION),
+            task_objects=selected_storage.object_store(RuntimeDomain.TASK),
             artifacts=artifacts,
             cursor_signer=HmacCursorSigner(
                 "runtime-history",
                 token_seed(resolved_namespace),
             ),
-            conversation=selected_state.conversation,
-            session_transcript_store=selected_state.run_store,
+            conversation=selected_storage.conversation,
+            session_transcript_store=selected_storage.run_store,
         )
     except BaseException as error:
         body_error = error
@@ -1126,7 +1126,7 @@ async def _open_runtime_history(
     finally:
         if initialized:
             try:
-                await selected_state.close()
+                await selected_storage.close()
             except BaseException as error:
                 if body_error is None:
                     raise

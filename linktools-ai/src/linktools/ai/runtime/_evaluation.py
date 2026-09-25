@@ -37,7 +37,7 @@ from .service_api import (
 )
 from .state._contracts import (
     EvaluationRecord,
-    EvaluationState,
+    EvaluationRepositories,
     ExecutionRecord,
     ExecutionRepository,
     IdempotencyRecord,
@@ -78,7 +78,7 @@ class DefaultEvaluationService:
 
     def __init__(
         self,
-        state: EvaluationState,
+        state: EvaluationRepositories,
         executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
         execution: ExecutionService,

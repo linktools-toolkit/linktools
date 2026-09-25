@@ -10,7 +10,7 @@ from ._task_test_helpers import admit_graph
 import linktools.ai.task._local as task_local
 from linktools.ai.core import TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.task import (
     DefaultTaskGraphService,
     LocalTaskGraphLauncher,
@@ -72,7 +72,7 @@ class _BlockingRunner:
 async def test_scheduler_retries_transient_reconcile_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-reconcile-retry", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     try:
@@ -115,7 +115,7 @@ async def test_scheduler_retries_transient_reconcile_conflict(
 async def test_scheduler_timeout_boundary_does_not_lose_completion_activity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-boundary-activity", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     try:
@@ -208,7 +208,7 @@ async def test_scheduler_timeout_boundary_does_not_lose_completion_activity(
 async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-observer-idle", tenant_id="tenant")
     launcher: LocalTaskGraphLauncher | None = None
     streams = []
@@ -287,7 +287,7 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
 async def test_local_event_stream_observes_foreign_update_via_scheduler_notification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(
         namespace="task-observer-scheduler-notify", tenant_id="tenant"
     )

@@ -7,7 +7,7 @@ import pytest
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 
 from ._runtime_test_helpers import RuntimeUsageModels
 
@@ -20,7 +20,7 @@ async def test_in_memory_session_run_restores_timeline() -> None:
     async with Runtime.open(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
         session = await runtime.agent("default").create_session("session")
@@ -57,7 +57,7 @@ async def test_in_memory_fork_survives_parent_close() -> None:
     async with Runtime.open(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
         parent = await runtime.agent("default").create_session("parent")

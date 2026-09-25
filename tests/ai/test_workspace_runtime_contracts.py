@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Regression tests for workspace RuntimeState composition."""
+"""Regression tests for workspace RuntimeStorage composition."""
 
 import pytest
 from linktools.ai.asset import (
@@ -10,7 +10,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._harness_memory import build_harness_memory
 from linktools.ai.runtime._memory import RuntimeMemoryStore
@@ -22,7 +22,7 @@ from pydantic_ai_harness.memory import Memory
 
 @pytest.mark.asyncio
 async def test_runtime_memory_store_implements_harness_path_storage() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="memory-regression", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
@@ -51,7 +51,7 @@ async def test_runtime_memory_store_implements_harness_path_storage() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_capability_is_harness_owned_over_runtime_state() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="memory-capability", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
@@ -83,7 +83,7 @@ async def test_memory_capability_is_harness_owned_over_runtime_state() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_missing_delete_uses_harness_mutation_contract() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="memory-missing-delete", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
@@ -113,7 +113,7 @@ async def test_memory_missing_delete_uses_harness_mutation_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_store_remains_writable_across_missing_delete_receipts() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="memory-sequence-gap", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
@@ -199,8 +199,8 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     ]
 
 
-def _workspace_runtime_state(workspace: Workspace) -> RuntimeState:
-    return RuntimeState.from_root(workspace.storage_root / "runtime")
+def _workspace_runtime_state(workspace: Workspace) -> RuntimeStorage:
+    return RuntimeStorage.from_root(workspace.storage_root / "runtime")
 
 
 @pytest.mark.asyncio
@@ -210,7 +210,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     async with Runtime.open(
         "default",
         models=models,
-        state=_workspace_runtime_state(workspace),
+        storage=_workspace_runtime_state(workspace),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         assert runtime.tenant_id == "default"
@@ -228,7 +228,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         "default",
         context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
-        state=_workspace_runtime_state(workspace),
+        storage=_workspace_runtime_state(workspace),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
@@ -238,7 +238,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     async with Runtime.open(
         "default",
         models=models,
-        state=_workspace_runtime_state(workspace),
+        storage=_workspace_runtime_state(workspace),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         loaded = await runtime.session.get(

@@ -21,7 +21,7 @@ from ...storage import (
 from ._plan import (
     RuntimeDomain,
     RuntimeRetentionMode,
-    RuntimeStatePlan,
+    RuntimeStoragePlan,
     runtime_domain_uses_object_store,
 )
 
@@ -104,7 +104,7 @@ class _RuntimeObjectRouter:
 
 
 def build_runtime_object_router(
-    plan: RuntimeStatePlan,
+    plan: RuntimeStoragePlan,
     external: ObjectStore | None,
     stores: Mapping[RuntimeDomain, object],
     contexts: Mapping[RuntimeDomain, SqlStorageContext],

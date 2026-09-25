@@ -15,7 +15,7 @@ from ...storage import (
     sql_table_options,
     sql_unique,
 )
-from ._plan import RuntimeDomain, RuntimeStatePlan
+from ._plan import RuntimeDomain, RuntimeStoragePlan
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -35,7 +35,7 @@ _OPERATION_COMMENT = "Ordered durable operation ledger for replay, result recove
 
 
 def build_runtime_sql_metadata(
-    plan: "RuntimeStatePlan | frozenset[RuntimeDomain]",
+    plan: "RuntimeStoragePlan | frozenset[RuntimeDomain]",
     *,
     metadata: "MetaData | None" = None,
 ) -> "MetaData":
@@ -60,7 +60,7 @@ def build_runtime_sql_metadata(
         return metadata
     if isinstance(plan, frozenset) and not plan:
         raise ValueError("at least one RuntimeDomain is required")
-    if isinstance(plan, RuntimeStatePlan) and not any(
+    if isinstance(plan, RuntimeStoragePlan) and not any(
         plan.route(domain).retention.value == "durable" for domain in RuntimeDomain
     ):
         raise ValueError("at least one durable RuntimeDomain is required")
@@ -329,7 +329,7 @@ def build_runtime_sql_metadata(
     return metadata
 
 
-def required_runtime_sql_tables(plan: RuntimeStatePlan) -> frozenset[str]:
+def required_runtime_sql_tables(plan: RuntimeStoragePlan) -> frozenset[str]:
     """Return the stable Runtime table set for a durable plan."""
     if not any(
         plan.route(domain).retention.value == "durable" for domain in RuntimeDomain

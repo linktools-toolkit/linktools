@@ -18,7 +18,7 @@ from linktools.ai.core import (
     ToolOperationStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
@@ -61,7 +61,7 @@ def _tool_record() -> ToolOperationRecord:
 
 @pytest.mark.asyncio
 async def test_configured_runtime_mutation_requires_active_transaction() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="mutation-guard", tenant_id="tenant")
     try:
         with pytest.raises(RuntimeError, match="storage mutation outside transaction"):
@@ -73,7 +73,7 @@ async def test_configured_runtime_mutation_requires_active_transaction() -> None
 @pytest.mark.asyncio
 async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
-    state = RuntimeState.filesystem(root)
+    state = RuntimeStorage.filesystem(root)
     await state.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
         await state.recovery.tools.reserve(_tool_record())
@@ -95,7 +95,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     finally:
         await state.close()
 
-    reopened = RuntimeState.filesystem(root)
+    reopened = RuntimeStorage.filesystem(root)
     await reopened.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
         record = await reopened.recovery.tools.get_operation(
@@ -110,7 +110,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
 @pytest.mark.asyncio
 async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
-    state = RuntimeState.filesystem(root)
+    state = RuntimeStorage.filesystem(root)
     await state.initialize(namespace="nested-event", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = ExecutionRecord(
@@ -148,7 +148,7 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
     finally:
         await state.close()
 
-    reopened = RuntimeState.filesystem(root)
+    reopened = RuntimeStorage.filesystem(root)
     await reopened.initialize(namespace="nested-event", tenant_id="tenant")
     try:
         events = await reopened.execution.events.list(
@@ -166,7 +166,7 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_blob_stream_consumption_does_not_hold_runtime_transaction_lock() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="blob-stream", tenant_id="tenant")
     started = asyncio.Event()
     release = asyncio.Event()

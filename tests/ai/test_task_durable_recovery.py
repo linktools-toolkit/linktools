@@ -18,7 +18,7 @@ from linktools.ai.core import (
     principal_identity_payload,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState, RuntimeStatePlan, RuntimeStateRoute
+from linktools.ai.runtime.state import RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime.state._plan import RuntimeDomain
 from linktools.ai.runtime.state._store import OperationQuery, stream_digest
 from linktools.ai.task import (
@@ -128,7 +128,7 @@ def test_task_admission_rejects_unsupported_version() -> None:
 
 @pytest.mark.asyncio
 async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         request = _request("memory")
@@ -194,7 +194,7 @@ async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
 async def test_partial_admission_operation_without_graph_fails_closed(
     operation_status: OperationStatus,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         request = _request(f"partial-operation-{operation_status.value.lower()}")
@@ -214,7 +214,7 @@ async def test_partial_admission_operation_without_graph_fails_closed(
 async def test_existing_admitted_graph_rejects_different_operation_as_storage_conflict() -> (
     None
 ):
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         first = _request("occupied", idempotency_key="submit:occupied:first")
@@ -237,7 +237,7 @@ async def test_existing_admitted_graph_rejects_different_operation_as_storage_co
 @pytest.mark.asyncio
 async def test_corrupt_occupied_graph_without_its_admission_operation_fails_closed(
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         first = _request(
@@ -294,15 +294,15 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
     admission = TaskGraphAdmission.from_request(request)
     engine = None
     if backend == "filesystem":
-        def create_state() -> RuntimeState:
-            return RuntimeState.filesystem(path)
+        def create_state() -> RuntimeStorage:
+            return RuntimeStorage.filesystem(path)
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
         await provision_database(engine)
 
-        def create_state() -> RuntimeState:
+        def create_state() -> RuntimeStorage:
             assert engine is not None
-            return RuntimeState.sql(engine)
+            return RuntimeStorage.sql(engine)
 
     try:
         state = create_state()
@@ -336,7 +336,7 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
 
 @pytest.mark.asyncio
 async def test_recovery_discovery_uses_bounded_keyset_pages() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         for index in range(129):
@@ -365,7 +365,7 @@ async def test_recovery_discovery_uses_bounded_keyset_pages() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_graph_is_terminal_and_excluded_from_recovery() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-test", tenant_id="tenant")
     try:
         request = _request("empty", nodes=())
@@ -383,12 +383,12 @@ async def test_empty_graph_is_terminal_and_excluded_from_recovery() -> None:
 
 
 def test_durable_pure_task_graph_does_not_require_durable_execution(tmp_path) -> None:
-    task = RuntimeStateRoute.filesystem(tmp_path / "task")
+    task = RuntimeStorageRoute.filesystem(tmp_path / "task")
 
-    state = RuntimeState.from_plan(
-        RuntimeStatePlan(
+    state = RuntimeStorage.from_plan(
+        RuntimeStoragePlan(
             task=task,
-            execution=RuntimeStateRoute.transient(),
+            execution=RuntimeStorageRoute.transient(),
         )
     )
     assert state.plan.route(RuntimeDomain.TASK).retention.value == "durable"

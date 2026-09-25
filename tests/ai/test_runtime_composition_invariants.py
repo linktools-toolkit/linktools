@@ -26,7 +26,7 @@ from linktools.ai.runtime._approval import DefaultApprovalService
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.runtime._factory import compose_runtime_components
 from linktools.ai.runtime._subagent import SubagentDispatcher
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
@@ -135,7 +135,7 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
     components = await compose_runtime_components(
         "workspace",
         models=ModelRegistry.openai(model="gpt-test"),
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(group,),
     )
 
@@ -170,7 +170,7 @@ async def test_runtime_rejects_source_change_during_assembly(
             await compose_runtime_components(
                 "workspace",
                 models=RuntimeUsageModels(),  # type: ignore[arg-type]
-                state=RuntimeState.in_memory(),
+                storage=RuntimeStorage.in_memory(),
                 capabilities=(CapabilityGroup("workspace", assets=store),),
             )
 
@@ -292,7 +292,7 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
     async with Runtime.open(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
         result = await runtime.agent("default").run(

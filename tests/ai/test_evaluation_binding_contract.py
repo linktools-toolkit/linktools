@@ -23,7 +23,7 @@ from linktools.ai.runtime.service_api import (
     ReplayEvaluationRequest,
     StartEvaluationRequest,
 )
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     EvaluationRecord,
     ExecutionRecord,
@@ -112,7 +112,7 @@ class _Allow:
 
 @pytest.mark.asyncio
 async def test_evaluation_start_persists_source_execution_identity() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     binding = _binding()
     execution = _RecordingExecution()
@@ -147,7 +147,7 @@ async def test_evaluation_start_persists_source_execution_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluation_idempotency_includes_memory_scope() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     binding = _binding()
     service = DefaultEvaluationService(
@@ -188,7 +188,7 @@ async def test_evaluation_idempotency_includes_memory_scope() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluation_replay_uses_historical_execution_binding() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     historical = _binding("agent")
     source = _execution(historical, execution_id="source-execution")
@@ -234,7 +234,7 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluation_compare_uses_source_execution_binding() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     baseline_source = _execution(_binding("agent"), execution_id="baseline-execution")
@@ -286,7 +286,7 @@ async def test_evaluation_compare_uses_source_execution_binding() -> None:
 
 @pytest.mark.asyncio
 async def test_evaluation_status_cannot_lead_source_execution() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     source = replace(
         _execution(_binding("agent"), execution_id="source-execution"),
@@ -333,7 +333,7 @@ async def test_evaluation_status_cannot_lead_source_execution() -> None:
 async def test_evaluation_missing_source_execution_fails_closed(
     status: EvaluationStatus,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     await state.evaluation.records.create(

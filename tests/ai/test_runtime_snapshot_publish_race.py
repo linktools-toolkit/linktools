@@ -15,7 +15,7 @@ from linktools.ai.runtime import (
     SnapshotTargetInspection,
 )
 from linktools.ai.runtime import _snapshot as snapshot_module
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
 
@@ -25,18 +25,18 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = InMemoryObjectStore("snapshot")
-    state_ref = ObjectRef("runtime", "state", "a" * 64, 0)
+    storage_ref = ObjectRef("runtime", "storage", "a" * 64, 0)
     snapshot_ref = ObjectRef("snapshot", "snapshot", "b" * 64, 0)
     manifest = {
         "kind": "runtime-snapshot",
         "format_version": 1,
         "namespace": "namespace",
         "tenant_id": "tenant",
-        "state": {
-            "store_id": state_ref.store_id,
-            "key": state_ref.key,
-            "digest": state_ref.digest,
-            "size": state_ref.size,
+        "storage": {
+            "store_id": storage_ref.store_id,
+            "key": storage_ref.key,
+            "digest": storage_ref.digest,
+            "size": storage_ref.size,
         },
         "workspace": {"present": False, "entries": []},
         "metadata": {},
@@ -53,7 +53,7 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
         del cls, ref, object_store, limits
         return manifest
 
-    async def restore_state(
+    async def restore_storage(
         cls,
         ref: ObjectRef,
         *,
@@ -86,9 +86,9 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
         classmethod(verified_manifest),
     )
     monkeypatch.setattr(
-        RuntimeState,
+        RuntimeStorage,
         "restore_snapshot",
-        classmethod(restore_state),
+        classmethod(restore_storage),
     )
     monkeypatch.setattr(
         RuntimeSnapshot,
@@ -129,18 +129,18 @@ async def test_collect_temporary_skips_active_restore_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = InMemoryObjectStore("snapshot")
-    state_ref = ObjectRef("runtime", "state", "a" * 64, 0)
+    storage_ref = ObjectRef("runtime", "storage", "a" * 64, 0)
     snapshot_ref = ObjectRef("snapshot", "snapshot", "b" * 64, 0)
     manifest = {
         "kind": "runtime-snapshot",
         "format_version": 1,
         "namespace": "namespace",
         "tenant_id": "tenant",
-        "state": {
-            "store_id": state_ref.store_id,
-            "key": state_ref.key,
-            "digest": state_ref.digest,
-            "size": state_ref.size,
+        "storage": {
+            "store_id": storage_ref.store_id,
+            "key": storage_ref.key,
+            "digest": storage_ref.digest,
+            "size": storage_ref.size,
         },
         "workspace": {"present": False, "entries": []},
         "metadata": {},
@@ -157,7 +157,7 @@ async def test_collect_temporary_skips_active_restore_generation(
         del cls, ref, object_store, limits
         return manifest
 
-    async def restore_state(
+    async def restore_storage(
         cls,
         ref: ObjectRef,
         *,
@@ -176,9 +176,9 @@ async def test_collect_temporary_skips_active_restore_generation(
         classmethod(verified_manifest),
     )
     monkeypatch.setattr(
-        RuntimeState,
+        RuntimeStorage,
         "restore_snapshot",
-        classmethod(restore_state),
+        classmethod(restore_storage),
     )
 
     target = tmp_path / "runtime"
@@ -208,18 +208,18 @@ async def test_current_pointer_commit_unknown_keeps_published_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = InMemoryObjectStore("snapshot")
-    state_ref = ObjectRef("runtime", "state", "a" * 64, 0)
+    storage_ref = ObjectRef("runtime", "storage", "a" * 64, 0)
     snapshot_ref = ObjectRef("snapshot", "snapshot", "b" * 64, 0)
     manifest = {
         "kind": "runtime-snapshot",
         "format_version": 1,
         "namespace": "namespace",
         "tenant_id": "tenant",
-        "state": {
-            "store_id": state_ref.store_id,
-            "key": state_ref.key,
-            "digest": state_ref.digest,
-            "size": state_ref.size,
+        "storage": {
+            "store_id": storage_ref.store_id,
+            "key": storage_ref.key,
+            "digest": storage_ref.digest,
+            "size": storage_ref.size,
         },
         "workspace": {"present": False, "entries": []},
         "metadata": {},
@@ -234,7 +234,7 @@ async def test_current_pointer_commit_unknown_keeps_published_generation(
         del cls, ref, object_store, limits
         return manifest
 
-    async def restore_state(
+    async def restore_storage(
         cls,
         ref: ObjectRef,
         *,
@@ -251,9 +251,9 @@ async def test_current_pointer_commit_unknown_keeps_published_generation(
         classmethod(verified_manifest),
     )
     monkeypatch.setattr(
-        RuntimeState,
+        RuntimeStorage,
         "restore_snapshot",
-        classmethod(restore_state),
+        classmethod(restore_storage),
     )
 
     target = tmp_path / "runtime"

@@ -7,13 +7,13 @@ import pytest
 from ._task_test_helpers import admit_graph
 from linktools.ai.core import TaskStatus
 from linktools.ai.errors import ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.task import TaskGraph, TaskNode
 
 
 @pytest.mark.asyncio
 async def test_explicit_cancel_preserves_terminal_nodes_and_cancels_active_work() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-cancel-semantics", tenant_id="tenant")
     try:
         repository = state.task.tasks

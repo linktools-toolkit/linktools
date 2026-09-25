@@ -32,7 +32,7 @@ from ..errors import AIError, ErrorCode
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from .service_api import ArtifactDownload, ArtifactView
-from .state._contracts import ArtifactState
+from .state._contracts import ArtifactRepositories
 
 _logger = environ.get_logger("ai.runtime.artifact")
 _CURSOR_RESOURCE_KIND = "ARTIFACT"
@@ -41,7 +41,7 @@ _CURSOR_RESOURCE_KIND = "ARTIFACT"
 class DefaultArtifactService:
     """Authorize metadata access before issuing an opaque download URL."""
 
-    def __init__(self, state: ArtifactState, authorization: AuthorizationPolicy, *, token_seed: bytes, cursor_signer: CursorSigner, entry_path: str = "/v1/artifacts") -> None:
+    def __init__(self, state: ArtifactRepositories, authorization: AuthorizationPolicy, *, token_seed: bytes, cursor_signer: CursorSigner, entry_path: str = "/v1/artifacts") -> None:
         if not token_seed:
             raise ValueError("artifact token seed is required")
         self._state = state

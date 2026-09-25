@@ -37,7 +37,7 @@ from linktools.ai.workspace import Workspace
 from linktools.commands.ai._common import (
     _load_workspace,
     _local_metrics,
-    _local_runtime_state,
+    _local_runtime_storage,
 )
 from linktools.commands.ai.history import Command as HistoryCommand, _emit_execution_detail
 from linktools.commands.ai.metrics import Command as MetricsCommand, _query_summary
@@ -333,13 +333,13 @@ async def test_local_debug_storage_uses_separate_runtime_and_metrics_databases(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    state = _local_runtime_state(workspace)
+    storage = _local_runtime_storage(workspace)
     metrics = await _local_metrics(workspace)
     runtime_root = workspace.storage_root / "runtime"
 
     assert all(
-        state.plan.route(domain).path == (runtime_root / "runtime.db").resolve()
-        for domain in state.plan.durable_domains
+        storage.plan.route(domain).path == (runtime_root / "runtime.db").resolve()
+        for domain in storage.plan.durable_domains
     )
     assert metrics.namespace == "default"
     assert (runtime_root / "metrics.db").is_file()

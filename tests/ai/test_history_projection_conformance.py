@@ -20,7 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._history import StepExecutionHistoryReader
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import RuntimeDomain
@@ -100,7 +100,7 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
 
 @pytest.mark.asyncio
 async def test_history_head_requires_open_for_mutations() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="history-head", tenant_id="tenant")
     repository = state.execution.executions
     store = repository.state_store
@@ -155,7 +155,7 @@ async def test_history_head_requires_open_for_mutations() -> None:
 async def test_execution_projection_paths_reject_a_sealed_history_head(
     tmp_path: Path,
 ) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="history-fence", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
@@ -256,7 +256,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
 async def test_terminal_prepare_accepts_an_unprojected_execution_run(
     tmp_path: Path,
 ) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="history-unprojected", tenant_id="tenant")
     terminal_plan = None
     try:
@@ -313,7 +313,7 @@ async def test_conversation_head_replacement_preserves_physical_identity(
     provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(provisioning_engine)
     await provisioning_engine.dispose()
-    state = RuntimeState.sqlite(
+    state = RuntimeStorage.sqlite(
         path,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
@@ -361,7 +361,7 @@ async def test_conversation_head_replacement_preserves_physical_identity(
 
 @pytest.mark.asyncio
 async def test_projection_flight_resolves_waiters_after_abandon() -> None:
-    steps = RuntimeState.in_memory()
+    steps = RuntimeStorage.in_memory()
     await steps.initialize(namespace="flight-abandon", tenant_id="tenant")
     try:
         store = steps.run_store
@@ -444,7 +444,7 @@ async def test_run_history_lock_rejects_cross_run_nesting() -> None:
 
 @pytest.mark.asyncio
 async def test_state_callback_cannot_acquire_run_history_lock() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="lock-order", tenant_id="tenant")
     history_lock = _AgentRunHistoryLock()
     try:
@@ -461,7 +461,7 @@ async def test_state_callback_cannot_acquire_run_history_lock() -> None:
 
 @pytest.mark.asyncio
 async def test_read_only_state_callback_rejects_mutation() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="read-only", tenant_id="tenant")
     try:
 
@@ -476,7 +476,7 @@ async def test_read_only_state_callback_rejects_mutation() -> None:
 
 @pytest.mark.asyncio
 async def test_read_only_state_callback_rejects_record_guard() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="read-only-guard", tenant_id="tenant")
     try:
 
@@ -492,7 +492,7 @@ async def test_read_only_state_callback_rejects_record_guard() -> None:
         await state.close()
 
 
-async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) -> None:
+async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str) -> None:
     repository = state.execution.executions
     if await repository.get_history_head("execution", tenant_id="tenant") is None:
         await repository.state_store.mutate(
@@ -606,7 +606,7 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
     )
 
 
-def _reader(state: RuntimeState) -> StepExecutionHistoryReader:
+def _reader(state: RuntimeStorage) -> StepExecutionHistoryReader:
     return StepExecutionHistoryReader(
         namespace="history",
         executions=state.execution.executions,
@@ -617,7 +617,7 @@ def _reader(state: RuntimeState) -> StepExecutionHistoryReader:
 
 @pytest.mark.asyncio
 async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="history-in-memory-refs", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
@@ -651,7 +651,7 @@ async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> No
 async def test_terminal_seal_reuses_durable_projection_after_staging_release(
     tmp_path: Path,
 ) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
@@ -689,7 +689,7 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
 
 @pytest.mark.asyncio
 async def test_failed_claimed_attempt_without_run_is_skipped() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.FAILED, 1))
@@ -714,7 +714,7 @@ async def test_failed_claimed_attempt_without_run_is_skipped() -> None:
 
 @pytest.mark.asyncio
 async def test_history_skips_missing_non_final_attempt() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.FAILED, 2))
@@ -748,7 +748,7 @@ async def test_history_skips_missing_non_final_attempt() -> None:
 async def test_successful_execution_requires_final_history_evidence(
     method_name: str,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
@@ -767,7 +767,7 @@ async def test_successful_execution_requires_final_history_evidence(
 async def test_successful_history_preserves_user_prompt_and_projects_all_views() -> (
     None
 ):
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="history", tenant_id="tenant")
     try:
         prompt = '  {"question":"你好\\nworld","x":1}  '

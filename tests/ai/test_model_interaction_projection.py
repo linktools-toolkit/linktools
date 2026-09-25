@@ -25,7 +25,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime._attachment import (
     bind_tool_return_attachments,
@@ -519,7 +519,7 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
 
 @pytest.mark.asyncio
 async def test_parent_tool_result_round_trip_materializes_two_model_requests() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="interaction-tool-roundtrip", tenant_id="tenant")
     try:
         capture = RuntimeCaptureStore(
@@ -714,7 +714,7 @@ async def test_execution_model_interactions_are_durable_and_public() -> None:
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(_agent_group(),),
         metrics=Metrics.in_memory(),
     ) as runtime:
@@ -726,7 +726,7 @@ async def test_execution_model_interactions_support_volatile_memory_state() -> N
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(_agent_group(),),
         metrics=Metrics.in_memory(),
     ) as runtime:

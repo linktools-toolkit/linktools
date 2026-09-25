@@ -27,7 +27,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.runtime.state import RuntimeStatePlan
+from linktools.ai.runtime.state import RuntimeStoragePlan
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import (
@@ -178,9 +178,9 @@ def test_model_registry_snapshot_is_instance_owned() -> None:
     assert snapshot.resolve("route").route_id == "route"
 
 
-def test_runtime_state_plan_rejects_an_invalid_domain() -> None:
+def test_runtime_storage_plan_rejects_an_invalid_domain() -> None:
     with pytest.raises(ValueError):
-        RuntimeStatePlan(conversation="invalid")  # type: ignore[arg-type]
+        RuntimeStoragePlan(conversation="invalid")  # type: ignore[arg-type]
 
 
 def _pending_tools() -> PendingToolContinuation:

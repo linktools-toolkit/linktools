@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RuntimeState resource ownership and restart checks."""
+"""RuntimeStorage resource ownership and restart checks."""
 
 import asyncio
 
@@ -8,9 +8,9 @@ import pytest
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime.state import (
     RuntimeDomain,
-    RuntimeState,
-    RuntimeStatePlan,
-    RuntimeStateRoute,
+    RuntimeStorage,
+    RuntimeStoragePlan,
+    RuntimeStorageRoute,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -20,12 +20,12 @@ async def test_sqlite_runtime_state_owns_and_reopens_database(tmp_path) -> None:
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    state = RuntimeState.sql(engine)
+    state = RuntimeStorage.sql(engine)
     await state.initialize(namespace="runtime", tenant_id="tenant")
     assert state.ready is True
     await state.close()
 
-    reopened = RuntimeState.sql(engine)
+    reopened = RuntimeStorage.sql(engine)
     await reopened.initialize(namespace="runtime", tenant_id="tenant")
     assert reopened.ready is True
     await reopened.close()
@@ -34,14 +34,14 @@ async def test_sqlite_runtime_state_owns_and_reopens_database(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_transient_runtime_state_closes_repository_and_object_domains() -> None:
-    plan = RuntimeStatePlan(
+    plan = RuntimeStoragePlan(
         **{
-            domain.value: RuntimeStateRoute.transient()
+            domain.value: RuntimeStorageRoute.transient()
             for domain in RuntimeDomain
             if domain is not RuntimeDomain.RECOVERY
         }
     )
-    state = RuntimeState.from_plan(plan)
+    state = RuntimeStorage.from_plan(plan)
     await state.initialize(namespace="transient", tenant_id="tenant")
     await state.close()
     await state.close()
@@ -50,7 +50,7 @@ async def test_transient_runtime_state_closes_repository_and_object_domains() ->
 
 @pytest.mark.asyncio
 async def test_runtime_state_close_cursor_retries_failed_action_and_survives_cancellation() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="close-cursor", tenant_id="tenant")
     calls: list[str] = []
     failed = True
@@ -72,7 +72,7 @@ async def test_runtime_state_close_cursor_retries_failed_action_and_survives_can
     await state.close()
     assert calls == ["first", "first", "second"]
 
-    cancelled = RuntimeState.in_memory()
+    cancelled = RuntimeStorage.in_memory()
     await cancelled.initialize(namespace="close-cancellation", tenant_id="tenant")
     started = asyncio.Event()
     release = asyncio.Event()
@@ -96,10 +96,10 @@ async def test_runtime_state_close_cursor_retries_failed_action_and_survives_can
 
 
 def test_mixed_runtime_plan_has_explicit_routes(tmp_path) -> None:
-    plan = RuntimeStatePlan(
-        conversation=RuntimeStateRoute.filesystem(tmp_path / "conversation"),
-        execution=RuntimeStateRoute.transient(),
-        memory=RuntimeStateRoute.memory(),
+    plan = RuntimeStoragePlan(
+        conversation=RuntimeStorageRoute.filesystem(tmp_path / "conversation"),
+        execution=RuntimeStorageRoute.transient(),
+        memory=RuntimeStorageRoute.memory(),
     )
     assert plan.route(RuntimeDomain.CONVERSATION).retention.value == "durable"
     assert plan.route(RuntimeDomain.EXECUTION).retention.value == "transient"

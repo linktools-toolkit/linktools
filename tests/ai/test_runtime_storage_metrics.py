@@ -11,7 +11,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from pydantic_ai.models.test import TestModel
 
 
@@ -65,7 +65,7 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
     async with Runtime.open(
         "default",
         models=_Models(),  # type: ignore[arg-type]
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:

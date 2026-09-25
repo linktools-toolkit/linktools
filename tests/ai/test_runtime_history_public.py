@@ -28,7 +28,7 @@ from linktools.ai.runtime import (
     ExecutionTraceItem,
     Page,
     TranscriptItem,
-    RuntimeState,
+    RuntimeStorage,
     UsageSummary,
 )
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
@@ -306,7 +306,7 @@ async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
 async def test_runtime_history_opens_without_model_or_agent_composition() -> None:
     async with RuntimeHistory.open(
         "workspace",
-        state=RuntimeState.in_memory(),
+        storage=RuntimeStorage.in_memory(),
     ) as history:
         assert history.tenant_id == "default"
         with pytest.raises(AIError) as error:

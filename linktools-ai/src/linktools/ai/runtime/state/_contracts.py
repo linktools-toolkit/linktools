@@ -2292,14 +2292,14 @@ class ArtifactRepository(RuntimeRepository, Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ConversationState:
+class ConversationRepositories:
     sessions: SessionRepository
     histories: ConversationHistoryRepository
     operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionState:
+class ExecutionRepositories:
     executions: ExecutionRepository
     events: EventRepository
     idempotency: IdempotencyRepository
@@ -2307,33 +2307,33 @@ class ExecutionState:
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryState:
+class MemoryRepositories:
     records: MemoryRepository
     operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
-class ArtifactState:
+class ArtifactRepositories:
     records: ArtifactRepository
     operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
-class TaskState:
+class TaskRepositories:
     tasks: TaskRepository
     operations: OperationLedgerRepository
     admissions: TaskAdmissionRepository
 
 
 @dataclass(frozen=True, slots=True)
-class EvaluationState:
+class EvaluationRepositories:
     records: EvaluationRepository
     idempotency: IdempotencyRepository
     operations: OperationLedgerRepository
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryState:
+class RecoveryRepositories:
     approvals: ApprovalRepository
     external_calls: ExternalCallRepository
     checkpoints: RecoveryCheckpointRepository
@@ -2347,15 +2347,15 @@ __all__ = [
     "ApprovalRepository",
     "ArtifactRecord",
     "ArtifactRepository",
-    "ArtifactState",
+    "ArtifactRepositories",
     "ContextProjection",
     "ConversationCursor",
     "ConversationHistoryRecord",
     "ConversationHistoryRepository",
-    "ConversationState",
+    "ConversationRepositories",
     "EvaluationRecord",
     "EvaluationRepository",
-    "EvaluationState",
+    "EvaluationRepositories",
     "EventRepository",
     "ExecutionCancelRequestCommit",
     "ExecutionEventAppend",
@@ -2369,7 +2369,7 @@ __all__ = [
     "ExecutionStartReservation",
     "ExecutionStartReservationResult",
     "ExecutionStartUnknownCommit",
-    "ExecutionState",
+    "ExecutionRepositories",
     "ExecutionTerminalCommit",
     "ExecutionTerminalCommitResult",
     "ExternalCallRecord",
@@ -2383,7 +2383,7 @@ __all__ = [
     "LoadedModelContext",
     "MemoryRecord",
     "MemoryRepository",
-    "MemoryState",
+    "MemoryRepositories",
     "OperationLedgerRepository",
     "OperationTerminalUpdate",
     "PendingDeferredCall",
@@ -2394,7 +2394,7 @@ __all__ = [
     "RecoveryCheckpointState",
     "RecoveryConversationIntent",
     "RecoveryHandoffPhase",
-    "RecoveryState",
+    "RecoveryRepositories",
     "RecoveryTerminalHandoff",
     "RecoveryTerminalOutcome",
     "ResultRecord",
@@ -2405,7 +2405,7 @@ __all__ = [
     "StoredAgentRunCheckpoint",
     "TaskAdmissionRepository",
     "TaskRepository",
-    "TaskState",
+    "TaskRepositories",
     "ToolOperationAdmission",
     "validate_tool_operation_failure",
     "TranscriptChunk",

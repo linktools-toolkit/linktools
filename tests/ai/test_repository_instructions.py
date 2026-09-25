@@ -19,7 +19,7 @@ from linktools.ai.asset import (
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import (
     AssetRuleCatalog,
@@ -340,7 +340,7 @@ async def test_runtime_reads_rules_from_asset_store_not_workspace_storage(
         async with Runtime.open(
             "rule-assets",
             models=runtime_test_helpers.RuntimeUsageModels(),  # type: ignore[arg-type]
-            state=RuntimeState.in_memory(),
+            storage=RuntimeStorage.in_memory(),
             capabilities=(
                 CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),
                 CapabilityGroup("rules", assets=store),

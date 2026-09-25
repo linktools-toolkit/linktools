@@ -15,7 +15,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import ForkSessionRequest, RuntimeState
+from linktools.ai.runtime import ForkSessionRequest, RuntimeStorage
 from linktools.ai.runtime._history import StepSessionHistoryReader
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state import RuntimeDomain
@@ -55,7 +55,7 @@ def _session(session_id: str = "session") -> SessionRecord:
     )
 
 
-def _reader(state: RuntimeState) -> StepSessionHistoryReader:
+def _reader(state: RuntimeStorage) -> StepSessionHistoryReader:
     return StepSessionHistoryReader(
         store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
         cursor_signer=HmacCursorSigner("session-history", b"session-history-key"),
@@ -64,7 +64,7 @@ def _reader(state: RuntimeState) -> StepSessionHistoryReader:
 
 
 async def _advance(
-    state: RuntimeState,
+    state: RuntimeStorage,
     expected: ConversationCursor | None,
     next_cursor: ConversationCursor,
 ) -> None:
@@ -107,7 +107,7 @@ async def _advance(
         )
 
 
-def _service(state: RuntimeState) -> DefaultSessionService:
+def _service(state: RuntimeStorage) -> DefaultSessionService:
     return DefaultSessionService(
         state.conversation,
         state.execution.executions,
@@ -119,7 +119,7 @@ def _service(state: RuntimeState) -> DefaultSessionService:
 
 
 async def _materialize(
-    state: RuntimeState,
+    state: RuntimeStorage,
     agent_run_id: str,
     prompts: tuple[str, ...],
     messages: list[object] | None = None,
@@ -178,7 +178,7 @@ async def _materialize(
 
 @pytest.mark.asyncio
 async def test_empty_and_committed_session_history_use_continuation_only() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -217,7 +217,7 @@ async def test_empty_and_committed_session_history_use_continuation_only() -> No
 
 @pytest.mark.asyncio
 async def test_session_history_cursor_binds_to_current_continuation() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-cursor", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -251,7 +251,7 @@ async def test_session_history_cursor_binds_to_current_continuation() -> None:
 
 @pytest.mark.asyncio
 async def test_session_history_uses_projection_v1_mapping_and_empty_strings() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-projection", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -334,7 +334,7 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
 
 @pytest.mark.asyncio
 async def test_session_fork_excludes_uncommitted_physical_tail() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-uncommitted-fork", tenant_id="tenant")
     try:
         source = await state.conversation.sessions.create(_session())
@@ -375,7 +375,7 @@ async def test_session_fork_excludes_uncommitted_physical_tail() -> None:
 async def test_session_history_fork_copies_continuation_without_execution_lookup() -> (
     None
 ):
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-fork", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -399,7 +399,7 @@ async def test_session_history_fork_copies_continuation_without_execution_lookup
 
 @pytest.mark.asyncio
 async def test_session_history_reports_missing_committed_checkpoint() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-history-missing", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -416,7 +416,7 @@ async def test_session_history_reports_missing_committed_checkpoint() -> None:
 
 @pytest.mark.asyncio
 async def test_durable_session_history_survives_runtime_state_reopen(tmp_path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="session-history-durable", tenant_id="tenant")
     agent_run_id = "session-history-durable-run"
     await state.conversation.sessions.create(_session())
@@ -428,7 +428,7 @@ async def test_durable_session_history_survives_runtime_state_reopen(tmp_path) -
     )
     await state.close()
 
-    reopened = RuntimeState.filesystem(tmp_path / "runtime")
+    reopened = RuntimeStorage.filesystem(tmp_path / "runtime")
     await reopened.initialize(namespace="session-history-durable", tenant_id="tenant")
     try:
         after_reopen = await _service(reopened).history(
@@ -444,7 +444,7 @@ async def test_durable_session_history_survives_runtime_state_reopen(tmp_path) -
 async def test_sql_session_history_survives_runtime_state_reopen(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeState.sql(engine)
+    state = RuntimeStorage.sql(engine)
     await state.initialize(namespace="session-history-sql", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
@@ -457,7 +457,7 @@ async def test_sql_session_history_survives_runtime_state_reopen(tmp_path) -> No
         )
         await state.close()
 
-        reopened = RuntimeState.sql(engine)
+        reopened = RuntimeStorage.sql(engine)
         await reopened.initialize(namespace="session-history-sql", tenant_id="tenant")
         try:
             after_reopen = await _service(reopened).history(

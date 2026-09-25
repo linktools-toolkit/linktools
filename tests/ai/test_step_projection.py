@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import ExecutionDeltaType, ExecutionLineageKind, ExecutionStatus
-from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._event import ExecutionDelta, LiveExecutionEventBroker
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
@@ -71,7 +71,7 @@ def _execution() -> ExecutionRecord:
 
 @pytest.mark.asyncio
 async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="step-io", tenant_id="tenant")
     try:
         await state.execution.executions.create_with_history_head(_execution())
@@ -137,7 +137,7 @@ async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_agent_run_reuses_durable_recovery_identity(tmp_path: Path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="agent-run-recovery", tenant_id="tenant")
     try:
         recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)

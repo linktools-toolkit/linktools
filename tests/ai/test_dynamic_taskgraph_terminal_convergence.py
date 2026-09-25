@@ -7,13 +7,13 @@ import pytest
 from ._task_test_helpers import admit_graph
 from linktools.ai.core import TaskStatus
 from linktools.ai.errors import ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.task import TaskExpanderRef, TaskGraph, TaskNode
 
 
 @pytest.mark.asyncio
 async def test_failure_does_not_terminalize_graph_before_independent_expansion_settles() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-terminal-convergence", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -105,7 +105,7 @@ async def test_failure_does_not_terminalize_graph_before_independent_expansion_s
 
 @pytest.mark.asyncio
 async def test_waiting_node_keeps_graph_running_without_task_lease() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-waiting-aggregate", tenant_id="tenant")
     try:
         repository = state.task.tasks

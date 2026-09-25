@@ -18,7 +18,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
+from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime._event import LiveExecutionEventBroker
 from linktools.ai.runtime._execution import (
     CancelEffectOutcome,
@@ -148,7 +148,7 @@ def _request(
 
 
 def _service(
-    state: RuntimeState,
+    state: RuntimeStorage,
     *,
     backend: _Launcher | None = None,
     operation_ids: object | None = None,
@@ -175,7 +175,7 @@ def _service(
 
 @pytest.mark.asyncio
 async def test_execution_start_claim_has_one_launcher_winner() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="service-start", tenant_id="tenant")
     try:
         launcher = _Launcher(state.execution.executions)
@@ -220,7 +220,7 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
 
 @pytest.mark.asyncio
 async def test_task_start_holds_immediate_terminal_execution_before_return() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="service-start-handoff", tenant_id="tenant")
     release_started = asyncio.Event()
     release_finished = asyncio.Event()
@@ -276,7 +276,7 @@ async def test_task_start_holds_immediate_terminal_execution_before_return() -> 
 async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
-    state = RuntimeState.sql(engine)
+    state = RuntimeStorage.sql(engine)
     await state.initialize(namespace="sql-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
@@ -294,7 +294,7 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
 
 @pytest.mark.asyncio
 async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
+    state = RuntimeStorage.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="filesystem-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
@@ -318,7 +318,7 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
 
 @pytest.mark.asyncio
 async def test_unbound_runtime_bridge_rejects_runtime_access() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="terminal-verifier", tenant_id="tenant")
     try:
         service = _service(state)

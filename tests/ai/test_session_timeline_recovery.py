@@ -16,7 +16,7 @@ from linktools.ai.core import (
     UsageMetrics,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
     RecoveryConversationIntent,
@@ -47,7 +47,7 @@ def _session() -> SessionRecord:
 
 @pytest.mark.asyncio
 async def test_recovery_handoff_commits_timeline_with_session_continuation() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="session-timeline-recovery", tenant_id="tenant")
     try:
         session = await state.conversation.sessions.create(_session())

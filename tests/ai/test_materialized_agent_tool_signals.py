@@ -17,7 +17,7 @@ from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
@@ -107,13 +107,13 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
             tool_permissions=WorkspaceToolPermissionPolicy(default="deny")
         ),
     )
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     started = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     async with Runtime.open(
         "default",
         models=_CompositionModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
         metrics=metrics,
     ) as runtime:

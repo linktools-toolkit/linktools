@@ -18,7 +18,7 @@ from linktools.ai.runtime import (
 )
 from linktools.cli import BaseCommand
 
-from ._common import _load_workspace, _local_runtime_state, _run_async
+from ._common import _load_workspace, _local_runtime_storage, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -38,7 +38,7 @@ class Command(BaseCommand):
         async def execute() -> int:
             async with RuntimeHistory.open(
                 "default",
-                state=_local_runtime_state(workspace),
+                storage=_local_runtime_storage(workspace),
             ) as history:
                 principal = Principal(
                     "runtime",

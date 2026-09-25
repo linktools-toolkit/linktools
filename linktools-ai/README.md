@@ -5,7 +5,7 @@
 ```text
 namespace
     + ModelRegistry
-    + RuntimeState
+    + RuntimeStorage
     + CapabilityGroup(s)
         -> optional, independent Workspace and Sandbox via CapabilityGroup(...)
         -> Runtime.open(...)
@@ -42,7 +42,7 @@ python3 -m linktools ai run "review this change" --project /workspace/project --
 Useful options:
 
 - `--base-url`, `--api-key`, and `--model` also read `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
-- `--storage filesystem|sqlite` selects Runtime state storage.
+- `--storage filesystem|sqlite` selects the Runtime storage backend.
 - `--planning` enables planning for the execution.
 - `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.
@@ -52,22 +52,22 @@ Useful options:
 ```python
 from linktools.ai import CapabilityGroup, Runtime, Workspace
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 
 workspace = Workspace.initialize("/workspace/project")
 models = ModelRegistry.openai(model="gpt-4o-mini")
-state = RuntimeState.in_memory()
+storage = RuntimeStorage.in_memory()
 
 async with Runtime.open(
     "default",
     models=models,
-    state=state,
+    storage=storage,
     capabilities=(CapabilityGroup("workspace", workspace=workspace),),
 ) as runtime:
     result = await runtime.agent("default").run(
         "review this change",
         memory_scope="default",
-        planning=True,
+        planning_enabled=True,
     )
 ```
 
@@ -113,7 +113,7 @@ application.agent(
 async with Runtime.open(
     "default",
     models=models,
-    state=state,
+    storage=storage,
     capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
 ) as runtime:
     result = await runtime.agent("audit").run("inspect ticket SEC-123")
@@ -418,7 +418,7 @@ result = await agent.run(
 )
 ```
 
-The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime state rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
+The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime storage rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
 If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. `Agent.task(files=...)` keeps the existing node-execution materialization semantics. Use `BinaryContent` or `WorkspaceFileInput` in the task prompt when bytes must be materialized at graph admission; delegated subagents use the same explicit execution-input rules.
 
@@ -439,7 +439,7 @@ context = RuntimeContext(app, tenant_id="tenant-a")
 async with Runtime.open(
     "web-chat",
     models=models,
-    state=state,
+    storage=storage,
     context=context,
 ) as runtime:
     ...
@@ -490,47 +490,47 @@ single persistence baseline; superseded development data is not a compatibility
 obligation. Published-version fixtures and readers are added only when a real
 compatibility commitment exists.
 
-## 7. Runtime state
+## 7. Runtime storage
 
-`Runtime.open()` requires an explicit `RuntimeState`; storage selection belongs to the application:
+`Runtime.open()` requires an explicit `RuntimeStorage`; storage selection belongs to the application:
 
 ```python
 from pathlib import Path
 
 from linktools.ai import Runtime
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 
 runtime_root = Path("/var/lib/linktools/runtime")
-state = RuntimeState.sqlite(runtime_root / "runtime.db")
+storage = RuntimeStorage.sqlite(runtime_root / "runtime.db")
 
 async with Runtime.open(
     "service-runtime",
     models=models,
-    state=state,
+    storage=storage,
 ) as runtime:
     ...
 ```
 
-Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only State handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only State, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeState snapshots include Runtime-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
-binding metadata; portable RuntimeState restore therefore requires the
+`RuntimeStorage` supports in-memory, filesystem, SQLite, and SQL backends. Repository domains keep their ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the storage composition directly. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only `RuntimeStorage` handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only `RuntimeStorage`, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeStorage snapshots include Runtime-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
+binding metadata; portable RuntimeStorage restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.
 
-SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local path-backed SQLite state initializes its own Runtime and `ai_objects` schema; an existing SQLite database is only validated and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
+SQLite-backed `RuntimeStorage` supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local SQLite database initializes its Runtime and `ai_objects` schema; an existing SQLite database is only validated and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
 
-Durable local execution and recovery are provided by Runtime state and recovery
+Durable local execution and recovery are provided by Runtime persistence and recovery
 checkpoints and do not require an external workflow server. Harness provides the
 Planning, Memory, StepPersistence, and context-compaction capability behavior,
 while LinkTools remains the durable owner of plans, Memory records and mutation
 receipts, execution history, and the raw transcript. Memory content continues to
-persist through `MemoryState` and `ObjectStore`. Compaction only rewrites the
+persist through `MemoryRepositories` and `ObjectStore`. Compaction only rewrites the
 request context projection; it never rewrites the raw transcript.
 
 ### Workspace relocation
 
-Workspace has no independent persistent identity. `Workspace.root`, Runtime state paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Runtime.open()` / `RuntimeState`.
+Workspace has no independent persistent identity. `Workspace.root`, Runtime storage paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Runtime.open()` / `RuntimeStorage`.
 
-Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime state consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the captured execution inputs and
+Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime storage consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the captured execution inputs and
 Asset-version-pinned Skill resources. A separate `Runtime.restore()` migration step is not required.
 
 ## 8. Execution failure diagnostics

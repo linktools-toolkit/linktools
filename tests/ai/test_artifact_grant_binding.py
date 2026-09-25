@@ -20,7 +20,7 @@ from linktools.ai.core import (
     canonical_json_bytes,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime import _artifact as artifact_module
 from linktools.ai.runtime._artifact import (
     DefaultArtifactService,
@@ -61,7 +61,7 @@ class _RecordingAuthorization:
 
 @pytest.mark.asyncio
 async def test_artifact_list_authorizes_the_execution_identity() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="artifact-list", tenant_id="tenant")
     try:
         await state.artifact.records.put_metadata(
@@ -101,7 +101,7 @@ async def test_artifact_list_authorizes_the_execution_identity() -> None:
 async def test_artifact_grant_is_bound_to_receipt_identity_and_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="artifact-grant", tenant_id="tenant")
     try:
         reference = ObjectRef(

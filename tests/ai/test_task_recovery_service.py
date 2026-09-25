@@ -14,7 +14,7 @@ from linktools.ai.core import (
     idempotency_key_digest,
 )
 from linktools.ai.errors import ErrorCode
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.task import (
     CancelGraphRequest,
     DefaultTaskGraphService,
@@ -55,7 +55,7 @@ def _request(graph_id: str) -> TaskGraphRequest:
     )
 
 
-async def _recovery_graph(state: RuntimeState, graph_id: str) -> TaskGraphRequest:
+async def _recovery_graph(state: RuntimeStorage, graph_id: str) -> TaskGraphRequest:
     request = _request(graph_id)
     await state.task.admissions.admit(
         TaskGraphAdmission.from_request(request),
@@ -82,7 +82,7 @@ async def _recovery_graph(state: RuntimeState, graph_id: str) -> TaskGraphReques
 
 @pytest.mark.asyncio
 async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "boundary")
@@ -115,7 +115,7 @@ async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
 
 @pytest.mark.asyncio
 async def test_explicit_recovery_rearms_original_graph() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "resume")
@@ -148,7 +148,7 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_intent_stays_pending_until_recovery_settles_it() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "cancel")

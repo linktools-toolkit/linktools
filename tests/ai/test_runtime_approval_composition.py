@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
 from linktools.ai.workspace import (
     Workspace,
@@ -65,9 +65,9 @@ async def test_composed_runtime_ask_enters_approval_wait(
         ),
     )
     state = (
-        RuntimeState.in_memory()
+        RuntimeStorage.in_memory()
         if backend == "memory"
-        else RuntimeState.filesystem(tmp_path / "runtime-state")
+        else RuntimeStorage.filesystem(tmp_path / "runtime-state")
     )
     application = CapabilityGroup("application")
     application.agent(
@@ -79,7 +79,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
     async with Runtime.open(
         "default",
         models=_ToolModels(),  # type: ignore[arg-type]
-        state=state,
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         execution = await runtime.agent("default").start("read a file")

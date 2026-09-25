@@ -19,7 +19,7 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.runtime.state._recovery_commands import RuntimeRecoveryCommands
@@ -85,7 +85,7 @@ def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperati
     )
 
 
-def _commands(state: RuntimeState) -> RuntimeRecoveryCommands:
+def _commands(state: RuntimeStorage) -> RuntimeRecoveryCommands:
     return RuntimeRecoveryCommands(
         state.execution.executions,
         state.execution.events,
@@ -98,7 +98,7 @@ def _commands(state: RuntimeState) -> RuntimeRecoveryCommands:
 
 @pytest.mark.asyncio
 async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="execution-recovery", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -137,7 +137,7 @@ async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> No
 
 @pytest.mark.asyncio
 async def test_recovery_cancel_intent_fences_stale_resume() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="recovery-cancel", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = _execution(now)
@@ -201,7 +201,7 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
 
 @pytest.mark.asyncio
 async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="tool-resolution", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     try:

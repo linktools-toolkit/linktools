@@ -92,7 +92,7 @@ from .service_api import (
     ExecutionTreeEvent,
     TaskGraphRunEvent,
 )
-from .state import RuntimeState
+from .state import RuntimeStorage
 
 _logger = environ.get_logger("ai.runtime")
 AppT = TypeVar("AppT")
@@ -269,7 +269,7 @@ class Runtime(Generic[AppT]):
         namespace: str,
         *,
         models: ModelRegistry,
-        state: RuntimeState,
+        storage: RuntimeStorage,
         context: None = None,
         capabilities: "Sequence[CapabilityGroup[None] | CapabilityGroupCapture[None]]" = (),
         metrics: "Metrics | None" = None,
@@ -283,7 +283,7 @@ class Runtime(Generic[AppT]):
         namespace: str,
         *,
         models: ModelRegistry,
-        state: RuntimeState,
+        storage: RuntimeStorage,
         context: RuntimeContext[AppT],
         capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
         metrics: "Metrics | None" = None,
@@ -296,7 +296,7 @@ class Runtime(Generic[AppT]):
         namespace: str,
         *,
         models: ModelRegistry,
-        state: RuntimeState,
+        storage: RuntimeStorage,
         context: "RuntimeContext[object] | None" = None,
         capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]" = (),
         metrics: "Metrics | None" = None,
@@ -311,7 +311,7 @@ class Runtime(Generic[AppT]):
             resolved_namespace,
             context=root_context,
             models=models,
-            state=state,
+            storage=storage,
             capabilities=capabilities,
             metrics=metrics,
             limits=selected_limits,
@@ -1200,7 +1200,7 @@ async def _open_runtime(
     *,
     context: RuntimeContext[object],
     models: ModelRegistry,
-    state: RuntimeState,
+    storage: RuntimeStorage,
     capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]",
     metrics: "Metrics | None",
     limits: PromptLimits,
@@ -1212,7 +1212,7 @@ async def _open_runtime(
         app=context.app,
         tenant_id=context.tenant_id,
         models=models,
-        state=state,
+        storage=storage,
         capabilities=capabilities,
         metrics=metrics,
         limits=limits,

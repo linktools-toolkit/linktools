@@ -8,7 +8,7 @@ from ._task_test_helpers import admit_graph
 from linktools.ai.core import ExecutionStatus, TaskStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model._openai import _OpenAIModelBinding
-from linktools.ai.runtime import ExecutionResult, RuntimeState
+from linktools.ai.runtime import ExecutionResult, RuntimeStorage
 from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.task import TaskGraph, TaskNode, TaskNodeRunError
 
@@ -58,7 +58,7 @@ def test_openai_materialization_normalizes_provider_config_error(
 
 @pytest.mark.asyncio
 async def test_failed_task_node_persists_execution_identity() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-error-propagation", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -92,7 +92,7 @@ async def test_failed_task_node_persists_execution_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_generic_failed_task_node_keeps_execution_identity_empty() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-error-generic", tenant_id="tenant")
     try:
         repository = state.task.tasks

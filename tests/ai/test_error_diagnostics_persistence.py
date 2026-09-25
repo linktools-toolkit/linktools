@@ -20,7 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state._codec import (
@@ -159,16 +159,16 @@ def _failed_terminal(
 async def _durable_state(
     tmp_path: Path,
     backend: str,
-) -> tuple[RuntimeState, Path]:
+) -> tuple[RuntimeStorage, Path]:
     path = tmp_path / f"runtime-{backend}"
     if backend == "filesystem":
-        return RuntimeState.filesystem(path), path
+        return RuntimeStorage.filesystem(path), path
     database = path.with_suffix(".db")
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
     await engine.dispose()
     return (
-        RuntimeState.sqlite(
+        RuntimeStorage.sqlite(
             database,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         ),
@@ -196,9 +196,9 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
         await state.close()
 
     reopened = (
-        RuntimeState.filesystem(durable_path)
+        RuntimeStorage.filesystem(durable_path)
         if backend == "filesystem"
-        else RuntimeState.sqlite(
+        else RuntimeStorage.sqlite(
             durable_path,
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
@@ -207,7 +207,7 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
         async with Runtime.open(
             "default",
             models=_DiagnosticModels(),  # type: ignore[arg-type]
-            state=reopened,
+            storage=reopened,
         ) as runtime:
             result = await runtime.execution.result(
                 started.execution_id,

@@ -19,10 +19,10 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeSnapshot, RuntimeState
+from linktools.ai.runtime import RuntimeSnapshot, RuntimeStorage
 from linktools.ai.runtime import _snapshot as runtime_snapshot_module
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
-from linktools.ai.runtime.state import _root as runtime_state_root_module
+from linktools.ai.runtime.state import _root as runtime_storage_root_module
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
     encode_envelope,
@@ -81,7 +81,7 @@ class _SnapshotGuard:
     "decoder",
     (
         runtime_snapshot_module._object_ref_from_payload,
-        runtime_state_root_module._object_ref_from_payload,
+        runtime_storage_root_module._object_ref_from_payload,
     ),
 )
 def test_current_snapshot_object_ref_requires_store_id(decoder) -> None:
@@ -101,7 +101,7 @@ def test_current_snapshot_object_ref_requires_store_id(decoder) -> None:
     "decoder",
     (
         runtime_snapshot_module._object_ref_from_payload,
-        runtime_state_root_module._object_ref_from_payload,
+        runtime_storage_root_module._object_ref_from_payload,
     ),
 )
 def test_snapshot_manifest_refs_require_runtime_logical_owner(decoder) -> None:
@@ -126,7 +126,7 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
     limits = SnapshotLimits(max_entries=100, max_bytes=1024 * 1024)
 
     with pytest.raises(AIError) as state_error:
-        await RuntimeState.restore_snapshot(
+        await RuntimeStorage.restore_snapshot(
             reference,
             object_store=store,
             root=tmp_path / "state",
@@ -144,15 +144,15 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
 
 
 @pytest.mark.asyncio
-async def test_runtime_state_snapshot_identity_ignores_target_store(
+async def test_runtime_storage_snapshot_identity_ignores_target_store(
     tmp_path,
 ) -> None:
     root = tmp_path / "runtime"
-    writable = RuntimeState.from_root(root)
+    writable = RuntimeStorage.from_root(root)
     await writable.initialize(namespace="runtime", tenant_id="tenant")
     await writable.close()
 
-    state = RuntimeState.from_root(root)
+    state = RuntimeStorage.from_root(root)
     await state.initialize(namespace="runtime", tenant_id="tenant", read_only=True)
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     first = InMemoryObjectStore("snapshot-a")
@@ -171,7 +171,7 @@ async def test_runtime_state_snapshot_identity_ignores_target_store(
 @pytest.mark.asyncio
 async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
     root = tmp_path / "runtime"
-    writable = RuntimeState.from_root(root)
+    writable = RuntimeStorage.from_root(root)
     await writable.initialize(namespace="runtime", tenant_id="tenant")
     await writable.close()
     workspace_root = tmp_path / "workspace"
@@ -185,7 +185,7 @@ async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
     first_ref = await RuntimeSnapshot.create(
         "runtime",
         tenant_id="tenant",
-        state=RuntimeState.from_root(root),
+        storage=RuntimeStorage.from_root(root),
         object_store=first,
         workspace=workspace,
         exclusive=_SnapshotGuard(),
@@ -194,7 +194,7 @@ async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
     second_ref = await RuntimeSnapshot.create(
         "runtime",
         tenant_id="tenant",
-        state=RuntimeState.from_root(root),
+        storage=RuntimeStorage.from_root(root),
         object_store=second,
         workspace=workspace,
         exclusive=_SnapshotGuard(),
@@ -214,9 +214,9 @@ async def test_runtime_snapshot_rejects_coerced_object_ref_fields() -> None:
         "format_version": 1,
         "namespace": "runtime",
         "tenant_id": "tenant",
-        "state": {
+        "storage": {
             "store_id": "snapshot",
-            "key": "state",
+            "key": "storage",
             "digest": "a" * 64,
             "size": "1",
         },
@@ -250,9 +250,9 @@ async def test_runtime_snapshot_rejects_coerced_format_version() -> None:
         "format_version": 1.0,
         "namespace": "runtime",
         "tenant_id": "tenant",
-        "state": {
+        "storage": {
             "store_id": "snapshot",
-            "key": "state",
+            "key": "storage",
             "digest": "a" * 64,
             "size": 1,
         },
@@ -279,7 +279,7 @@ async def test_runtime_snapshot_rejects_coerced_format_version() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_state_restore_rejects_mismatched_logical_record_key_before_target_write(
+async def test_runtime_storage_restore_rejects_mismatched_logical_record_key_before_target_write(
     tmp_path,
 ) -> None:
     namespace = "runtime"
@@ -323,7 +323,7 @@ async def test_runtime_state_restore_rejects_mismatched_logical_record_key_befor
         ),
     )
     manifest = {
-        "kind": "runtime-state-snapshot",
+        "kind": "runtime-storage-snapshot",
         "format_version": 1,
         "namespace": namespace,
         "tenant_id": tenant_id,
@@ -347,7 +347,7 @@ async def test_runtime_state_restore_rejects_mismatched_logical_record_key_befor
     target = tmp_path / "restored"
 
     with pytest.raises(AIError) as raised:
-        await RuntimeState.restore_snapshot(
+        await RuntimeStorage.restore_snapshot(
             ref,
             object_store=store,
             root=target,

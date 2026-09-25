@@ -5,7 +5,7 @@ import pytest
 
 from linktools.ai.core import Principal, TaskStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeState
+from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
@@ -34,7 +34,7 @@ def _recovery_digest(code: ErrorCode) -> str:
 
 @pytest.mark.asyncio
 async def test_task_recovery_required_is_durable_and_not_dependency_failure() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-recovery", tenant_id="tenant")
     try:
         request = _request("graph")
@@ -98,7 +98,7 @@ async def test_task_recovery_required_is_durable_and_not_dependency_failure() ->
 
 @pytest.mark.asyncio
 async def test_task_recovery_preserves_execution_reference_for_waiting_attach() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-recovery", tenant_id="tenant")
     try:
         request = _request("recover")
@@ -151,7 +151,7 @@ async def test_task_recovery_preserves_execution_reference_for_waiting_attach() 
 
 @pytest.mark.asyncio
 async def test_cancel_does_not_overwrite_recovery_required() -> None:
-    state = RuntimeState.in_memory()
+    state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-recovery", tenant_id="tenant")
     try:
         request = _request("cancel")

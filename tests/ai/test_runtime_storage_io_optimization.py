@@ -13,7 +13,7 @@ from linktools.ai.core import ApprovalStatus
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
 from linktools.ai.runtime._plan import RuntimePlanStore
-from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
