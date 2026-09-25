@@ -270,23 +270,23 @@ async def _load_mcp(
             continue
         declarations.append((entry, value))
 
-    resource_roots = tuple(
-        (entry.key, value.resource_root)
+    resources = tuple(
+        (entry.key, value.resource)
         for entry, value in declarations
-        if value.resource_root is not None
+        if value.resource is not None
     )
     for entry, error in failures:
-        if entry.key in package_keys and _inside_mcp_resource_root(
+        if entry.key in package_keys and _inside_mcp_resource(
             entry.key,
-            resource_roots,
+            resources,
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        if not _inside_mcp_resource_root(entry.key, resource_roots):
+        if not _inside_mcp_resource(entry.key, resources):
             raise error
     for entry, _value in declarations:
-        if _inside_mcp_resource_root(
+        if _inside_mcp_resource(
             entry.key,
-            resource_roots,
+            resources,
             owner=entry.key,
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -297,7 +297,7 @@ async def _load_mcp(
     return result
 
 
-def _inside_mcp_resource_root(
+def _inside_mcp_resource(
     key: AssetKey,
     roots: Sequence[tuple[AssetKey, AssetKey]],
     *,
@@ -315,7 +315,7 @@ def _bind_mcp_declaration(
     value: MCPServerSpec,
     context: CapabilityLoadContext,
 ) -> CapabilityContribution[object]:
-    root = value.resource_root
+    root = value.resource
     if root is None:
         if any(argument.startswith("resource:") for argument in value.args):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)

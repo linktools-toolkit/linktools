@@ -240,7 +240,7 @@ async def prepare_mcp_resource_projections(
         binding = resources.get(server.id)
         if binding is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if server.resource_root is None:
+        if server.resource is None:
             if binding.versions is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             projections[server.id] = _MCPResourceProjection(
@@ -394,13 +394,13 @@ def _bound_resource_versions(
             ErrorCode.CAPABILITY_REQUIRED_MISSING,
             safe_details={"kind": "mcp_resource", "server_id": server.id},
         )
-    if server.resource_root is None:
+    if server.resource is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    prefix = f"{server.resource_root.id}/"
+    prefix = f"{server.resource.id}/"
     values: dict[str, AssetVersionRef] = {}
     for version in binding.versions:
         if (
-            version.key.kind != server.resource_root.kind
+            version.key.kind != server.resource.kind
             or not version.key.id.startswith(prefix)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

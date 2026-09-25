@@ -671,7 +671,7 @@ def _mcp_resource_bindings(
             continue
         server, versions = codec.from_execution_payload(pin.contract)
         asset_source_id = pin.contract.get("asset_source_id")
-        if server.resource_root is not None:
+        if server.resource is not None:
             if (
                 versions is None
                 or not isinstance(asset_source_id, str)

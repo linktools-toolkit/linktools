@@ -102,7 +102,7 @@ class _RuntimeBindingResolver:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
 
             asset_source_id = pin.contract.get("asset_source_id")
-            if server.resource_root is None:
+            if server.resource is None:
                 if resource_versions is not None or asset_source_id is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 asset_source_id = None
