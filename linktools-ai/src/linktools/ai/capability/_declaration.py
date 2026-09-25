@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from ..core import (
     DEFAULT_DISCOVERY_POLICY,
@@ -63,9 +63,7 @@ class AgentDeclarationLoader:
             if not isinstance(defaults, Mapping):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
             try:
-                self._defaults = ImmutableJsonMapping(
-                    cast(Mapping[str, JsonValue], defaults)
-                )
+                self._defaults = ImmutableJsonMapping(defaults)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
             AgentMarkdownSpecCodec().from_payload(
