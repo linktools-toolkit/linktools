@@ -8,11 +8,15 @@ from typing import Any
 
 import anyio
 from fastmcp.client.transports import ClientTransport
+from pydantic import TypeAdapter
 from mcp import ClientSession
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
 
 from ..errors import AIError, ErrorCode
+_JSON_RPC_MESSAGE_ADAPTER = TypeAdapter(JSONRPCMessage)
+
+
 from ..workspace import (
     SandboxResource,
     SandboxResourcePath,
@@ -128,7 +132,7 @@ class _SandboxMCPTransport(ClientTransport):
                         if not frame:
                             raise _invalid_protocol()
                         try:
-                            message = JSONRPCMessage.model_validate_json(frame)
+                            message = _JSON_RPC_MESSAGE_ADAPTER.validate_json(frame)
                         except (TypeError, ValueError) as error:
                             raise _invalid_protocol() from error
                         await output.send(SessionMessage(message))
