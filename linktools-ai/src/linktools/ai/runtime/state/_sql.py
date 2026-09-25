@@ -92,6 +92,7 @@ class SqlStateStorageGroup:
         self._mutation_lock = (
             asyncio.Lock() if context.dialect.name == "sqlite" else None
         )
+        self._close_lock = asyncio.Lock()
         self._closed = False
         self._initialized = False
 
@@ -117,12 +118,17 @@ class SqlStateStorageGroup:
         )
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._initialized = False
-        if self._owns_context:
-            await self._context.close()
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                if self._owns_context:
+                    await self._context.close()
+            except BaseException:
+                self._closed = False
+                raise
+            self._initialized = False
         _logger.debug("SQL StateStorageGroup closed")
 
     async def read(self, store: "SqlStateStore", fn: StateCallback[ValueT]) -> ValueT:
@@ -306,6 +312,7 @@ class SqlStateStore:
             self._metadata,
             owns_context=context is None,
         )
+        self._close_lock = asyncio.Lock()
         self._closed = False
         self._initialized = False
 
@@ -332,12 +339,17 @@ class SqlStateStore:
         self._initialized = True
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._initialized = False
-        if self._owns_group:
-            await self._storage_group.close()
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                if self._owns_group:
+                    await self._storage_group.close()
+            except BaseException:
+                self._closed = False
+                raise
+            self._initialized = False
 
     async def read(self, fn: StateCallback[ValueT]) -> ValueT:
         self._ensure_ready()

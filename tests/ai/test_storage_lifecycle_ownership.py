@@ -19,7 +19,13 @@ from linktools.ai.asset import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore, StorageOverlay
+from linktools.ai.runtime.state._sql import SqlStateStore
+from linktools.ai.storage import (
+    FilesystemObjectStore,
+    SqlObjectStore,
+    StorageOverlay,
+    create_sql_storage_context,
+)
 from sqlalchemy.ext.asyncio import create_async_engine
 
 pytestmark = pytest.mark.asyncio
@@ -67,6 +73,61 @@ async def test_filesystem_object_put_settles_before_propagating_cancellation(
 
     assert store.pending_background_tasks == ()
     assert await store.stat("payload") is not None
+
+
+async def test_sql_storage_context_close_retries_failed_owned_engine_dispose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'close.db'}")
+    context = create_sql_storage_context(engine, owns_engine=True)
+    calls = 0
+    original = engine.dispose
+
+    async def dispose() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("dispose failed")
+        await original()
+
+    monkeypatch.setattr(engine, "dispose", dispose)
+    with pytest.raises(RuntimeError, match="dispose failed"):
+        await context.close()
+    assert context.closed is False
+
+    await context.close()
+    assert context.closed is True
+    assert calls == 2
+
+
+async def test_sql_state_store_close_retries_failed_owned_group_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'store-close.db'}")
+    store = SqlStateStore(engine)
+    calls = 0
+    original = store.context.close
+
+    async def close_context() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("context close failed")
+        await original()
+
+    monkeypatch.setattr(store.context, "close", close_context)
+    with pytest.raises(RuntimeError, match="context close failed"):
+        await store.close()
+    assert store._closed is False
+    assert store._storage_group._closed is False
+
+    await store.close()
+    assert store._closed is True
+    assert store._storage_group._closed is True
+    assert calls == 2
+    await engine.dispose()
 
 
 async def test_sql_object_put_settles_before_propagating_cancellation(
