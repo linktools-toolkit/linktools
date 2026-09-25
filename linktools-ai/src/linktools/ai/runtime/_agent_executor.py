@@ -113,16 +113,13 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ..spec import MCPServerSpecCodec
+from ..spec import MCPServerSpecCodec, RepositoryInstructions
 from ..workspace import (
     Sandbox,
     SandboxResource,
     SandboxSession,
     Workspace,
 )
-
-if TYPE_CHECKING:
-    from ..workspace import RepositoryInstructions
 
 from ._capabilities import compose_platform_capabilities
 from ._capture import RuntimeCaptureStore
