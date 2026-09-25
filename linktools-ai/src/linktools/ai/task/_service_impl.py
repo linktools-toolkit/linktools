@@ -83,7 +83,7 @@ class _LocalTaskWaiter(Protocol):
 
 
 class _TaskGraphPreflight(Protocol):
-    def validate_request(self, graph: TaskGraph) -> None: ...
+    def admit_request(self, graph: TaskGraph) -> TaskGraph: ...
 
     async def capture_admission(
         self,
@@ -335,13 +335,20 @@ class DefaultTaskGraphService(TaskGraphService):
             AuthorizationAction.TASK_RUN,
             ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id),
         )
+        graph = request.graph
         if self._preflight is not None:
-            self._preflight.validate_request(request.graph)
+            graph = self._preflight.admit_request(graph)
+            request = TaskGraphRequest(
+                graph,
+                request.principal,
+                request.idempotency_key,
+                request.limits,
+                request.correlation,
+            )
         admission = TaskGraphAdmission.from_request(request)
         existing = await self._persistence.admissions.get(
             graph_id, tenant_id=tenant_id,
         )
-        graph = request.graph
         if self._preflight is not None and existing is None:
             graph = await self._preflight.capture_admission(
                 admission,
