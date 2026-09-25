@@ -49,15 +49,11 @@ class CompiledAgent:
 
     @property
     def skill_definitions(self) -> "tuple[SkillDefinition, ...]":
-        return tuple(
-            value.value
-            for value in self.selected_skills
-            if isinstance(value.value, SkillDefinition)
-        )
+        return tuple(value.value for value in self.selected_skills)
 
     @property
     def mcp_servers(self) -> "tuple[MCPServerSpec, ...]":
-        return tuple(value.value for value in self.selected_mcp if isinstance(value.value, MCPServerSpec))
+        return tuple(value.value for value in self.selected_mcp)
 
     @property
     def static_tool_names(self) -> "tuple[str, ...]":
