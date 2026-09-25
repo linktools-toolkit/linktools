@@ -5,7 +5,7 @@
 import asyncio
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Protocol, cast
+from typing import Protocol
 from uuid import uuid4
 
 from linktools.core import environ
@@ -32,7 +32,6 @@ from .runtime import (
     ListSessionRequest,
     Runtime,
     RuntimeStorage,
-    SessionView,
 )
 from .workspace import Workspace
 
@@ -45,15 +44,6 @@ class ACPConnection(Protocol):
 
 class ACPTextContent(Protocol):
     text: str
-
-
-class _SessionReconciliationPort(Protocol):
-    async def reconcile(
-        self,
-        session_id: str,
-        *,
-        principal: Principal,
-    ) -> SessionView: ...
 
 
 class ACPAgent:
@@ -161,8 +151,10 @@ class ACPAgent:
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
-        session = cast(_SessionReconciliationPort, self._runtime.session)
-        loaded = await session.reconcile(session_id, principal=self._principal)
+        loaded = await self._runtime.session.reconcile(
+            session_id,
+            principal=self._principal,
+        )
         if loaded.active_execution_id is not None:
             await self._runtime.execution.cancel(
                 loaded.active_execution_id,
