@@ -5,7 +5,7 @@
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, Literal, TypeAlias, TypeVar, cast
+from typing import Generic, Literal, TypeAlias, TypeVar
 
 from pydantic import BaseModel
 from pydantic_ai import Tool
@@ -87,16 +87,16 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "task_expander" and not isinstance(self.value, TaskExpander):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "tool" and cast(Tool, self.value).name != self.id:
+        if self.kind == "tool" and self.value.name != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "agent" and cast(AgentSpec, self.value).id != self.id:
+        if self.kind == "agent" and self.value.id != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "skill" and cast(SkillDefinition, self.value).id != self.id:
+        if self.kind == "skill" and self.value.id != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "mcp" and cast(MCPServerSpec, self.value).id != self.id:
+        if self.kind == "mcp" and self.value.id != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "runtime_capability":
-            capability = cast(AbstractCapability, self.value)
+            capability = self.value
             if not isinstance(capability.defer_loading, bool):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             if capability.id is not None and capability.id != self.id:
@@ -174,7 +174,7 @@ class CapabilityContribution(Generic[AppT]):
         if not isinstance(contract, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value, _resource_versions = MCPServerSpecCodec().from_execution_payload(
-            cast("Mapping[str, object]", contract)
+            contract
         )
         return _ContractContribution("mcp", value.id, value, contract)
 
@@ -259,10 +259,10 @@ def _contribution_contract(
         contract: dict[str, JsonValue] = {
             "version": 1,
             "description": definition.description,
-            "parameters": cast(JsonValue, definition.parameters_json_schema),
-            "return_schema": cast(JsonValue, definition.return_schema),
+            "parameters": definition.parameters_json_schema,
+            "return_schema": definition.return_schema,
             "strict": definition.strict,
-            "metadata": cast(JsonValue, definition.metadata),
+            "metadata": definition.metadata,
         }
         if value.max_retries is not None:
             contract["max_retries"] = value.max_retries
