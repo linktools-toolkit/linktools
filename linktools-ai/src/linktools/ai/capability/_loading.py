@@ -268,6 +268,7 @@ class CapabilityLoadContext:
                 if error.code in {
                     ErrorCode.ASSET_VERSION_NOT_FOUND,
                     ErrorCode.ASSET_VERSION_OWNER_UNKNOWN,
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
                 }:
                     raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
                 raise
