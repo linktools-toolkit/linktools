@@ -317,7 +317,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "loaded_context_message": ("message", "source"),
         "loaded_model_context": ("messages",),
         "runtime_payload_ref": ("payload", "source_domain"),
-        "task_binding_contract": ("task_id", "task_revision", "effect", "output_contract", "timeout_seconds", "max_attempts", "retry_delay_seconds", "reconcile"),
+        "task_binding_contract": ("task_id", "task_revision", "effect_policy", "output_contract", "timeout_seconds", "max_attempts", "retry_delay_seconds", "reconcile"),
         "transcript_chunk": ("owner_id", "first_message_index", "message_count", "origin", "codec", "raw_digest", "raw_size", "content"),
         "transcript_head": ("owner_domain", "owner_id", "message_count", "chunk_count", "quality"),
         "transcript_message_ref": ("source_domain", "owner_id", "message_index"),
@@ -431,8 +431,8 @@ def _encode_v1_task_node_fields(
         fields["retry_delay_seconds"] = value.retry_delay_seconds
     if value.output_contract is not None:
         fields["output_contract"] = dict(value.output_contract)
-    if value.effect != "none":
-        fields["effect"] = value.effect
+    if value.effect_policy != "none":
+        fields["effect_policy"] = value.effect_policy
     return fields
 
 
@@ -499,8 +499,20 @@ def _decode_v1_task_node(
     output_contract = raw_fields.get("output_contract")
     if output_contract is not None and not isinstance(output_contract, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    effect = raw_fields.get("effect", "none")
-    if not isinstance(effect, str):
+    optional = frozenset(
+        {
+            "input_refs",
+            "timeout_seconds",
+            "max_attempts",
+            "retry_delay_seconds",
+            "output_contract",
+            "effect_policy",
+        }
+    )
+    if keys - required - optional:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    effect_policy = raw_fields.get("effect_policy", "none")
+    if not isinstance(effect_policy, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return TaskNode(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
@@ -540,7 +552,7 @@ def _decode_v1_task_node(
             Mapping[str, JsonValue] | None,
             output_contract,
         ),
-        effect=effect,
+        effect_policy=effect_policy,
         dependency_policy="all_succeeded",
     )
 
@@ -574,7 +586,7 @@ def _decode_v1_terminal_task_node(
         max_attempts=node.max_attempts,
         retry_delay_seconds=node.retry_delay_seconds,
         output_contract=node.output_contract,
-        effect=node.effect,
+        effect_policy=node.effect_policy,
         dependency_policy="all_terminal",
     )
 
@@ -2428,7 +2440,7 @@ def _validate_v1_codec_definition() -> None:
         "max_attempts",
         "retry_delay_seconds",
         "output_contract",
-        "effect",
+        "effect_policy",
         "dependency_policy",
         "_input",
     ):

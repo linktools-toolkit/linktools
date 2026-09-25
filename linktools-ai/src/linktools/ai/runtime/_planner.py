@@ -442,7 +442,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             max_attempts=node.max_attempts,
             retry_delay_seconds=node.retry_delay_seconds,
             output_contract=node.output_contract,
-            effect=node.effect,
+            effect_policy=node.effect_policy,
             dependency_policy=node.dependency_policy,
         )
 
@@ -524,7 +524,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             max_attempts=node.max_attempts,
             retry_delay_seconds=node.retry_delay_seconds,
             output_contract=node.output_contract,
-            effect=node.effect,
+            effect_policy=node.effect_policy,
             dependency_policy=node.dependency_policy,
         )
 
@@ -781,7 +781,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             max_attempts=node.max_attempts,
             retry_delay_seconds=node.retry_delay_seconds,
             output_contract=_output_contract(handler, node.output_type),
-            effect=_handler_effect(handler),
+            effect_policy=_handler_effect_policy(handler),
             dependency_policy=node.dependency_policy,
         )
 
@@ -807,7 +807,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         resolution: TaskEffectResolution,
     ) -> None:
         del resolution
-        if node.effect != "non_replay_safe":
+        if node.effect_policy != "non_replay_safe":
             raise AIError(ErrorCode.TASK_NOT_READY)
 
     def validate_recovery(self, graph_state: TaskGraphState) -> None:
@@ -850,7 +850,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 ) from error
             if node.expander is not None:
                 self._resolve_expander(node.expander, request=False)
-            if node.effect != _handler_effect(handler):
+            if node.effect_policy != _handler_effect_policy(handler):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     safe_details={
@@ -906,7 +906,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 max_attempts=node.max_attempts,
                 retry_delay_seconds=node.retry_delay_seconds,
                 output_contract=node.output_contract,
-                effect=node.effect,
+                effect_policy=node.effect_policy,
                 dependency_policy=node.dependency_policy,
             )
             if canonical.input != node.input:
@@ -1099,7 +1099,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         else:
             if view.status is not ExecutionStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if view.task_attempt > 0 and node.effect == "non_replay_safe":
+            if view.task_attempt > 0 and node.effect_policy == "non_replay_safe":
                 await self._execution.require_task_recovery(
                     execution_id,
                     principal=principal,
@@ -1165,7 +1165,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 execution_id,
                 principal,
                 AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT),
-                unknown_effect=node.effect == "non_replay_safe",
+                unknown_effect=node.effect_policy == "non_replay_safe",
                 cause=error,
             )
         except AIError as error:
@@ -1174,7 +1174,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 execution_id,
                 principal,
                 error,
-                unknown_effect=node.effect == "non_replay_safe",
+                unknown_effect=node.effect_policy == "non_replay_safe",
             )
         except Exception as error:  # noqa: BLE001
             return await self._settle_custom_failure(
@@ -1182,7 +1182,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 execution_id,
                 principal,
                 AIError(ErrorCode.TASK_NODE_FAILED),
-                unknown_effect=node.effect == "non_replay_safe",
+                unknown_effect=node.effect_policy == "non_replay_safe",
                 cause=error,
             )
 
@@ -1195,7 +1195,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 if isinstance(error, AIError)
                 else AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
             )
-            if node.effect == "non_replay_safe":
+            if node.effect_policy == "non_replay_safe":
                 await self._execution.require_task_recovery(
                     execution_id,
                     principal=principal,
@@ -2291,7 +2291,7 @@ def _task_binding(
     return TaskBindingContract(
         task_id,
         task_revision,
-        node.effect,
+        node.effect_policy,
         output_contract,
         node.timeout_seconds,
         node.max_attempts,
@@ -2305,8 +2305,8 @@ def _validate_task_output(node: TaskNode, output: JsonValue) -> None:
         _restore_output_contract(node.output_contract).validate_payload(output)
 
 
-def _handler_effect(handler: object) -> str:
-    value = getattr(handler, "effect", "none")
+def _handler_effect_policy(handler: object) -> str:
+    value = getattr(handler, "effect_policy", "none")
     return value if value in {"none", "replay_safe", "non_replay_safe"} else "none"
 
 

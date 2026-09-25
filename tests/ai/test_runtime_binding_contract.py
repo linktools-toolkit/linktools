@@ -438,7 +438,7 @@ def test_restore_rejects_tool_contract_drift_without_revision_bump() -> None:
 
     spec = AgentSpec("agent", allow_tools=("sample",))
     semantic = tool_metadata(
-        effect="none",
+        effect_policy="none",
         plan_safe=True,
         tool_class="business",
     )

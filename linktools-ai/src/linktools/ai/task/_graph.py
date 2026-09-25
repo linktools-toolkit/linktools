@@ -147,7 +147,7 @@ class TaskNode:
     retry_delay_seconds: float
     output_type: object | None
     output_contract: "Mapping[str, JsonValue] | None"
-    effect: str
+    effect_policy: str
     dependency_policy: str
     _input: bytes = field(repr=False)
 
@@ -165,7 +165,7 @@ class TaskNode:
         retry_delay_seconds: float = 0,
         output_type: object | None = None,
         output_contract: "Mapping[str, JsonValue] | None" = None,
-        effect: str = "none",
+        effect_policy: str = "none",
         dependency_policy: str = "all_succeeded",
     ) -> None:
         if isinstance(dependencies, (str, bytes)):
@@ -191,7 +191,7 @@ class TaskNode:
             or isinstance(max_attempts, bool)
             or not isinstance(max_attempts, int)
             or max_attempts < 1
-            or effect not in {"none", "replay_safe", "non_replay_safe"}
+            or effect_policy not in {"none", "replay_safe", "non_replay_safe"}
             or dependency_policy not in _TASK_DEPENDENCY_POLICIES
         ):
             raise ValueError("task node identity is invalid")
@@ -231,7 +231,7 @@ class TaskNode:
         object.__setattr__(self, "retry_delay_seconds", normalized_retry_delay)
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "output_contract", contract)
-        object.__setattr__(self, "effect", effect)
+        object.__setattr__(self, "effect_policy", effect_policy)
         object.__setattr__(self, "dependency_policy", dependency_policy)
         object.__setattr__(self, "_input", canonical_json_bytes(normalized))
 
@@ -546,8 +546,8 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
         value["retry_delay_seconds"] = node.retry_delay_seconds
     if node.output_contract is not None:
         value["output_contract"] = dict(node.output_contract)
-    if node.effect != "none":
-        value["effect"] = node.effect
+    if node.effect_policy != "none":
+        value["effect_policy"] = node.effect_policy
     if node.dependency_policy != "all_succeeded":
         value["dependency_policy"] = node.dependency_policy
     return value
@@ -696,7 +696,7 @@ class TaskNodeInfo:
     max_attempts: int
     retry_delay_seconds: float
     output_contract: "Mapping[str, JsonValue] | None"
-    effect: str
+    effect_policy: str
     dependency_policy: str = "all_succeeded"
 
     @classmethod
@@ -711,7 +711,7 @@ class TaskNodeInfo:
             node.max_attempts,
             node.retry_delay_seconds,
             node.output_contract,
-            node.effect,
+            node.effect_policy,
             node.dependency_policy,
         )
 

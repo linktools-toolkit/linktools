@@ -109,7 +109,7 @@ async def _boundary(
     bridge = _Bridge(decision)
     descriptor = ManagedToolDescriptor(
         effect_owner="tool_operation",
-        effect="replay_safe",
+        effect_policy="replay_safe",
         tool_class="business",
     )
     raw = FunctionToolset([semantic_tool(tool, descriptor)])

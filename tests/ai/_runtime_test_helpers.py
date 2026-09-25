@@ -44,7 +44,7 @@ def semantic_tool(
     return Tool(
         function,
         metadata=tool_metadata(
-            effect=descriptor.effect,
+            effect_policy=descriptor.effect_policy,
             tool_class=descriptor.tool_class,
             path_fields=path_fields,
         ),

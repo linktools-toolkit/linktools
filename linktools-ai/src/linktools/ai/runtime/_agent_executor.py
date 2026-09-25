@@ -1055,7 +1055,7 @@ def _bound_tool_metadata(
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     validate_tool_metadata(
         metadata,
-        require_effect=True,
+        require_effect_policy=True,
         require_tool_class=True,
     )
     return metadata

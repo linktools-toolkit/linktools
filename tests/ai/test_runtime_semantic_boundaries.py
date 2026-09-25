@@ -243,7 +243,7 @@ def test_tool_identity_preserves_absent_return_schema() -> None:
         "parameters": {"type": "object", "properties": {}},
         "strict": None,
         "metadata": {
-            "linktools.ai.effect": "none",
+            "linktools.ai.effect_policy": "none",
             "linktools.ai.tool_class": "business",
         },
     }
@@ -394,7 +394,7 @@ async def test_tool_operation_records_the_args_that_reach_the_handler() -> None:
     operations = _RecordingToolOperations()
     descriptor = ManagedToolDescriptor(
         effect_owner="tool_operation",
-        effect="replay_safe",
+        effect_policy="replay_safe",
         tool_class="business",
     )
     boundary = RuntimeToolBoundaryToolset(

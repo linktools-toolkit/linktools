@@ -122,7 +122,7 @@ async def test_missing_write_parent_is_known_failure_not_effect_unknown(
             {
                 "write_file": ManagedToolDescriptor(
                     effect_owner="tool_operation",
-                    effect="non_replay_safe",
+                    effect_policy="non_replay_safe",
                     tool_class="filesystem.write",
                     workspace_path_fields=("path",),
                 )
@@ -160,7 +160,7 @@ async def test_effectful_plain_ai_error_after_partial_effect_becomes_unknown(
         {
             "create_directory": ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect="non_replay_safe",
+                effect_policy="non_replay_safe",
                 tool_class="filesystem.write",
                 workspace_path_fields=("path",),
             )

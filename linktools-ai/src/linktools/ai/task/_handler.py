@@ -39,7 +39,7 @@ class TaskBindingContract:
 
     task_id: str
     task_revision: int
-    effect: Literal["none", "replay_safe", "non_replay_safe"]
+    effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
     output_contract: Mapping[str, JsonValue]
     timeout_seconds: float | None
     max_attempts: int
@@ -60,7 +60,7 @@ class TaskBindingContract:
             not isinstance(self.task_revision, int)
             or isinstance(self.task_revision, bool)
             or self.task_revision < 1
-            or self.effect not in {"none", "replay_safe", "non_replay_safe"}
+            or self.effect_policy not in {"none", "replay_safe", "non_replay_safe"}
             or isinstance(self.max_attempts, bool)
             or not isinstance(self.max_attempts, int)
             or self.max_attempts < 1
@@ -81,7 +81,7 @@ class TaskBindingContract:
                 "contract": "task-binding-v1",
                 "task_id": self.task_id,
                 "task_revision": self.task_revision,
-                "effect": self.effect,
+                "effect_policy": self.effect_policy,
                 "output_contract": dict(self.output_contract),
                 "timeout_seconds": self.timeout_seconds,
                 "max_attempts": self.max_attempts,

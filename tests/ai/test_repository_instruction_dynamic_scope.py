@@ -86,7 +86,7 @@ def _boundary(
 ) -> RuntimeToolBoundaryToolset:
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
-        effect="none",
+        effect_policy="none",
         tool_class="filesystem.read",
         workspace_path_fields=path_fields,
     )

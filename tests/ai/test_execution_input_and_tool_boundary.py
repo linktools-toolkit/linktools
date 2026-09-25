@@ -276,7 +276,7 @@ def _context() -> RunContext[None]:
 def _workspace_boundary(sandbox_session: object) -> RuntimeToolBoundaryToolset:
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
-        effect="none",
+        effect_policy="none",
         tool_class="filesystem.read",
         workspace_path_fields=("path",),
     )

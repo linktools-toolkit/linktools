@@ -24,7 +24,7 @@ from ..capability import (
     ToolCallFailed,
     ToolCallRetry,
     tool_class_from_metadata,
-    tool_effect_from_metadata,
+    tool_effect_policy_from_metadata,
     tool_path_fields_from_metadata,
 )
 from ..core import canonical_sha256, normalize_json_value
@@ -56,7 +56,7 @@ class RepositoryInstructionBoundary(Protocol):
 @dataclass(frozen=True, slots=True)
 class ManagedToolDescriptor:
     effect_owner: Literal["none", "tool_operation"]
-    effect: Literal["none", "replay_safe", "non_replay_safe"]
+    effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
     tool_class: Literal[
         "business",
         "filesystem.read",
@@ -69,8 +69,8 @@ class ManagedToolDescriptor:
     def __post_init__(self) -> None:
         if self.effect_owner not in {"none", "tool_operation"}:
             raise ValueError("effect owner is invalid")
-        if self.effect not in {"none", "replay_safe", "non_replay_safe"}:
-            raise ValueError("effect is invalid")
+        if self.effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
+            raise ValueError("effect policy is invalid")
         if self.tool_class not in {
             "business",
             "filesystem.read",
@@ -86,26 +86,26 @@ class ManagedToolDescriptor:
             raise ValueError("workspace path fields must be non-empty strings")
         if len(self.workspace_path_fields) != len(set(self.workspace_path_fields)):
             raise ValueError("workspace path fields must be unique")
-        if self.effect_owner == "none" and self.effect != "none":
-            raise ValueError("effect-free tools must use effect=none")
-        if self.effect_owner == "tool_operation" and self.effect == "none":
-            raise ValueError("tool-operation tools require an effect")
+        if self.effect_owner == "none" and self.effect_policy != "none":
+            raise ValueError("effect-free tools must use effect_policy=none")
+        if self.effect_owner == "tool_operation" and self.effect_policy == "none":
+            raise ValueError("tool-operation tools require an effect policy")
 
 
 def managed_tool_descriptor_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> ManagedToolDescriptor:
     """Build a leaf descriptor from one validated Tool semantic declaration."""
-    effect = tool_effect_from_metadata(metadata, require=True)
+    effect_policy = tool_effect_policy_from_metadata(metadata, require=True)
     tool_class = tool_class_from_metadata(metadata)
     path_fields = tool_path_fields_from_metadata(metadata)
-    if effect is None or tool_class is None:
+    if effect_policy is None or tool_class is None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if tool_class == "business" and path_fields:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return ManagedToolDescriptor(
-        effect_owner="none" if effect == "none" else "tool_operation",
-        effect=effect,
+        effect_owner="none" if effect_policy == "none" else "tool_operation",
+        effect_policy=effect_policy,
         tool_class=tool_class,
         workspace_path_fields=path_fields,
     )
@@ -303,7 +303,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         bridge = self._tool_operations
         if bridge is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        replay_safe = descriptor.effect == "replay_safe"
+        replay_safe = descriptor.effect_policy == "replay_safe"
         decision = await bridge.begin(
             ctx,
             call,

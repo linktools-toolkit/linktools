@@ -51,7 +51,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
     workspace = Workspace.load(workspace_root)
     capabilities: CapabilityGroup[None] = CapabilityGroup("application")
     handler = TaskFunction[None]("test.recovery", 1, _recover_node)
-    capabilities.task(handler, effect="none")
+    capabilities.task(handler, effect_policy="none")
     graph = TaskGraph("reopen-expired", (handler.node("root"),))
     request = TaskGraphRequest(
         graph,

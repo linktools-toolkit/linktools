@@ -23,7 +23,7 @@ async def test_plan_mode_keeps_workspace_file_reads_only() -> None:
         ToolDefinition(
             name="attach_files",
             metadata=tool_metadata(
-                effect="none",
+                effect_policy="none",
                 plan_safe=True,
                 tool_class="filesystem.read",
                 path_fields=["paths"],
@@ -32,7 +32,7 @@ async def test_plan_mode_keeps_workspace_file_reads_only() -> None:
         ToolDefinition(
             name="read_file",
             metadata=tool_metadata(
-                effect="none",
+                effect_policy="none",
                 plan_safe=True,
                 tool_class="filesystem.read",
                 path_fields=["path"],
@@ -41,7 +41,7 @@ async def test_plan_mode_keeps_workspace_file_reads_only() -> None:
         ToolDefinition(
             name="write_file",
             metadata=tool_metadata(
-                effect="non_replay_safe",
+                effect_policy="non_replay_safe",
                 tool_class="filesystem.write",
                 path_fields=["path"],
             ),
@@ -92,7 +92,7 @@ async def test_plan_mode_prepare_captures_wrapped_per_run_tool_metadata() -> Non
                 control,
                 name="control",
                 metadata=tool_metadata(
-                    effect="none",
+                    effect_policy="none",
                     plan_safe=True,
                     compaction_keep_result=True,
                 ),
@@ -101,7 +101,7 @@ async def test_plan_mode_prepare_captures_wrapped_per_run_tool_metadata() -> Non
                 ordinary,
                 name="ordinary",
                 metadata=tool_metadata(
-                    effect="non_replay_safe",
+                    effect_policy="non_replay_safe",
                 ),
             ),
         ],

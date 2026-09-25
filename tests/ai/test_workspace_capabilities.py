@@ -540,7 +540,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
         {
             "read_file": ManagedToolDescriptor(
                 effect_owner="none",
-                effect="none",
+                effect_policy="none",
                 tool_class="filesystem.read",
                 workspace_path_fields=("path",),
             )

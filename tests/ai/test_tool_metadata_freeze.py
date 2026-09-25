@@ -16,7 +16,7 @@ async def _probe() -> str:
 @pytest.mark.parametrize(
     "metadata",
     (
-        tool_metadata(effect="none"),
+        tool_metadata(effect_policy="none"),
         tool_metadata(tool_class="business"),
     ),
 )
@@ -37,7 +37,7 @@ def test_tool_revision_defines_named_identity() -> None:
         sample,
         name="sample",
         metadata=tool_metadata(
-            effect="none", plan_safe=True, tool_class="business"
+            effect_policy="none", plan_safe=True, tool_class="business"
         ),
     )
     changed = Tool(
@@ -46,7 +46,7 @@ def test_tool_revision_defines_named_identity() -> None:
         timeout=2.0,
         max_retries=3,
         metadata=tool_metadata(
-            effect="replay_safe", plan_safe=True, tool_class="business"
+            effect_policy="replay_safe", plan_safe=True, tool_class="business"
         ),
     )
 
@@ -70,7 +70,7 @@ def test_upstream_metadata_is_contract_data_not_identity() -> None:
         return value
 
     metadata = tool_metadata(
-        effect="none", plan_safe=True, tool_class="business"
+        effect_policy="none", plan_safe=True, tool_class="business"
     )
     first = CapabilityContribution.from_opaque(
         "tool",

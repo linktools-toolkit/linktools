@@ -344,12 +344,12 @@ def test_memory_owner_selects_only_its_declared_tools() -> None:
 def test_tool_metadata_preserves_upstream_values() -> None:
     metadata = tool_metadata(
         base={"upstream": "retained"},
-        effect="replay_safe",
+        effect_policy="replay_safe",
         plan_safe=True,
         tool_class="business",
     )
     assert metadata["upstream"] == "retained"
-    assert metadata["linktools.ai.effect"] == "replay_safe"
+    assert metadata["linktools.ai.effect_policy"] == "replay_safe"
     assert metadata["linktools.ai.plan_safe"] is True
     assert metadata["linktools.ai.tool_class"] == "business"
 
@@ -357,7 +357,7 @@ def test_tool_metadata_preserves_upstream_values() -> None:
 @pytest.mark.parametrize(
     "metadata",
     (
-        {"linktools.ai.effect": "unknown"},
+        {"linktools.ai.effect_policy": "unknown"},
         {"linktools.ai.plan_safe": 1},
         {"linktools.ai.tool_class": "filesystem"},
         {"linktools.ai.path_fields": {"path"}},
@@ -394,12 +394,12 @@ async def test_business_tool_metadata_is_captured_in_tool_contract() -> None:
     group = CapabilityGroup[None]("business")
     tool = group.tool(
         business_tool,
-        effect="replay_safe",
+        effect_policy="replay_safe",
         plan_safe=True,
     )
     candidate = (await group.capture()).contributions[0]
     assert tool.tool_def.metadata == {
-        "linktools.ai.effect": "replay_safe",
+        "linktools.ai.effect_policy": "replay_safe",
         "linktools.ai.plan_safe": True,
         "linktools.ai.tool_class": "business",
     }
@@ -415,7 +415,7 @@ async def test_business_tool_adapter_preserves_sync_execution_and_ctx_keyword() 
         return ctx if release.wait(0.2) else "blocked"
 
     group = CapabilityGroup[None]("business")
-    tool = group.tool(blocking_tool, effect="none")
+    tool = group.tool(blocking_tool, effect_policy="none")
     toolset = FunctionToolset([tool])
     context = _context()
     tools = await toolset.get_tools(context)
@@ -442,7 +442,7 @@ async def test_business_tool_adapter_preserves_ctx_keyword_for_async_tools() -> 
         return ctx
 
     group = CapabilityGroup[None]("business")
-    tool = group.tool(business_tool, effect="none")
+    tool = group.tool(business_tool, effect_policy="none")
     toolset = FunctionToolset([tool])
     context = _context()
     tools = await toolset.get_tools(context)
@@ -955,7 +955,7 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
                     Tool(
                         _business,
                         metadata=tool_metadata(
-                            effect="none",
+                            effect_policy="none",
                             tool_class="business",
                         ),
                     )
@@ -965,7 +965,7 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
         {
             "_business": ManagedToolDescriptor(
                 effect_owner="none",
-                effect="none",
+                effect_policy="none",
                 tool_class="business",
             )
         },
@@ -994,7 +994,7 @@ async def test_runtime_tool_boundary_does_not_rewrite_explicit_descriptor() -> N
                 [
                     Tool(
                         _business,
-                        metadata={"linktools.ai.effect": "invalid"},
+                        metadata={"linktools.ai.effect_policy": "invalid"},
                     )
                 ]
             ),
@@ -1002,7 +1002,7 @@ async def test_runtime_tool_boundary_does_not_rewrite_explicit_descriptor() -> N
         {
             "_business": ManagedToolDescriptor(
                 effect_owner="none",
-                effect="none",
+                effect_policy="none",
                 tool_class="business",
             )
         },

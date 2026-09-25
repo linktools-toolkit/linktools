@@ -50,7 +50,7 @@ _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 @dataclass(frozen=True, slots=True)
 class _RegisteredTaskHandler(Generic[AppT]):
     handler: TaskNodeHandler[AppT]
-    effect: Literal["none", "replay_safe", "non_replay_safe"]
+    effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
     output_type: object | None
     reconcile: (
         Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None
@@ -184,17 +184,17 @@ class CapabilityGroup(Generic[AppT]):
         *,
         name: "str | None" = None,
         revision: int = 1,
-        effect: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
+        effect_policy: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
         plan_safe: bool = False,
     ) -> "Tool[AgentContext[AppT]]":
         """Register one ordinary model-visible Python tool."""
         _validate_revision(revision)
-        _validate_tool_effect(effect, plan_safe)
+        _validate_tool_effect_policy(effect_policy, plan_safe)
         tool_name = name or function.__name__
         _validate_business_tool_name(tool_name)
         adapted = _adapt_tool(function, name=tool_name)
         adapted.metadata = tool_metadata(
-            effect=effect,
+            effect_policy=effect_policy,
             plan_safe=plan_safe,
             tool_class="business",
             base=adapted.metadata,
@@ -213,20 +213,20 @@ class CapabilityGroup(Generic[AppT]):
         self,
         handler: "TaskNodeHandler[AppT]",
         *,
-        effect: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
+        effect_policy: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
         output_type: object | None = None,
         reconcile: (
             "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
         ) = None,
     ) -> "TaskNodeHandler[AppT]":
         """Register one application-owned TaskNode handler revision."""
-        if effect not in {"none", "replay_safe", "non_replay_safe"}:
+        if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if reconcile is not None and not callable(reconcile):
             raise TypeError("reconcile must be callable")
         registered = _RegisteredTaskHandler(
             handler,
-            effect,
+            effect_policy,
             output_type,
             reconcile,
         )
@@ -490,8 +490,8 @@ def _validate_external_capability_id(value: str) -> None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
-def _validate_tool_effect(effect: str, plan_safe: bool) -> None:
-    if effect not in {"none", "replay_safe", "non_replay_safe"}:
+def _validate_tool_effect_policy(effect_policy: str, plan_safe: bool) -> None:
+    if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if not isinstance(plan_safe, bool):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)

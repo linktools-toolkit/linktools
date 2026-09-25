@@ -51,7 +51,7 @@ from ._mcp_transport import _SandboxMCPTransport
 
 _logger = environ.get_logger("ai.runtime.mcp")
 _MCP_TOOL_METADATA = tool_metadata(
-    effect="non_replay_safe",
+    effect_policy="non_replay_safe",
     tool_class="mcp",
 )
 

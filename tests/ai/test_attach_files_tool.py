@@ -101,7 +101,7 @@ async def _boundary(
         {
             "attach_files": ManagedToolDescriptor(
                 effect_owner="none",
-                effect="none",
+                effect_policy="none",
                 tool_class="filesystem.read",
                 workspace_path_fields=("paths",),
             )
@@ -122,7 +122,7 @@ def test_attach_files_declares_multi_path_workspace_metadata(tmp_path: Path) -> 
     tool = next(item.value for item in contributions if item.id == "attach_files")
 
     assert tool.tool_def.metadata == {  # type: ignore[attr-defined]
-        "linktools.ai.effect": "none",
+        "linktools.ai.effect_policy": "none",
         "linktools.ai.plan_safe": True,
         "linktools.ai.tool_class": "filesystem.read",
         "linktools.ai.path_fields": ["paths"],

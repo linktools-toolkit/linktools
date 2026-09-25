@@ -1070,7 +1070,7 @@ class DefaultExecutionService:
         binding = current.binding
         if (
             not isinstance(binding, TaskBindingContract)
-            or binding.effect != "non_replay_safe"
+            or binding.effect_policy != "non_replay_safe"
         ):
             raise AIError(ErrorCode.TASK_NOT_READY)
 
@@ -1204,7 +1204,7 @@ class DefaultExecutionService:
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         if (
-            current.binding.effect == "non_replay_safe"
+            current.binding.effect_policy == "non_replay_safe"
             and current.task_attempt > 0
             and current.status is ExecutionStatus.STARTED
         ):

@@ -76,7 +76,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
     source.write_text("accepted content", encoding="utf-8")
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.hold", 1, hold)
-    application.task(handler, effect="none")
+    application.task(handler, effect_policy="none")
     attachment = (
         WorkspaceFileInput("input.txt", identifier="source")
         if workspace_input
@@ -245,7 +245,7 @@ def test_task_registration_returns_original_handler() -> None:
     group = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
 
-    registered = group.task(handler, effect="none")
+    registered = group.task(handler, effect_policy="none")
 
     assert registered is handler
     assert registered.node("node").node_id == "node"
@@ -354,8 +354,8 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
         return "collected"
 
     group = CapabilityGroup[None]("application")
-    failure = group.task(TaskFunction("example.fail", 1, fail), effect="none")
-    collector = group.task(TaskFunction("example.collect", 1, collect), effect="none")
+    failure = group.task(TaskFunction("example.fail", 1, fail), effect_policy="none")
+    collector = group.task(TaskFunction("example.collect", 1, collect), effect_policy="none")
     group.agent(
         "default", model_route="default", allow_tools=(), allow_skills=(), allow_subagents=()
     )
@@ -466,8 +466,8 @@ async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed(
     v1 = TaskFunction[None]("example.echo", 1, _echo_task)
     v2 = TaskFunction[None]("example.echo", 2, _echo_task)
 
-    group.task(v1, effect="none")
-    group.task(v2, effect="none")
+    group.task(v1, effect_policy="none")
+    group.task(v2, effect_policy="none")
     snapshot = await group.capture()
 
     assert {
@@ -546,7 +546,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
     workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
-    application.task(handler, effect="none")
+    application.task(handler, effect_policy="none")
     application.agent(
         "default",
         model_route="default",
@@ -603,7 +603,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
-    application.task(handler, effect="none")
+    application.task(handler, effect_policy="none")
     application.task_expander(_ApplicationGraphExpander(handler))
     application.task_expander(_AgentGraphExpander())
     application.agent(
@@ -729,8 +729,8 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
     handler = TaskFunction[None]("example.effect-applied", 1, _invalid_effect_output)
     application.task(
         handler,
-        effect="non_replay_safe",
-        output=_EffectOutput,
+        effect_policy="non_replay_safe",
+        output_type=_EffectOutput,
     )
     application.agent(
         "default",
@@ -799,8 +799,8 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
     handler = TaskFunction[None]("example.effect-invalid", 1, _invalid_effect_output)
     application.task(
         handler,
-        effect="non_replay_safe",
-        output=_EffectOutput,
+        effect_policy="non_replay_safe",
+        output_type=_EffectOutput,
     )
     application.agent(
         "default",
@@ -867,7 +867,7 @@ async def test_not_applied_retries_same_execution_once(
 
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.effect-retry", 1, flaky_effect)
-    application.task(handler, effect="non_replay_safe")
+    application.task(handler, effect_policy="non_replay_safe")
     application.agent(
         "default",
         model_route="default",
@@ -1203,7 +1203,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.block", 1, blocking_task)
-    application.task(handler, effect="none")
+    application.task(handler, effect_policy="none")
     application.agent(
         "default",
         model_route="default",

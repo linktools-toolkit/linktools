@@ -61,7 +61,7 @@ async def _list_directory(path: str = ".") -> str:
 def _toolset(repository: _RepositoryBoundary) -> RuntimeToolBoundaryToolset:
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
-        effect="none",
+        effect_policy="none",
         tool_class="filesystem.read",
         workspace_path_fields=("path",),
     )

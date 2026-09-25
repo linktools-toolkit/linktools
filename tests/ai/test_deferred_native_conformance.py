@@ -86,7 +86,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
     del tmp_path
     descriptor = ManagedToolDescriptor(
         effect_owner="tool_operation",
-        effect="non_replay_safe",
+        effect_policy="non_replay_safe",
         tool_class="filesystem.read",
     )
     boundary = RuntimeToolBoundaryToolset(

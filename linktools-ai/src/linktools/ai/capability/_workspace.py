@@ -26,7 +26,7 @@ from ..workspace import (
 )
 from ._context import AgentContext
 from ._tool_signal import ToolCallRetry
-from ._tool_metadata import tool_effect_from_metadata, tool_metadata
+from ._tool_metadata import tool_effect_policy_from_metadata, tool_metadata
 
 _ResultT = TypeVar("_ResultT")
 
@@ -64,72 +64,72 @@ def _runtime_tool_metadata(
 
 _WORKSPACE_TOOL_DECLARATIONS = (
     WorkspaceToolDeclaration("attach_files", tool_metadata(
-        effect="none",
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("paths",),
     )),
     WorkspaceToolDeclaration("create_directory", tool_metadata(
-        effect="non_replay_safe",
+        effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
     WorkspaceToolDeclaration("edit_file", tool_metadata(
-        effect="non_replay_safe",
+        effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
     WorkspaceToolDeclaration("file_info", tool_metadata(
-        effect="none",
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
     WorkspaceToolDeclaration("find_files", tool_metadata(
-        effect="none",
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
     WorkspaceToolDeclaration("list_directory", tool_metadata(
-        effect="none",
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
     WorkspaceToolDeclaration("read_file", tool_metadata(
-        effect="none",
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
         context_dedupe="workspace_file_read_v1",
     )),
     WorkspaceToolDeclaration("search_files", tool_metadata(
-        effect="none",
+        effect_policy="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
     WorkspaceToolDeclaration("write_file", tool_metadata(
-        effect="non_replay_safe",
+        effect_policy="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
     WorkspaceToolDeclaration("check_command", tool_metadata(
-        effect="none",
+        effect_policy="none",
         plan_safe=True,
         tool_class="shell",
     )),
     WorkspaceToolDeclaration("run_command", tool_metadata(
-        effect="non_replay_safe",
+        effect_policy="non_replay_safe",
         tool_class="shell",
     )),
     WorkspaceToolDeclaration("start_command", tool_metadata(
-        effect="non_replay_safe",
+        effect_policy="non_replay_safe",
         tool_class="shell",
     )),
     WorkspaceToolDeclaration("stop_command", tool_metadata(
-        effect="non_replay_safe",
+        effect_policy="non_replay_safe",
         tool_class="shell",
     )),
 )
@@ -141,7 +141,7 @@ _EFFECTFUL_WORKSPACE_TOOLS = frozenset(
     {
         declaration.name
         for declaration in _WORKSPACE_TOOL_DECLARATIONS
-        if tool_effect_from_metadata(
+        if tool_effect_policy_from_metadata(
             _runtime_tool_metadata(declaration),
             require=True,
         )

@@ -253,7 +253,7 @@ def _contribution_contract(
         definition = value.tool_def
         validate_tool_metadata(
             definition.metadata,
-            require_effect=True,
+            require_effect_policy=True,
             require_tool_class=True,
         )
         contract: dict[str, JsonValue] = {
@@ -305,7 +305,7 @@ def _contribution_contract(
             "version": 1,
             "id": task_id,
             "revision": task_revision,
-            "effect": _task_effect(value),
+            "effect_policy": _task_effect_policy(value),
             "output_contract": _task_output_contract(value),
             "reconcile": getattr(value, "reconcile", None) is not None,
         }
@@ -338,11 +338,11 @@ def _task_identity(handler: object) -> tuple[str, int]:
     return task_id, task_revision
 
 
-def _task_effect(handler: object) -> str:
-    effect = getattr(handler, "effect", "none")
-    if effect not in {"none", "replay_safe", "non_replay_safe"}:
+def _task_effect_policy(handler: object) -> str:
+    effect_policy = getattr(handler, "effect_policy", "none")
+    if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return effect
+    return effect_policy
 
 
 def _task_output_contract(handler: object) -> JsonValue:

@@ -107,7 +107,7 @@ async def _state(
 def _application(
     calls: list[str],
     *,
-    effect: Literal["replay_safe", "non_replay_safe"] = "replay_safe",
+    effect_policy: Literal["replay_safe", "non_replay_safe"] = "replay_safe",
     effect_log: Path | None = None,
 ) -> CapabilityGroup[None]:
     application: CapabilityGroup[None] = CapabilityGroup("application")
@@ -121,7 +121,7 @@ def _application(
                 os.fsync(handle.fileno())
         return "tool-result"
 
-    application.tool(lookup, name="lookup", effect=effect)
+    application.tool(lookup, name="lookup", effect_policy=effect_policy)
     application.agent(
         "default",
         model_route="default",
@@ -580,7 +580,7 @@ def _crash_session_process(
                 await provision_runtime_database(engine)
             state = RuntimeState.sql(engine)
         application = _application(
-            [], effect="non_replay_safe", effect_log=Path(effect_log)
+            [], effect_policy="non_replay_safe", effect_log=Path(effect_log)
         )
         async with Runtime.open(
             "session-tool-crash",
@@ -651,7 +651,7 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
         )
         state = RuntimeState.sql(engine)
     calls: list[str] = []
-    application = _application(calls, effect="non_replay_safe", effect_log=effect_log)
+    application = _application(calls, effect_policy="non_replay_safe", effect_log=effect_log)
     try:
         async with Runtime.open(
             "session-tool-crash",
@@ -946,7 +946,7 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
         models=_ToolModels(),
         state=RuntimeState.sqlite(database),
         capabilities=(
-            _application(calls, effect="non_replay_safe", effect_log=effect_log),
+            _application(calls, effect_policy="non_replay_safe", effect_log=effect_log),
         ),
     ) as runtime:
         session = runtime.agent("default").session("session")

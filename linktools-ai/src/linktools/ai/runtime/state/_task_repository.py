@@ -1733,7 +1733,7 @@ class TaskRepositoryImpl(RepositoryBase):
 
             if (
                 current.status is TaskStatus.RUNNING
-                and definition.effect == "non_replay_safe"
+                and definition.effect_policy == "non_replay_safe"
             ):
                 value = replace(
                     current,
@@ -1850,7 +1850,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 if (
                     node.status is TaskStatus.RUNNING
                     and node.execution_id is not None
-                    and definition.effect == "non_replay_safe"
+                    and definition.effect_policy == "non_replay_safe"
                 ):
                     next_values.append(
                         replace(

@@ -180,7 +180,7 @@ async def test_ask_boundary_defers_before_runtime_operation() -> None:
 
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
-        effect="none",
+        effect_policy="none",
         tool_class="filesystem.read",
     )
     boundary = RuntimeToolBoundaryToolset(
