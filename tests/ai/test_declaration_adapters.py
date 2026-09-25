@@ -594,6 +594,46 @@ async def test_declaration_loaders_are_backend_agnostic(
 
 
 @pytest.mark.asyncio
+async def test_flat_mcp_declaration_owns_ordinary_resource_files() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        server = MCPServerSpec(
+            "server",
+            "python",
+            ("resource:script.py",),
+            AssetKey("mcp", "server/assets"),
+        )
+        await store.put(
+            AssetKey("mcp", "server"),
+            MCPServerSpecCodec().encode(server),
+        )
+        await store.put(
+            AssetKey("mcp", "server/assets/script.py"),
+            b"print('resource')\n",
+        )
+
+        capture = await CapabilityGroup("application", assets=store).capture()
+        contribution = next(
+            item
+            for item in capture.contributions
+            if item.kind == "mcp" and item.id == "server"
+        )
+        restored, versions = MCPServerSpecCodec().from_execution_payload(
+            contribution.contract
+        )
+
+        assert restored == server
+        assert versions is not None
+        assert tuple(ref.key.id for ref in versions) == (
+            "server/assets/script.py",
+        )
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_explicit_mcp_resource_root_reserves_declaration_filenames() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
