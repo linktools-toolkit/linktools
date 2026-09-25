@@ -514,6 +514,8 @@ async def test_runtime_accepts_multiple_task_handler_revisions() -> None:
     v2 = TaskFunction[None]("example.runtime-revision", 2, _echo_task)
     group.task(v1, effect_policy="none")
     group.task(v2, effect_policy="none")
+    group.task_expander(_TestTaskExpander("example.runtime-expand", 1))
+    group.task_expander(_TestTaskExpander("example.runtime-expand", 2))
     state = RuntimeStorage.in_memory()
 
     async with Runtime.open(
