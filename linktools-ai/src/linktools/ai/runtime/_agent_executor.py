@@ -677,7 +677,7 @@ def _mcp_resource_bindings(
 ) -> dict[str, _MCPResourceBinding]:
     codec = MCPServerSpecCodec()
     result: dict[str, _MCPResourceBinding] = {}
-    for pin in binding.snapshot.selected:
+    for pin in binding.binding_contract.selected:
         if pin.kind != "mcp":
             continue
         server, versions = codec.from_execution_payload(pin.contract)
@@ -883,11 +883,11 @@ async def _materialize_agent(
             )
         )
 
-    if scope.subagent_available and scope.binding.snapshot.subagents:
+    if scope.subagent_available and scope.binding.binding_contract.subagents:
         if scope.subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         subagent_capability = SubagentCapability(
-            scope.binding.snapshot.subagents,
+            scope.binding.binding_contract.subagents,
             scope.subagent_delegate,
             scope.subagent_descriptions,
         )

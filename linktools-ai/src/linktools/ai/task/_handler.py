@@ -34,7 +34,7 @@ _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True, slots=True)
-class TaskBindingSnapshot:
+class TaskBindingContract:
     """Durable semantic binding for one application-owned task handler."""
 
     task_id: str
@@ -354,7 +354,7 @@ class TaskFunction(Generic[AppT]):
 
 
 __all__ = [
-    "TaskBindingSnapshot",
+    "TaskBindingContract",
     "TaskDependency",
     "TaskDependencyState",
     "TaskArtifactPublisher",

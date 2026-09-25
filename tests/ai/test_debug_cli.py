@@ -32,7 +32,7 @@ from linktools.ai.runtime import (
 )
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
-from linktools.ai.task import TaskBindingSnapshot
+from linktools.ai.task import TaskBindingContract
 from linktools.ai.workspace import Workspace
 from linktools.commands.ai._common import (
     _load_workspace,
@@ -90,7 +90,7 @@ def _record(
     error_code: str | None = None,
 ):
     info = _info(execution_id, created_at, error_code=error_code)
-    binding = TaskBindingSnapshot(
+    binding = TaskBindingContract(
         "debug",
         1,
         "none",

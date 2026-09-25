@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionStatus,
@@ -199,9 +199,9 @@ async def test_closing_session_can_commit_owned_continuation_then_close() -> Non
         await state.close()
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="model"),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
@@ -218,7 +218,7 @@ class _BindingCatalog:
         return SimpleNamespace(
             digest=binding.binding_digest,
             compiled_agent=SimpleNamespace(digest="b" * 64),
-            snapshot=binding,
+            binding_contract=binding,
         )
 
 

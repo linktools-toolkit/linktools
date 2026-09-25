@@ -4,7 +4,7 @@
 
 from types import SimpleNamespace
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.spec import AgentSpec
 
@@ -14,15 +14,15 @@ def _replay_values(
     execution_correlation: dict[str, str | int],
     request_correlation: dict[str, str | int],
 ) -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
-    snapshot = object()
+    binding_contract = object()
     execution = SimpleNamespace(
         binding_digest="a" * 64,
         planning=False,
         thinking=False,
-        binding=snapshot,
+        binding=binding_contract,
         correlation=execution_correlation,
     )
-    binding = SimpleNamespace(binding_digest="a" * 64, snapshot=snapshot)
+    binding = SimpleNamespace(binding_digest="a" * 64, binding_contract=binding_contract)
     request = SimpleNamespace(
         planning=False,
         thinking=False,
@@ -32,7 +32,7 @@ def _replay_values(
 
 
 def test_execution_replay_uses_binding_digest() -> None:
-    durable = AgentBindingSnapshot(
+    durable = AgentBindingContract(
         agent_spec=AgentSpec("agent", description="durable label"),
         model_contract={"model_identity": "test:model"},
         selected=(),
@@ -40,7 +40,7 @@ def test_execution_replay_uses_binding_digest() -> None:
         output_mode="text",
         output_schema={"type": "string"},
     )
-    replayed = AgentBindingSnapshot(
+    replayed = AgentBindingContract(
         agent_spec=AgentSpec("agent", description="request label"),
         model_contract={"model_identity": "test:model"},
         selected=(),
@@ -60,7 +60,7 @@ def test_execution_replay_uses_binding_digest() -> None:
     )
     binding = SimpleNamespace(
         digest=replayed.binding_digest,
-        snapshot=replayed,
+        binding_contract=replayed,
     )
     request = SimpleNamespace(planning=False, thinking=False)
 

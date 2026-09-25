@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
@@ -20,9 +20,9 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
+def _binding_contract() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("default"),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
@@ -33,15 +33,15 @@ def _binding_snapshot() -> AgentBindingSnapshot:
 
 
 def _binding() -> object:
-    snapshot = _binding_snapshot()
+    binding_contract = _binding_contract()
     compiled_agent = SimpleNamespace(
         digest="b" * 64,
         spec=SimpleNamespace(id="default"),
         selected_tools=(),
     )
     return SimpleNamespace(
-        digest=snapshot.binding_digest,
-        snapshot=snapshot,
+        digest=binding_contract.binding_digest,
+        binding_contract=binding_contract,
         compiled_agent=compiled_agent,
     )
 
@@ -60,7 +60,7 @@ def _request() -> ExecutionRequest:
 
 def _record() -> ExecutionRecord:
     now = datetime.now(timezone.utc)
-    snapshot = _binding_snapshot()
+    binding_contract = _binding_contract()
     return ExecutionRecord(
         execution_id="execution",
         session_id=None,
@@ -80,7 +80,7 @@ def _record() -> ExecutionRecord:
         mode="run",
         planning=False,
         thinking=False,
-        binding=snapshot,
+        binding=binding_contract,
         principal_id="principal",
         principal_kind="service",
         stored_user_input=StoredUserInput(

@@ -11,7 +11,7 @@ from datetime import datetime
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot
+from ..agent import AgentBindingContract
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -35,7 +35,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import ObjectStore, StoredPayload, read_object
 from ..task import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskEvent,
     TaskGraphInfo,
     TaskResultRecord,

@@ -8,7 +8,7 @@ from typing import cast
 
 from ..agent import (
     AgentBinding,
-    AgentBindingSnapshot,
+    AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
     CapabilityPin,
@@ -46,26 +46,26 @@ class _RuntimeBindingResolver:
         """Resolve one current binding before its first durable admission."""
         if not isinstance(binding, AgentBinding):
             raise TypeError("binding must be AgentBinding")
-        snapshot = await self.resolve_snapshot(binding.snapshot)
-        if snapshot == binding.snapshot:
+        binding_contract = await self.resolve_contract(binding.binding_contract)
+        if binding_contract == binding.binding_contract:
             return binding
-        return self._compiler.restore(snapshot)
+        return self._compiler.restore(binding_contract)
 
-    async def resolve_root(self, agent_id: str) -> AgentBindingSnapshot:
+    async def resolve_root(self, agent_id: str) -> AgentBindingContract:
         """Resolve one Agent as a root execution target and its direct children."""
         compiled_agent = self._catalog.root_agent(agent_id)
-        return await self.resolve_snapshot(
-            self._compiler.bind(compiled_agent, output=None).snapshot
+        return await self.resolve_contract(
+            self._compiler.bind(compiled_agent, output=None).binding_contract
         )
 
-    async def resolve_snapshot(
+    async def resolve_contract(
         self,
-        snapshot: AgentBindingSnapshot,
-    ) -> AgentBindingSnapshot:
-        """Resolve MCP Asset versions and direct child bindings for one snapshot."""
-        if not isinstance(snapshot, AgentBindingSnapshot):
-            raise TypeError("snapshot must be AgentBindingSnapshot")
-        resolved = await self._resolve_mcp(snapshot)
+        binding_contract: AgentBindingContract,
+    ) -> AgentBindingContract:
+        """Resolve MCP Asset versions and direct child bindings for one contract."""
+        if not isinstance(binding_contract, AgentBindingContract):
+            raise TypeError("binding_contract must be AgentBindingContract")
+        resolved = await self._resolve_mcp(binding_contract)
         if resolved.subagent_bindings:
             children = tuple(
                 [await self._resolve_mcp(child) for child in resolved.subagent_bindings]
@@ -76,19 +76,19 @@ class _RuntimeBindingResolver:
             )
         return replace(resolved, subagent_bindings=children)
 
-    async def _resolve_child(self, agent_id: str) -> AgentBindingSnapshot:
+    async def _resolve_child(self, agent_id: str) -> AgentBindingContract:
         compiled_agent = self._catalog.root_agent(agent_id)
-        snapshot = self._compiler.bind_subagent(compiled_agent).snapshot
-        return await self._resolve_mcp(snapshot)
+        binding_contract = self._compiler.bind_subagent(compiled_agent).binding_contract
+        return await self._resolve_mcp(binding_contract)
 
     async def _resolve_mcp(
         self,
-        snapshot: AgentBindingSnapshot,
-    ) -> AgentBindingSnapshot:
+        binding_contract: AgentBindingContract,
+    ) -> AgentBindingContract:
         execution_policy: "Mapping[str, JsonValue] | None" = None
         selected: list[CapabilityPin] = []
         codec = MCPServerSpecCodec()
-        for pin in snapshot.selected:
+        for pin in binding_contract.selected:
             if pin.kind != "mcp":
                 selected.append(pin)
                 continue
@@ -128,7 +128,7 @@ class _RuntimeBindingResolver:
                     ),
                 )
             )
-        return replace(snapshot, selected=tuple(selected))
+        return replace(binding_contract, selected=tuple(selected))
 
 
 __all__ = ["_RuntimeBindingResolver"]

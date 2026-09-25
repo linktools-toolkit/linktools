@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
 
 from ..agent import (
-    AgentBindingSnapshot,
+    AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
     CompiledAgent,
@@ -44,7 +44,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore
 from ..task import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskDependency,
     TaskDependencyState,
     TaskEffectResolution,
@@ -474,26 +474,26 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         node: TaskNode,
         *,
         graph_id: str,
-    ) -> AgentBindingSnapshot:
-        payload = node.input.get("binding")
+    ) -> AgentBindingContract:
+        payload = node.input.get("binding_contract")
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        snapshot = AgentBindingSnapshot.from_payload(payload)
+        binding_contract = AgentBindingContract.from_payload(payload)
         capability_snapshot = self._require_capability_snapshot(graph_id)
-        resolved = capability_snapshot.bindings.get(snapshot.binding_digest)
+        resolved = capability_snapshot.bindings.get(binding_contract.binding_digest)
         if resolved is not None:
             return resolved
-        root = capability_snapshot.roots.get(snapshot.agent_spec.id)
-        if root is None or not _binding_matches_snapshot_root(snapshot, root):
+        root = capability_snapshot.roots.get(binding_contract.agent_spec.id)
+        if root is None or not _binding_contract_matches_root(binding_contract, root):
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
                 safe_details={
                     "kind": "agent_binding",
-                    "agent_id": snapshot.agent_spec.id,
+                    "agent_id": binding_contract.agent_spec.id,
                     "graph_id": graph_id,
                 },
             )
-        return snapshot
+        return binding_contract
 
     def _resolved_agent_node(
         self,
@@ -503,17 +503,17 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
     ) -> TaskNode:
         if node.input.get("task_id") != self._agent.id:
             return node
-        snapshot = self._resolved_agent_binding(
+        binding_contract = self._resolved_agent_binding(
             node,
             graph_id=graph_id,
         )
-        current = AgentBindingSnapshot.from_payload(
-            node.input.get("binding")
+        current = AgentBindingContract.from_payload(
+            node.input.get("binding_contract")
         )
-        if current == snapshot:
+        if current == binding_contract:
             return node
         body = node.input
-        body["binding"] = snapshot.to_payload()
+        body["binding_contract"] = binding_contract.to_payload()
         return TaskNode(
             node.node_id,
             node.dependencies,
@@ -1554,7 +1554,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             input={
                 "task_id": self._agent.id,
                 "task_revision": self._agent.revision,
-                "binding": binding.snapshot.to_payload(),
+                "binding_contract": binding.binding_contract.to_payload(),
                 "user_prompt": task_prompt_draft(user_prompt),
                 "mode": "run",
                 "planning": resolved_planning,
@@ -1604,12 +1604,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 safe_details={"kind": "agent", "agent_id": agent_id},
             )
         compiled_agent = self._compiler.restore(root).compiled_agent
-        binding = self._compiler.bind(compiled_agent, output=output).snapshot
-        binding = replace(
-            binding,
+        binding_contract = self._compiler.bind(compiled_agent, output=output).binding_contract
+        binding_contract = replace(
+            binding_contract,
             subagent_bindings=root.subagent_bindings,
         )
-        if not _binding_matches_snapshot_root(binding, root):
+        if not _binding_contract_matches_root(binding_contract, root):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         resolved_planning = (
             compiled_agent.spec.planning if planning is None else planning
@@ -1627,7 +1627,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             input={
                 "task_id": self._agent.id,
                 "task_revision": self._agent.revision,
-                "binding": binding.to_payload(),
+                "binding_contract": binding_contract.to_payload(),
                 "user_prompt": task_prompt_draft(user_prompt),
                 "mode": "run",
                 "planning": resolved_planning,
@@ -2228,16 +2228,16 @@ def _normalize_handler_body(value: Mapping[str, JsonValue]) -> dict[str, JsonVal
     return normalized
 
 
-def _binding_matches_snapshot_root(
-    binding: AgentBindingSnapshot,
-    root: AgentBindingSnapshot,
+def _binding_contract_matches_root(
+    binding_contract: AgentBindingContract,
+    root: AgentBindingContract,
 ) -> bool:
     return (
-        binding.agent_spec == root.agent_spec
-        and dict(binding.model_contract) == dict(root.model_contract)
-        and binding.selected == root.selected
-        and binding.subagents == root.subagents
-        and binding.subagent_bindings == root.subagent_bindings
+        binding_contract.agent_spec == root.agent_spec
+        and dict(binding_contract.model_contract) == dict(root.model_contract)
+        and binding_contract.selected == root.selected
+        and binding_contract.subagents == root.subagents
+        and binding_contract.subagent_bindings == root.subagent_bindings
     )
 
 
@@ -2282,13 +2282,13 @@ def _task_binding(
     handler: object,
     task_id: str,
     task_revision: int,
-) -> TaskBindingSnapshot:
+) -> TaskBindingContract:
     output_contract: Mapping[str, JsonValue] = (
         {"kind": "json"}
         if node.output_contract is None
         else dict(node.output_contract)
     )
-    return TaskBindingSnapshot(
+    return TaskBindingContract(
         task_id,
         task_revision,
         node.effect,

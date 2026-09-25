@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import ExecutionRequest
@@ -18,8 +18,8 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 
-def _binding() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="default"),
         model_contract={"provider": "test", "model": "fixture"},
         selected=(),
@@ -69,7 +69,7 @@ def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
     backend._restore_binding = None
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(
-            snapshot=execution.binding,
+            binding_contract=execution.binding,
             digest=digest,
         )
     )
@@ -92,7 +92,7 @@ def test_local_binding_lookup_uses_semantic_digest() -> None:
     backend = _backend(execution)
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(
-            snapshot=equivalent,
+            binding_contract=equivalent,
             binding_digest=digest,
         )
     )
@@ -100,7 +100,7 @@ def test_local_binding_lookup_uses_semantic_digest() -> None:
     binding = backend._execution_binding(execution)
 
     assert binding.binding_digest == execution.binding_digest
-    assert binding.snapshot == equivalent
+    assert binding.binding_contract == equivalent
 
 
 @pytest.mark.asyncio

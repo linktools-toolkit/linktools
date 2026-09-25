@@ -5,7 +5,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionEventType,
@@ -27,9 +27,9 @@ from linktools.ai.spec import AgentSpec
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="default"),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),

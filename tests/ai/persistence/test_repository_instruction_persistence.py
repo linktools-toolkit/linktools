@@ -5,7 +5,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from linktools.ai.agent import AgentBindingSnapshot, CapabilityPin
+from linktools.ai.agent import AgentBindingContract, CapabilityPin
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.capability import SkillDefinition, SkillResourceVersion, SkillSourceRef
@@ -31,9 +31,9 @@ from linktools.ai.spec import AgentSpec, SkillSpec
 from linktools.ai.storage import ObjectRef, StorageEntryRevision, StoredPayload
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="model"),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
@@ -149,7 +149,7 @@ def test_object_ref_traversal_allows_additive_skill_asset_fields() -> None:
     source = contract["source"]
     assert isinstance(source, dict)
     source["future_metadata"] = {"version": 2}
-    binding = AgentBindingSnapshot(
+    binding = AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="model"),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(CapabilityPin("skill", "review", contract),),

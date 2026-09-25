@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 import linktools.ai.runtime._event as event_module
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionDeltaType,
@@ -54,9 +54,9 @@ from linktools.ai.task import (
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
+def _binding_contract() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("default", model_route="default"),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
@@ -92,7 +92,7 @@ def _execution(
         mode="run",
         planning=False,
         thinking=False,
-        binding=_binding_snapshot(),
+        binding=_binding_contract(),
         **execution_owner_fields(),
     )
 

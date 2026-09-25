@@ -100,7 +100,7 @@ class CapabilityPin:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentBindingSnapshot:
+class AgentBindingContract:
     """Persist identity inputs and locators required to restore one Agent binding."""
 
     agent_spec: AgentSpec
@@ -109,7 +109,7 @@ class AgentBindingSnapshot:
     subagents: "tuple[SubagentRef, ...]"
     output_mode: OutputMode
     output_schema: Mapping[str, JsonValue]
-    subagent_bindings: "tuple[AgentBindingSnapshot, ...]" = ()
+    subagent_bindings: "tuple[AgentBindingContract, ...]" = ()
     _wire_extensions: Mapping[str, JsonValue] = field(
         default_factory=dict,
         repr=False,
@@ -165,7 +165,7 @@ class AgentBindingSnapshot:
         if (
             child_bindings != self.subagent_bindings
             or any(
-                not isinstance(item, AgentBindingSnapshot)
+                not isinstance(item, AgentBindingContract)
                 or item.subagents
                 or item.subagent_bindings
                 for item in child_bindings
@@ -192,7 +192,7 @@ class AgentBindingSnapshot:
     @property
     def subagent_binding_map(
         self,
-    ) -> "Mapping[str, AgentBindingSnapshot]":
+    ) -> "Mapping[str, AgentBindingContract]":
         return {
             item.agent_spec.id: item
             for item in self.subagent_bindings
@@ -225,7 +225,7 @@ class AgentBindingSnapshot:
         return payload
 
     @classmethod
-    def from_payload(cls, value: object) -> "AgentBindingSnapshot":
+    def from_payload(cls, value: object) -> "AgentBindingContract":
         if not isinstance(value, Mapping) or not _BINDING_FIELDS.issubset(value):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         version = value["version"]
@@ -288,7 +288,7 @@ class AgentBindingSnapshot:
 class AgentBinding:
     compiled_agent: "CompiledAgent"
     output_binding: OutputBinding
-    snapshot: AgentBindingSnapshot
+    binding_contract: AgentBindingContract
 
     def __post_init__(self) -> None:
         from ._compiled import CompiledAgent
@@ -296,21 +296,21 @@ class AgentBinding:
         if (
             not isinstance(self.compiled_agent, CompiledAgent)
             or not isinstance(self.output_binding, OutputBinding)
-            or not isinstance(self.snapshot, AgentBindingSnapshot)
+            or not isinstance(self.binding_contract, AgentBindingContract)
             or AgentSpecCodec().to_payload(self.compiled_agent.spec)
-            != AgentSpecCodec().to_payload(self.snapshot.agent_spec)
+            != AgentSpecCodec().to_payload(self.binding_contract.agent_spec)
             or dict(self.compiled_agent.model.contract)
-            != dict(self.snapshot.model_contract)
-            or _compiled_agent_selected_pins(self.compiled_agent) != self.snapshot.selected
-            or self.compiled_agent.selected_subagents != self.snapshot.subagent_ids
-            or self.output_binding.mode != self.snapshot.output_mode
-            or self.output_binding.schema_definition != dict(self.snapshot.output_schema)
+            != dict(self.binding_contract.model_contract)
+            or _compiled_agent_selected_pins(self.compiled_agent) != self.binding_contract.selected
+            or self.compiled_agent.selected_subagents != self.binding_contract.subagent_ids
+            or self.output_binding.mode != self.binding_contract.output_mode
+            or self.output_binding.schema_definition != dict(self.binding_contract.output_schema)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     @property
     def binding_digest(self) -> str:
-        return self.snapshot.binding_digest
+        return self.binding_contract.binding_digest
 
     @property
     def output_type(self) -> "type[object]":
@@ -343,11 +343,11 @@ def _compiled_agent_selected_pins(
 
 def _decode_subagent_bindings(
     value: object,
-) -> "tuple[AgentBindingSnapshot, ...]":
+) -> "tuple[AgentBindingContract, ...]":
     if not isinstance(value, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return tuple(
-        AgentBindingSnapshot.from_payload(item)
+        AgentBindingContract.from_payload(item)
         for item in value
     )
 
@@ -367,4 +367,4 @@ def _require_mapping(value: object) -> "dict[str, object]":
     return dict(value)
 
 
-__all__ = ["AgentBinding", "AgentBindingSnapshot", "CapabilityPin", "SubagentRef"]
+__all__ = ["AgentBinding", "AgentBindingContract", "CapabilityPin", "SubagentRef"]

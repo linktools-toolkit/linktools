@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionEventType,
@@ -31,9 +31,9 @@ from linktools.ai.storage import ObjectRef, StoredPayload
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
+def _binding_contract() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("default"),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
@@ -96,7 +96,7 @@ async def test_in_memory_terminal_commit_validates_success_result(
             mode="run",
             planning=False,
             thinking=False,
-            binding=_binding_snapshot(),
+            binding=_binding_contract(),
             **execution_owner_fields(),
         )
         identity = IdempotencyRecord(

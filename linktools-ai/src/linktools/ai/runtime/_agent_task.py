@@ -9,7 +9,7 @@ from typing import cast
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
+from ..agent import AgentBindingContract, AgentCatalog, AgentCompiler
 from ..core import (
     CorrelationData,
     ExecutionMode,
@@ -56,7 +56,7 @@ _AGENT_TASK_ID = "linktools.ai.agent"
 _AGENT_TASK_REVISION = 1
 _AGENT_BODY_FIELDS = frozenset(
     {
-        "binding",
+        "binding_contract",
         "user_prompt",
         "mode",
         "planning",
@@ -172,19 +172,24 @@ class _AgentTaskNodeHandler:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             resolved_mode = normalize_execution_mode(mode)
             resolved_thinking = normalize_thinking(thinking)
-            snapshot = AgentBindingSnapshot.from_payload(input.get("binding"))
-            binding = self._compiler.restore(snapshot)
+            binding_contract = AgentBindingContract.from_payload(
+                input.get("binding_contract")
+            )
+            binding = self._compiler.restore(binding_contract)
         except (AIError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         if resolved_mode != "run":
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if binding.snapshot != snapshot or binding.binding_digest != snapshot.binding_digest:
+        if (
+            binding.binding_contract != binding_contract
+            or binding.binding_digest != binding_contract.binding_digest
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_agent_id(binding.compiled_agent.spec.id)
         if isinstance(base_user_prompt, str):
             validate_user_prompt(base_user_prompt)
         return {
-            "binding": binding.snapshot.to_payload(),
+            "binding_contract": binding.binding_contract.to_payload(),
             "user_prompt": raw_user_prompt,
             "mode": "run",
             "planning": planning,
@@ -248,7 +253,7 @@ class _AgentTaskNodeHandler:
         binding_digest, request = prepared[:2]
         agent_id = prepared[2] if len(prepared) > 2 else ""
         session_id = prepared[3] if len(prepared) > 3 else None
-        binding_snapshot = prepared[4] if len(prepared) > 4 else None
+        binding_contract = prepared[4] if len(prepared) > 4 else None
         key = (principal.tenant_id, graph_id, node.node_id)
         hold_id = f"task:{graph_id}:{node.node_id}"
         if session_id is None or self._session is None:
@@ -256,7 +261,7 @@ class _AgentTaskNodeHandler:
                 binding_digest,
                 request,
                 dependency_hold_id=hold_id,
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
         else:
             launch = self._session.resume(
@@ -274,7 +279,7 @@ class _AgentTaskNodeHandler:
                     request.correlation,
                     request.files,
                 ),
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
         launch_task = asyncio.create_task(
             launch,
@@ -390,7 +395,7 @@ class _AgentTaskNodeHandler:
                 request,
                 _,
                 _,
-                binding_snapshot,
+                binding_contract,
             ) = await self._prepare_request(
                 node,
                 graph_id=graph_id,
@@ -404,7 +409,7 @@ class _AgentTaskNodeHandler:
                 handle = await self._execution.resolve_existing(
                     binding_digest,
                     request,
-                    binding_snapshot=binding_snapshot,
+                    binding_contract=binding_contract,
                 )
             except asyncio.CancelledError:
                 raise
@@ -461,7 +466,7 @@ class _AgentTaskNodeHandler:
         ExecutionRequest,
         str,
         str | None,
-        AgentBindingSnapshot,
+        AgentBindingContract,
     ]:
         payload = node.input
         if (
@@ -481,8 +486,10 @@ class _AgentTaskNodeHandler:
         )
         if normalized != body:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        snapshot = AgentBindingSnapshot.from_payload(normalized["binding"])
-        binding = self._compiler.restore(snapshot)
+        binding_contract = AgentBindingContract.from_payload(
+            normalized["binding_contract"]
+        )
+        binding = self._compiler.restore(binding_contract)
         raw_user_prompt = cast(Mapping[str, JsonValue], normalized["user_prompt"])
         if raw_user_prompt.get("kind") == "text":
             base_user_prompt: str | tuple[object, ...] = cast(
@@ -563,7 +570,7 @@ class _AgentTaskNodeHandler:
             request,
             binding.compiled_agent.spec.id,
             cast("str | None", normalized["session_id"]),
-            binding.snapshot,
+            binding.binding_contract,
         )
 
     async def _handoff_execution(

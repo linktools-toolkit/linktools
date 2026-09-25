@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import ExecutionDeltaType, ExecutionLineageKind, ExecutionStatus
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._event import ExecutionDelta, LiveExecutionEventBroker
@@ -32,8 +32,8 @@ def _run() -> AgentRunRecord:
     )
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding_contract() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent"),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
@@ -64,7 +64,7 @@ def _execution() -> ExecutionRecord:
         mode="run",
         planning=False,
         thinking=False,
-        binding=_binding_snapshot(),
+        binding=_binding_contract(),
         **execution_owner_fields(),
     )
 

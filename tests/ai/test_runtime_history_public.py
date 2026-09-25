@@ -36,7 +36,7 @@ from linktools.ai.runtime._runtime_history import RuntimeHistory
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskGraph,
     TaskGraphSnapshot,
     TaskNode,
@@ -451,7 +451,7 @@ async def test_runtime_history_projects_owned_sessions_without_runtime_open() ->
 
 class _ResultExecutions:
     def __init__(self) -> None:
-        self.binding = TaskBindingSnapshot(
+        self.binding = TaskBindingContract(
             "handler",
             1,
             "none",

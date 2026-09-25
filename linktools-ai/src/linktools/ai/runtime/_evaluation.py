@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot
+from ..agent import AgentBindingContract
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -94,7 +94,7 @@ class DefaultEvaluationService:
         binding_digest: str,
         request: StartEvaluationRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> EvaluationHandle:
         evaluation_id = uuid.uuid4().hex
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
@@ -169,7 +169,7 @@ class DefaultEvaluationService:
                         planning=False,
                         thinking=False,
                     ),
-                    binding_snapshot=binding_snapshot,
+                    binding_contract=binding_contract,
                 )
                 await self._state.records.create(
                     EvaluationRecord(
@@ -341,7 +341,7 @@ class DefaultEvaluationService:
                 planning=False,
                 thinking=False,
             ),
-            binding_snapshot=source.binding,
+            binding_contract=source.binding,
         )
 
     async def _synchronize(
@@ -397,7 +397,7 @@ class DefaultEvaluationService:
             record.execution_id,
             tenant_id=self._state.records.tenant_id,
         )
-        if execution is None or not isinstance(execution.binding, AgentBindingSnapshot):
+        if execution is None or not isinstance(execution.binding, AgentBindingContract):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return execution
 

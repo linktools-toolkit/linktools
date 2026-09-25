@@ -18,7 +18,7 @@ from linktools.core import environ
 
 from ..agent import (
     AgentBinding,
-    AgentBindingSnapshot,
+    AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
     restore_output,
@@ -54,7 +54,7 @@ from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskBindingSnapshot, TaskEffectResolution
+from ..task import TaskBindingContract, TaskEffectResolution
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
@@ -547,14 +547,17 @@ class DefaultExecutionService:
     def _binding(
         self,
         binding_digest: str,
-        snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> AgentBinding:
-        if snapshot is None:
+        if binding_contract is None:
             return self._catalog.binding(binding_digest)
-        if snapshot.binding_digest != binding_digest:
+        if binding_contract.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        binding = self._compiler.restore(snapshot)
-        if binding.binding_digest != binding_digest or binding.snapshot != snapshot:
+        binding = self._compiler.restore(binding_contract)
+        if (
+            binding.binding_digest != binding_digest
+            or binding.binding_contract != binding_contract
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return binding
 
@@ -676,15 +679,15 @@ class DefaultExecutionService:
 
     async def start_task(
         self,
-        binding: TaskBindingSnapshot,
+        binding: TaskBindingContract,
         *,
         principal: Principal,
         input: Mapping[str, JsonValue],
         idempotency_key: str,
         correlation: Mapping[str, str | int],
     ) -> ExecutionHandle:
-        if not isinstance(binding, TaskBindingSnapshot):
-            raise TypeError("binding must be TaskBindingSnapshot")
+        if not isinstance(binding, TaskBindingContract):
+            raise TypeError("binding must be TaskBindingContract")
         normalized_input = normalize_json_value(dict(input))
         if not isinstance(normalized_input, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -805,7 +808,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if current.status in {
             ExecutionStatus.SUCCEEDED,
@@ -859,7 +862,7 @@ class DefaultExecutionService:
             AuthorizationAction.EXECUTION_RUN,
         )
         if (
-            not isinstance(current.binding, TaskBindingSnapshot)
+            not isinstance(current.binding, TaskBindingContract)
             or current.status is not ExecutionStatus.STARTED
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -899,7 +902,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return _execution_view(current)
@@ -937,7 +940,7 @@ class DefaultExecutionService:
             AuthorizationAction.EXECUTION_RUN,
         )
         if (
-            not isinstance(current.binding, TaskBindingSnapshot)
+            not isinstance(current.binding, TaskBindingContract)
             or not isinstance(wait_id, str)
             or not wait_id.strip()
         ):
@@ -977,7 +980,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         normalized = normalize_json_value(value)
         try:
@@ -1020,7 +1023,7 @@ class DefaultExecutionService:
             AuthorizationAction.EXECUTION_RUN,
         )
         if (
-            not isinstance(current.binding, TaskBindingSnapshot)
+            not isinstance(current.binding, TaskBindingContract)
             or current.status is not ExecutionStatus.RECOVERY_REQUIRED
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1066,7 +1069,7 @@ class DefaultExecutionService:
         )
         binding = current.binding
         if (
-            not isinstance(binding, TaskBindingSnapshot)
+            not isinstance(binding, TaskBindingContract)
             or binding.effect != "non_replay_safe"
         ):
             raise AIError(ErrorCode.TASK_NOT_READY)
@@ -1192,7 +1195,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if current.status is ExecutionStatus.CANCELLED:
             return CancelExecutionResult(execution_id, True)
@@ -1272,7 +1275,7 @@ class DefaultExecutionService:
         output: JsonValue,
         terminal_event_payload: "Mapping[str, JsonValue] | None" = None,
     ) -> ExecutionResult:
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         execution_id = current.execution_id
         if current.status is ExecutionStatus.SUCCEEDED:
@@ -1336,7 +1339,7 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
-        if not isinstance(current.binding, TaskBindingSnapshot):
+        if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if current.status is ExecutionStatus.FAILED:
             return await self.result(execution_id, principal=principal)
@@ -1447,7 +1450,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         dependency_hold_id: "str | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1455,7 +1458,7 @@ class DefaultExecutionService:
             scope="execution.run",
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
 
     async def resolve_existing(
@@ -1463,11 +1466,11 @@ class DefaultExecutionService:
         binding_digest: str,
         request: ExecutionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> "ExecutionHandle | None":
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        binding = self._binding(binding_digest, binding_snapshot)
+        binding = self._binding(binding_digest, binding_contract)
         context = await self._canonicalize_request(request)
         request = context.request
         scope = "execution.run"
@@ -1558,7 +1561,7 @@ class DefaultExecutionService:
         session_id: str,
         request: ExecutionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1569,7 +1572,7 @@ class DefaultExecutionService:
             session_agent_id=agent_id,
             scope="session.resume",
             prepare_local_stream=True,
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
 
     async def start_subagent(
@@ -1580,7 +1583,7 @@ class DefaultExecutionService:
         parent_execution_id: str,
         root_execution_id: str,
         parent_invocation_id: str,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1590,7 +1593,7 @@ class DefaultExecutionService:
             parent_invocation_id=parent_invocation_id,
             lineage_kind=ExecutionLineageKind.SUBAGENT,
             scope="execution.subagent",
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
 
     async def replay_subagent(
@@ -1649,7 +1652,7 @@ class DefaultExecutionService:
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
             parent_invocation_id=parent_invocation_id,
-            binding_snapshot=execution.binding,
+            binding_contract=execution.binding,
         )
 
     async def list_children(
@@ -1682,7 +1685,7 @@ class DefaultExecutionService:
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         if session_id is None:
             return await self._start_unlocked(
@@ -1700,7 +1703,7 @@ class DefaultExecutionService:
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
         async with self._session_guard(request.principal.tenant_id, session_id):
             return await self._start_unlocked(
@@ -1718,7 +1721,7 @@ class DefaultExecutionService:
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
 
     async def _start_unlocked(
@@ -1738,7 +1741,7 @@ class DefaultExecutionService:
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1748,7 +1751,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         context = await self._canonicalize_request(request)
         request = context.request
-        binding = self._binding(binding_digest, binding_snapshot)
+        binding = self._binding(binding_digest, binding_contract)
         parent: ExecutionRecord | None = None
         if lineage_kind is ExecutionLineageKind.SUBAGENT:
             if parent_execution_id is None or not parent_invocation_id:
@@ -1980,7 +1983,7 @@ class DefaultExecutionService:
             mode=request.mode,
             planning=request.planning,
             thinking=request.thinking,
-            binding=binding.snapshot,
+            binding=binding.binding_contract,
             repository_instructions=repository_instructions,
             correlation=request.correlation,
             principal_id=request.principal.principal_id,
@@ -2596,12 +2599,12 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         timeout_seconds: "float | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionResult:
         handle = await self.start(
             binding_digest,
             request,
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
         return await self.wait(
             handle.execution_id,
@@ -2617,7 +2620,7 @@ class DefaultExecutionService:
         )
         if (
             previous.parent_execution_id is not None
-            or not isinstance(previous.binding, AgentBindingSnapshot)
+            or not isinstance(previous.binding, AgentBindingContract)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
@@ -2648,7 +2651,7 @@ class DefaultExecutionService:
             lineage_kind=ExecutionLineageKind.RETRY,
             base_execution_id=previous.base_execution_id,
             conversation_agent_run_id=previous.conversation_agent_run_id,
-            binding_snapshot=previous.binding,
+            binding_contract=previous.binding,
         )
 
     async def fork(
@@ -2659,7 +2662,7 @@ class DefaultExecutionService:
         )
         if (
             previous.parent_execution_id is not None
-            or not isinstance(previous.binding, AgentBindingSnapshot)
+            or not isinstance(previous.binding, AgentBindingContract)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
@@ -2689,7 +2692,7 @@ class DefaultExecutionService:
             source_execution_id=previous.execution_id,
             lineage_kind=ExecutionLineageKind.FORK,
             base_execution_id=previous.execution_id,
-            binding_snapshot=previous.binding,
+            binding_contract=previous.binding,
         )
 
     async def cancel(
@@ -3465,7 +3468,7 @@ def _execution_view(execution: ExecutionRecord) -> ExecutionView:
 
 
 def _validate_task_binding_output(
-    binding: TaskBindingSnapshot,
+    binding: TaskBindingContract,
     output: JsonValue,
 ) -> None:
     contract = dict(binding.output_contract)

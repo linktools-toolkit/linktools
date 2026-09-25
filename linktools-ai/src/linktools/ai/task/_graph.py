@@ -496,11 +496,11 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
     if (
         node_input.get("task_id") == "linktools.ai.agent"
         and node_input.get("task_revision") == 1
-        and isinstance(node_input.get("binding"), Mapping)
+        and isinstance(node_input.get("binding_contract"), Mapping)
     ):
         node_input = dict(node_input)
-        node_input["binding"] = canonical_sha256(
-            binding_digest_payload(node_input["binding"])
+        node_input["binding_contract"] = canonical_sha256(
+            binding_digest_payload(node_input["binding_contract"])
         )
         prompt = node_input.get("user_prompt")
         if isinstance(prompt, Mapping) and prompt.get("kind") in {

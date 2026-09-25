@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import (
     EvaluationStatus,
     ExecutionLineageKind,
@@ -33,8 +33,8 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
 
-def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding(agent_id: str = "agent") -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec(agent_id),
         model_contract={"model_identity": "test:model"},
         selected=(),
@@ -50,7 +50,7 @@ def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
 
 
 def _execution(
-    binding: AgentBindingSnapshot,
+    binding: AgentBindingContract,
     *,
     execution_id: str,
 ) -> ExecutionRecord:
@@ -87,7 +87,7 @@ def _execution(
 class _RecordingExecution:
     def __init__(self) -> None:
         self.binding_digest: str | None = None
-        self.binding_snapshot: AgentBindingSnapshot | None = None
+        self.binding_contract: AgentBindingContract | None = None
         self.request: ExecutionRequest | None = None
 
     async def start(
@@ -96,11 +96,11 @@ class _RecordingExecution:
         request: ExecutionRequest,
         *,
         dependency_hold_id: str | None = None,
-        binding_snapshot: AgentBindingSnapshot | None = None,
+        binding_contract: AgentBindingContract | None = None,
     ) -> ExecutionHandle:
         del dependency_hold_id
         self.binding_digest = binding_digest
-        self.binding_snapshot = binding_snapshot
+        self.binding_contract = binding_contract
         self.request = request
         return ExecutionHandle("execution")
 
@@ -131,7 +131,7 @@ async def test_evaluation_start_persists_source_execution_identity() -> None:
                 "evaluation-memory",
                 "evaluation-start",
             ),
-            binding_snapshot=binding,
+            binding_contract=binding,
         )
 
         record = await state.evaluation.records.get(
@@ -140,7 +140,7 @@ async def test_evaluation_start_persists_source_execution_identity() -> None:
         )
         assert record is not None
         assert record.execution_id == "execution"
-        assert execution.binding_snapshot == binding
+        assert execution.binding_contract == binding
     finally:
         await state.close()
 
@@ -166,7 +166,7 @@ async def test_evaluation_idempotency_includes_memory_scope() -> None:
                 "scope-a",
                 "same-key",
             ),
-            binding_snapshot=binding,
+            binding_contract=binding,
         )
 
         with pytest.raises(AIError) as raised:
@@ -178,7 +178,7 @@ async def test_evaluation_idempotency_includes_memory_scope() -> None:
                     "scope-b",
                     "same-key",
                 ),
-                binding_snapshot=binding,
+                binding_contract=binding,
             )
 
         assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
@@ -225,7 +225,7 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
 
         assert replayed.execution_id == "execution"
         assert execution.binding_digest == source.binding_digest
-        assert execution.binding_snapshot == source.binding
+        assert execution.binding_contract == source.binding
         assert execution.request is not None
         assert execution.request.user_prompt == "evaluation:dataset"
     finally:

@@ -8,7 +8,7 @@ from datetime import datetime
 from linktools.core import environ
 from ...core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, JsonValue, Page, ResourceKind
 from ...errors import AIError, ErrorCode
-from ...task import TaskBindingSnapshot
+from ...task import TaskBindingContract
 from ._contracts import ExecutionCandidate, ExecutionCandidatePage, ExecutionCancelRequestCommit, ExecutionEventAppend, ExecutionEventRecord, ExecutionHistoryHeadRecord, ExecutionHistorySealRecord, ExecutionHistoryState, ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation, ExecutionStartReservationResult, ExecutionStartUnknownCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord
 from ._plan import RuntimeDomain
 from ._store import FactQuery, RecordQuery, RecordReplacement, StateStore, StateTransaction, StoredFact, StoredRecord, operation_key, stream_digest
@@ -917,7 +917,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             event_count = len(pending_events) + 1
             task_updates: dict[str, object] = {}
             if task_state is not None:
-                if not isinstance(stored_value.binding, TaskBindingSnapshot):
+                if not isinstance(stored_value.binding, TaskBindingContract):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 (
                     task_attempt,

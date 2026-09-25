@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from ._task_test_helpers import admit_graph
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.capability import CapabilityGroup, TaskExpansionContext
 from linktools.ai.core import (
     JsonValue,
@@ -674,7 +674,9 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         agent_child = next(
             node for node in snapshot.nodes if node.node_id == "agent-child"
         )
-        binding = AgentBindingSnapshot.from_payload(agent_child.input["binding"])
+        binding = AgentBindingContract.from_payload(
+            agent_child.input["binding_contract"]
+        )
         assert binding.agent_spec.id == "worker"
         assert snapshot.node_states[-1].status is TaskStatus.SUCCEEDED
         child_a_state = next(

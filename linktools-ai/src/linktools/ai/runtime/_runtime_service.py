@@ -518,7 +518,7 @@ class Runtime(Generic[AppT]):
             handle = await self.execution.start(
                 binding.binding_digest,
                 request,
-                binding_snapshot=binding.snapshot,
+                binding_contract=binding.binding_contract,
             )
         else:
             if not isinstance(session_id, str) or not session_id.strip():
@@ -540,7 +540,7 @@ class Runtime(Generic[AppT]):
                 binding.binding_digest,
                 session_id,
                 resume_request,
-                binding_snapshot=binding.snapshot,
+                binding_contract=binding.binding_contract,
             )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s "
@@ -753,7 +753,7 @@ class Runtime(Generic[AppT]):
         return await self.evaluation.start(
             binding.binding_digest,
             request,
-            binding_snapshot=binding.snapshot,
+            binding_contract=binding.binding_contract,
         )
 
     async def _replay_evaluation_for_agent(

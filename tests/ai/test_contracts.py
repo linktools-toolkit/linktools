@@ -8,7 +8,7 @@ from datetime import date, datetime, timezone
 from enum import Enum, IntEnum
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.capability import SubagentCapability
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -59,8 +59,8 @@ class _JsonIntEnum(IntEnum):
     VALUE = 1
 
 
-def _binding_snapshot(*, agent_id: str = "default") -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding_contract(*, agent_id: str = "default") -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec(agent_id, model_route="route"),
         model_contract={"version": 1, "id": "route"},
         selected=(),
@@ -234,7 +234,7 @@ def test_recovery_handoff_phase_only_models_reachable_boundaries() -> None:
 
 
 def test_execution_record_owns_binding_and_durable_user_input() -> None:
-    snapshot = _binding_snapshot()
+    binding_contract = _binding_contract()
     now = datetime.now(timezone.utc)
     record = ExecutionRecord(
         execution_id="execution",
@@ -255,7 +255,7 @@ def test_execution_record_owns_binding_and_durable_user_input() -> None:
         mode="run",
         planning=False,
         thinking=False,
-        binding=snapshot,
+        binding=binding_contract,
         principal_id="principal",
         principal_kind="user",
         stored_user_input=StoredUserInput(
@@ -264,7 +264,7 @@ def test_execution_record_owns_binding_and_durable_user_input() -> None:
         ),
     )
     assert record.stored_user_input.payload.decode() == "prompt"
-    assert record.binding_digest == snapshot.binding_digest
+    assert record.binding_digest == binding_contract.binding_digest
 
 
 def test_domain_codec_preserves_mapping_payloads_in_nullable_json_values() -> None:

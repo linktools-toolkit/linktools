@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic_ai.messages import ModelMessage
 
-from ...agent import AgentBindingSnapshot
+from ...agent import AgentBindingContract
 from ...core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -52,7 +52,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskEvent,
     TaskGraph,
     TaskGraphAdmission,
@@ -639,7 +639,7 @@ class ExecutionRecord:
     mode: ExecutionMode | None
     planning: bool | None
     thinking: ThinkingValue | None
-    binding: AgentBindingSnapshot | TaskBindingSnapshot
+    binding: AgentBindingContract | TaskBindingContract
     principal_id: str
     principal_kind: str
     stored_user_input: StoredUserInput
@@ -658,10 +658,10 @@ class ExecutionRecord:
     started_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        agent_binding = isinstance(self.binding, AgentBindingSnapshot)
-        task_binding = isinstance(self.binding, TaskBindingSnapshot)
+        agent_binding = isinstance(self.binding, AgentBindingContract)
+        task_binding = isinstance(self.binding, TaskBindingContract)
         if agent_binding == task_binding:
-            raise TypeError("execution binding snapshot is invalid")
+            raise TypeError("execution binding contract is invalid")
         if agent_binding:
             mode = normalize_execution_mode(self.mode)
             thinking = normalize_thinking(self.thinking)
@@ -747,13 +747,13 @@ class ExecutionRecord:
 
     @property
     def binding_kind(self) -> str:
-        return "agent" if isinstance(self.binding, AgentBindingSnapshot) else "task"
+        return "agent" if isinstance(self.binding, AgentBindingContract) else "task"
 
     @property
     def agent_id(self) -> str | None:
         return (
             self.binding.agent_spec.id
-            if isinstance(self.binding, AgentBindingSnapshot)
+            if isinstance(self.binding, AgentBindingContract)
             else None
         )
 
@@ -761,7 +761,7 @@ class ExecutionRecord:
     def task_id(self) -> str | None:
         return (
             self.binding.task_id
-            if isinstance(self.binding, TaskBindingSnapshot)
+            if isinstance(self.binding, TaskBindingContract)
             else None
         )
 

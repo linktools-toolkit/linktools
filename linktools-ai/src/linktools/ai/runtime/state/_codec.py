@@ -29,7 +29,7 @@ from typing import (
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
-from ...agent import AgentBindingSnapshot
+from ...agent import AgentBindingContract
 from ...core import (
     RUNTIME_OBJECT_STORE_ID,
     ApprovalDecision,
@@ -58,7 +58,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskExpanderRef,
     TaskGraph,
     TaskGraphAdmission,
@@ -200,7 +200,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("loaded_model_context", LoadedModelContext),
     ("runtime_payload_ref", RuntimePayloadRef),
     ("stored_user_input", StoredUserInput),
-    ("task_binding_snapshot", TaskBindingSnapshot),
+    ("task_binding_contract", TaskBindingContract),
     ("transcript_chunk", TranscriptChunk),
     ("transcript_head", TranscriptHeadRecord),
     ("transcript_message_ref", TranscriptMessageRef),
@@ -317,7 +317,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "loaded_context_message": ("message", "source"),
         "loaded_model_context": ("messages",),
         "runtime_payload_ref": ("payload", "source_domain"),
-        "task_binding_snapshot": ("task_id", "task_revision", "effect", "output_contract", "timeout_seconds", "max_attempts", "retry_delay_seconds", "reconcile"),
+        "task_binding_contract": ("task_id", "task_revision", "effect", "output_contract", "timeout_seconds", "max_attempts", "retry_delay_seconds", "reconcile"),
         "transcript_chunk": ("owner_id", "first_message_index", "message_count", "origin", "codec", "raw_digest", "raw_size", "content"),
         "transcript_head": ("owner_domain", "owner_id", "message_count", "chunk_count", "quality"),
         "transcript_message_ref": ("source_domain", "owner_id", "message_index"),
@@ -969,7 +969,7 @@ _V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
         OperationTerminalUpdate: (
             "linktools.ai.runtime.state.OperationTerminalUpdate"
         ),
-        AgentBindingSnapshot: "linktools.ai.agent.AgentBindingSnapshot@1",
+        AgentBindingContract: "linktools.ai.agent.AgentBindingContract@1",
         ModelRequest: "pydantic_ai.messages.ModelRequest",
         ModelResponse: "pydantic_ai.messages.ModelResponse",
     }
@@ -1256,7 +1256,7 @@ def _codec_wire_type_id(
 def _encode_external(value: object, codec: _VersionCodec) -> JsonValue:
     if type(value) not in codec.external_schema_types:
         raise TypeError(f"unsupported external type: {type(value).__name__}")
-    if isinstance(value, AgentBindingSnapshot):
+    if isinstance(value, AgentBindingContract):
         return value.to_payload()
     if isinstance(value, IdempotencyTerminalUpdate):
         return {
@@ -1299,9 +1299,9 @@ def _decode_external(
 ) -> object:
     if target not in codec.external_schema_types:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if target is AgentBindingSnapshot:
+    if target is AgentBindingContract:
         try:
-            return AgentBindingSnapshot.from_payload(value)
+            return AgentBindingContract.from_payload(value)
         except AIError:
             raise
         except (TypeError, ValueError, KeyError) as error:
@@ -1678,7 +1678,7 @@ def iter_runtime_object_dependencies(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for values in (manifest["roots"], manifest["bindings"]):
             for raw in cast("Mapping[object, object]", values).values():
-                AgentBindingSnapshot.from_payload(raw)
+                AgentBindingContract.from_payload(raw)
         return
 
     return
@@ -1700,7 +1700,7 @@ def _iter_runtime_object_refs(
         source_domain = value.source_domain or domain
         yield from _iter_runtime_object_refs(value.payload, source_domain, codec)
         return
-    if isinstance(value, AgentBindingSnapshot):
+    if isinstance(value, AgentBindingContract):
         return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
@@ -1734,11 +1734,11 @@ def _iter_runtime_object_refs(
                 ):
                     binding = _decode_external(
                         item,
-                        AgentBindingSnapshot,
+                        AgentBindingContract,
                         codec,
                         persisted=True,
                     )
-                    if not isinstance(binding, AgentBindingSnapshot):
+                    if not isinstance(binding, AgentBindingContract):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     continue
                 yield from _iter_runtime_object_refs(item, domain, codec)

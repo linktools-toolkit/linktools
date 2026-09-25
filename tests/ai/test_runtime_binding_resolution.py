@@ -10,7 +10,7 @@ import pytest
 
 from linktools.ai.agent import (
     AgentBinding,
-    AgentBindingSnapshot,
+    AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
     CapabilityPin,
@@ -62,7 +62,7 @@ class _BindingFixture:
 class _RecordingExecution:
     def __init__(self) -> None:
         self.binding_digest: str | None = None
-        self.binding_snapshot: AgentBindingSnapshot | None = None
+        self.binding_contract: AgentBindingContract | None = None
 
     async def start(
         self,
@@ -70,11 +70,11 @@ class _RecordingExecution:
         request: ExecutionRequest,
         *,
         dependency_hold_id: str | None = None,
-        binding_snapshot: AgentBindingSnapshot | None = None,
+        binding_contract: AgentBindingContract | None = None,
     ) -> ExecutionHandle:
         del request, dependency_hold_id
         self.binding_digest = binding_digest
-        self.binding_snapshot = binding_snapshot
+        self.binding_contract = binding_contract
         return ExecutionHandle("execution")
 
 
@@ -120,7 +120,7 @@ async def _fixture() -> _BindingFixture:
         ),
     }
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").binding_contract(),
         candidates=candidates,
         agents=specs,
     )
@@ -143,17 +143,17 @@ async def _fixture() -> _BindingFixture:
     )
 
 
-def _resolved_child(snapshot: AgentBindingSnapshot) -> AgentBindingSnapshot:
-    assert snapshot.subagent_ids == ("child",)
-    assert len(snapshot.subagent_bindings) == 1
-    child = snapshot.subagent_bindings[0]
+def _resolved_child(binding_contract: AgentBindingContract) -> AgentBindingContract:
+    assert binding_contract.subagent_ids == ("child",)
+    assert len(binding_contract.subagent_bindings) == 1
+    child = binding_contract.subagent_bindings[0]
     assert child.agent_spec.id == "child"
     assert child.subagents == ()
     assert child.subagent_bindings == ()
     return child
 
 
-def _skill_ref(child: AgentBindingSnapshot) -> SkillSourceRef:
+def _skill_ref(child: AgentBindingContract) -> SkillSourceRef:
     pin = next(item for item in child.selected if item.kind == "skill")
     skill = SkillDefinition.from_contract(pin.contract)
     assert skill.source_ref is not None
@@ -178,7 +178,7 @@ async def test_binding_resolution_preserves_direct_child_asset_versions() -> Non
     fixture = await _fixture()
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
-        ref = _skill_ref(_resolved_child(resolved.snapshot))
+        ref = _skill_ref(_resolved_child(resolved.binding_contract))
 
         assert [item.path for item in ref.resource_versions] == ["guide.txt"]
         await fixture.assets.put(
@@ -202,7 +202,7 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
                     input={
                         "task_id": "linktools.ai.agent",
                         "task_revision": 1,
-                        "binding": fixture.binding.snapshot.to_payload(),
+                        "binding_contract": fixture.binding.binding_contract.to_payload(),
                     },
                 ),
             ),
@@ -272,9 +272,9 @@ async def test_runtime_start_admits_resolved_binding() -> None:
         )
 
         assert started.execution_id == "execution"
-        assert execution.binding_snapshot is not None
-        assert execution.binding_digest == execution.binding_snapshot.binding_digest
-        assert _skill_ref(_resolved_child(execution.binding_snapshot)).resource_versions
+        assert execution.binding_contract is not None
+        assert execution.binding_digest == execution.binding_contract.binding_digest
+        assert _skill_ref(_resolved_child(execution.binding_contract)).resource_versions
     finally:
         await fixture.assets.close()
 
@@ -285,8 +285,8 @@ async def test_execution_binding_uses_selected_child_asset_versions() -> None:
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
 
-        assert resolved.snapshot != fixture.binding.snapshot
-        assert _skill_ref(_resolved_child(resolved.snapshot)).resource_versions
+        assert resolved.binding_contract != fixture.binding.binding_contract
+        assert _skill_ref(_resolved_child(resolved.binding_contract)).resource_versions
     finally:
         await fixture.assets.close()
 
@@ -306,7 +306,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").binding_contract(),
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -322,7 +322,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         compiler.bind(catalog.root_agent(specification.id))
     )
 
-    pin = next(item for item in resolved.snapshot.selected if item.kind == "mcp")
+    pin = next(item for item in resolved.binding_contract.selected if item.kind == "mcp")
     selected = resolved.compiled_agent.selected_mcp
     assert pin.contract["execution_policy"] == {
         "version": 1,
@@ -358,7 +358,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").binding_contract(),
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -379,7 +379,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         compiler.bind(catalog.root_agent(specification.id))
     )
 
-    pin = next(item for item in resolved.snapshot.selected if item.kind == "mcp")
+    pin = next(item for item in resolved.binding_contract.selected if item.kind == "mcp")
     assert pin.contract["execution_policy"] == sandbox.stdio_execution_policy()
 
 
@@ -412,11 +412,11 @@ async def test_existing_child_mcp_resolves_asset_versions(
         child = replace(
             fixture.compiler.bind_subagent(
                 fixture.catalog.root_agent("child")
-            ).snapshot,
+            ).binding_contract,
             selected=(pin,),
         )
-        snapshot = replace(
-            fixture.binding.snapshot,
+        binding_contract = replace(
+            fixture.binding.binding_contract,
             selected=(pin,) if parent_resources else (),
             subagent_bindings=(child,),
         )
@@ -426,7 +426,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
             mcp_assets={"server": ("application", store)},
         )
         await store.put(resource, b"print('updated')")
-        resolved = await resolver.resolve_snapshot(snapshot)
+        resolved = await resolver.resolve_contract(binding_contract)
         server, versions = codec.from_execution_payload(
             resolved.subagent_bindings[0].selected[0].contract
         )
@@ -434,7 +434,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
         assert resolved.subagent_bindings[0].selected[0].contract["resource_source_id"] == "application"
         assert versions is not None
         assert await store.read_versions(versions) == (b"print('updated')",)
-        assert await resolver.resolve_snapshot(resolved) == resolved
+        assert await resolver.resolve_contract(resolved) == resolved
     finally:
         await store.close()
         await fixture.assets.close()
@@ -471,7 +471,7 @@ async def test_runtime_state_snapshot_preserves_asset_version_refs(
                 mode="run",
                 planning=False,
                 thinking=False,
-                binding=resolved.snapshot,
+                binding=resolved.binding_contract,
                 principal_id="principal",
                 principal_kind="service",
                 stored_user_input=StoredUserInput(
@@ -480,7 +480,7 @@ async def test_runtime_state_snapshot_preserves_asset_version_refs(
                 ),
             )
         )
-        resolved_ref = _skill_ref(_resolved_child(resolved.snapshot))
+        resolved_ref = _skill_ref(_resolved_child(resolved.binding_contract))
     finally:
         await state.close()
 
@@ -547,7 +547,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
                 input={
                     "task_id": "linktools.ai.agent",
                     "task_revision": 1,
-                    "binding": fixture.binding.snapshot.to_payload(),
+                    "binding_contract": fixture.binding.binding_contract.to_payload(),
                 },
             ),
         ),

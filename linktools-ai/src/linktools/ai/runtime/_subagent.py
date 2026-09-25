@@ -8,7 +8,7 @@ from typing import Protocol, cast
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
+from ..agent import AgentBindingContract, AgentCatalog, AgentCompiler
 from ..capability import SubagentDelegate
 from ..core import (
     ExecutionMode,
@@ -82,12 +82,12 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
         refs: "tuple[SubagentRef, ...]",
-        binding: AgentBindingSnapshot,
+        binding: AgentBindingContract,
         mode: ExecutionMode,
         require_frozen_bindings: bool = False,
     ) -> SubagentDelegate:
-        if not isinstance(binding, AgentBindingSnapshot):
-            raise TypeError("binding must be AgentBindingSnapshot")
+        if not isinstance(binding, AgentBindingContract):
+            raise TypeError("binding must be AgentBindingContract")
         allowed = {ref.id: ref for ref in refs}
         if len(allowed) != len(refs):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -137,7 +137,7 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
         ref: SubagentRef,
-        frozen_binding: "AgentBindingSnapshot | None" = None,
+        frozen_binding: "AgentBindingContract | None" = None,
         mode: ExecutionMode,
         user_prompt: str,
         files: Sequence[str] = (),
@@ -195,7 +195,7 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
         ref: SubagentRef,
-        frozen_binding: "AgentBindingSnapshot | None",
+        frozen_binding: "AgentBindingContract | None",
         child_mode: ExecutionMode,
         user_prompt: str,
         files: tuple[str, ...],
@@ -242,7 +242,7 @@ class SubagentDispatcher:
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
                 parent_invocation_id=invocation_id,
-                binding_snapshot=child_binding.snapshot,
+                binding_contract=child_binding.binding_contract,
             )
         except AIError as error:
             if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import (
     OperationKind,
     OperationLedgerInput,
@@ -55,8 +55,8 @@ from sqlalchemy.schema import CreateTable
 pytestmark = pytest.mark.asyncio
 
 
-def _binding_snapshot() -> AgentBindingSnapshot:
-    return AgentBindingSnapshot(
+def _binding_contract() -> AgentBindingContract:
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="default"),
         model_contract={"version": 1, "id": "default"},
         selected=(),

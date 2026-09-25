@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools import ai
-from linktools.ai.agent import AgentBindingSnapshot, CapabilityPin
+from linktools.ai.agent import AgentBindingContract, CapabilityPin
 from linktools.ai.runtime import (
     Agent,
     ExecutionHandle,
@@ -37,8 +37,8 @@ def test_runtime_bound_agent_does_not_expose_compile_or_registration() -> None:
     assert "define" not in Agent.__dict__
 
 
-def test_agent_binding_snapshot_persists_binding_inputs() -> None:
-    snapshot = AgentBindingSnapshot(
+def test_agent_binding_contract_persists_binding_inputs() -> None:
+    binding_contract = AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="model"),
         model_contract={"version": 1, "id": "model"},
         selected=(),
@@ -47,7 +47,7 @@ def test_agent_binding_snapshot_persists_binding_inputs() -> None:
         output_schema={"type": "object", "properties": {"value": {"type": "string"}}},
     )
 
-    payload = snapshot.to_payload()
+    payload = binding_contract.to_payload()
 
     assert set(payload) == {
         "version",
@@ -59,7 +59,7 @@ def test_agent_binding_snapshot_persists_binding_inputs() -> None:
         "output_schema",
     }
     assert "binding_digest" not in payload
-    assert len(snapshot.binding_digest) == 64
+    assert len(binding_contract.binding_digest) == 64
 
 
 def test_capability_pin_persists_contract_once() -> None:
@@ -93,8 +93,8 @@ def test_capability_pin_persists_contract_once() -> None:
     assert "future" not in decoded.to_payload()
 
 
-def test_agent_binding_snapshot_preserves_unknown_fields() -> None:
-    payload = AgentBindingSnapshot(
+def test_agent_binding_contract_preserves_unknown_fields() -> None:
+    payload = AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="model"),
         model_contract={"version": 1, "id": "model"},
         selected=(),
@@ -104,7 +104,7 @@ def test_agent_binding_snapshot_preserves_unknown_fields() -> None:
     ).to_payload()
     payload["future"] = 3
 
-    decoded = AgentBindingSnapshot.from_payload(payload)
+    decoded = AgentBindingContract.from_payload(payload)
 
     assert decoded.to_payload()["future"] == 3
 
@@ -128,13 +128,13 @@ class _CaptureSessionExecution:
         session_id: str,
         request: ExecutionRequest,
         *,
-        binding_snapshot: object | None = None,
+        binding_contract: object | None = None,
     ) -> ExecutionHandle:
         self.agent_id = agent_id
         self.binding_digest = binding_digest
         self.session_id = session_id
         self.request = request
-        self.binding_snapshot = binding_snapshot
+        self.binding_contract = binding_contract
         return ExecutionHandle("execution")
 
 

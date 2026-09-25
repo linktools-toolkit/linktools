@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -32,9 +32,9 @@ from linktools.ai.workspace import RepositoryInstructionDocument, RepositoryInst
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="model"),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
@@ -48,7 +48,7 @@ class _Catalog:
     def binding(self, digest: str) -> object:
         binding = _binding()
         assert digest == binding.binding_digest
-        return SimpleNamespace(digest=binding.binding_digest, snapshot=binding)
+        return SimpleNamespace(digest=binding.binding_digest, binding_contract=binding)
 
 
 class _History:

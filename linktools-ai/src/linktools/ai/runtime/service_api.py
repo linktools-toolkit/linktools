@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, cast
 
-from ..agent import AgentBindingSnapshot
+from ..agent import AgentBindingContract
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -31,7 +31,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskBindingSnapshot, TaskEffectResolution, TaskEvent
+from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent
 from ._input_contract import UserPromptInput, validate_user_input
 from ._snapshot_contract import RunSnapshot
 from .recovery import (
@@ -1121,11 +1121,11 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         dependency_hold_id: "str | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle: ...
     async def start_task(
         self,
-        binding: TaskBindingSnapshot,
+        binding: TaskBindingContract,
         *,
         principal: Principal,
         input: Mapping[str, JsonValue],
@@ -1215,7 +1215,7 @@ class ExecutionService(Protocol):
         binding_digest: str,
         request: ExecutionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> "ExecutionHandle | None": ...
     async def inspect(
         self, execution_id: str, *, principal: Principal
@@ -1245,7 +1245,7 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         timeout_seconds: "float | None" = None,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionResult: ...
     async def retry(
         self, execution_id: str, request: RetryExecutionRequest
@@ -1342,7 +1342,7 @@ class SessionService(Protocol):
         session_id: str,
         request: ResumeSessionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle: ...
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
@@ -1361,7 +1361,7 @@ class EvaluationService(Protocol):
         binding_digest: str,
         request: StartEvaluationRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> EvaluationHandle: ...
     async def inspect(
         self, evaluation_id: str, *, principal: Principal

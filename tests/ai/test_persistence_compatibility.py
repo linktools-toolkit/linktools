@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, CapabilityPin, bind_output, restore_output
+from linktools.ai.agent import AgentBindingContract, AgentCompiler, CapabilityPin, bind_output, restore_output
 from linktools.ai.capability import CapabilityGroup, workspace_capabilities
 from linktools.ai.core import (
     EvaluationStatus,
@@ -46,9 +46,9 @@ def _load_json(name: str) -> object:
     return json.loads((_FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
-def _binding_fixture_value() -> AgentBindingSnapshot:
+def _binding_fixture_value() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("runtime-persistence-v1", tool_retries=10000),
         model_contract={"route_id": "default", "model_identity": "fixture:model"},
         selected=(),
@@ -59,19 +59,19 @@ def _binding_fixture_value() -> AgentBindingSnapshot:
 
 
 def test_agent_binding_v1_fixture_matches_current_contract() -> None:
-    value = _load_json("runtime_agent_binding_snapshot_v1.json")
+    value = _load_json("runtime_agent_binding_contract_v1.json")
     expected = _binding_fixture_value()
     assert value == expected.to_payload()
-    decoded = AgentBindingSnapshot.from_payload(value)
+    decoded = AgentBindingContract.from_payload(value)
     assert decoded == expected
     assert decoded.binding_digest == expected.binding_digest
 
 
 def test_agent_binding_preserves_unknown_fields() -> None:
-    value = cast(dict[str, object], _load_json("runtime_agent_binding_snapshot_v1.json"))
+    value = cast(dict[str, object], _load_json("runtime_agent_binding_contract_v1.json"))
     value["future_metadata"] = {"future": True}
 
-    decoded = AgentBindingSnapshot.from_payload(value)
+    decoded = AgentBindingContract.from_payload(value)
 
     assert decoded == _binding_fixture_value()
     assert decoded.to_payload()["future_metadata"] == {"future": True}
@@ -80,10 +80,10 @@ def test_agent_binding_preserves_unknown_fields() -> None:
 
 
 def test_agent_binding_future_version_is_rejected() -> None:
-    value = cast(dict[str, object], _load_json("runtime_agent_binding_snapshot_v1.json"))
+    value = cast(dict[str, object], _load_json("runtime_agent_binding_contract_v1.json"))
     value["version"] = 2
     with pytest.raises(AIError) as raised:
-        AgentBindingSnapshot.from_payload(value)
+        AgentBindingContract.from_payload(value)
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 def test_output_binding_round_trips_from_durable_contract() -> None:
@@ -290,8 +290,8 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         contribution.id: contribution.contract
         for contribution in candidates
     }
-    assert len(binding.snapshot.selected) == 1
-    pin = binding.snapshot.selected[0]
+    assert len(binding.binding_contract.selected) == 1
+    pin = binding.binding_contract.selected[0]
     assert pin.kind == "tool"
     assert pin.id == "read_file"
     assert dict(pin.contract) == baseline["read_file"]
@@ -300,8 +300,8 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         model_resolver=models,
         candidates=candidates,
         agents={spec.id: spec},
-    ).restore(binding.snapshot)
-    assert restored.snapshot == binding.snapshot
+    ).restore(binding.binding_contract)
+    assert restored.binding_contract == binding.binding_contract
     selected = tuple(candidate.id for candidate in restored.compiled_agent.selected_tools)
     with pytest.raises(AIError) as missing_session:
         workspace_capabilities(workspace, selected)
@@ -311,5 +311,5 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 
-def test_binding_snapshot_has_no_workspace_identity() -> None:
+def test_binding_contract_has_no_workspace_identity() -> None:
     assert "workspace_ref" not in _binding_fixture_value().to_payload()

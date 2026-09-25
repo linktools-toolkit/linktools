@@ -12,7 +12,7 @@ from typing import Protocol, cast
 
 from linktools.core import environ
 
-from ..agent import AgentBindingSnapshot
+from ..agent import AgentBindingContract
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -90,7 +90,7 @@ class _SessionExecutionService(ExecutionService, Protocol):
         session_id: str,
         request: ExecutionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle: ...
 
 
@@ -421,14 +421,14 @@ class DefaultSessionService:
         session_id: str,
         request: ResumeSessionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         return await self._resume(
             agent_id,
             binding_digest,
             session_id,
             request,
-            binding_snapshot=binding_snapshot,
+            binding_contract=binding_contract,
         )
 
     async def _resume(
@@ -438,7 +438,7 @@ class DefaultSessionService:
         session_id: str,
         request: ResumeSessionRequest,
         *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
+        binding_contract: "AgentBindingContract | None" = None,
     ) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(
@@ -477,7 +477,7 @@ class DefaultSessionService:
                 binding_digest,
                 session_id,
                 execution_request,
-                binding_snapshot=binding_snapshot,
+                binding_contract=binding_contract,
             )
 
     async def fork(

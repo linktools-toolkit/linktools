@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -32,9 +32,9 @@ from linktools.ai.spec import AgentSpec
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
+def _binding(agent_id: str = "agent") -> AgentBindingContract:
     spec = AgentSpec(agent_id)
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=spec,
         model_contract={},
         selected=(),

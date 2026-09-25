@@ -10,7 +10,7 @@ from typing import Annotated
 import pytest
 from linktools.ai.agent import (
     AgentBinding,
-    AgentBindingSnapshot,
+    AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
     CapabilityPin,
@@ -83,9 +83,9 @@ class _SchemaTwinB(BaseModel):
         return value
 
 
-def _snapshot() -> AgentBindingSnapshot:
+def _binding_contract() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent"),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
@@ -96,14 +96,14 @@ def _snapshot() -> AgentBindingSnapshot:
 
 
 def test_binding_round_trip_preserves_nonsemantic_wire_extensions() -> None:
-    original = _snapshot()
+    original = _binding_contract()
     payload = original.to_payload()
     agent_spec = dict(payload["agent_spec"])
     agent_spec["future_display_note"] = {"source": "declaration"}
     payload["agent_spec"] = agent_spec
     payload["future_binding_note"] = {"source": "envelope"}
 
-    restored = AgentBindingSnapshot.from_payload(payload)
+    restored = AgentBindingContract.from_payload(payload)
     written = restored.to_payload()
 
     assert written["agent_spec"]["future_display_note"] == {
@@ -115,12 +115,12 @@ def test_binding_round_trip_preserves_nonsemantic_wire_extensions() -> None:
 
 def _execution(
     *,
-    binding: AgentBindingSnapshot | None = None,
+    binding: AgentBindingContract | None = None,
     planning: bool = False,
     thinking: bool = False,
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
-    snapshot = _snapshot() if binding is None else binding
+    binding_contract = _binding_contract() if binding is None else binding
     return ExecutionRecord(
         execution_id="execution",
         session_id=None,
@@ -140,7 +140,7 @@ def _execution(
         mode="run",
         planning=planning,
         thinking=thinking,
-        binding=snapshot,
+        binding=binding_contract,
         principal_id="principal",
         principal_kind="service",
         stored_user_input=StoredUserInput(
@@ -291,11 +291,11 @@ def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
             size=1,
         ).contract,
     )
-    snapshot = replace(_snapshot(), selected=(pin,))
+    binding_contract = replace(_binding_contract(), selected=(pin,))
 
     assert tuple(
         runtime_codec.iter_runtime_object_refs(
-            runtime_codec._encode_persisted_domain(_execution(binding=snapshot)),
+            runtime_codec._encode_persisted_domain(_execution(binding=binding_contract)),
             default_domain=RuntimeDomain.EXECUTION,
         )
     ) == ()
@@ -384,7 +384,7 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     assert first.compiled_agent.spec.id == second.compiled_agent.spec.id
     assert first.compiled_agent.spec.revision == second.compiled_agent.spec.revision
     assert first.binding_digest == second.binding_digest
-    assert first.snapshot != second.snapshot
+    assert first.binding_contract != second.binding_contract
     assert first.compiled_agent.model is not second.compiled_agent.model
 
     catalog = AgentCatalog({"agent": first.compiled_agent})
@@ -393,10 +393,10 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     assert catalog.binding(first.binding_digest) is second
 
 
-def test_current_binding_snapshot_has_minimal_wire_shape() -> None:
-    snapshot = _snapshot()
+def test_current_binding_contract_has_minimal_wire_shape() -> None:
+    binding_contract = _binding_contract()
 
-    assert set(snapshot.to_payload()) == {
+    assert set(binding_contract.to_payload()) == {
         "version",
         "agent_spec",
         "model_contract",
@@ -405,7 +405,7 @@ def test_current_binding_snapshot_has_minimal_wire_shape() -> None:
         "output_mode",
         "output_schema",
     }
-    assert len(snapshot.binding_digest) == 64
+    assert len(binding_contract.binding_digest) == 64
 
 
 def test_custom_output_materializes_from_durable_json_schema() -> None:
@@ -476,7 +476,7 @@ def test_restore_rejects_tool_contract_drift_without_revision_bump() -> None:
     original = first_compiler.bind(first_compiler.compile(spec))
 
     with pytest.raises(AIError) as raised:
-        second_compiler.restore(original.snapshot)
+        second_compiler.restore(original.binding_contract)
 
     assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
@@ -490,7 +490,7 @@ def test_catalog_reuses_binding_for_unchanged_compiled_semantics() -> None:
         compiler.compile(AgentSpec("agent", description="second label"))
     )
 
-    assert first.snapshot == second.snapshot
+    assert first.binding_contract == second.binding_contract
     assert first.binding_digest == second.binding_digest
 
     catalog = AgentCatalog({"agent": first.compiled_agent})
@@ -505,7 +505,7 @@ def test_same_json_schema_produces_same_binding_identity() -> None:
     second = compiler.bind(compiled_agent, output=_SchemaTwinB)
 
     assert first.binding_digest == second.binding_digest
-    assert first.snapshot == second.snapshot
+    assert first.binding_contract == second.binding_contract
     assert first.output_binding.schema_definition == second.output_binding.schema_definition
 
     catalog = AgentCatalog({"agent": compiled_agent})
@@ -514,20 +514,20 @@ def test_same_json_schema_produces_same_binding_identity() -> None:
     assert catalog.binding(first.binding_digest) is first
 
 
-def test_restored_binding_uses_only_snapshot_semantics() -> None:
+def test_restored_binding_uses_only_contract_semantics() -> None:
     compiler = _compiler()
     compiled_agent = compiler.compile(AgentSpec("agent"))
     current = compiler.bind(compiled_agent, output=_SchemaTwinA)
 
-    restored = compiler.restore(current.snapshot)
+    restored = compiler.restore(current.binding_contract)
 
     assert restored.binding_digest == current.binding_digest
-    assert restored.snapshot == current.snapshot
+    assert restored.binding_contract == current.binding_contract
     assert restored.output_binding.schema_definition == current.output_binding.schema_definition
     assert restored.output_type is not _SchemaTwinA
 
 
-def test_binding_rejects_selected_compiled_agent_snapshot_mismatch() -> None:
+def test_binding_rejects_selected_compiled_agent_contract_mismatch() -> None:
     compiler = _compiler()
     binding = compiler.bind(compiler.compile(AgentSpec("agent")))
     mismatched_compiled_agent = replace(
@@ -545,7 +545,7 @@ def test_binding_rejects_selected_compiled_agent_snapshot_mismatch() -> None:
         AgentBinding(
             mismatched_compiled_agent,
             binding.output_binding,
-            binding.snapshot,
+            binding.binding_contract,
         )
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
@@ -568,11 +568,11 @@ def test_binding_preserves_selected_pin_version_error() -> None:
         AgentBinding(
             invalid_compiled_agent,
             binding.output_binding,
-            binding.snapshot,
+            binding.binding_contract,
         )
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_execution_binding_digest_is_derived_from_snapshot() -> None:
+def test_execution_binding_digest_is_derived_from_binding_contract() -> None:
     value = _execution(planning=True, thinking=True)
     assert value.binding_digest == value.binding.binding_digest

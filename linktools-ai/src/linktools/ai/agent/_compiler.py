@@ -23,7 +23,7 @@ from ..spec import (
     mcp_server_selector,
     parse_mcp_tool_selector,
 )
-from ._binding import AgentBinding, AgentBindingSnapshot, CapabilityPin
+from ._binding import AgentBinding, AgentBindingContract, CapabilityPin
 from ._compiled import CompiledAgent
 from ._output import bind_output, restore_output
 
@@ -153,7 +153,7 @@ class AgentCompiler:
         subagents: Sequence[SubagentRef],
     ) -> AgentBinding:
         output_binding = bind_output(output)
-        snapshot = AgentBindingSnapshot(
+        binding_contract = AgentBindingContract(
             agent_spec=AgentSpecCodec().from_payload(
                 AgentSpecCodec().to_payload(compiled_agent.spec)
             ),
@@ -166,36 +166,39 @@ class AgentCompiler:
         return AgentBinding(
             compiled_agent,
             output_binding,
-            snapshot,
+            binding_contract,
         )
 
-    def restore(self, snapshot: AgentBindingSnapshot) -> AgentBinding:
+    def restore(self, binding_contract: AgentBindingContract) -> AgentBinding:
         """Restore exact historical semantics without expanding current selectors."""
-        if not isinstance(snapshot, AgentBindingSnapshot):
-            raise TypeError("snapshot must be AgentBindingSnapshot")
+        if not isinstance(binding_contract, AgentBindingContract):
+            raise TypeError("binding_contract must be AgentBindingContract")
         try:
             model = self._models.restore(
-                snapshot.model_contract,
-                route_id=snapshot.agent_spec.model_route,
+                binding_contract.model_contract,
+                route_id=binding_contract.agent_spec.model_route,
             )
-            selected = self._restore_selected(snapshot.selected)
+            selected = self._restore_selected(binding_contract.selected)
             ordinary_policy, mcp_policy = self._restore_policies(
-                snapshot.agent_spec,
+                binding_contract.agent_spec,
                 selected["tool"],
                 selected["mcp"],
             )
             compiled_agent = self._build_compiled_agent(
-                snapshot.agent_spec,
+                binding_contract.agent_spec,
                 model=model,
                 selected_tools=selected["tool"],
                 selected_skills=selected["skill"],
                 selected_mcp=selected["mcp"],
                 selected_capabilities=selected["capability"],
-                selected_subagents=snapshot.subagent_ids,
+                selected_subagents=binding_contract.subagent_ids,
                 ordinary_policy=ordinary_policy,
                 mcp_policy=mcp_policy,
             )
-            output_binding = restore_output(snapshot.output_mode, snapshot.output_schema)
+            output_binding = restore_output(
+                binding_contract.output_mode,
+                binding_contract.output_schema,
+            )
         except AIError as error:
             if error.code in {
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
@@ -207,7 +210,7 @@ class AgentCompiler:
         return AgentBinding(
             compiled_agent,
             output_binding,
-            snapshot,
+            binding_contract,
         )
 
     def _restore_selected(

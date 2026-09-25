@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, bind_output
+from linktools.ai.agent import AgentBindingContract, AgentCompiler, bind_output
 from linktools.ai.capability import CapabilityContribution, CapabilityGroup
 from linktools.ai.core import (
     ExecutionStatus,
@@ -85,31 +85,31 @@ def test_custom_output_restore_uses_persisted_schema() -> None:
     compiler = _compiler()
     definition = compiler.compile(_spec())
     binding = compiler.bind(definition, output=_RegisteredOutput)
-    snapshot = binding.snapshot
-    assert snapshot.output_schema == binding.output_binding.schema_definition
+    binding_contract = binding.binding_contract
+    assert binding_contract.output_schema == binding.output_binding.schema_definition
 
-    restored = _compiler().restore(snapshot)
-    assert restored.snapshot == snapshot
+    restored = _compiler().restore(binding_contract)
+    assert restored.binding_contract == binding_contract
     assert restored.output_type is not _RegisteredOutput
 
 
 def test_custom_output_restore_requires_complete_persisted_schema() -> None:
     compiler = _compiler()
     binding = compiler.bind(compiler.compile(_spec()), output=_RegisteredOutput)
-    snapshot = binding.snapshot
+    binding_contract = binding.binding_contract
     fresh = _compiler()
 
-    missing_payload = snapshot.to_payload()
+    missing_payload = binding_contract.to_payload()
     missing_payload.pop("output_schema")
     with pytest.raises(AIError) as missing_error:
-        AgentBindingSnapshot.from_payload(missing_payload)
+        AgentBindingContract.from_payload(missing_payload)
     assert missing_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-    changed_schema = dict(snapshot.output_schema)
+    changed_schema = dict(binding_contract.output_schema)
     changed_schema["title"] = "PersistedOutput"
-    changed = replace(snapshot, output_schema=changed_schema)
+    changed = replace(binding_contract, output_schema=changed_schema)
     restored = fresh.restore(changed)
-    assert restored.snapshot == changed
+    assert restored.binding_contract == changed
     assert restored.output_binding.schema_definition == changed_schema
 
 def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
@@ -128,19 +128,19 @@ async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -
     binding = compiler.bind(compiler.compile(_spec()))
 
     assert (
-        _compiler(candidates=candidates).restore(binding.snapshot).snapshot
-        == binding.snapshot
+        _compiler(candidates=candidates).restore(binding.binding_contract).binding_contract
+        == binding.binding_contract
     )
 
     with pytest.raises(AIError) as missing:
-        _compiler().restore(binding.snapshot)
+        _compiler().restore(binding.binding_contract)
     assert missing.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
     changed_group = CapabilityGroup[None]("changed")
     changed_group.capability(_RegisteredCapability(), revision=4)
     changed_candidates = (await changed_group.snapshot()).contributions
     with pytest.raises(AIError) as changed:
-        _compiler(candidates=changed_candidates).restore(binding.snapshot)
+        _compiler(candidates=changed_candidates).restore(binding.binding_contract)
     assert changed.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
 

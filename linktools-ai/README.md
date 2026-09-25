@@ -11,7 +11,7 @@ namespace
         -> Runtime.open(...)
         -> snapshotted capability/declaration candidates
         -> AgentCompiler
-        -> AgentDefinition
+        -> CompiledAgent
         -> Runtime.agent(id)
         -> per-execution AgentBinding
         -> Agent / Session / Execution / Task / Evaluation / Recovery
@@ -375,7 +375,7 @@ second = await session.run(
 history = await session.history()
 ```
 
-A Session owns conversation continuity and the stable Agent id. Every new execution binds the current snapshotted Agent definition to that execution's output contract. Retry, fork, durable recovery, evaluation, and Task execution use the exact binding snapshot/digest required by their contract rather than re-running current selector discovery.
+A Session owns conversation continuity and the stable Agent id. Every new execution binds the current compiled Agent to that execution's output contract. Retry, fork, durable recovery, evaluation, and Task execution use the exact binding contract/digest required by their contract rather than re-running current selector discovery.
 
 User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
 

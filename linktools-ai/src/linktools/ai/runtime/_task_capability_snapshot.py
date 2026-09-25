@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import cast
 
-from ..agent import AgentBindingSnapshot, AgentCompiler
+from ..agent import AgentBindingContract, AgentCompiler
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
@@ -21,8 +21,8 @@ _VERSION = 1
 
 @dataclass(frozen=True, slots=True)
 class TaskCapabilitySnapshot:
-    roots: Mapping[str, AgentBindingSnapshot]
-    bindings: Mapping[str, AgentBindingSnapshot]
+    roots: Mapping[str, AgentBindingContract]
+    bindings: Mapping[str, AgentBindingContract]
 
     def __post_init__(self) -> None:
         roots = dict(sorted(self.roots.items()))
@@ -31,7 +31,7 @@ class TaskCapabilitySnapshot:
             any(
                 not isinstance(key, str)
                 or not key
-                or not isinstance(value, AgentBindingSnapshot)
+                or not isinstance(value, AgentBindingContract)
                 or value.agent_spec.id != key
                 for key, value in roots.items()
             )
@@ -39,7 +39,7 @@ class TaskCapabilitySnapshot:
                 not isinstance(key, str)
                 or len(key) != 64
                 or any(character not in "0123456789abcdef" for character in key)
-                or not isinstance(value, AgentBindingSnapshot)
+                or not isinstance(value, AgentBindingContract)
                 for key, value in bindings.items()
             )
         ):
@@ -91,22 +91,22 @@ class TaskCapabilitySnapshotStore:
             )
 
         node_bindings = tuple(
-            snapshot
+            binding_contract
             for node in graph.nodes
-            if (snapshot := self._node_binding(node)) is not None
+            if (binding_contract := self._node_binding(node)) is not None
         )
         unique_bindings = {
-            snapshot.binding_digest: snapshot
-            for snapshot in node_bindings
+            binding_contract.binding_digest: binding_contract
+            for binding_contract in node_bindings
         }
-        roots: dict[str, AgentBindingSnapshot] = {}
+        roots: dict[str, AgentBindingContract] = {}
         if any(node.expander is not None for node in graph.nodes):
             for agent_id in self._binding_resolver.root_ids:
                 roots[agent_id] = await self._binding_resolver.resolve_root(agent_id)
-        bindings: dict[str, AgentBindingSnapshot] = {}
-        for binding_digest, snapshot in sorted(unique_bindings.items()):
-            bindings[binding_digest] = await self._binding_resolver.resolve_snapshot(
-                snapshot
+        bindings: dict[str, AgentBindingContract] = {}
+        for binding_digest, binding_contract in sorted(unique_bindings.items()):
+            bindings[binding_digest] = await self._binding_resolver.resolve_contract(
+                binding_contract
             )
 
         manifest: dict[str, JsonValue] = {
@@ -190,13 +190,13 @@ class TaskCapabilitySnapshotStore:
     def _node_binding(
         self,
         node: TaskNode,
-    ) -> AgentBindingSnapshot | None:
+    ) -> AgentBindingContract | None:
         if node.input.get("task_id") != self._agent_task_id:
             return None
-        payload = node.input.get("binding")
+        payload = node.input.get("binding_contract")
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return AgentBindingSnapshot.from_payload(payload)
+        return AgentBindingContract.from_payload(payload)
 
     async def _read(
         self,
@@ -240,24 +240,24 @@ class TaskCapabilitySnapshotStore:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         roots = {
-            str(agent_id): AgentBindingSnapshot.from_payload(value)
+            str(agent_id): AgentBindingContract.from_payload(value)
             for agent_id, value in cast(
                 "Mapping[object, object]",
                 manifest["roots"],
             ).items()
         }
         bindings = {
-            str(binding_digest): AgentBindingSnapshot.from_payload(value)
+            str(binding_digest): AgentBindingContract.from_payload(value)
             for binding_digest, value in cast(
                 "Mapping[object, object]",
                 manifest["bindings"],
             ).items()
         }
-        for agent_id, snapshot in roots.items():
-            if snapshot.agent_spec.id != agent_id:
+        for agent_id, binding_contract in roots.items():
+            if binding_contract.agent_spec.id != agent_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._compiler.restore(snapshot)
-        for source_digest, snapshot in bindings.items():
+            self._compiler.restore(binding_contract)
+        for source_digest, binding_contract in bindings.items():
             if (
                 len(source_digest) != 64
                 or any(
@@ -266,7 +266,7 @@ class TaskCapabilitySnapshotStore:
                 )
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._compiler.restore(snapshot)
+            self._compiler.restore(binding_contract)
         return TaskCapabilitySnapshot(roots, bindings)
 
     def _key(self, admission: TaskGraphAdmission) -> str:

@@ -23,7 +23,7 @@ from pydantic_ai.tools import (
     DeferredToolRequests,
 )
 
-from ..agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, SubagentRef
+from ..agent import AgentBinding, AgentBindingContract, AgentCatalog, SubagentRef
 from ..capability import AgentContext, SubagentDelegate
 from ..spec import RepositoryInstructionResolver, RepositoryInstructions
 from ..workspace import (
@@ -153,7 +153,7 @@ class _SubagentDispatcher(Protocol):
         memory_scope: "str | None",
         principal: Principal,
         refs: "tuple[SubagentRef, ...]",
-        binding: AgentBindingSnapshot,
+        binding: AgentBindingContract,
         mode: ExecutionMode,
         require_frozen_bindings: bool = False,
     ) -> SubagentDelegate: ...
@@ -245,7 +245,7 @@ class LocalExecutionBackend:
         executor: AgentExecutor,
         catalog: AgentCatalog,
         *,
-        restore_binding: "Callable[[AgentBindingSnapshot], AgentBinding] | None" = None,
+        restore_binding: "Callable[[AgentBindingContract], AgentBinding] | None" = None,
         workspace: "Workspace | None",
         limits: PromptLimits,
         execution_cwd: "str | None",
@@ -2836,7 +2836,7 @@ class LocalExecutionBackend:
                     return
                 await self._append_event(current, emission.kind, emission.payload)
 
-            subagent_refs = binding.snapshot.subagents
+            subagent_refs = binding.binding_contract.subagents
             subagent_available = (
                 current.parent_execution_id is None
                 and self._subagent_dispatcher is not None
@@ -2924,7 +2924,7 @@ class LocalExecutionBackend:
                                 memory_scope=current.memory_scope,
                                 principal=request.principal,
                                 refs=subagent_refs,
-                                binding=binding.snapshot,
+                                binding=binding.binding_contract,
                                 mode=current.mode,
                                 require_frozen_bindings=self._execution_objects_durable,
                             )

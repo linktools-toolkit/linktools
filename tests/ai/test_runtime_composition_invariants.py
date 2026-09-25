@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output, restore_output
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import CapabilityGroup
@@ -82,9 +82,9 @@ class _UncertainExecution:
         return SimpleNamespace(status=ExecutionStatus.STARTED)
 
 
-def _binding() -> AgentBindingSnapshot:
+def _binding() -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec("agent", model_route="model"),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
@@ -94,7 +94,7 @@ def _binding() -> AgentBindingSnapshot:
     )
 
 
-def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecord:
+def _execution(*, binding: AgentBindingContract | None = None) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     selected = binding or _binding()
     return ExecutionRecord(

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -93,9 +93,9 @@ class _CandidateRepository:
         return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
 
 
-def _binding(agent_id: str) -> AgentBindingSnapshot:
+def _binding(agent_id: str) -> AgentBindingContract:
     output = bind_output()
-    return AgentBindingSnapshot(
+    return AgentBindingContract(
         agent_spec=AgentSpec(agent_id, model_route="model"),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),

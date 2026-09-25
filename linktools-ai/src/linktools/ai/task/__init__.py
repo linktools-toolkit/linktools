@@ -34,7 +34,7 @@ from ._graph import (
     ready_nodes,
 )
 from ._handler import (
-    TaskBindingSnapshot,
+    TaskBindingContract,
     TaskArtifactPublisher,
     TaskDependency,
     TaskDependencyState,
@@ -64,7 +64,7 @@ __all__ = [
     "DefaultTaskGraphService",
     "LocalTaskGraphLauncher",
     "RecoverGraphRequest",
-    "TaskBindingSnapshot",
+    "TaskBindingContract",
     "TaskDependency",
     "TaskDependencyState",
     "TaskArtifactPublisher",

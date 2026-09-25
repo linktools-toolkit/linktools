@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.agent import (
-    AgentBindingSnapshot,
+    AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
     CapabilityPin,
@@ -42,7 +42,7 @@ def _load_json(name: str) -> dict[str, object]:
 
 def _compiler(agents: dict[str, AgentSpec]) -> AgentCompiler:
     return AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").binding_contract(),
         candidates=(),
         agents=agents,
     )
@@ -73,9 +73,9 @@ def test_v1_skill_wire_and_capability_pin_round_trip() -> None:
     }
 
 
-def test_v1_binding_restores_from_current_snapshot() -> None:
+def test_v1_binding_restores_from_current_contract() -> None:
     payload = _load_json("agent_binding_subagent_v1_golden.json")
-    snapshot = AgentBindingSnapshot.from_payload(payload)
+    binding_contract = AgentBindingContract.from_payload(payload)
     compiler = _compiler(
         {
             "parent": AgentSpec("parent", allow_subagents=("child",)),
@@ -83,16 +83,16 @@ def test_v1_binding_restores_from_current_snapshot() -> None:
         }
     )
 
-    restored = compiler.restore(snapshot)
+    restored = compiler.restore(binding_contract)
 
-    assert restored.binding_digest == snapshot.binding_digest
-    assert restored.snapshot.subagent_ids == ("child",)
-    assert restored.snapshot.subagents[0].to_payload() == {
+    assert restored.binding_digest == binding_contract.binding_digest
+    assert restored.binding_contract.subagent_ids == ("child",)
+    assert restored.binding_contract.subagents[0].to_payload() == {
         "kind": "agent",
         "id": "child",
         "revision": 1,
     }
-    assert restored.snapshot.to_payload() == payload
+    assert restored.binding_contract.to_payload() == payload
 
 
 
@@ -109,7 +109,7 @@ def test_durable_subagent_binding_does_not_fall_back_to_current_catalog() -> Non
             for agent_id, spec in agents.items()
         }
     )
-    snapshot = compiler.bind(catalog.root_agent("parent")).snapshot
+    binding_contract = compiler.bind(catalog.root_agent("parent")).binding_contract
     dispatcher = SubagentDispatcher(
         catalog,
         compiler,
@@ -122,8 +122,8 @@ def test_durable_subagent_binding_does_not_fall_back_to_current_catalog() -> Non
             root_execution_id="parent-execution",
             memory_scope=None,
             principal=Principal("principal", "tenant"),
-            refs=snapshot.subagents,
-            binding=snapshot,
+            refs=binding_contract.subagents,
+            binding=binding_contract,
             mode="run",
             require_frozen_bindings=True,
         )
@@ -135,19 +135,19 @@ def test_durable_subagent_binding_does_not_fall_back_to_current_catalog() -> Non
             root_execution_id="parent-execution",
             memory_scope=None,
             principal=Principal("principal", "tenant"),
-            refs=snapshot.subagents,
-            binding=snapshot,
+            refs=binding_contract.subagents,
+            binding=binding_contract,
             mode="run",
             require_frozen_bindings=False,
         )
     )
 
 
-def test_future_binding_snapshot_version_is_rejected() -> None:
+def test_future_binding_contract_version_is_rejected() -> None:
     payload = _load_json("agent_binding_subagent_v1_golden.json")
     payload["version"] = 2
     with pytest.raises(AIError) as raised:
-        AgentBindingSnapshot.from_payload(payload)
+        AgentBindingContract.from_payload(payload)
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 def test_skill_and_agent_use_v1_declaration_contracts() -> None:
