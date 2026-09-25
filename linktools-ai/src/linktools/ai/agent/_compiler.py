@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
-from typing import Literal, cast
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -226,7 +226,7 @@ class AgentCompiler:
         for pin in pins:
             if pin.kind == "skill":
                 value = SkillDefinition.from_contract(
-                    cast("Mapping[str, object]", pin.contract)
+                    pin.contract
                 )
                 candidate = CapabilityContribution.from_declaration(value)
                 if candidate.id != pin.id or candidate.revision != pin.revision:
@@ -451,7 +451,7 @@ def _selected_candidates(
 
 def _pin(candidate: CapabilityContribution[object]) -> CapabilityPin:
     return CapabilityPin(
-        cast(Literal["tool", "skill", "mcp", "runtime_capability"], candidate.kind),
+        candidate.kind,
         candidate.id,
         candidate.contract,
     )
