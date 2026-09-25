@@ -244,6 +244,7 @@ async def _load_mcp(
             value = codec.decode_author(by_key[key], format="json")
             if value.id != key.id:
                 raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+        _bind_mcp_declaration(value, context)
         result.append(value)
     return result
 
