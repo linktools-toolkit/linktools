@@ -359,7 +359,7 @@ class CapabilityGroup(Generic[AppT]):
                 loaded = await loader.load(context)
                 for value in loaded:
                     if not isinstance(loader, BuiltinDeclarationLoader):
-                        _validate_custom_skill_source(value, context.group_id)
+                        _validate_custom_skill_source(value, context)
                     if isinstance(
                         value,
                         (AgentSpec, SkillDefinition, MCPServerSpec),
@@ -411,7 +411,10 @@ class CapabilityGroup(Generic[AppT]):
         return capture
 
 
-def _validate_custom_skill_source(value: object, group_id: str) -> None:
+def _validate_custom_skill_source(
+    value: object,
+    context: CapabilityLoadContext,
+) -> None:
     if isinstance(value, CapabilityContribution):
         if value.kind != "skill" or not isinstance(value.value, SkillDefinition):
             return
@@ -421,9 +424,20 @@ def _validate_custom_skill_source(value: object, group_id: str) -> None:
     else:
         return
     source_ref = definition.source_ref
-    if source_ref is not None and (
-        source_ref.asset_source_id != group_id or source_ref.resource_versions
-    ):
+    if source_ref is None:
+        return
+    if source_ref.asset_source_id != context.group_id:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    versions = tuple(item.asset for item in source_ref.resource_versions)
+    if not versions:
+        return
+    try:
+        captured = context.bind_versions(tuple(ref.key for ref in versions))
+    except AIError as error:
+        if error.code is ErrorCode.SNAPSHOT_CONFLICT:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        raise
+    if versions != captured:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
