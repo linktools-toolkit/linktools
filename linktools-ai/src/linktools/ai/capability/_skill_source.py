@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Literal, Protocol, cast, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from ..asset import AssetStoreReader, AssetVersionRef
 from ..core import (
@@ -51,17 +51,6 @@ class SkillSourceRef:
         ordered = tuple(sorted(versions, key=lambda item: item.path))
         if ordered != versions or len({item.path for item in versions}) != len(versions):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    def with_asset_versions(
-        self,
-        resource_versions: Sequence[SkillResourceVersion],
-    ) -> "SkillSourceRef":
-        return SkillSourceRef(
-            self.source_id,
-            self.root,
-            tuple(sorted(resource_versions, key=lambda item: item.path)),
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class SkillLocation:
     kind: Literal["local", "virtual"]
@@ -116,7 +105,7 @@ class LocalSkillResourceSource:
     def _root_ref(self, source: SkillSourceRef) -> str:
         if not isinstance(source, SkillSourceRef) or source.source_id != self._id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return _normalize_relative_path(source.root, field_name="skill root")
+        return source.root
 
     async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
         logical_root = self._root_ref(source)
@@ -126,20 +115,6 @@ class LocalSkillResourceSource:
         logical_root = self._root_ref(source)
         relative = _require_resource_path(path)
         return await asyncio.to_thread(self._read_sync, logical_root, relative)
-
-    async def resource_mode(self, source: SkillSourceRef, path: str) -> int:
-        logical_root = self._root_ref(source)
-        relative = _require_resource_path(path)
-        package = await asyncio.to_thread(self._package_path, logical_root)
-        resolved = await asyncio.to_thread(
-            _resolve_contained_file,
-            package,
-            package / relative,
-        )
-        try:
-            return (await asyncio.to_thread(resolved.stat)).st_mode & 0o111
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     def _inspect_sync(self, root: str) -> SkillResourceView:
         package = self._package_path(root)
@@ -218,14 +193,6 @@ class AssetSkillResourceSource:
             tuple(item.path for item in binding.resource_versions),
         )
 
-    async def resource_mode(self, source: SkillSourceRef, path: str) -> int:
-        binding = self._binding(source)
-        relative = _require_resource_path(path)
-        for item in binding.resource_versions:
-            if item.path == relative:
-                return item.executable_bits
-        raise AIError(ErrorCode.ASSET_NOT_FOUND)
-
     async def read(self, source: SkillSourceRef, path: str) -> bytes:
         binding = self._binding(source)
         relative = _require_resource_path(path)
@@ -265,22 +232,6 @@ class SkillSourceRegistry:
                 safe_details={"source_id": source_id},
             ) from error
 
-    def with_overrides(
-        self,
-        sources: Sequence[SkillResourceSource],
-    ) -> "SkillSourceRegistry":
-        values = dict(self._sources)
-        seen: set[str] = set()
-        for source in sources:
-            if not isinstance(source, SkillResourceSource):
-                raise TypeError("sources must implement SkillResourceSource")
-            if source.id in seen:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            seen.add(source.id)
-            values[source.id] = source
-        return SkillSourceRegistry(tuple(values.values()))
-
-
 def require_skill_resource_path(path: str) -> str:
     return _require_resource_path(path)
 
@@ -293,25 +244,6 @@ def _require_resource_path(path: str) -> str:
             ErrorCode.REQUEST_FIELD_INVALID,
             "skill resource path is invalid",
         ) from error
-
-
-def _normalize_relative_path(path: str, *, field_name: str) -> str:
-    if not isinstance(path, str) or not path or "\x00" in path or "\\" in path:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{field_name} is invalid")
-    if path.startswith("virtual:") or path.startswith("file:"):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{field_name} is invalid")
-    pure = PurePosixPath(path)
-    if pure.is_absolute() or path.startswith("./") or path.endswith("/") or "//" in path:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{field_name} is invalid")
-    parts = pure.parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{field_name} is invalid")
-    if len(parts[0]) == 2 and parts[0][1] == ":":
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{field_name} is invalid")
-    normalized = "/".join(parts)
-    if normalized != path:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{field_name} is invalid")
-    return normalized
 
 
 def _skill_directory_is_discoverable(package: Path, base: Path, name: str) -> bool:
