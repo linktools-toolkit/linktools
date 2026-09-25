@@ -32,18 +32,20 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import Metrics
-from ..spec import AgentSpec, MCPServerSpec
+from ..spec import (
+    AgentSpec,
+    MCPServerSpec,
+    RepositoryInstructions,
+)
 from ..storage import ObjectStore, PayloadPolicy
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
-    AssetRuleCatalog,
     AssetRuleInstructionResolver,
     LocalRepositoryInstructionResolver,
     LocalSandbox,
     RepositoryInstructionResolver,
     Sandbox,
     Workspace,
-    WorkspacePolicy,
 )
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
@@ -177,7 +179,7 @@ async def compose_runtime_components(
             for group in groups
             for document in group.instructions.documents
         )
-        rules = AssetRuleCatalog(instruction_documents)
+        rules = RepositoryInstructions(instruction_documents)
         task_handlers = tuple(
             cast("TaskNodeHandler[object]", candidate.value)
             for candidate in candidates
@@ -227,14 +229,11 @@ async def compose_runtime_components(
             tenant_id=effective_tenant_id,
         )
         initialized = True
-        instruction_policy = (
-            WorkspacePolicy() if workspace is None else workspace.policy
-        )
         for group in groups:
             await group.verify_source_revision()
         if workspace is None:
             instruction_resolver: RepositoryInstructionResolver | None = (
-                AssetRuleInstructionResolver(rules, instruction_policy)
+                AssetRuleInstructionResolver(rules)
                 if rules.documents
                 else None
             )
@@ -243,7 +242,7 @@ async def compose_runtime_components(
         else:
             instruction_resolver = LocalRepositoryInstructionResolver(
                 workspace.root,
-                instruction_policy,
+                workspace.policy,
                 rules,
             )
             workspace_access = WorkspaceAccess.for_workspace(
