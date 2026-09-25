@@ -177,7 +177,6 @@ class SandboxResource:
         return cls(resource_id, source, local)
 
 
-
 @dataclass(frozen=True, slots=True)
 class ReadOnlySandboxPolicy:
     """Root-relative read rules shared by supported sandbox backends."""
