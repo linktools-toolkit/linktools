@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Resolve execution-owned Agent binding dependencies to immutable Asset versions."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import cast
 
@@ -12,12 +12,6 @@ from ..agent import (
     AgentCatalog,
     AgentCompiler,
     CapabilityPin,
-)
-from ..asset import AssetKey, AssetStoreReader, AssetVersionRef
-from ..capability import (
-    mcp_resource_path,
-    validate_resource_path,
-    validate_resource_tree,
 )
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec
@@ -34,7 +28,6 @@ class _RuntimeBindingResolver:
         compiler: AgentCompiler,
         *,
         sandbox: Sandbox | None = None,
-        mcp_assets: "Mapping[str, tuple[str, AssetStoreReader]] | None" = None,
     ) -> None:
         if not isinstance(catalog, AgentCatalog):
             raise TypeError("catalog must be AgentCatalog")
@@ -43,7 +36,6 @@ class _RuntimeBindingResolver:
         self._catalog = catalog
         self._compiler = compiler
         self._sandbox = sandbox
-        self._mcp_assets = dict(mcp_assets or {})
 
     @property
     def root_ids(self) -> tuple[str, ...]:
@@ -94,15 +86,13 @@ class _RuntimeBindingResolver:
     ) -> AgentBindingSnapshot:
         execution_policy: "Mapping[str, JsonValue] | None" = None
         selected: list[CapabilityPin] = []
+        codec = MCPServerSpecCodec()
         for pin in snapshot.selected:
             if pin.kind != "mcp":
                 selected.append(pin)
                 continue
-            codec = MCPServerSpecCodec()
             if execution_policy is None:
-                execution_policy = _mcp_execution_policy(
-                    self._sandbox,
-                )
+                execution_policy = _mcp_execution_policy(self._sandbox)
             server, resource_versions = codec.from_execution_payload(
                 cast("Mapping[str, object]", pin.contract)
             )
@@ -110,28 +100,21 @@ class _RuntimeBindingResolver:
             bound_policy = pin.contract.get("execution_policy")
             if bound_policy is not None and dict(bound_policy) != current_policy:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            if resource_versions is not None:
-                if bound_policy is None:
+
+            resource_source_id = pin.contract.get("resource_source_id")
+            if server.resource_root is None:
+                if resource_versions is not None or resource_source_id is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                selected.append(pin)
-                continue
-            resource_source_id = None
-            if server.resource_root is not None:
-                asset_source = self._mcp_assets.get(server.id)
-                if asset_source is None:
-                    raise AIError(
-                        ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                        safe_details={
-                            "kind": "mcp_resource",
-                            "server_id": server.id,
-                        },
-                    )
-                resource_source_id, store = asset_source
-                resource_versions = await _resolve_mcp_resource_versions(
-                    store,
-                    server.resource_root,
-                    server.args,
-                )
+                source_id = None
+            else:
+                if (
+                    resource_versions is None
+                    or not isinstance(resource_source_id, str)
+                    or not resource_source_id
+                ):
+                    raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+                source_id = resource_source_id
+
             selected.append(
                 CapabilityPin(
                     "mcp",
@@ -139,8 +122,8 @@ class _RuntimeBindingResolver:
                     codec.to_execution_payload(
                         server,
                         resource_versions,
-                        resource_source_id=resource_source_id,
-                        execution_policy=execution_policy,
+                        resource_source_id=source_id,
+                        execution_policy=current_policy,
                     ),
                 )
             )
@@ -149,30 +132,3 @@ class _RuntimeBindingResolver:
 
 __all__ = ["_RuntimeBindingResolver"]
 
-
-async def _resolve_mcp_resource_versions(
-    store: AssetStoreReader,
-    root: AssetKey,
-    args: Sequence[str],
-) -> tuple[AssetVersionRef, ...]:
-    infos = await store.metadata_snapshot()
-    selected_infos = tuple(
-        (info, relative)
-        for info in infos
-        if (relative := mcp_resource_path(info.key, root)) is not None
-    )
-    selected = tuple(info.key for info, _relative in selected_infos)
-    available = {relative for _info, relative in selected_infos}
-    validate_resource_tree(available)
-    for argument in args:
-        if not argument.startswith("resource:"):
-            continue
-        relative = argument[len("resource:") :]
-        validate_resource_path(relative)
-        if relative not in available:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    versions = await store.resolve_versions(selected)
-    for (info, _relative), version in zip(selected_infos, versions, strict=True):
-        if not version.matches_info(info):
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-    return tuple(versions)
