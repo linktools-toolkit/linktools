@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -93,7 +93,7 @@ class CapabilityPin:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return cls(
-            cast(Literal["tool", "skill", "mcp", "runtime_capability"], kind),
+            kind,
             identity,
             _normalize_mapping(contract),
         )
@@ -272,7 +272,7 @@ class AgentBindingContract:
                 model_contract=_normalize_mapping(value["model_contract"]),
                 selected=tuple(CapabilityPin.from_payload(item) for item in selected),
                 subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
-                output_mode=cast(OutputMode, mode),
+                output_mode=mode,
                 output_schema=_normalize_mapping(value["output_schema"]),
                 subagent_bindings=subagent_bindings,
                 _wire_extensions=wire_extensions,
@@ -333,7 +333,7 @@ def _compiled_agent_selected_pins(
     )
     return tuple(
         CapabilityPin(
-            cast(Literal["tool", "skill", "mcp", "runtime_capability"], candidate.kind),
+            candidate.kind,
             candidate.id,
             candidate.contract,
         )
@@ -356,7 +356,7 @@ def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        return dict(ImmutableJsonMapping(cast("Mapping[str, JsonValue]", value)))
+        return dict(ImmutableJsonMapping(value))
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
