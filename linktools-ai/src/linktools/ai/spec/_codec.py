@@ -5,7 +5,7 @@
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Literal, Protocol, TypeVar, cast
+from typing import Literal, Protocol, TypeVar
 
 import yaml
 
