@@ -8,10 +8,10 @@ from typing import Any
 
 import anyio
 from fastmcp.client.transports import ClientTransport
-from pydantic import TypeAdapter
 from mcp import ClientSession
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
+from pydantic import TypeAdapter
 
 from ..errors import AIError, ErrorCode
 from ..workspace import (
