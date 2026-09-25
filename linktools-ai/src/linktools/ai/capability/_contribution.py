@@ -223,6 +223,8 @@ class CapabilityContribution(Generic[AppT]):
             "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
         ) = None,
     ) -> "CapabilityContribution[AppT]":
+        if not isinstance(value, TaskNodeHandler):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if reconcile is not None and not callable(reconcile):
