@@ -164,17 +164,17 @@ class AgentSpecCodec:
                 model_route=model_route,
                 system_prompt=system_prompt,
                 instructions=tuple(instructions),
-                allow_tools=tuple(cast("list[str]", allow_tools)),
-                allow_skills=tuple(cast("list[str]", allow_skills)),
-                allow_subagents=tuple(cast("list[str]", allow_subagents)),
-                allow_runtime_capabilities=tuple(cast("list[str]", allow_runtime_capabilities)),
+                allow_tools=tuple(allow_tools),
+                allow_skills=tuple(allow_skills),
+                allow_subagents=tuple(allow_subagents),
+                allow_runtime_capabilities=tuple(allow_runtime_capabilities),
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
                 planning=planning,
                 thinking=normalized_thinking,
                 tool_retries=tool_retries,
                 output_retries=output_retries,
-                description=cast("str | None", description),
-                preload_skills=tuple(cast("list[str]", preload_skills)),
+                description=description,
+                preload_skills=tuple(preload_skills),
                 metadata=cast("Mapping[str, JsonValue]", metadata),
                 revision=revision,
             )
@@ -200,7 +200,7 @@ class AgentSpecCodec:
         return decode_author_json_mapping(data)
 
     def encode(self, value: AgentSpec) -> bytes:
-        return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
+        return _encode(self.to_wire_payload(value))
 
     def decode(self, data: bytes) -> AgentSpec:
         return self.from_payload(_decode(data))
@@ -253,7 +253,7 @@ class SkillSpecCodec:
             return SkillSpec(
                 identity,
                 content,
-                cast("str | None", description),
+                description,
                 cast("Mapping[str, JsonValue]", metadata),
                 revision=revision,
             )
@@ -272,7 +272,7 @@ class SkillSpecCodec:
         return self.from_author_payload(decode_author_json_mapping(data))
 
     def encode(self, value: SkillSpec) -> bytes:
-        return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
+        return _encode(self.to_wire_payload(value))
 
     def decode(self, data: bytes) -> SkillSpec:
         return self.from_payload(_decode(data))
@@ -590,7 +590,7 @@ class MCPServerSpecCodec:
             value = MCPServerSpec(
                 identity,
                 command,
-                tuple(cast("list[str]", args)),
+                tuple(args),
                 resource_root,
                 revision=revision,
             )
@@ -599,7 +599,7 @@ class MCPServerSpecCodec:
         return value, resource_versions
 
     def encode(self, value: MCPServerSpec) -> bytes:
-        return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
+        return _encode(self.to_wire_payload(value))
 
     def decode(self, data: bytes) -> MCPServerSpec:
         return self.from_payload(_decode(data))
@@ -612,7 +612,7 @@ def _encode(value: "dict[str, object]") -> bytes:
 def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    policy = dict(cast(Mapping[str, object], value))
+    policy = dict(value)
     boundary = policy.get("boundary")
     if boundary == "host-stdio":
         if policy != {"version": 1, "boundary": "host-stdio"}:
@@ -641,8 +641,8 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
     return {
         "version": 1,
         "boundary": "workspace-stdio",
-        "workspace_access": cast(str, policy["workspace_access"]),
-        "hidden_paths": list(cast(list[str], hidden_paths)),
+        "workspace_access": policy["workspace_access"],
+        "hidden_paths": list(hidden_paths),
         "network": "isolated",
     }
 
@@ -699,7 +699,7 @@ def decode_author_yaml_mapping(data: bytes) -> dict[str, object]:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     if not isinstance(normalized, dict):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    return cast(dict[str, object], normalized)
+    return normalized
 
 
 def _strict_json_mapping(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -815,7 +815,7 @@ def _parse_skill_markdown(content: str) -> dict[str, object]:
     if not isinstance(description, str) or not 1 <= len(description) <= 1024:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     for key, maximum in (("compatibility", 500),):
-        if key in frontmatter and (not isinstance(frontmatter[key], str) or not 1 <= len(cast(str, frontmatter[key])) <= maximum):
+        if key in frontmatter and (not isinstance(frontmatter[key], str) or not 1 <= len(frontmatter[key]) <= maximum):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     for key in ("license", "allowed-tools"):
         if key in frontmatter and not isinstance(frontmatter[key], str):
@@ -831,7 +831,7 @@ def _parse_skill_markdown(content: str) -> dict[str, object]:
             normalized = normalize_json_value(dict(metadata))
             frontmatter["metadata"] = dict(
                 ImmutableJsonMapping(
-                    cast("dict[str, JsonValue]", normalized),
+                    normalized,
                     allow_empty_keys=True,
                 )
             )
