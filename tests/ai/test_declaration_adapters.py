@@ -22,6 +22,9 @@ from linktools.ai.capability import (
     CapabilityContribution,
     CapabilityGroup,
     CapabilityLoadContext,
+    SkillDefinition,
+    SkillResourceVersion,
+    SkillSourceRef,
 )
 from linktools.ai.core import validate_logical_id as validate_core_logical_id
 from linktools.ai.errors import AIError, ErrorCode
@@ -312,6 +315,50 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
     assert [item.id for item in snapshot.contributions] == ["security/audit"]
     assert isinstance(snapshot.contributions[0].value, AgentSpec)
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_custom_skill_loader_keeps_captured_resource_versions() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    resource = AssetKey("worker", "audit/helper.py")
+    await store.put(resource, b"print('audit')\n")
+
+    class WorkerLoader:
+        source_kind = "worker"
+
+        async def load(
+            self,
+            context: CapabilityLoadContext,
+        ) -> "Sequence[SkillDefinition]":
+            (ref,) = context.bind_versions((resource,))
+            return (
+                SkillDefinition(
+                    SkillSpec("audit", "audit instructions"),
+                    SkillSourceRef(
+                        context.group_id,
+                        "audit",
+                        (SkillResourceVersion("helper.py", ref),),
+                    ),
+                ),
+            )
+
+    group = CapabilityGroup("application", assets=store)
+    group.loader("worker", WorkerLoader())
+    try:
+        capture = await group.capture()
+        assert len(capture.contributions) == 1
+        skill = capture.contributions[0].value
+        assert isinstance(skill, SkillDefinition)
+        assert skill.source_ref is not None
+        assert len(skill.source_ref.resource_versions) == 1
+        reader = capture.asset_reader
+        assert reader is not None
+        ref = skill.source_ref.resource_versions[0].asset
+        assert await reader.read_versions((ref,)) == (b"print('audit')\n",)
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
