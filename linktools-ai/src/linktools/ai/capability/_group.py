@@ -39,7 +39,12 @@ from ..spec import (
 )
 from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
 from ..storage import StorageRevision
-from ..workspace import Sandbox, Workspace
+from ..workspace import (
+    RepositoryInstructionDocument,
+    RepositoryInstructions,
+    Sandbox,
+    Workspace,
+)
 from ._context import AgentContext
 from ._skill import SkillDefinition
 from ._task import TaskExpander
@@ -367,6 +372,7 @@ class CapabilityGroupSnapshot(Generic[AppT]):
     contributions: tuple[CapabilityContribution[AppT], ...]
     source_revision: "StorageRevision | None"
     workspace: "Workspace | None"
+    instructions: RepositoryInstructions
     _asset_reader: "AssetStoreReader | None" = field(repr=False, compare=False)
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
 
@@ -378,6 +384,8 @@ class CapabilityGroupSnapshot(Generic[AppT]):
             not isinstance(value, CapabilityContribution)
             for value in contributions
         ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if not isinstance(self.instructions, RepositoryInstructions):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if (self._asset_reader is None) != (self.source_revision is None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -582,7 +590,7 @@ class CapabilityLoader(Protocol[AppT]):
         context: CapabilityLoadContext,
     ) -> (
         "Sequence[CapabilityContribution[AppT] | AgentSpec | SkillDefinition "
-        "| MCPServerSpec]"
+        "| MCPServerSpec | RepositoryInstructionDocument]"
     ): ...
 
 
@@ -617,7 +625,7 @@ class CapabilityGroup(Generic[AppT]):
         if assets is not None:
             from ._declaration import BuiltinDeclarationLoader
 
-            for kind in ("agent", "skill", "mcp"):
+            for kind in ("agent", "skill", "mcp", "rule"):
                 self._loaders[kind] = cast(
                     "CapabilityLoader[AppT]",
                     BuiltinDeclarationLoader(kind),
@@ -820,6 +828,7 @@ class CapabilityGroup(Generic[AppT]):
     async def snapshot(self) -> "CapabilityGroupSnapshot[AppT]":
         """Capture registrations and declarations at one Asset revision."""
         contributions = list(tuple(self._contributions))
+        instruction_documents: list[RepositoryInstructionDocument] = []
         loaders = tuple(self._loaders.items())
         store = self._store
         source_revision: StorageRevision | None = None
@@ -841,6 +850,9 @@ class CapabilityGroup(Generic[AppT]):
                         )
                     elif isinstance(value, CapabilityContribution):
                         item = cast("CapabilityContribution[AppT]", value)
+                    elif isinstance(value, RepositoryInstructionDocument):
+                        instruction_documents.append(value)
+                        continue
                     else:
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     contributions.append(item)
@@ -862,13 +874,16 @@ class CapabilityGroup(Generic[AppT]):
             snapshot_contributions,
             source_revision,
             self._workspace,
+            RepositoryInstructions(tuple(instruction_documents)),
             asset_reader,
             sandbox=self._sandbox,
         )
         _logger.info(
-            "capability group snapshotted: group=%s contributions=%d source_revision=%s",
+            "capability group snapshotted: group=%s contributions=%d instructions=%d "
+            "source_revision=%s",
             self._id,
             len(snapshot_contributions),
+            len(instruction_documents),
             None if source_revision is None else source_revision.value,
         )
         return snapshot
