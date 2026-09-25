@@ -103,7 +103,7 @@ def lookup_ticket(ctx: AgentContext[None], ticket_id: str) -> str:
 
 application.agent(
     "audit",
-    model_route="default",
+    model="default",
     system_prompt="Review the supplied evidence carefully.",
     allow_tools=("lookup_ticket",),
     allow_skills=("review",),
@@ -223,7 +223,7 @@ Because the paths point to original files, external edits after verification
 can be observed by an already running process.
 
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
-`resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
+`resource=AssetKey("mcp", "server/assets")`. Arguments whose complete
 value starts with `resource:` then name files below that root. CapabilityGroup capture binds selected MCP files to Asset version references in the same group capture,
 rejecting absolute paths, traversal, and missing files. Runtime preserves those
 refs and adds only the execution policy required by the selected Sandbox.
@@ -233,7 +233,7 @@ read-only. Asset updates after the
 CapabilityGroup capture do not alter that declaration capture; a later
 CapabilityGroup capture sees the newer Asset versions. Runtime does not copy
 MCP resource bytes to a temporary directory or persist a second copy.
-Without `resource_root`, existing argument strings keep their original
+Without `resource`, existing argument strings keep their original
 meaning.
 
 ### Execution sandbox
@@ -301,7 +301,7 @@ from linktools.ai.spec import AgentSpec
 
 spec = AgentSpec(
     id="audit",
-    model_route="default",
+    model="default",
     system_prompt="Audit the supplied change.",
     instructions=("Cite concrete evidence.",),
     allow_tools=("read_file", "mcp:security:*"),
