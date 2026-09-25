@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, NoReturn, cast
 
 from linktools.core import environ
@@ -246,10 +247,11 @@ async def prepare_mcp_resource_projections(
     *,
     asset_readers: Mapping[str, AssetStoreReader],
     sandboxed: bool,
+    materialize_root: "Path | None" = None,
 ) -> dict[str, _MCPResourceProjection]:
     """Verify selected Asset versions and expose existing local resource files."""
     projections: dict[str, _MCPResourceProjection] = {}
-    for server in servers:
+    for index, server in enumerate(servers):
         binding = resources.get(server.id)
         if binding is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -279,9 +281,12 @@ async def prepare_mcp_resource_projections(
             server.id,
             reader,
             versions,
+            materialize_root=(
+                None
+                if materialize_root is None
+                else materialize_root / "mcp" / str(index)
+            ),
         )
-        if resource is None:
-            await reader.read_versions(tuple(versions.values()))
         local_files = None if resource is None else resource.files
         if local_files is None and any(
             argument.startswith("resource:") for argument in server.args
