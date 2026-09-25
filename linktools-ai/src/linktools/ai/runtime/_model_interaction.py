@@ -146,6 +146,7 @@ def build_context_projection(
     intern_payload: PayloadIntern,
     *,
     source_refs: Sequence[StagedContextSource] | None = None,
+    source_keys: Sequence[bytes] | None = None,
 ) -> StagedContextProjection:
     source_values = tuple(source)
     projected_values = tuple(projected)
@@ -156,13 +157,14 @@ def build_context_projection(
     )
     if len(refs) != len(source_values):
         raise ValueError("context source references do not match source messages")
-
-    signatures: dict[bytes, list[int]] = {}
-    for index, message in enumerate(source_values):
-        signatures.setdefault(_message_key(message), []).append(index)
-    projected_keys = tuple(
-        _message_key(message) for message in projected_values
+    keys = (
+        tuple(_message_key(message) for message in source_values)
+        if source_keys is None
+        else tuple(source_keys)
     )
+    if len(keys) != len(source_values):
+        raise ValueError("context source keys do not match source messages")
+
     items: list[StagedContextItem] = []
 
     def append_source(ref: StagedContextSource) -> bool:
@@ -204,6 +206,23 @@ def build_context_projection(
             raise TypeError("context source reference is invalid")
         return False
 
+    if projected_values == source_values:
+        for message, ref in zip(projected_values, refs, strict=True):
+            if append_source(ref):
+                continue
+            items.append(
+                StagedContextInline(
+                    *intern_payload(encode_model_messages((message,)))
+                )
+            )
+        return StagedContextProjection(tuple(items))
+
+    signatures: dict[bytes, list[int]] = {}
+    for index, key in enumerate(keys):
+        signatures.setdefault(key, []).append(index)
+    projected_keys = tuple(
+        _message_key(message) for message in projected_values
+    )
     for message, key in zip(
         projected_values,
         projected_keys,
