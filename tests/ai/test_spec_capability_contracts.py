@@ -523,6 +523,26 @@ def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
     assert server == MCPServerSpec("mcp", "echo")
 
 
+def test_mcp_package_resource_ignores_unrelated_fields() -> None:
+    server = MCPServerSpecCodec().decode_author(
+        json.dumps(
+            {
+                "version": 1,
+                "command": "python",
+                "resource": {
+                    "kind": "mcp",
+                    "id": "server",
+                    "future": {"enabled": True},
+                },
+            }
+        ).encode(),
+        format="json",
+        package_id="server",
+    )
+
+    assert server.resource == AssetKey("mcp", "server")
+
+
 def test_mcp_author_resource_ignores_unrelated_fields() -> None:
     server = MCPServerSpecCodec().decode_author(
         json.dumps(
