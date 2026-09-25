@@ -48,7 +48,7 @@ from ._tool_semantic import (
     validate_tool_semantic_metadata,
 )
 from ._workspace import (
-    ToolDeclaration,
+    WorkspaceToolDeclaration,
     WorkspaceAccess,
     workspace_capabilities,
     workspace_tool_declarations,
@@ -74,7 +74,7 @@ __all__ = [
     "TOOL_EFFECT_METADATA_KEY",
     "TOOL_PATH_FIELDS_METADATA_KEY",
     "TOOL_PLAN_SAFE_METADATA_KEY",
-    "ToolDeclaration",
+    "WorkspaceToolDeclaration",
     "SkillDefinition",
     "SkillLocation",
     "SkillResourceSource",
