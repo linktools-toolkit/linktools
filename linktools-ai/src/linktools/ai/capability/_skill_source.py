@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Literal, Protocol, cast, runtime_checkable
 
-from ..asset import AssetInfo, AssetKey, AssetStoreReader, AssetVersionRef
+from ..asset import AssetStoreReader, AssetVersionRef
 from ..core import (
     DEFAULT_DISCOVERY_POLICY,
     validate_logical_id,
@@ -97,9 +97,9 @@ class SkillResourceSource(Protocol):
     @property
     def id(self) -> str: ...
 
-    async def inspect(self, root: str) -> SkillResourceView: ...
+    async def inspect(self, source: SkillSourceRef) -> SkillResourceView: ...
 
-    async def read(self, root: str, path: str) -> bytes: ...
+    async def read(self, source: SkillSourceRef, path: str) -> bytes: ...
 
 
 class LocalSkillResourceSource:
@@ -113,17 +113,22 @@ class LocalSkillResourceSource:
     def id(self) -> str:
         return self._id
 
-    async def inspect(self, root: str) -> SkillResourceView:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
+    def _root_ref(self, source: SkillSourceRef) -> str:
+        if not isinstance(source, SkillSourceRef) or source.source_id != self._id:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return _normalize_relative_path(source.root, field_name="skill root")
+
+    async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
+        logical_root = self._root_ref(source)
         return await asyncio.to_thread(self._inspect_sync, logical_root)
 
-    async def read(self, root: str, path: str) -> bytes:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
+    async def read(self, source: SkillSourceRef, path: str) -> bytes:
+        logical_root = self._root_ref(source)
         relative = _normalize_resource_path(path)
         return await asyncio.to_thread(self._read_sync, logical_root, relative)
 
-    async def resource_mode(self, root: str, path: str) -> int:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
+    async def resource_mode(self, source: SkillSourceRef, path: str) -> int:
+        logical_root = self._root_ref(source)
         relative = _normalize_resource_path(path)
         package = await asyncio.to_thread(self._package_path, logical_root)
         resolved = await asyncio.to_thread(
@@ -183,156 +188,51 @@ class LocalSkillResourceSource:
 
 
 class AssetSkillResourceSource:
-    def __init__(self, source_id: str, store: AssetStoreReader) -> None:
+    """Read Skill resources through version references captured in SkillSourceRef."""
+
+    def __init__(self, source_id: str, asset_reader: AssetStoreReader) -> None:
         if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError("skill source id must be non-empty")
-        if not isinstance(store, AssetStoreReader):
-            raise TypeError("store must provide read-only AssetStore operations")
+        if not isinstance(asset_reader, AssetStoreReader):
+            raise TypeError("asset_reader must provide AssetStoreReader operations")
         self._id = source_id
-        self._store = store
+        self._asset_reader = asset_reader
 
     @property
     def id(self) -> str:
         return self._id
 
-    async def inspect(self, root: str) -> SkillResourceView:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        assets = await self._asset_infos(logical_root)
-        resources = self._resource_infos(assets)
-        local = await self._local_resources(logical_root, assets)
-        location = (
-            SkillLocation("virtual", f"{self._id}/skills/{logical_root}")
-            if local is None
-            else SkillLocation("local", str(local[0]))
-        )
-        return SkillResourceView(
-            location,
-            tuple(relative for relative, _info in resources),
-        )
-
-    async def read(self, root: str, path: str) -> bytes:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        relative = _normalize_resource_path(path)
-        value = await self._store.get(AssetKey("skill", f"{logical_root}/{relative}"))
-        if value is None:
-            raise AIError(ErrorCode.ASSET_NOT_FOUND)
-        return bytes(value)
-
     @property
     def asset_reader(self) -> AssetStoreReader:
-        return self._store
+        return self._asset_reader
 
-    async def resolve(self, root: str) -> SkillSourceRef:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        assets = await self._asset_infos(logical_root)
-        resources = self._resource_infos(assets)
-        refs = await self._store.resolve_versions(
-            tuple(info.key for _relative, info in resources)
-        )
-        paths = await self._store.local_paths(tuple(ref.key for ref in refs))
-        versions: list[SkillResourceVersion] = []
-        for (relative, info), ref, path in zip(resources, refs, paths, strict=True):
-            if not ref.matches_info(info):
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-            mode = 0
-            if path is not None:
-                try:
-                    mode = (await asyncio.to_thread(path.stat)).st_mode & 0o111
-                except OSError as error:
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            _validate_resource_mode(mode)
-            versions.append(SkillResourceVersion(relative, ref, mode))
-        resolved_versions = tuple(sorted(versions, key=lambda item: item.path))
-        return SkillSourceRef(self._id, logical_root).with_asset_versions(
-            resolved_versions,
+    def _binding(self, source: SkillSourceRef) -> SkillSourceRef:
+        if not isinstance(source, SkillSourceRef) or source.source_id != self._id:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return source
+
+    async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
+        binding = self._binding(source)
+        return SkillResourceView(
+            SkillLocation("virtual", f"{self._id}/resources/{binding.root}"),
+            tuple(item.path for item in binding.resource_versions),
         )
 
-    async def _asset_infos(
-        self,
-        root: str,
-    ) -> "tuple[tuple[str, AssetInfo], ...]":
-        prefix = f"{root}/"
-        selected: list[tuple[str, AssetInfo]] = []
-        for info in await self._store.metadata_snapshot():
-            if info.key.kind != "skill" or not info.key.id.startswith(prefix):
-                continue
-            relative = info.key.id[len(prefix) :]
-            try:
-                normalized = _normalize_resource_path(relative)
-            except AIError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            selected.append((normalized, info))
-        return tuple(sorted(selected, key=lambda item: item[0]))
+    async def resource_mode(self, source: SkillSourceRef, path: str) -> int:
+        binding = self._binding(source)
+        relative = _normalize_resource_path(path)
+        for item in binding.resource_versions:
+            if item.path == relative:
+                return item.executable_bits
+        raise AIError(ErrorCode.ASSET_NOT_FOUND)
 
-    @staticmethod
-    def _resource_infos(
-        assets: "Sequence[tuple[str, AssetInfo]]",
-    ) -> "tuple[tuple[str, AssetInfo], ...]":
-        return tuple(
-            (relative, info)
-            for relative, info in assets
-            if relative != "SKILL.md"
-            and not DEFAULT_DISCOVERY_POLICY.ignores(relative)
-        )
-
-    async def _local_resources(
-        self,
-        root: str,
-        assets: "Sequence[tuple[str, AssetInfo]]",
-    ) -> "tuple[Path, dict[str, Path]] | None":
-        if not assets:
-            return None
-        paths = await self._store.local_paths(
-            tuple(
-                AssetKey("skill", f"{root}/{relative}")
-                for relative, _info in assets
-            )
-        )
-        if any(path is None for path in paths):
-            return None
-        return await asyncio.to_thread(
-            _resolve_local_skill_package,
-            tuple(relative for relative, _info in assets),
-            tuple(cast(Path, path) for path in paths),
-        )
-
-
-def _resolve_local_skill_package(
-    relatives: Sequence[str],
-    paths: Sequence[Path],
-) -> "tuple[Path, dict[str, Path]] | None":
-    package_path = paths[0]
-    for _part in PurePosixPath(relatives[0]).parts:
-        package_path = package_path.parent
-    for relative, path in zip(relatives[1:], paths[1:], strict=True):
-        candidate = path
-        for _part in PurePosixPath(relative).parts:
-            candidate = candidate.parent
-        if package_path != candidate:
-            return None
-    try:
-        package = package_path.resolve(strict=True)
-    except (OSError, RuntimeError) as error:
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-    if not package.is_dir():
-        return None
-
-    local: dict[str, Path] = {}
-    for relative, path in zip(relatives, paths, strict=True):
-        expected = package_path.joinpath(*PurePosixPath(relative).parts)
-        if path != expected:
-            return None
-        try:
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(package)
-        except ValueError:
-            return None
-        except (OSError, RuntimeError) as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        if not resolved.is_file():
-            return None
-        local[relative] = resolved
-    return package, local
+    async def read(self, source: SkillSourceRef, path: str) -> bytes:
+        binding = self._binding(source)
+        relative = _normalize_resource_path(path)
+        for item in binding.resource_versions:
+            if item.path == relative:
+                return (await self._asset_reader.read_versions((item.asset,)))[0]
+        raise AIError(ErrorCode.ASSET_NOT_FOUND)
 
 
 def _validate_resource_mode(mode: object) -> None:
@@ -343,74 +243,6 @@ def _validate_resource_mode(mode: object) -> None:
         or mode > 0o111
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-class AssetVersionSkillResourceSource:
-    """Read Skill resources through immutable Asset version references."""
-
-    def __init__(
-        self,
-        source_id: str,
-        roots: Mapping[str, SkillSourceRef],
-        asset_reader: AssetStoreReader,
-    ) -> None:
-        if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("skill source id must be non-empty")
-        if not isinstance(asset_reader, AssetStoreReader):
-            raise TypeError("asset_reader must provide AssetStoreReader operations")
-        normalized: dict[str, SkillSourceRef] = {}
-        for root, ref in roots.items():
-            logical_root = _normalize_relative_path(root, field_name="skill root")
-            if (
-                not isinstance(ref, SkillSourceRef)
-                or ref.source_id != source_id
-                or ref.root != logical_root
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            normalized[logical_root] = ref
-        if not normalized:
-            raise ValueError("asset-version skill roots must not be empty")
-        self._id = source_id
-        self._roots = MappingProxyType(dict(sorted(normalized.items())))
-        self._asset_reader = asset_reader
-
-    @property
-    def id(self) -> str:
-        return self._id
-
-    def _root(self, root: str) -> SkillSourceRef:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        try:
-            return self._roots[logical_root]
-        except KeyError as error:
-            raise AIError(
-                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                safe_details={"source_id": self._id, "root": logical_root},
-            ) from error
-
-    async def inspect(self, root: str) -> SkillResourceView:
-        binding = self._root(root)
-        return SkillResourceView(
-            SkillLocation("virtual", f"{self._id}/skills/{binding.root}"),
-            tuple(item.path for item in binding.resource_versions),
-        )
-
-    async def resource_mode(self, root: str, path: str) -> int:
-        binding = self._root(root)
-        relative = _normalize_resource_path(path)
-        for item in binding.resource_versions:
-            if item.path == relative:
-                return item.executable_bits
-        raise AIError(ErrorCode.ASSET_NOT_FOUND)
-
-    async def read(self, root: str, path: str) -> bytes:
-        binding = self._root(root)
-        relative = _normalize_resource_path(path)
-        for item in binding.resource_versions:
-            if item.path != relative:
-                continue
-            return (await self._asset_reader.read_versions((item.asset,)))[0]
-        raise AIError(ErrorCode.ASSET_NOT_FOUND)
 
 
 class SkillSourceRegistry:
@@ -522,7 +354,6 @@ def _resolve_contained_file(root: Path, candidate: Path) -> Path:
 
 __all__ = [
     "AssetSkillResourceSource",
-    "AssetVersionSkillResourceSource",
     "LocalSkillResourceSource",
     "SkillLocation",
     "SkillResourceSource",
