@@ -19,9 +19,9 @@ from linktools.ai.runtime._message import (
 )
 from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
-    RunRecord,
+    AgentRunRecord,
 )
-from linktools.ai.runtime.state._steps import StagingStepStore
+from linktools.ai.runtime.state._steps import StagingAgentRunStore
 
 
 def _request(name: str, body: bytes) -> ModelRequest:
@@ -85,7 +85,7 @@ def test_snapshot_context_projects_consumed_binary_even_without_compaction() -> 
     capture = RuntimeCaptureStore(
         object(),  # type: ignore[arg-type]
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
     )
     request = _request("a.png", b"image")
     response = ModelResponse(parts=[TextPart("done")])
@@ -102,7 +102,7 @@ def test_snapshot_context_composes_compaction_with_pending_binary() -> None:
     capture = RuntimeCaptureStore(
         object(),  # type: ignore[arg-type]
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
     )
     consumed_request = _request("old.png", b"old")
     consumed_response = ModelResponse(parts=[TextPart("done")])
@@ -122,19 +122,19 @@ def test_snapshot_context_composes_compaction_with_pending_binary() -> None:
 
 @pytest.mark.asyncio
 async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> None:
-    store = StagingStepStore()
+    store = StagingAgentRunStore()
     await store.initialize()
-    await store.register_run(RunRecord("pending"))
-    await store.register_run(RunRecord("consumed"))
+    await store.register_agent_run(AgentRunRecord("pending"))
+    await store.register_agent_run(AgentRunRecord("consumed"))
     pending_capture = RuntimeCaptureStore(
         store,
         execution_id=None,
-        step_run_id="pending",
+        agent_run_id="pending",
     )
     consumed_capture = RuntimeCaptureStore(
         store,
         execution_id=None,
-        step_run_id="consumed",
+        agent_run_id="consumed",
     )
     pending_request = _request("pending.png", b"pending")
     consumed_request = _request("consumed.png", b"consumed")
@@ -142,7 +142,7 @@ async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> No
 
     await store.save_snapshot(
         ContinuableSnapshot(
-            run_id="pending",
+            agent_run_id="pending",
             step_index=1,
             messages=[pending_request],
             context_messages=pending_capture.snapshot_context([pending_request])[0],
@@ -152,7 +152,7 @@ async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> No
     consumed_raw = [consumed_request, consumed_response]
     await store.save_snapshot(
         ContinuableSnapshot(
-            run_id="consumed",
+            agent_run_id="consumed",
             step_index=1,
             messages=consumed_raw,
             context_messages=consumed_capture.snapshot_context(consumed_raw)[0],

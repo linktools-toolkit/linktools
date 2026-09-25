@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Local Agent segment execution primitives."""
+"""Local AgentRun execution primitives."""
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -21,7 +21,7 @@ from ._agent_executor import (
     AgentExecutionResult,
     DurableBoundary,
     LiveDelta,
-    _RunScope,
+    _AgentRunScope,
 )
 from ._input import CanonicalUserInput
 from ._memory import MemoryStore
@@ -30,7 +30,7 @@ from ._tool import ToolOperationBridge
 from ._tool_boundary import RepositoryInstructionBoundary
 from .state import RuntimeDomain
 from .state._contracts import LoadedModelContext
-from .state._step_contracts import StepStore
+from .state._step_contracts import AgentRunStore
 from .state._steps import ExecutionTerminalSealPlan
 
 
@@ -44,39 +44,39 @@ class _WorkerFailure:
     operation_id: str | None = None
 
 
-class _StepLifecycle(Protocol):
-    async def materialize_conversation(self, *, step_run_id: str) -> None: ...
+class _AgentRunLifecycle(Protocol):
+    async def materialize_conversation(self, *, agent_run_id: str) -> None: ...
     async def materialize_from_recovery(
         self,
         *,
         target: RuntimeDomain,
-        step_run_id: str,
+        agent_run_id: str,
         execution_id: "str | None" = None,
     ) -> None: ...
     async def materialize_recovery_snapshot(
-        self, *, step_run_id: str, require_complete: bool
+        self, *, agent_run_id: str, require_complete: bool
     ) -> None: ...
     async def verify_terminal_attempts(
         self,
         *,
-        candidate_step_run_ids: tuple[str, ...],
-        required_step_run_id: str | None,
+        candidate_agent_run_ids: tuple[str, ...],
+        required_agent_run_id: str | None,
     ) -> None: ...
     async def release_staging_many(
         self,
         *,
-        candidate_step_run_ids: tuple[str, ...],
+        candidate_agent_run_ids: tuple[str, ...],
         execution_id: "str | None" = None,
     ) -> None: ...
     async def flush_execution_projection(
-        self, step_run_id: str, *, execution_id: str
+        self, agent_run_id: str, *, execution_id: str
     ) -> None: ...
-    async def wait_projection_flight(self, step_run_id: str) -> None: ...
+    async def wait_projection_flight(self, agent_run_id: str) -> None: ...
     async def prepare_execution_terminal_seal(
         self,
         *,
         execution_id: str,
-        run_ids: Sequence[str],
+        agent_run_ids: Sequence[str],
         binding_digest: str,
     ) -> ExecutionTerminalSealPlan: ...
     async def finalize_execution_terminal_seal(
@@ -94,8 +94,8 @@ class _StepLifecycle(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class _AgentSegmentInput:
-    """The immutable inputs needed to materialize one agent segment."""
+class _AgentRunInput:
+    """The immutable inputs needed to materialize one AgentRun."""
 
     binding: AgentBinding
     context: AgentContext[object]
@@ -106,17 +106,17 @@ class _AgentSegmentInput:
     initial_attachments: tuple[Mapping[str, JsonValue], ...]
     history: list[ModelMessage]
     initial_context: LoadedModelContext
-    conversation_id: str
-    step_store: StepStore
-    step_run_id: str
-    segment_sequence: int
+    agent_conversation_id: str
+    run_store: AgentRunStore
+    agent_run_id: str
+    agent_run_sequence: int
     history_id: str | None
     memory_store: MemoryStore | None
     plan_store_resolver: Callable[..., RuntimePlanStore] | None
     mode: ExecutionMode
     planning: bool
     thinking: ThinkingValue
-    parent_step_run_id: str | None
+    parent_agent_run_id: str | None
     subagent_available: bool
     subagent_descriptions: Mapping[str, str | None]
     subagent_delegate: SubagentDelegate | None
@@ -130,90 +130,90 @@ class _AgentSegmentInput:
 
 
 @dataclass(frozen=True, slots=True)
-class _SegmentCompleted:
+class _AgentRunCompleted:
     result: AgentExecutionResult
 
 
 @dataclass(frozen=True, slots=True)
-class _SegmentDeferred:
+class _AgentRunDeferred:
     requests: DeferredToolRequests
 
 
 @dataclass(frozen=True, slots=True)
-class _SegmentFailed:
+class _AgentRunFailed:
     error: Exception
 
 
 @dataclass(frozen=True, slots=True)
-class _SegmentCancelled:
+class _AgentRunCancelled:
     pass
 
 
-class _AgentSegmentRunner:
-    """Run exactly one AgentExecutor segment without changing runtime state."""
+class _AgentRunRunner:
+    """Run exactly one AgentRun without changing runtime state."""
 
     def __init__(self, executor: AgentExecutor) -> None:
         self._executor = executor
 
     async def run(
         self,
-        segment: _AgentSegmentInput,
-    ) -> "_SegmentCompleted | _SegmentDeferred | _SegmentFailed | _SegmentCancelled":
-        scope = _RunScope(
-            binding=segment.binding,
-            context=segment.context,
-            workspace=segment.workspace,
-            limits=segment.limits,
-            execution_cwd=segment.execution_cwd,
-            user_prompt=segment.user_prompt,
-            history=segment.history,
-            initial_context=segment.initial_context,
-            initial_attachments=segment.initial_attachments,
-            conversation_id=segment.conversation_id,
-            step_store=segment.step_store,
-            step_run_id=segment.step_run_id,
-            segment_sequence=segment.segment_sequence,
-            history_id=segment.history_id,
-            memory_store=segment.memory_store,
-            plan_store_resolver=segment.plan_store_resolver,
-            mode=segment.mode,
-            planning=segment.planning,
-            thinking=segment.thinking,
-            parent_step_run_id=segment.parent_step_run_id,
-            subagent_available=segment.subagent_available,
-            subagent_descriptions=segment.subagent_descriptions,
-            subagent_delegate=segment.subagent_delegate,
-            event_sink=segment.event_sink,
-            usage_sink=segment.usage_sink,
-            tool_operations=segment.tool_operations,
-            replace_history_system_prompt=segment.replace_history_system_prompt,
-            repository_instructions=segment.repository_instructions,
-            repository_instruction_boundary=segment.repository_instruction_boundary,
-            deferred_tool_results=segment.deferred_tool_results,
+        agent_run_input: _AgentRunInput,
+    ) -> "_AgentRunCompleted | _AgentRunDeferred | _AgentRunFailed | _AgentRunCancelled":
+        scope = _AgentRunScope(
+            binding=agent_run_input.binding,
+            context=agent_run_input.context,
+            workspace=agent_run_input.workspace,
+            limits=agent_run_input.limits,
+            execution_cwd=agent_run_input.execution_cwd,
+            user_prompt=agent_run_input.user_prompt,
+            history=agent_run_input.history,
+            initial_context=agent_run_input.initial_context,
+            initial_attachments=agent_run_input.initial_attachments,
+            agent_conversation_id=agent_run_input.agent_conversation_id,
+            run_store=agent_run_input.run_store,
+            agent_run_id=agent_run_input.agent_run_id,
+            agent_run_sequence=agent_run_input.agent_run_sequence,
+            history_id=agent_run_input.history_id,
+            memory_store=agent_run_input.memory_store,
+            plan_store_resolver=agent_run_input.plan_store_resolver,
+            mode=agent_run_input.mode,
+            planning=agent_run_input.planning,
+            thinking=agent_run_input.thinking,
+            parent_agent_run_id=agent_run_input.parent_agent_run_id,
+            subagent_available=agent_run_input.subagent_available,
+            subagent_descriptions=agent_run_input.subagent_descriptions,
+            subagent_delegate=agent_run_input.subagent_delegate,
+            event_sink=agent_run_input.event_sink,
+            usage_sink=agent_run_input.usage_sink,
+            tool_operations=agent_run_input.tool_operations,
+            replace_history_system_prompt=agent_run_input.replace_history_system_prompt,
+            repository_instructions=agent_run_input.repository_instructions,
+            repository_instruction_boundary=agent_run_input.repository_instruction_boundary,
+            deferred_tool_results=agent_run_input.deferred_tool_results,
         )
         try:
             result = await self._executor.execute(scope)
         except asyncio.CancelledError:
-            return _SegmentCancelled()
+            return _AgentRunCancelled()
         except Exception as error:
-            return _SegmentFailed(error)
+            return _AgentRunFailed(error)
         if isinstance(result, DeferredToolRequests):
-            return _SegmentDeferred(result)
-        return _SegmentCompleted(result)
+            return _AgentRunDeferred(result)
+        return _AgentRunCompleted(result)
 
 
-async def _step_messages(
-    store: StepStore,
-    run_id: str,
+async def _agent_run_messages(
+    store: AgentRunStore,
+    agent_run_id: str,
     *,
     include_interrupted: bool = False,
 ) -> list[ModelMessage]:
     snapshot = await store.latest_snapshot(
-        run_id=run_id,
+        agent_run_id=agent_run_id,
         include_interrupted=include_interrupted,
     )
     if snapshot is None:
-        raise LookupError(run_id)
+        raise LookupError(agent_run_id)
     return list(
         snapshot.messages
         if snapshot.context_messages is None

@@ -263,7 +263,7 @@ async def _emit_model_interactions(
                 show_header=first,
             )
             table.add_column("Req", justify="right")
-            table.add_column("Seg/Depth")
+            table.add_column("Run/Depth")
             table.add_column("Purpose")
             table.add_column("Status")
             table.add_column("Model")
@@ -272,7 +272,7 @@ async def _emit_model_interactions(
             for item in items:
                 table.add_row(
                     str(item.request_sequence),
-                    f"{item.segment_sequence}/{item.depth}",
+                    f"{item.agent_run_sequence}/{item.depth}",
                     item.purpose,
                     _status_text(item.status),
                     _model_label(item.model),

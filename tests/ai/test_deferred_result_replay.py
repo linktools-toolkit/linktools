@@ -79,7 +79,7 @@ class _Checkpoints:
     def __init__(self, pending: PendingDeferredCall, *, approvals: bool) -> None:
         self.record = RecoveryCheckpoint(
             execution_id="execution",
-            step_run_id="step",
+            agent_run_id="step",
             state=RecoveryCheckpointState.WAITING,
             revision=0,
             created_at=datetime.now(timezone.utc),

@@ -20,7 +20,7 @@ from linktools.ai.runtime._capabilities import (
 from linktools.ai.runtime._harness_planning import HarnessPlanning
 from linktools.ai.runtime._compaction import RuntimeCompactionPolicy
 from linktools.ai.runtime.state._steps import (
-    StagingStepStore,
+    StagingAgentRunStore,
 )
 from pydantic_ai.messages import CachePoint, ModelRequest, ModelResponse, UserPromptPart
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -40,18 +40,18 @@ pytestmark = pytest.mark.asyncio
 async def test_linktools_planning_registers_only_write_plan() -> None:
     capabilities = await compose_platform_capabilities(
         agent_name="agent",
-        step_run_id="run",
-        segment_sequence=1,
+        agent_run_id="run",
+        agent_run_sequence=1,
         history_id=None,
         memory_scope=None,
-        step_store=StagingStepStore(),
+        run_store=StagingAgentRunStore(),
         memory_store=None,
         ordinary_tool_policy=(),
         compaction_policy=RuntimeCompactionPolicy(),
         limits=PromptLimits(),
         planning=True,
         context_target_tokens=None,
-        parent_step_run_id=None,
+        parent_agent_run_id=None,
         plan_store_resolver=lambda _ctx: None,  # type: ignore[return-value]
     )
     planning = next(
@@ -65,7 +65,7 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
     )
     assert tuple(await toolset.get_tools(context)) == ("write_plan",)
 
@@ -82,7 +82,7 @@ async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> Non
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
     )
     request_context = ModelRequestContext(
         model=TestModel(),

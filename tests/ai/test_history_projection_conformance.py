@@ -15,8 +15,8 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
-    step_conversation_id,
-    step_run_id,
+    agent_conversation_id as make_agent_conversation_id,
+    agent_run_id as make_agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
@@ -38,7 +38,7 @@ from linktools.ai.runtime.state._store import (
     StateLockOrderError,
     StateTransactionNestingError,
 )
-from linktools.ai.runtime.state._steps import LockOrderError, _RunHistoryLock
+from linktools.ai.runtime.state._steps import LockOrderError, _AgentRunHistoryLock
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore
 from ._runtime_test_helpers import execution_owner_fields
@@ -52,7 +52,7 @@ from pydantic_ai.messages import (
 )
 from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
-    RunRecord,
+    AgentRunRecord,
     StepEvent,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -183,17 +183,17 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
             )
 
         await repository.state_store.mutate(seal)
-        archive = state.steps.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
         assert isinstance(archive, StateStepArchive)
-        run_id = step_run_id(
+        agent_run_id = make_agent_run_id(
             namespace="history",
             tenant_id="tenant",
             execution_id="execution",
-            segment_sequence=1,
+            agent_run_sequence=1,
         )
-        run = await archive.get_run(run_id=run_id)
+        run = await archive.get_agent_run(agent_run_id=agent_run_id)
         assert run is not None
-        before_events = await archive.list_events(run_id=run_id)
+        before_events = await archive.list_events(agent_run_id=agent_run_id)
         before_head = await repository.get_history_head("execution", tenant_id="tenant")
         assert before_head is not None
         now = datetime.now(timezone.utc)
@@ -203,11 +203,11 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                 run,
                 events=(
                     StepEvent(
-                        run_id=run_id,
+                        agent_run_id=agent_run_id,
                         kind="after-seal",
                         step_index=3,
                         timestamp=now,
-                        conversation_id=run.conversation_id,
+                        agent_conversation_id=run.agent_conversation_id,
                         agent_name=run.agent_name,
                     ),
                 ),
@@ -229,13 +229,13 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
             await archive.materialize_snapshot(
                 run,
                 ContinuableSnapshot(
-                    run_id=run_id,
+                    agent_run_id=agent_run_id,
                     step_index=4,
                     messages=[
                         ModelRequest(parts=[UserPromptPart(content="after-seal")])
                     ],
-                    conversation_id=run.conversation_id,
-                    parent_run_id=run.parent_run_id,
+                    agent_conversation_id=run.agent_conversation_id,
+                    parent_agent_run_id=run.parent_agent_run_id,
                     agent_name=run.agent_name,
                     timestamp=now,
                     transcript_message_count_before=0,
@@ -243,7 +243,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                 execution_id="execution",
             )
         assert snapshot_error.value.code is ErrorCode.STORAGE_CONFLICT
-        assert await archive.list_events(run_id=run_id) == before_events
+        assert await archive.list_events(agent_run_id=agent_run_id) == before_events
         assert (
             await repository.get_history_head("execution", tenant_id="tenant")
             == before_head
@@ -261,34 +261,34 @@ async def test_terminal_prepare_accepts_an_unprojected_execution_run(
     terminal_plan = None
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
-        run_id = step_run_id(
+        agent_run_id = make_agent_run_id(
             namespace="history-unprojected",
             tenant_id="tenant",
             execution_id="execution",
-            segment_sequence=1,
+            agent_run_sequence=1,
         )
         now = datetime.now(timezone.utc)
-        await state.steps.register_run(
-            RunRecord(
-                run_id=run_id,
-                conversation_id=step_conversation_id(
+        await state.run_store.register_agent_run(
+            AgentRunRecord(
+                agent_run_id=agent_run_id,
+                agent_conversation_id=make_agent_conversation_id(
                     namespace="history-unprojected",
                     tenant_id="tenant",
                     execution_id="execution",
                 ),
-                parent_run_id=None,
+                parent_agent_run_id=None,
                 agent_name="default",
-                metadata={"segment_sequence": "1"},
+                metadata={"agent_run_sequence": "1"},
                 started_at=now,
             )
         )
 
-        archive = state.steps.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
         assert isinstance(archive, StateStepArchive)
-        assert await archive.get_run(run_id=run_id) is None
-        terminal_plan = await state.steps.prepare_execution_terminal_seal(
+        assert await archive.get_agent_run(agent_run_id=agent_run_id) is None
+        terminal_plan = await state.run_store.prepare_execution_terminal_seal(
             execution_id="execution",
-            run_ids=(run_id,),
+            agent_run_ids=(agent_run_id,),
             binding_digest="a" * 64,
         )
 
@@ -301,7 +301,7 @@ async def test_terminal_prepare_accepts_an_unprojected_execution_run(
         assert projection.projection_digest == "empty"
     finally:
         if terminal_plan is not None:
-            await state.steps.discard_execution_terminal_seal(terminal_plan)
+            await state.run_store.discard_execution_terminal_seal(terminal_plan)
         await state.close()
 
 
@@ -329,28 +329,28 @@ async def test_conversation_head_replacement_preserves_physical_identity(
             )
         )
         now = datetime.now(timezone.utc)
-        run = RunRecord(
-            run_id="run",
-            conversation_id="conversation",
-            parent_run_id=None,
+        run = AgentRunRecord(
+            agent_run_id="run",
+            agent_conversation_id="conversation",
+            parent_agent_run_id=None,
             agent_name="default",
             metadata={"history_id": "history"},
             started_at=now,
         )
-        await state.steps.read_store(RuntimeDomain.CONVERSATION).materialize_snapshot(
+        await state.run_store.read_store(RuntimeDomain.CONVERSATION).materialize_snapshot(
             run,
             ContinuableSnapshot(
-                run_id="run",
+                agent_run_id="run",
                 step_index=1,
                 messages=[ModelRequest(parts=[UserPromptPart(content="hello")])],
-                conversation_id="conversation",
-                parent_run_id=None,
+                agent_conversation_id="conversation",
+                parent_agent_run_id=None,
                 agent_name="default",
                 timestamp=now,
                 transcript_message_count_before=0,
             ),
         )
-        head = await state.steps.read_store(
+        head = await state.run_store.read_store(
             RuntimeDomain.CONVERSATION
         ).transcript_repository.get_head("history")
         assert head is not None
@@ -364,7 +364,7 @@ async def test_projection_flight_resolves_waiters_after_abandon() -> None:
     steps = RuntimeState.in_memory()
     await steps.initialize(namespace="flight-abandon", tenant_id="tenant")
     try:
-        store = steps.steps
+        store = steps.run_store
         captured = await store.capture_execution_projection("missing-run")
         assert captured is None
         await store.wait_projection_flight("missing-run")
@@ -420,7 +420,7 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
         backend._commit_execution_terminal_checkpoint(
             current,
             object(),
-            run_id=None,
+            agent_run_id=None,
         )
     )
     await started.wait()
@@ -434,7 +434,7 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
 
 @pytest.mark.asyncio
 async def test_run_history_lock_rejects_cross_run_nesting() -> None:
-    history_lock = _RunHistoryLock()
+    history_lock = _AgentRunHistoryLock()
 
     async with history_lock.hold("run-a"):
         with pytest.raises(LockOrderError):
@@ -446,7 +446,7 @@ async def test_run_history_lock_rejects_cross_run_nesting() -> None:
 async def test_state_callback_cannot_acquire_run_history_lock() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="lock-order", tenant_id="tenant")
-    history_lock = _RunHistoryLock()
+    history_lock = _AgentRunHistoryLock()
     try:
 
         async def callback(_transaction: object) -> None:
@@ -506,48 +506,48 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
                 ),
             )
         )
-    run_id = step_run_id(
+    agent_run_id = make_agent_run_id(
         namespace="history",
         tenant_id="tenant",
         execution_id="execution",
-        segment_sequence=sequence,
+        agent_run_sequence=sequence,
     )
-    conversation_id = step_conversation_id(
+    agent_conversation_id = make_agent_conversation_id(
         namespace="history",
         tenant_id="tenant",
         execution_id="execution",
     )
     now = datetime.now(timezone.utc)
-    await state.steps.register_run(
-        RunRecord(
-            run_id=run_id,
-            conversation_id=conversation_id,
-            parent_run_id=None,
+    await state.run_store.register_agent_run(
+        AgentRunRecord(
+            agent_run_id=agent_run_id,
+            agent_conversation_id=agent_conversation_id,
+            parent_agent_run_id=None,
             agent_name="default",
             metadata={
-                "segment_sequence": str(sequence),
+                "agent_run_sequence": str(sequence),
                 "agent_name": "default",
             },
             started_at=now,
         )
     )
-    await state.steps.append_event(
+    await state.run_store.append_event(
         StepEvent(
-            run_id=run_id,
+            agent_run_id=agent_run_id,
             kind="model_request_started",
             step_index=1,
             timestamp=now,
-            conversation_id=conversation_id,
+            agent_conversation_id=agent_conversation_id,
             agent_name="default",
         )
     )
-    await state.steps.append_event(
+    await state.run_store.append_event(
         StepEvent(
-            run_id=run_id,
+            agent_run_id=agent_run_id,
             kind="model_request_completed",
             step_index=2,
             timestamp=now,
-            conversation_id=conversation_id,
+            agent_conversation_id=agent_conversation_id,
             agent_name="default",
             metadata={
                 "linktools.ai.model_usage.input_tokens": "0",
@@ -557,39 +557,39 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
             },
         )
     )
-    await state.steps.save_snapshot(
+    await state.run_store.save_snapshot(
         ContinuableSnapshot(
-            run_id=run_id,
+            agent_run_id=agent_run_id,
             step_index=2,
             messages=[
                 ModelRequest(
                     parts=[UserPromptPart(content=prompt)],
-                    conversation_id=conversation_id,
+                    conversation_id=agent_conversation_id,
                 ),
                 ModelResponse(
                     parts=[
                         ThinkingPart(content="plan"),
                         TextPart(content="response"),
                     ],
-                    conversation_id=conversation_id,
+                    conversation_id=agent_conversation_id,
                 ),
             ],
-            conversation_id=conversation_id,
-            parent_run_id=None,
+            agent_conversation_id=agent_conversation_id,
+            parent_agent_run_id=None,
             agent_name="default",
             timestamp=now,
             transcript_message_count_before=0,
         )
     )
-    await state.steps.flush_execution_projection(
-        run_id,
+    await state.run_store.flush_execution_projection(
+        agent_run_id,
         execution_id="execution",
     )
     seal = ExecutionHistorySealRecord(
                execution_id="execution",
                run_heads=(
             ExecutionRunSealHead(
-                run_id,
+                agent_run_id,
                 2,
                 1,
                 2,
@@ -610,7 +610,7 @@ def _reader(state: RuntimeState) -> StepExecutionHistoryReader:
     return StepExecutionHistoryReader(
         namespace="history",
         executions=state.execution.executions,
-        store=state.steps.read_store(RuntimeDomain.EXECUTION),
+        store=state.run_store.read_store(RuntimeDomain.EXECUTION),
         cursor_signer=HmacCursorSigner("history", b"history-key"),
     )
 
@@ -622,15 +622,15 @@ async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> No
     try:
         await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
         await _materialize_attempt(state, 1, "in-memory-ref")
-        archive = state.steps.read_store(RuntimeDomain.EXECUTION)
-        run_id = step_run_id(
+        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        agent_run_id = make_agent_run_id(
             namespace="history",
             tenant_id="tenant",
             execution_id="execution",
-            segment_sequence=1,
+            agent_run_sequence=1,
         )
         resolved = await archive.resolve_transcript_message_refs(
-            (TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 0),)
+            (TranscriptMessageRef(RuntimeDomain.EXECUTION, agent_run_id, 0),)
         )
         assert len(resolved) == 1
         assert isinstance(resolved[0].message, ModelRequest)
@@ -638,7 +638,7 @@ async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> No
 
         for ref in (
             TranscriptMessageRef(RuntimeDomain.EXECUTION, "missing-run", 0),
-            TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 999),
+            TranscriptMessageRef(RuntimeDomain.EXECUTION, agent_run_id, 999),
         ):
             with pytest.raises(AIError) as raised:
                 await archive.resolve_transcript_message_refs((ref,))
@@ -657,21 +657,21 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
         await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
         await _materialize_attempt(state, 1, "durable-only")
         await state.retention.release_execution_handoff("execution", tenant_id="tenant")
-        run_id = step_run_id(
+        agent_run_id = make_agent_run_id(
             namespace="history",
             tenant_id="tenant",
             execution_id="execution",
-            segment_sequence=1,
+            agent_run_sequence=1,
         )
-        terminal_plan = await state.steps.prepare_execution_terminal_seal(
+        terminal_plan = await state.run_store.prepare_execution_terminal_seal(
             execution_id="execution",
-            run_ids=(run_id,),
+            agent_run_ids=(agent_run_id,),
             binding_digest="a" * 64,
         )
         assert terminal_plan.projections[0].projection_digest != "empty"
-        archive = state.steps.read_store(RuntimeDomain.EXECUTION)
+        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
         assert isinstance(archive, StateStepArchive)
-        head = await archive.execution_history_head(run_id)
+        head = await archive.execution_history_head(agent_run_id)
         projection = terminal_plan.projections[0]
         assert head == (
             projection.target_event_offset,
@@ -682,7 +682,7 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
         assert await archive.verify_execution_projection_head(
             terminal_plan.projections[0]
         )
-        await state.steps.finalize_execution_terminal_seal(terminal_plan)
+        await state.run_store.finalize_execution_terminal_seal(terminal_plan)
     finally:
         await state.close()
 
@@ -737,7 +737,7 @@ async def test_history_skips_missing_non_final_attempt() -> None:
             "plan",
             "response",
         ]
-        assert [item.payload["segment_sequence"] for item in trace.items] == [2, 2]
+        assert [item.payload["agent_run_sequence"] for item in trace.items] == [2, 2]
         assert [item.text for item in transcript.items] == ["attempt-2", "response"]
     finally:
         await state.close()
@@ -787,7 +787,7 @@ async def test_successful_history_preserves_user_prompt_and_projects_all_views()
         )
 
         assert [item.content for item in history.items] == [prompt, "plan", "response"]
-        assert [item.payload["segment_sequence"] for item in trace.items] == [1, 1]
+        assert [item.payload["agent_run_sequence"] for item in trace.items] == [1, 1]
         assert [item.text for item in transcript.items] == [prompt, "response"]
     finally:
         await state.close()

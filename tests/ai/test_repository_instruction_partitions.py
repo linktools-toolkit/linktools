@@ -84,7 +84,7 @@ def _checkpoint(
     )
     checkpoint = SimpleNamespace(
         state=RecoveryCheckpointState.ACTIVE,
-        step_run_id="step",
+        agent_run_id="step",
         repository_instruction_overlay=reference,
         repository_instruction_barriers=(first_barrier, latest_barrier),
     )

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Regressions for cancellation ownership at durable StepStore boundaries."""
+"""Regressions for cancellation ownership at durable AgentRunStore boundaries."""
 
 import asyncio
 
@@ -9,28 +9,28 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state._durability import CommitObservation, DurableCommitState
 from linktools.ai.runtime.state._steps import (
-    RuntimeStepStore,
-    _RunDurabilityFlight,
-    _RunDurabilityKind,
-    _RunHistoryLock,
+    RuntimeAgentRunStore,
+    _AgentRunDurabilityFlight,
+    _AgentRunDurabilityKind,
+    _AgentRunHistoryLock,
 )
 
 
 @pytest.mark.asyncio
 async def test_cancelled_step_flight_finishes_before_waiters_resume() -> None:
-    store = object.__new__(RuntimeStepStore)
+    store = object.__new__(RuntimeAgentRunStore)
     store._background_tasks = set()
     store._durability_flights = {}
-    store._history_lock = _RunHistoryLock()
+    store._history_lock = _AgentRunHistoryLock()
 
     loop = asyncio.get_running_loop()
-    flight = _RunDurabilityFlight(
+    flight = _AgentRunDurabilityFlight(
         "run",
         "token",
-        _RunDurabilityKind.PROJECTION,
+        _AgentRunDurabilityKind.PROJECTION,
         loop.create_future(),
     )
-    store._durability_flights[flight.run_id] = flight
+    store._durability_flights[flight.agent_run_id] = flight
 
     started = asyncio.Event()
     release = asyncio.Event()
@@ -54,7 +54,7 @@ async def test_cancelled_step_flight_finishes_before_waiters_resume() -> None:
     await asyncio.sleep(0)
 
     assert not settler.done()
-    assert store._durability_flights[flight.run_id] is flight
+    assert store._durability_flights[flight.agent_run_id] is flight
     assert not flight.completion.done()
     assert len(store._background_tasks) == 1
 
@@ -67,7 +67,7 @@ async def test_cancelled_step_flight_finishes_before_waiters_resume() -> None:
         await settler
     await waiter
 
-    assert flight.run_id not in store._durability_flights
+    assert flight.agent_run_id not in store._durability_flights
     assert flight.completion.done()
     assert flight.completion.exception() is None
     assert store._background_tasks == set()
@@ -75,19 +75,19 @@ async def test_cancelled_step_flight_finishes_before_waiters_resume() -> None:
 
 @pytest.mark.asyncio
 async def test_step_flight_fences_only_after_real_unresolved_readback() -> None:
-    store = object.__new__(RuntimeStepStore)
+    store = object.__new__(RuntimeAgentRunStore)
     store._background_tasks = set()
     store._durability_flights = {}
-    store._history_lock = _RunHistoryLock()
+    store._history_lock = _AgentRunHistoryLock()
 
     loop = asyncio.get_running_loop()
-    flight = _RunDurabilityFlight(
+    flight = _AgentRunDurabilityFlight(
         "run",
         "token",
-        _RunDurabilityKind.PROJECTION,
+        _AgentRunDurabilityKind.PROJECTION,
         loop.create_future(),
     )
-    store._durability_flights[flight.run_id] = flight
+    store._durability_flights[flight.agent_run_id] = flight
 
     async def operation() -> None:
         raise RuntimeError("commit failed")
@@ -102,7 +102,7 @@ async def test_step_flight_fences_only_after_real_unresolved_readback() -> None:
         await store._settle_durability_flight(flight, operation, readback)
 
     assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
-    assert flight.run_id in store._durability_flights
+    assert flight.agent_run_id in store._durability_flights
     assert flight.completion.done()
     completion_error = flight.completion.exception()
     assert isinstance(completion_error, AIError)

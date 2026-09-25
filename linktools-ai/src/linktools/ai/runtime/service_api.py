@@ -292,7 +292,7 @@ class ExecutionHistoryItem:
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
     content_included: bool = True
-    segment_sequence: "int | None" = None
+    agent_run_sequence: "int | None" = None
     request_sequence: "int | None" = None
     tool_operation_id: "str | None" = None
     started_at: "datetime | None" = None
@@ -307,8 +307,8 @@ class ExecutionHistoryItem:
             raise TypeError("history content flag must be bool")
         if not self.content_included and self.content is not None:
             raise ValueError("omitted history content must be None")
-        if self.segment_sequence is not None and self.segment_sequence < 1:
-            raise ValueError("history segment sequence is invalid")
+        if self.agent_run_sequence is not None and self.agent_run_sequence < 1:
+            raise ValueError("Agent run sequence is invalid")
         if self.request_sequence is not None and self.request_sequence < 1:
             raise ValueError("history request sequence is invalid")
         if self.duration_ns is not None and self.duration_ns < 0:
@@ -318,7 +318,7 @@ class ExecutionHistoryItem:
 @dataclass(frozen=True, slots=True)
 class ModelInteractionItem:
     execution_id: str
-    segment_sequence: int
+    agent_run_sequence: int
     depth: int
     request_sequence: int
     purpose: str
@@ -338,7 +338,7 @@ class ModelInteractionItem:
     def __post_init__(self) -> None:
         if (
             not self.execution_id
-            or self.segment_sequence < 1
+            or self.agent_run_sequence < 1
             or self.depth < 0
             or self.request_sequence < 1
             or self.step_index < 0
@@ -365,7 +365,7 @@ class AttachmentFact:
     digest: str | None
     position: int
     processing_status: str = "unknown"
-    segment_sequence: int | None = None
+    agent_run_sequence: int | None = None
     request_sequence: int | None = None
     step_index: int | None = None
     call_id: str | None = None
@@ -395,7 +395,7 @@ class AttachmentFact:
             or self.processing_status != "unknown"
         ):
             raise ValueError("attachment fact is invalid")
-        for value in (self.segment_sequence, self.request_sequence):
+        for value in (self.agent_run_sequence, self.request_sequence):
             if value is not None and (
                 isinstance(value, bool)
                 or not isinstance(value, int)
@@ -422,16 +422,16 @@ class AttachmentFact:
 @dataclass(frozen=True, slots=True)
 class UsageReadCutoff:
     execution_id: str
-    segment_sequence: int
+    agent_run_sequence: int
     request_sequence: int
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.execution_id, str)
             or not self.execution_id
-            or isinstance(self.segment_sequence, bool)
-            or not isinstance(self.segment_sequence, int)
-            or self.segment_sequence < 1
+            or isinstance(self.agent_run_sequence, bool)
+            or not isinstance(self.agent_run_sequence, int)
+            or self.agent_run_sequence < 1
             or isinstance(self.request_sequence, bool)
             or not isinstance(self.request_sequence, int)
             or self.request_sequence < 0
@@ -500,13 +500,13 @@ class UsageSummary:
             self.cutoffs,
             key=lambda value: (
                 value.execution_id,
-                value.segment_sequence,
+                value.agent_run_sequence,
             ),
         ))
         if (
             any(not isinstance(value, UsageReadCutoff) for value in cutoffs)
             or len({
-                (value.execution_id, value.segment_sequence)
+                (value.execution_id, value.agent_run_sequence)
                 for value in cutoffs
             }) != len(cutoffs)
         ):
@@ -619,7 +619,7 @@ class SessionHistoryReader(Protocol):
         session_id: str,
         *,
         tenant_id: str,
-        continuation_step_run_id: "str | None",
+        continuation_agent_run_id: "str | None",
         continuation_history_id: "str | None" = None,
         cursor: "str | None",
         limit: int,

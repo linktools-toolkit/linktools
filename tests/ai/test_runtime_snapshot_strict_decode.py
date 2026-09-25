@@ -364,7 +364,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
     operation = ToolOperationRecord(
         tool_operation_id=canonical_sha256({"tool_operation": 1}),
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         tool_call_id="call",
         idempotency_key_digest=canonical_sha256({"idempotency": 1}),
         tool_name="tool",
@@ -403,7 +403,7 @@ def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
         "tenant",
         RuntimeDomain.RECOVERY.value,
         "tool_call",
-        [operation.step_run_id, operation.tool_call_id],
+        [operation.agent_run_id, operation.tool_call_id],
     )
     assert aliases == (StoredAlias(expected_alias, record.key_digest),)
     assert sequences == {}

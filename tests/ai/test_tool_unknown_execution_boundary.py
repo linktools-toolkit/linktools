@@ -31,7 +31,7 @@ async def test_committed_unknown_effect_raises_boundary_error(
         namespace="runtime",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="step",
+        agent_run_id="step",
         binding_digest="b" * 64,
         owner="owner",
         background_tasks=set(),

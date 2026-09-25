@@ -56,7 +56,7 @@ async def test_model_cancellation_records_cancelled_observation() -> None:
         tenant_id="tenant",
         execution_id="execution",
         session_id=None,
-        step_run_id="step-run",
+        agent_run_id="agent-run",
         agent_id="agent",
     )
 
@@ -68,7 +68,7 @@ async def test_model_cancellation_records_cancelled_observation() -> None:
         deps=type("Deps", (), {"correlation": {}})(),
         model=model,
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
         run_step=1,
     )
     request_context = ModelRequestContext(

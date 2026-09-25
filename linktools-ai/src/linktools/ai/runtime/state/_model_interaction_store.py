@@ -22,12 +22,12 @@ from ._contracts import (
     RuntimePayloadRef,
     TranscriptSpanRef,
 )
-from ._step_contracts import ContinuableSnapshot, RunRecord, StepEvent
+from ._step_contracts import ContinuableSnapshot, AgentRunRecord, StepEvent
 from ._step_archive import (
     ExecutionProjectionBatch,
     InMemoryStepArchive,
     PreparedStepSnapshot,
-    StagingStepStore,
+    StagingAgentRunStore,
     StateStepArchive,
     _ProjectionOffset,
     _decode_step,
@@ -38,7 +38,7 @@ from ._step_archive import (
 from ._store import FactQuery, StateTransaction, StoredFact, StoredRecord
 
 
-class ModelInteractionStagingStepStore(StagingStepStore):
+class ModelInteractionStagingAgentRunStore(StagingAgentRunStore):
     """Staging store with request-sequence idempotency and durable high-water capture."""
 
     def stage_model_interaction(self, interaction: object) -> None:
@@ -47,14 +47,14 @@ class ModelInteractionStagingStepStore(StagingStepStore):
 
     def capture_projection_local(
         self,
-        run_id: str,
+        agent_run_id: str,
         offset: _ProjectionOffset,
     ) -> ExecutionProjectionBatch | None:
         # Base staging owns runs/events/snapshots/interactions. Ask it for a
         # complete local interaction snapshot, then translate the durable
         # request-sequence high-water without reaching into its other state.
         base = super().capture_projection_local(
-            run_id,
+            agent_run_id,
             replace(offset, interactions=0),
         )
         if base is None:
@@ -67,7 +67,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
 
     async def prepare_interactions(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         interactions: Sequence[StagedModelInteraction],
         payload: Callable[[str], bytes],
         *,
@@ -84,12 +84,12 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if isinstance(item, TranscriptSpanRef) and (
                     item.source_domain is not self.runtime_domain
-                    or item.owner_id != run.run_id
+                    or item.owner_id != run.agent_run_id
                 ):
                     raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             return context_projection_to_durable(
                 staged,
-                owner_id=run.run_id,
+                owner_id=run.agent_run_id,
                 source_domain=self.runtime_domain,
                 payload=payload,
                 local_message_base=local_message_base,
@@ -97,7 +97,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
 
         return tuple(
             ModelInteractionRecord(
-                staged.run_id,
+                staged.agent_run_id,
                 staged.step_index,
                 staged.request_sequence,
                 staged.purpose,
@@ -122,14 +122,14 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
 
     async def sync_projection(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None:
-        current_values = await super().list_model_interactions(run_id=run.run_id)
+        current_values = await super().list_model_interactions(agent_run_id=run.agent_run_id)
         current: dict[int, ModelInteractionRecord] = {}
         for value in current_values:
             if not isinstance(value, ModelInteractionRecord):
@@ -156,12 +156,12 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
     async def list_model_interactions(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         after_request_sequence: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
         values = await super().list_model_interactions(
-            run_id=run_id,
+            agent_run_id=agent_run_id,
             after_request_sequence=after_request_sequence,
             limit=limit,
         )
@@ -185,13 +185,13 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         records = tuple(
             value for value in values if isinstance(value, ModelInteractionRecord)
         )
-        if any(record.run_id != records[0].run_id for record in records):
+        if any(record.agent_run_id != records[0].agent_run_id for record in records):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await super().resolve_model_interactions(records)
 
     async def prepare_interactions(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         interactions: Sequence[StagedModelInteraction],
         payload: Callable[[str], bytes],
         *,
@@ -209,7 +209,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
     async def list_model_interactions(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         after_request_sequence: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
@@ -218,7 +218,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         values = await self._store.read(
             lambda transaction: transaction.list_facts(
                 FactQuery(
-                    self._stream(run_id, "interaction"),
+                    self._stream(agent_run_id, "interaction"),
                     after_sequence=after_request_sequence,
                     limit=limit,
                 )
@@ -239,7 +239,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
     async def _sync_projection_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
+        run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[PreparedStepSnapshot],
@@ -253,7 +253,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             execution_id,
             history_head_guard,
         )
-        owner = self._run_key(run.run_id)
+        owner = self._agent_run_key(run.agent_run_id)
         run_existed = await transaction.get_record(owner) is not None
         await super()._sync_projection_in_transaction(
             transaction,
@@ -281,7 +281,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
     async def _sync_interactions_in_transaction(
         self,
         transaction: StateTransaction,
-        run: RunRecord,
+        run: AgentRunRecord,
         interactions: Sequence[ModelInteractionRecord],
         *,
         owner_already_guarded: bool,
@@ -291,13 +291,13 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             return 0
         sequences = tuple(value.request_sequence for value in values)
         if (
-            any(value.run_id != run.run_id for value in values)
+            any(value.agent_run_id != run.agent_run_id for value in values)
             or sequences != tuple(sorted(sequences))
             or len(set(sequences)) != len(sequences)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        sequence_key = self._sequence(run.run_id, "interaction")
+        sequence_key = self._sequence(run.agent_run_id, "interaction")
         durable_count = (await transaction.get_sequences((sequence_key,))).get(
             sequence_key,
             0,
@@ -319,7 +319,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             stored = await transaction.list_facts(
                 FactQuery(
-                    self._stream(run.run_id, "interaction"),
+                    self._stream(run.agent_run_id, "interaction"),
                     after_sequence=replay_sequences[0] - 1,
                     limit=len(replay),
                 )
@@ -343,7 +343,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         if not owner_already_guarded:
-            owner_record = await transaction.get_record(self._run_key(run.run_id))
+            owner_record = await transaction.get_record(self._agent_run_key(run.agent_run_id))
             if owner_record is None or await transaction.guard_record(
                 owner_record.key_digest,
                 expected_storage_version=owner_record.storage_version,
@@ -352,8 +352,8 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         final = await transaction.reserve_sequence(sequence_key, len(fresh))
         if final != fresh_sequences[-1]:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        stream = self._stream(run.run_id, "interaction")
-        owner = self._run_key(run.run_id)
+        stream = self._stream(run.agent_run_id, "interaction")
+        owner = self._agent_run_key(run.agent_run_id)
         await _insert_facts(
             transaction,
             tuple(
@@ -373,7 +373,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
 
 
 def _validate_interaction_batch(
-    run: RunRecord,
+    run: AgentRunRecord,
     interactions: Sequence[StagedModelInteraction],
 ) -> tuple[StagedModelInteraction, ...]:
     values = tuple(interactions)
@@ -381,7 +381,7 @@ def _validate_interaction_batch(
     for interaction in values:
         if (
             not isinstance(interaction, StagedModelInteraction)
-            or interaction.run_id != run.run_id
+            or interaction.agent_run_id != run.agent_run_id
             or interaction.request_sequence in sequences
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -395,7 +395,7 @@ def _stage_interaction(
 ) -> None:
     if not isinstance(interaction, StagedModelInteraction):
         raise TypeError("staged model interaction is invalid")
-    values = values_by_run.setdefault(interaction.run_id, [])
+    values = values_by_run.setdefault(interaction.agent_run_id, [])
     if not values:
         values.append(interaction)
         return
@@ -440,6 +440,6 @@ def _with_interaction_high_water(
 
 __all__ = [
     "ModelInteractionInMemoryStepArchive",
-    "ModelInteractionStagingStepStore",
+    "ModelInteractionStagingAgentRunStore",
     "ModelInteractionStateStepArchive",
 ]

@@ -19,7 +19,7 @@ from ...core import (
     SessionStatus,
     ToolOperationStatus,
     canonical_sha256,
-    step_run_id,
+    agent_run_id,
 )
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
@@ -64,7 +64,7 @@ from ._recovery_repositories import (
 )
 from ._step_contracts import (
     ContinuableSnapshot,
-    RunRecord,
+    AgentRunRecord,
     StepEvent,
 )
 from ._step_archive import (
@@ -121,9 +121,9 @@ class RuntimeStateCommands:
         recovery: RecoveryCheckpointRepository | None = None,
         conversation_history: ConversationHistoryRepository | None = None,
         tools: object | None = None,
-        conversation_steps: StateStepArchive | None = None,
-        execution_steps: StateStepArchive | None = None,
-        recovery_steps: StateStepArchive | None = None,
+        conversation_run_store: StateStepArchive | None = None,
+        execution_run_store: StateStepArchive | None = None,
+        recovery_run_store: StateStepArchive | None = None,
         background_tasks: "set[asyncio.Task[object]]",
     ) -> None:
         self._execution = execution
@@ -137,9 +137,9 @@ class RuntimeStateCommands:
         self._recovery = recovery
         self._conversation_history = conversation_history
         self._tools = tools
-        self._conversation_steps = conversation_steps
-        self._execution_steps = execution_steps
-        self._recovery_steps = recovery_steps
+        self._conversation_run_store = conversation_run_store
+        self._execution_run_store = execution_run_store
+        self._recovery_run_store = recovery_run_store
         self._background_tasks = background_tasks
 
     def _require_approvals(self) -> ApprovalRepository:
@@ -172,7 +172,7 @@ class RuntimeStateCommands:
         external_calls = self._require_external_calls()
         if occurred_at.tzinfo is None:
             raise ValueError("deferred checkpoint timestamp must be timezone-aware")
-        if continuation.source_step_run_id == "":
+        if continuation.source_agent_run_id == "":
             raise ValueError("deferred checkpoint source step is required")
         approval_values = tuple(approval_records)
         external_values = tuple(external_records)
@@ -222,7 +222,7 @@ class RuntimeStateCommands:
                 "approval-v1",
                 tenant_id,
                 execution_id,
-                continuation.source_step_run_id,
+                continuation.source_agent_run_id,
                 item.tool_call_id,
             )
             for item in continuation.approvals
@@ -233,7 +233,7 @@ class RuntimeStateCommands:
                 "external-call-v1",
                 tenant_id,
                 execution_id,
-                continuation.source_step_run_id,
+                continuation.source_agent_run_id,
                 item.tool_call_id,
             )
             for item in continuation.calls
@@ -276,8 +276,8 @@ class RuntimeStateCommands:
                     != expected_agent_run_sequence
                     or current_checkpoint.revision != expected_recovery_revision
                     or current_checkpoint.state is not RecoveryCheckpointState.ACTIVE
-                    or current_checkpoint.step_run_id
-                    != continuation.source_step_run_id
+                    or current_checkpoint.agent_run_id
+                    != continuation.source_agent_run_id
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 for record in approval_values:
@@ -397,7 +397,7 @@ class RuntimeStateCommands:
                 "approval-v1",
                 self._tenant_id,
                 commit.execution_id,
-                expected_pending_tools.source_step_run_id,
+                expected_pending_tools.source_agent_run_id,
                 item.tool_call_id,
             )
             for item in expected_pending_tools.approvals
@@ -407,7 +407,7 @@ class RuntimeStateCommands:
                 "external-call-v1",
                 self._tenant_id,
                 commit.execution_id,
-                expected_pending_tools.source_step_run_id,
+                expected_pending_tools.source_agent_run_id,
                 item.tool_call_id,
             )
             for item in expected_pending_tools.calls
@@ -580,11 +580,11 @@ class RuntimeStateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         next_sequence = expected_agent_run_sequence + 1
-        next_run_id = step_run_id(
+        next_agent_run_id = agent_run_id(
             namespace=self._namespace,
             tenant_id=tenant_id,
             execution_id=execution_id,
-            segment_sequence=next_sequence,
+            agent_run_sequence=next_sequence,
         )
 
         async def operation() -> tuple[ExecutionRecord, RecoveryCheckpoint]:
@@ -633,7 +633,7 @@ class RuntimeStateCommands:
                     next_record=replace(
                         checkpoint,
                         state=RecoveryCheckpointState.ACTIVE,
-                        step_run_id=next_run_id,
+                        agent_run_id=next_agent_run_id,
                         pending_tools=None,
                         revision=expected_recovery_revision + 1,
                         updated_at=updated_execution.updated_at,
@@ -652,7 +652,7 @@ class RuntimeStateCommands:
                 execution.status is ExecutionStatus.STARTED
                 and execution.agent_run_sequence == next_sequence
                 and checkpoint.state is RecoveryCheckpointState.ACTIVE
-                and checkpoint.step_run_id == next_run_id
+                and checkpoint.agent_run_id == next_agent_run_id
                 and checkpoint.pending_tools is None
             ):
                 return CommitObservation(
@@ -1009,11 +1009,11 @@ class RuntimeStateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         next_sequence = claim.expected_agent_run_sequence + 1
-        next_run_id = step_run_id(
+        next_agent_run_id = agent_run_id(
             namespace=self._namespace,
             tenant_id=self._tenant_id,
             execution_id=claim.execution_id,
-            segment_sequence=next_sequence,
+            agent_run_sequence=next_sequence,
         )
 
         async def callback(
@@ -1054,7 +1054,7 @@ class RuntimeStateCommands:
             )
             updated_recovery = replace(
                 current_recovery,
-                step_run_id=next_run_id,
+                agent_run_id=next_agent_run_id,
                 state=RecoveryCheckpointState.ACTIVE,
                 revision=current_recovery.revision + 1,
                 updated_at=updated_execution.updated_at,
@@ -1095,7 +1095,7 @@ class RuntimeStateCommands:
                 recovery is not None
                 and recovery.revision == claim.expected_recovery_revision + 1
                 and recovery.state is RecoveryCheckpointState.ACTIVE
-                and recovery.step_run_id == next_run_id
+                and recovery.agent_run_id == next_agent_run_id
             )
             execution_predecessor = (
                 execution is not None
@@ -1106,7 +1106,7 @@ class RuntimeStateCommands:
                 recovery is not None
                 and recovery.revision == claim.expected_recovery_revision
                 and recovery.state is claim.expected_recovery_state
-                and recovery.step_run_id is None
+                and recovery.agent_run_id is None
             )
             if execution_target and recovery_target:
                 _logger.warning(
@@ -1420,12 +1420,12 @@ class RuntimeStateCommands:
         session_id: str | None = None,
         expected_cursor: ConversationCursor | None = None,
         next_cursor: ConversationCursor | None = None,
-        conversation_run: RunRecord | None = None,
+        conversation_agent_run: AgentRunRecord | None = None,
         conversation_snapshot: ContinuableSnapshot | None = None,
         recovery_checkpoint: RecoveryCheckpoint | None = None,
-        recovery_run: RunRecord | None = None,
+        recovery_run: AgentRunRecord | None = None,
         recovery_snapshot: ContinuableSnapshot | None = None,
-        execution_run: RunRecord | None = None,
+        execution_run: AgentRunRecord | None = None,
         execution_events: Sequence[StepEvent] = (),
         execution_snapshots: Sequence[ContinuableSnapshot] = (),
         execution_projections: Sequence[PreparedExecutionProjection] = (),
@@ -1433,10 +1433,10 @@ class RuntimeStateCommands:
         background_tasks: "set[asyncio.Task[object]] | None" = None,
     ) -> ExecutionTerminalCommitResult:
         if execution_projections and (
-            self._execution_steps is None or execution_run is None
+            self._execution_run_store is None or execution_run is None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if session_id is None and (conversation_run is not None or conversation_snapshot is not None):
+        if session_id is None and (conversation_agent_run is not None or conversation_snapshot is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if recovery_checkpoint is None and (recovery_run is not None or recovery_snapshot is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1455,18 +1455,18 @@ class RuntimeStateCommands:
         )
         prepared_conversation = ()
         if (
-            self._conversation_steps is not None
-            and conversation_run is not None
+            self._conversation_run_store is not None
+            and conversation_agent_run is not None
             and conversation_snapshot is not None
         ):
             conversation_snapshot = (
-                await self._conversation_steps.relocate_conversation_snapshot(
-                    conversation_run,
+                await self._conversation_run_store.relocate_conversation_snapshot(
+                    conversation_agent_run,
                     conversation_snapshot,
                 )
             )
-            prepared_conversation = await self._conversation_steps.prepare_snapshots(
-                conversation_run,
+            prepared_conversation = await self._conversation_run_store.prepare_snapshots(
+                conversation_agent_run,
                 (conversation_snapshot,),
             )
         timeline_range: tuple[int, int] | None = None
@@ -1499,26 +1499,26 @@ class RuntimeStateCommands:
 
         prepared_recovery = ()
         if (
-            self._recovery_steps is not None
+            self._recovery_run_store is not None
             and recovery_run is not None
             and recovery_snapshot is not None
         ):
-            recovery_snapshot = await self._recovery_steps.relocate_run_snapshot(
+            recovery_snapshot = await self._recovery_run_store.relocate_run_snapshot(
                 recovery_run,
                 recovery_snapshot,
             )
-            prepared_recovery = await self._recovery_steps.prepare_snapshots(
+            prepared_recovery = await self._recovery_run_store.prepare_snapshots(
                 recovery_run,
                 (recovery_snapshot,),
             )
         prepared_execution: PreparedStepSnapshotBatch | tuple[()] = ()
         if (
             not execution_projections
-            and self._execution_steps is not None
+            and self._execution_run_store is not None
             and execution_run is not None
             and execution_snapshots
         ):
-            prepared_execution = await self._execution_steps.prepare_snapshots(
+            prepared_execution = await self._execution_run_store.prepare_snapshots(
                 execution_run,
                 execution_snapshots,
             )
@@ -1542,17 +1542,17 @@ class RuntimeStateCommands:
             self._require_recovery()
             stores.append(self._recovery.state_store)
         if execution_run is not None:
-            if self._execution_steps is None:
+            if self._execution_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.append(self._execution_steps.state_store)
-        if conversation_run is not None or conversation_snapshot is not None:
-            if self._conversation_steps is None or conversation_run is None or conversation_snapshot is None:
+            stores.append(self._execution_run_store.state_store)
+        if conversation_agent_run is not None or conversation_snapshot is not None:
+            if self._conversation_run_store is None or conversation_agent_run is None or conversation_snapshot is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.append(self._conversation_steps.state_store)
+            stores.append(self._conversation_run_store.state_store)
         if recovery_run is not None or recovery_snapshot is not None:
-            if self._recovery_steps is None or recovery_run is None or recovery_snapshot is None:
+            if self._recovery_run_store is None or recovery_run is None or recovery_snapshot is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stores.append(self._recovery_steps.state_store)
+            stores.append(self._recovery_run_store.state_store)
         if _same_group(stores):
             async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
                 execution_transaction = group.transaction(self._execution.state_store)
@@ -1566,7 +1566,7 @@ class RuntimeStateCommands:
                 )
                 if session_id is not None:
                     conversation_transaction = group.transaction(self._conversation.state_store)
-                    if conversation_run is None or conversation_snapshot is None:
+                    if conversation_agent_run is None or conversation_snapshot is None:
                         await self._conversation.release_execution_in_transaction(
                             conversation_transaction,
                             session_id,
@@ -1574,11 +1574,11 @@ class RuntimeStateCommands:
                             execution_id=commit.execution.execution_id,
                         )
                     else:
-                        if next_cursor is None or self._conversation_steps is None:
+                        if next_cursor is None or self._conversation_run_store is None:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        await self._conversation_steps.materialize_snapshot_in_transaction(
-                            group.transaction(self._conversation_steps.state_store),
-                            conversation_run,
+                        await self._conversation_run_store.materialize_snapshot_in_transaction(
+                            group.transaction(self._conversation_run_store.state_store),
+                            conversation_agent_run,
                             prepared_conversation[0],
                         )
                         session = await self._conversation.get_in_transaction(
@@ -1612,10 +1612,10 @@ class RuntimeStateCommands:
                         )
                 if recovery_checkpoint is not None:
                     if recovery_run is not None or recovery_snapshot is not None:
-                        if self._recovery_steps is None or recovery_run is None or recovery_snapshot is None:
+                        if self._recovery_run_store is None or recovery_run is None or recovery_snapshot is None:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        await self._recovery_steps.materialize_snapshot_in_transaction(
-                            group.transaction(self._recovery_steps.state_store),
+                        await self._recovery_run_store.materialize_snapshot_in_transaction(
+                            group.transaction(self._recovery_run_store.state_store),
                             recovery_run,
                             prepared_recovery[0],
                         )
@@ -1628,11 +1628,11 @@ class RuntimeStateCommands:
                     )
                 if execution_run is not None:
                     execution_transaction_for_steps = group.transaction(
-                        self._execution_steps.state_store
+                        self._execution_run_store.state_store
                     )
                     if execution_projections:
                         for projection in execution_projections:
-                            await self._execution_steps.sync_projection_in_transaction(
+                            await self._execution_run_store.sync_projection_in_transaction(
                                 execution_transaction_for_steps,
                                 projection.run,
                                 events=projection.events,
@@ -1642,7 +1642,7 @@ class RuntimeStateCommands:
                                 history_head_guard=(head, head_record),
                             )
                     else:
-                        await self._execution_steps.sync_projection_in_transaction(
+                        await self._execution_run_store.sync_projection_in_transaction(
                             execution_transaction_for_steps,
                             execution_run,
                             events=execution_events,
@@ -1684,7 +1684,7 @@ class RuntimeStateCommands:
                         pending_event_count=len(audit_events),
                         session_id=session_id,
                         next_cursor=next_cursor,
-                        conversation_run=conversation_run,
+                        conversation_agent_run=conversation_agent_run,
                         conversation_snapshot=conversation_snapshot,
                         recovery_checkpoint=recovery_checkpoint,
                         recovery_run=recovery_run,
@@ -1759,7 +1759,7 @@ class RuntimeStateCommands:
                     pending_event_count=len(audit_events),
                     session_id=session_id,
                     next_cursor=next_cursor,
-                    conversation_run=conversation_run,
+                    conversation_agent_run=conversation_agent_run,
                     conversation_snapshot=conversation_snapshot,
                     recovery_checkpoint=recovery_checkpoint,
                     recovery_run=recovery_run,
@@ -1781,22 +1781,22 @@ class RuntimeStateCommands:
             if not _recovery_completion_predecessor(actual_recovery, recovery_checkpoint):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             recovery_pending = True
-        has_recovery_step_target = recovery_run is not None or recovery_snapshot is not None
-        recovery_steps_merged = False
-        if session_id is not None and conversation_run is not None and conversation_snapshot is not None:
-            if next_cursor is None or self._conversation_steps is None:
+        has_recovery_run_target = recovery_run is not None or recovery_snapshot is not None
+        recovery_run_store_merged = False
+        if session_id is not None and conversation_agent_run is not None and conversation_snapshot is not None:
+            if next_cursor is None or self._conversation_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
             conversation_stores = [
                 self._conversation.state_store,
-                self._conversation_steps.state_store,
+                self._conversation_run_store.state_store,
             ]
 
             async def commit_conversation(group: StateGroupTransaction) -> None:
                 conversation_transaction = group.transaction(self._conversation.state_store)
-                await self._conversation_steps.materialize_snapshot_in_transaction(
-                    group.transaction(self._conversation_steps.state_store),
-                    conversation_run,
+                await self._conversation_run_store.materialize_snapshot_in_transaction(
+                    group.transaction(self._conversation_run_store.state_store),
+                    conversation_agent_run,
                     prepared_conversation[0],
                 )
                 session = await self._conversation.get_in_transaction(
@@ -1846,14 +1846,14 @@ class RuntimeStateCommands:
                             tenant_id=self._tenant_id,
                             execution_id=commit.execution.execution_id,
                             next_cursor=next_cursor,
-                            run=conversation_run,
+                            run=conversation_agent_run,
                             snapshot=conversation_snapshot,
                         ):
                             break
             else:
                 await self._materialize_prepared_snapshot_with_reconciliation(
-                    self._conversation_steps,
-                    conversation_run,
+                    self._conversation_run_store,
+                    conversation_agent_run,
                     prepared_conversation,
                 )
 
@@ -1909,35 +1909,35 @@ class RuntimeStateCommands:
 
         execution_stores = [self._execution.state_store]
         if execution_run is not None:
-            if self._execution_steps is None:
+            if self._execution_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            execution_stores.append(self._execution_steps.state_store)
+            execution_stores.append(self._execution_run_store.state_store)
         recovery_state_merged = (
             recovery_pending
             and recovery_checkpoint is not None
             and self._recovery.state_store.storage_group is self._execution.state_store.storage_group
         )
         if recovery_state_merged:
-            if has_recovery_step_target:
-                if self._recovery_steps is None or recovery_run is None or recovery_snapshot is None:
+            if has_recovery_run_target:
+                if self._recovery_run_store is None or recovery_run is None or recovery_snapshot is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                recovery_steps_merged = (
-                    self._recovery_steps.state_store.storage_group
+                recovery_run_store_merged = (
+                    self._recovery_run_store.state_store.storage_group
                     is self._execution.state_store.storage_group
                 )
             execution_stores.append(self._recovery.state_store)
-            if recovery_steps_merged:
-                execution_stores.append(self._recovery_steps.state_store)
-        if recovery_pending and has_recovery_step_target and not recovery_steps_merged:
-            if self._recovery_steps is None or recovery_run is None or recovery_snapshot is None:
+            if recovery_run_store_merged:
+                execution_stores.append(self._recovery_run_store.state_store)
+        if recovery_pending and has_recovery_run_target and not recovery_run_store_merged:
+            if self._recovery_run_store is None or recovery_run is None or recovery_snapshot is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._materialize_prepared_snapshot_with_reconciliation(
-                self._recovery_steps,
+                self._recovery_run_store,
                 recovery_run,
                 prepared_recovery,
             )
 
-        execution_steps_in_transaction = False
+        execution_run_store_in_transaction = False
 
         async def commit_execution(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
             execution_transaction = group.transaction(self._execution.state_store)
@@ -1946,13 +1946,13 @@ class RuntimeStateCommands:
                 commit.execution.execution_id,
             )
             effective_commit = await self._effective_terminal_commit(execution_transaction, commit)
-            if execution_run is not None and execution_steps_in_transaction:
+            if execution_run is not None and execution_run_store_in_transaction:
                 execution_transaction_for_steps = group.transaction(
-                    self._execution_steps.state_store
+                    self._execution_run_store.state_store
                 )
                 if execution_projections:
                     for projection in execution_projections:
-                        await self._execution_steps.sync_projection_in_transaction(
+                        await self._execution_run_store.sync_projection_in_transaction(
                             execution_transaction_for_steps,
                             projection.run,
                             events=projection.events,
@@ -1962,7 +1962,7 @@ class RuntimeStateCommands:
                             history_head_guard=(head, head_record),
                         )
                 else:
-                    await self._execution_steps.sync_projection_in_transaction(
+                    await self._execution_run_store.sync_projection_in_transaction(
                         execution_transaction_for_steps,
                         execution_run,
                         events=execution_events,
@@ -1992,9 +1992,9 @@ class RuntimeStateCommands:
                 ),
             )
             if recovery_state_merged:
-                if recovery_steps_merged:
-                    await self._recovery_steps.materialize_snapshot_in_transaction(
-                        group.transaction(self._recovery_steps.state_store),
+                if recovery_run_store_merged:
+                    await self._recovery_run_store.materialize_snapshot_in_transaction(
+                        group.transaction(self._recovery_run_store.state_store),
                         recovery_run,
                         prepared_recovery[0],
                     )
@@ -2017,7 +2017,7 @@ class RuntimeStateCommands:
                 pending_event_count=len(audit_events),
                 session_id=session_id,
                 next_cursor=next_cursor,
-                conversation_run=conversation_run,
+                conversation_agent_run=conversation_agent_run,
                 conversation_snapshot=conversation_snapshot,
                 recovery_checkpoint=None,
                 recovery_run=None,
@@ -2101,13 +2101,13 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result = ExecutionTerminalCommitResult(execution, commit.result)
         elif _same_group(execution_stores):
-            execution_steps_in_transaction = execution_run is not None
+            execution_run_store_in_transaction = execution_run is not None
             result = await commit_execution_with_reconciliation(execution_stores)
         else:
             if execution_projections:
                 for projection in execution_projections:
                     await self._sync_prepared_projection_with_reconciliation(
-                        self._execution_steps,
+                        self._execution_run_store,
                         projection,
                         execution_id=commit.execution.execution_id,
                     )
@@ -2121,8 +2121,8 @@ class RuntimeStateCommands:
             terminal_stores = [self._execution.state_store]
             if recovery_state_merged:
                 terminal_stores.append(self._recovery.state_store)
-                if recovery_steps_merged:
-                    terminal_stores.append(self._recovery_steps.state_store)
+                if recovery_run_store_merged:
+                    terminal_stores.append(self._recovery_run_store.state_store)
             result = await commit_execution_with_reconciliation(terminal_stores)
         if recovery_state_merged and recovery_checkpoint is not None:
             actual_recovery = await self._recovery.get(
@@ -2161,7 +2161,7 @@ class RuntimeStateCommands:
     async def _materialize_snapshot_with_reconciliation(
         self,
         archive: StateStepArchive,
-        run: RunRecord,
+        run: AgentRunRecord,
         snapshot: ContinuableSnapshot,
         *,
         execution_id: str | None = None,
@@ -2204,7 +2204,7 @@ class RuntimeStateCommands:
     async def _materialize_prepared_snapshot_with_reconciliation(
         self,
         archive: StateStepArchive,
-        run: RunRecord,
+        run: AgentRunRecord,
         batch: PreparedStepSnapshotBatch,
         *,
         execution_id: str | None = None,
@@ -2282,13 +2282,13 @@ class RuntimeStateCommands:
     async def _prepared_snapshot_visible(
         self,
         archive: StateStepArchive,
-        run: RunRecord,
+        run: AgentRunRecord,
         prepared: PreparedStepSnapshot,
     ) -> bool:
-        if await archive.get_run(run_id=run.run_id) != run:
+        if await archive.get_agent_run(agent_run_id=run.agent_run_id) != run:
             return False
         snapshot = await archive.latest_snapshot(
-            run_id=run.run_id,
+            agent_run_id=run.agent_run_id,
             include_interrupted=True,
         )
         if snapshot is None:
@@ -2307,13 +2307,13 @@ class RuntimeStateCommands:
     async def _step_snapshot_visible(
         self,
         archive: StateStepArchive,
-        run: RunRecord,
+        run: AgentRunRecord,
         snapshot: ContinuableSnapshot,
     ) -> bool:
         return (
-            await archive.get_run(run_id=run.run_id) == run
+            await archive.get_agent_run(agent_run_id=run.agent_run_id) == run
             and await archive.verify_snapshot_projection(
-                run_id=run.run_id,
+                agent_run_id=run.agent_run_id,
                 snapshot=snapshot,
             )
         )
@@ -2325,7 +2325,7 @@ class RuntimeStateCommands:
         tenant_id: str,
         execution_id: str,
         next_cursor: ConversationCursor,
-        run: RunRecord,
+        run: AgentRunRecord,
         snapshot: ContinuableSnapshot,
     ) -> bool:
         session = await self._conversation.get(session_id, tenant_id=tenant_id)
@@ -2333,9 +2333,9 @@ class RuntimeStateCommands:
             session is not None
             and session.active_execution_id == execution_id
             and session.continuation == next_cursor
-            and self._conversation_steps is not None
+            and self._conversation_run_store is not None
             and await self._step_snapshot_visible(
-                self._conversation_steps,
+                self._conversation_run_store,
                 run,
                 snapshot,
             )
@@ -2343,16 +2343,16 @@ class RuntimeStateCommands:
 
     async def _sync_projection_with_reconciliation(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         *,
         execution_id: str,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
     ) -> None:
-        if self._execution_steps is None:
+        if self._execution_run_store is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         async def operation() -> None:
-            await self._execution_steps.sync_projection(
+            await self._execution_run_store.sync_projection(
                 run,
                 events=events,
                 snapshots=snapshots,
@@ -2361,12 +2361,12 @@ class RuntimeStateCommands:
 
         async def readback() -> CommitObservation[None]:
             try:
-                stored_run = await self._execution_steps.get_run(run_id=run.run_id)
-                stored_events = await self._execution_steps.list_events(
-                    run_id=run.run_id
+                stored_run = await self._execution_run_store.get_agent_run(agent_run_id=run.agent_run_id)
+                stored_events = await self._execution_run_store.list_events(
+                    agent_run_id=run.agent_run_id
                 )
-                stored_snapshot = await self._execution_steps.latest_snapshot(
-                    run_id=run.run_id,
+                stored_snapshot = await self._execution_run_store.latest_snapshot(
+                    agent_run_id=run.agent_run_id,
                     include_interrupted=True,
                 )
             except AIError as error:
@@ -2524,7 +2524,7 @@ class RuntimeStateCommands:
             if (
                 actual is None
                 or actual.execution_id != recovery_checkpoint.execution_id
-                or actual.step_run_id is not None
+                or actual.agent_run_id is not None
                 or actual.state is not RecoveryCheckpointState.ADMITTED
                 or actual.handoff_phase is not RecoveryHandoffPhase.NONE
             ):
@@ -2547,12 +2547,12 @@ class RuntimeStateCommands:
         pending_event_count: int,
         session_id: str | None,
         next_cursor: ConversationCursor | None,
-        conversation_run: RunRecord | None,
+        conversation_agent_run: AgentRunRecord | None,
         conversation_snapshot: ContinuableSnapshot | None,
         recovery_checkpoint: RecoveryCheckpoint | None,
-        recovery_run: RunRecord | None,
+        recovery_run: AgentRunRecord | None,
         recovery_snapshot: ContinuableSnapshot | None,
-        execution_run: RunRecord | None,
+        execution_run: AgentRunRecord | None,
         execution_events: Sequence[StepEvent],
         execution_snapshots: Sequence[ContinuableSnapshot],
         execution_projections: Sequence[PreparedExecutionProjection],
@@ -2608,10 +2608,10 @@ class RuntimeStateCommands:
             if history_seal != expected_seal:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution_projections:
-            if self._execution_steps is None:
+            if self._execution_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for projection in execution_projections:
-                if not await self._execution_steps.verify_execution_projection_head(
+                if not await self._execution_run_store.verify_execution_projection_head(
                     projection
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2674,7 +2674,7 @@ class RuntimeStateCommands:
             )
             if session is None or require_session_release and session.active_execution_id is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if conversation_run is not None and (
+            if conversation_agent_run is not None and (
                 next_cursor is None or session.continuation != next_cursor
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2687,12 +2687,12 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for archive, run, snapshot in (
             (
-                self._conversation_steps,
-                conversation_run,
+                self._conversation_run_store,
+                conversation_agent_run,
                 conversation_snapshot,
             ),
             (
-                self._recovery_steps,
+                self._recovery_run_store,
                 recovery_run,
                 recovery_snapshot,
             ),
@@ -2701,31 +2701,31 @@ class RuntimeStateCommands:
                 continue
             if archive is None or run is None or snapshot is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stored_run = await archive.get_run(run_id=run.run_id)
+            stored_run = await archive.get_agent_run(agent_run_id=run.agent_run_id)
             if not await archive.verify_snapshot_projection(
-                run_id=run.run_id,
+                agent_run_id=run.agent_run_id,
                 snapshot=snapshot,
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if stored_run != run:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution_run is not None:
-            if self._execution_steps is None:
+            if self._execution_run_store is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stored_run = await self._execution_steps.get_run(run_id=execution_run.run_id)
-            stored_events = await self._execution_steps.list_events(run_id=execution_run.run_id)
+            stored_run = await self._execution_run_store.get_agent_run(agent_run_id=execution_run.agent_run_id)
+            stored_events = await self._execution_run_store.list_events(agent_run_id=execution_run.agent_run_id)
             if stored_run != execution_run:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution_events and tuple(stored_events[-len(execution_events) :]) != tuple(execution_events):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stored_snapshot = await self._execution_steps.latest_snapshot(
-                run_id=execution_run.run_id,
+            stored_snapshot = await self._execution_run_store.latest_snapshot(
+                agent_run_id=execution_run.agent_run_id,
                 include_interrupted=True,
             )
             if execution_snapshots and stored_snapshot != execution_snapshots[-1]:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if execution_snapshots and not await self._execution_steps.verify_snapshot_projection(
-                run_id=execution_run.run_id,
+            if execution_snapshots and not await self._execution_run_store.verify_snapshot_projection(
+                agent_run_id=execution_run.agent_run_id,
                 snapshot=execution_snapshots[-1],
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2789,7 +2789,7 @@ def _deferred_resource_id(
     contract: str,
     tenant_id: str,
     execution_id: str,
-    source_step_run_id: str,
+    source_agent_run_id: str,
     tool_call_id: str,
 ) -> str:
     return canonical_sha256(
@@ -2797,7 +2797,7 @@ def _deferred_resource_id(
             "contract": contract,
             "tenant_id": tenant_id,
             "execution_id": execution_id,
-            "source_step_run_id": source_step_run_id,
+            "source_agent_run_id": source_agent_run_id,
             "tool_call_id": tool_call_id,
         }
     )

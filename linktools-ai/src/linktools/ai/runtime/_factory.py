@@ -262,7 +262,7 @@ async def compose_runtime_components(
             runtime_token_seed,
         )
         session_history_reader = StepSessionHistoryReader(
-            store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
+            store=selected_state.run_store.read_store(RuntimeDomain.CONVERSATION),
             cursor_signer=HmacCursorSigner("session-history", runtime_token_seed),
             sessions=selected_state.conversation.sessions,
         )
@@ -412,7 +412,7 @@ def _execution_history_reader(
     return StepExecutionHistoryReader(
         namespace=namespace,
         executions=state.execution.executions,
-        store=state.steps.read_store(RuntimeDomain.EXECUTION),
+        store=state.run_store.read_store(RuntimeDomain.EXECUTION),
         cursor_signer=HmacCursorSigner("execution-history", runtime_token_seed),
         tool_operations=state.recovery.tools,
     )
@@ -604,7 +604,7 @@ async def _build_local_components(
             state.object_store(RuntimeDomain.EXECUTION),
             state.object_store(RuntimeDomain.RECOVERY),
             namespace,
-            state.steps,
+            state.run_store,
             executor,
             catalog,
             restore_binding=compiler.restore,
@@ -614,15 +614,15 @@ async def _build_local_components(
             execution_cwd=execution_cwd,
             instruction_resolver=instruction_resolver,
             app=app,
-            step_reads={
-                domain: state.steps.read_store(domain)
+            run_stores={
+                domain: state.run_store.read_store(domain)
                 for domain in (
                     RuntimeDomain.CONVERSATION,
                     RuntimeDomain.EXECUTION,
                     RuntimeDomain.RECOVERY,
                 )
             },
-            step_lifecycle=state.steps,
+            agent_run_lifecycle=state.run_store,
             memory_store_factory=build_memory_store,
             conversation_durable=(
                 state.plan.route(RuntimeDomain.CONVERSATION).retention
@@ -647,7 +647,7 @@ async def _build_local_components(
             execution,
             HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
-            transcript_store=state.steps,
+            transcript_store=state.run_store,
             release_terminal=state.retention.release_session,
             workspace_access=input_materializer.access,
         )

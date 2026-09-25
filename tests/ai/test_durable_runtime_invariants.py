@@ -34,7 +34,7 @@ from linktools.ai.runtime.state._durability import (
 from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
 from linktools.ai.runtime.state._plan import RuntimeDomain
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
-from linktools.ai.runtime.state._steps import RuntimeStepStore
+from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 from linktools.ai.task import (
@@ -236,8 +236,8 @@ async def test_durable_commit_cancellation_accepts_committed_readback() -> None:
     assert owner == set()
 
 
-def _step_store_for_preflight() -> RuntimeStepStore:
-    store = object.__new__(RuntimeStepStore)
+def _run_store_for_preflight() -> RuntimeAgentRunStore:
+    store = object.__new__(RuntimeAgentRunStore)
     store._background_tasks = set()
     store._durability_flights = {}
     store._terminal_seals = {}
@@ -247,7 +247,7 @@ def _step_store_for_preflight() -> RuntimeStepStore:
 
 @pytest.mark.asyncio
 async def test_step_preflight_rejects_flights_tasks_and_terminal_seals() -> None:
-    store = _step_store_for_preflight()
+    store = _run_store_for_preflight()
     store._durability_flights["run"] = object()
     with pytest.raises(AIError) as flight_error:
         await store.preflight_close()
@@ -328,10 +328,10 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
 
     async def release_staging_many(
         *,
-        candidate_step_run_ids: tuple[str, ...],
+        candidate_agent_run_ids: tuple[str, ...],
         execution_id: str,
     ) -> None:
-        calls.append(f"staging:{execution_id}:{candidate_step_run_ids}")
+        calls.append(f"staging:{execution_id}:{candidate_agent_run_ids}")
 
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(
@@ -417,7 +417,7 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}
-    backend._segment_only_worker_exits = set()
+    backend._agent_run_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     backend._worker_cancel_requests = set()
     backend._worker_shutdown_requests = set()
@@ -451,7 +451,7 @@ async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}
-    backend._segment_only_worker_exits = set()
+    backend._agent_run_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     backend._worker_cancel_requests = set()
     backend._worker_shutdown_requests = set()

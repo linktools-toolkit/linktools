@@ -142,7 +142,7 @@ def _backend() -> LocalExecutionBackend:
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}
-    backend._segment_only_worker_exits = set()
+    backend._agent_run_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}

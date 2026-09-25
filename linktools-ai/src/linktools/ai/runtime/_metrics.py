@@ -29,7 +29,7 @@ _FRAMEWORK_CORRELATION_KEYS = frozenset(
     {
         "execution_id",
         "session_id",
-        "step_run_id",
+        "agent_run_id",
         "tool_call_id",
         "parent_execution_id",
         "root_execution_id",

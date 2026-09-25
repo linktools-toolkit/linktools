@@ -13,7 +13,7 @@ def _model_observation_id(
     source_namespace: str,
     tenant_id: str,
     execution_id: str,
-    step_run_id: str,
+    agent_run_id: str,
     request_sequence: int,
     purpose: str,
 ) -> str:
@@ -22,7 +22,7 @@ def _model_observation_id(
         source_namespace,
         tenant_id,
         execution_id,
-        step_run_id,
+        agent_run_id,
         str(request_sequence),
         purpose,
     )
@@ -32,7 +32,7 @@ def _tool_observation_id(
     source_namespace: str,
     tenant_id: str,
     execution_id: str,
-    step_run_id: str,
+    agent_run_id: str,
     tool_call_id: str,
 ) -> str:
     return _stable_observation_id(
@@ -40,7 +40,7 @@ def _tool_observation_id(
         source_namespace,
         tenant_id,
         execution_id,
-        step_run_id,
+        agent_run_id,
         tool_call_id,
     )
 

@@ -14,12 +14,12 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
-    step_conversation_id,
-    step_run_id,
+    agent_conversation_id as make_agent_conversation_id,
+    agent_run_id as make_agent_run_id,
 )
 from linktools.ai.runtime._history import StepExecutionHistoryReader
 from linktools.ai.runtime.state._contracts import ExecutionRecord
-from linktools.ai.runtime.state._step_contracts import RunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.spec import AgentSpec
 
 from ._runtime_test_helpers import execution_owner_fields
@@ -93,8 +93,8 @@ class _Executions:
 
 
 class _RangedStore:
-    def __init__(self, run_id: str) -> None:
-        self._run_id = run_id
+    def __init__(self, agent_run_id: str) -> None:
+        self._run_id = agent_run_id
         self._messages = (
             ModelRequest(parts=[UserPromptPart(content="user-1")]),
             ModelResponse(parts=[TextPart(content="assistant-1")]),
@@ -103,19 +103,19 @@ class _RangedStore:
         )
         self.ranges: list[tuple[int, int]] = []
 
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
-        if run_id != self._run_id:
+    async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
+        if agent_run_id != self._run_id:
             return None
-        return RunRecord(
-            run_id=run_id,
-            conversation_id=step_conversation_id(
+        return AgentRunRecord(
+            agent_run_id=agent_run_id,
+            agent_conversation_id=make_agent_conversation_id(
                 namespace="history",
                 tenant_id="tenant",
                 execution_id="execution",
             ),
-            parent_run_id=None,
+            parent_agent_run_id=None,
             agent_name="default",
-            metadata={"segment_sequence": "1", "agent_name": "default"},
+            metadata={"agent_run_sequence": "1", "agent_name": "default"},
             started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
@@ -126,11 +126,11 @@ class _RangedStore:
     def iter_message_range(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         start: int,
         end: int,
     ) -> AsyncIterator[object]:
-        assert run_id == self._run_id
+        assert agent_run_id == self._run_id
         self.ranges.append((start, end))
 
         async def iterate() -> AsyncIterator[object]:
@@ -143,13 +143,13 @@ class _RangedStore:
 @pytest.mark.asyncio
 async def test_execution_transcript_cursor_keeps_first_page_high_water() -> None:
     record = _execution()
-    run_id = step_run_id(
+    agent_run_id = make_agent_run_id(
         namespace="history",
         tenant_id="tenant",
         execution_id=record.execution_id,
-        segment_sequence=1,
+        agent_run_sequence=1,
     )
-    store = _RangedStore(run_id)
+    store = _RangedStore(agent_run_id)
     reader = StepExecutionHistoryReader(
         namespace="history",
         executions=_Executions(record),  # type: ignore[arg-type]
@@ -184,13 +184,13 @@ async def test_execution_transcript_cursor_keeps_first_page_high_water() -> None
 @pytest.mark.asyncio
 async def test_execution_transcript_cursor_resumes_from_message_range() -> None:
     record = _execution()
-    run_id = step_run_id(
+    agent_run_id = make_agent_run_id(
         namespace="history",
         tenant_id="tenant",
         execution_id=record.execution_id,
-        segment_sequence=1,
+        agent_run_sequence=1,
     )
-    store = _RangedStore(run_id)
+    store = _RangedStore(agent_run_id)
     reader = StepExecutionHistoryReader(
         namespace="history",
         executions=_Executions(record),  # type: ignore[arg-type]

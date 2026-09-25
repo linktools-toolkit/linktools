@@ -15,11 +15,11 @@ from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
 )
 from linktools.ai.runtime.state._steps import (
-    StagingStepStore,
+    StagingAgentRunStore,
 )
 
 from linktools.ai.runtime._capture import RuntimeCaptureStore
-from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
+from linktools.ai.runtime._capabilities import _RuntimeAgentRunPersistence
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
@@ -58,7 +58,7 @@ class _Bridge:
         return frozenset()
 
 
-class _RecordingStepStore(StagingStepStore):
+class _RecordingAgentRunStore(StagingAgentRunStore):
     def __init__(self) -> None:
         super().__init__()
         self.saved_snapshots: list[ContinuableSnapshot] = []
@@ -79,8 +79,8 @@ async def _read_file(path: str) -> str:
 
 @pytest.mark.asyncio
 async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> None:
-    run_id = "deferred-run"
-    store = _RecordingStepStore()
+    agent_run_id = "deferred-run"
+    store = _RecordingAgentRunStore()
     bridge = _Bridge()
     captured: list[int] = []
     del tmp_path
@@ -103,7 +103,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id=run_id,
+        agent_run_id=agent_run_id,
         tool_call_id="call",
     )
     tools = await boundary.get_tools(context)
@@ -122,28 +122,28 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_ordinary_completed_snapshot_behavior_is_unchanged() -> None:
-    run_id = "completed-run"
-    store = _RecordingStepStore()
-    persistence = _RuntimeStepPersistence(
+    agent_run_id = "completed-run"
+    store = _RecordingAgentRunStore()
+    persistence = _RuntimeAgentRunPersistence(
         capture=RuntimeCaptureStore(
             store,
             execution_id=None,
-            step_run_id=run_id,
+            agent_run_id=agent_run_id,
         ),
         agent_name="agent",
-        run_id=run_id,
+        agent_run_id=agent_run_id,
     )
     agent = Agent(TestModel(custom_output_text="ok"))
 
     result = await agent.run(
         "finish",
-        run_id=run_id,
+        agent_run_id=agent_run_id,
         capabilities=(persistence,),
     )
 
     assert result.output == "ok"
     assert store.saved_snapshots
-    latest = await store.latest_snapshot(run_id=run_id)
+    latest = await store.latest_snapshot(agent_run_id=agent_run_id)
     assert latest is not None
     assert latest.state == "complete"
     assert latest == store.saved_snapshots[-1]

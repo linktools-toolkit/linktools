@@ -111,7 +111,7 @@ def _context() -> RunContext[None]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
         tool_call_id="call",
         tool_name="delegate_task",
     )

@@ -76,7 +76,7 @@ def _context() -> RunContext[object]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
     )
 
 

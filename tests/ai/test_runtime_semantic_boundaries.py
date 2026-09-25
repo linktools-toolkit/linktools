@@ -305,7 +305,7 @@ def _run_context(model: TestModel) -> RunContext[None]:
         deps=None,
         model=model,
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
     )
 
 

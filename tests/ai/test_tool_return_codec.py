@@ -20,7 +20,7 @@ from linktools.ai.agent._output import bind_output
 from linktools.ai.capability import SkillSourceRegistry
 from linktools.ai.core import PromptLimits
 from linktools.ai.runtime import _agent_executor as agent_executor
-from linktools.ai.runtime._agent_executor import AgentExecutor, _RunScope
+from linktools.ai.runtime._agent_executor import AgentExecutor, _AgentRunScope
 from linktools.ai.runtime.state._contracts import LoadedModelContext
 from linktools.ai.runtime._tool_return_codec import (
     decode_tool_return_content,
@@ -134,7 +134,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
             captured["results"] = results
             return SimpleNamespace(
                 output=AssistantTextOutput(text="ok"),
-                run_id="step-run",
+                agent_run_id="agent-run",
                 all_messages=lambda: [],
             )
 
@@ -144,23 +144,23 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
 
     monkeypatch.setattr(agent_executor, "_materialize_agent", materialize)
 
-    class _StepStore:
+    class _AgentRunStore:
         def __init__(self) -> None:
-            self.get_run_calls = 0
+            self.get_agent_run_calls = 0
 
-        async def get_run(self, *, run_id: str) -> object | None:
-            assert run_id == "step-run"
-            self.get_run_calls += 1
-            if self.get_run_calls == 1:
+        async def get_agent_run(self, *, agent_run_id: str) -> object | None:
+            assert agent_run_id == "agent-run"
+            self.get_agent_run_calls += 1
+            if self.get_agent_run_calls == 1:
                 return None
             return SimpleNamespace(conversation_id="conversation")
 
-        async def latest_snapshot(self, *, run_id: str) -> object:
-            assert run_id == "step-run"
+        async def latest_snapshot(self, *, agent_run_id: str) -> object:
+            assert agent_run_id == "agent-run"
             return object()
 
-        async def model_interaction_count(self, *, run_id: str) -> int:
-            assert run_id == "step-run"
+        async def model_interaction_count(self, *, agent_run_id: str) -> int:
+            assert agent_run_id == "agent-run"
             return 0
 
     compiled_agent = SimpleNamespace(
@@ -185,7 +185,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
     portable = encode_tool_return_content(
         {"image": BinaryContent(data=b"binary", media_type="image/png")}
     )
-    scope = _RunScope(
+    scope = _AgentRunScope(
         binding=binding,  # type: ignore[arg-type]
         context=context,  # type: ignore[arg-type]
         workspace=None,
@@ -194,10 +194,10 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
         user_prompt=None,
         history=[],
         initial_context=LoadedModelContext(()),
-        conversation_id="conversation",
-        step_store=_StepStore(),  # type: ignore[arg-type]
-        step_run_id="step-run",
-        segment_sequence=1,
+        agent_conversation_id="conversation",
+        run_store=_AgentRunStore(),  # type: ignore[arg-type]
+        agent_run_id="agent-run",
+        agent_run_sequence=1,
         event_sink=sink,
         deferred_tool_results=DeferredToolResults(calls={"success": portable}),
     )

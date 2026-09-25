@@ -49,7 +49,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         namespace="tool-return-persistence",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         binding_digest="a" * 64,
         owner="worker",
         background_tasks=set(),

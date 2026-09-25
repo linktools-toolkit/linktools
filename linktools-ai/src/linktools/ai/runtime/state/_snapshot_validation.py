@@ -44,7 +44,7 @@ from ._repository_common import (
     record_state,
     restore_lease_fields,
 )
-from ._step_contracts import RunRecord
+from ._step_contracts import AgentRunRecord
 from ._store import (
     StoredAlias,
     StoredFact,
@@ -73,7 +73,7 @@ _ALLOWED_RECORD_KINDS = {
             "transcript_head",
             "transcript_seek",
             "context_projection",
-            "step_run",
+            "agent_run",
         }
     ),
     RuntimeDomain.EXECUTION: frozenset(
@@ -85,7 +85,7 @@ _ALLOWED_RECORD_KINDS = {
             "transcript_head",
             "transcript_seek",
             "context_projection",
-            "step_run",
+            "agent_run",
         }
     ),
     RuntimeDomain.MEMORY: frozenset({"memory"}),
@@ -109,7 +109,7 @@ _ALLOWED_RECORD_KINDS = {
             "transcript_head",
             "transcript_seek",
             "context_projection",
-            "step_run",
+            "agent_run",
         }
     ),
 }
@@ -137,7 +137,7 @@ _RECORD_TYPES = {
     "task_node_definition": TaskNode,
     "task_node_state": TaskNodeView,
     "task_result": TaskResultRecord,
-    "step_run": RunRecord,
+    "agent_run": AgentRunRecord,
 }
 
 
@@ -265,7 +265,7 @@ def _canonical_aliases(
             tenant_id,
             domain.value,
             "tool_call",
-            [value.step_run_id, value.tool_call_id],
+            [value.agent_run_id, value.tool_call_id],
         )
         current = aliases.get(digest)
         if current is not None and current != record_key:
@@ -464,7 +464,7 @@ def _expected_record(
         anchor_kind = (
             "conversation_history"
             if domain is RuntimeDomain.CONVERSATION
-            else "step_run"
+            else "agent_run"
         )
         _require_anchor(
             namespace, tenant_id, domain, records, anchor_kind, value.owner_id
@@ -483,41 +483,41 @@ def _expected_record(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sort_key = f"b:{value.block_start:020d}"
     elif isinstance(value, ContextProjection):
-        run_id = record.sort_key
-        if not run_id:
+        agent_run_id = record.sort_key
+        if not agent_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        identity = run_id
+        identity = agent_run_id
         parent = record_key_digest(
             namespace,
             tenant_id,
             domain.value,
             "transcript_head",
-            run_id,
+            agent_run_id,
         )
-        _require_anchor(namespace, tenant_id, domain, records, "step_run", run_id)
+        _require_anchor(namespace, tenant_id, domain, records, "agent_run", agent_run_id)
         if parent not in records:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        sort_key = run_id
-    elif isinstance(value, RunRecord):
-        if value.conversation_id is not None:
+        sort_key = agent_run_id
+    elif isinstance(value, AgentRunRecord):
+        if value.agent_conversation_id is not None:
             scope = scope_digest(
                 namespace,
                 tenant_id,
                 domain.value,
                 kind,
                 "conversation",
-                value.conversation_id,
+                value.agent_conversation_id,
             )
-        if value.parent_run_id is not None:
+        if value.parent_agent_run_id is not None:
             parent = parent_digest(
                 namespace,
                 tenant_id,
                 domain.value,
                 kind,
                 "parent",
-                value.parent_run_id,
+                value.parent_agent_run_id,
             )
-        sort_key = sortable_timestamp(value.started_at, value.run_id)
+        sort_key = sortable_timestamp(value.started_at, value.agent_run_id)
     elif isinstance(value, MemoryRecord):
         path = value.metadata.get("path")
         if not isinstance(path, str) or not path or not path.isascii():
@@ -567,8 +567,8 @@ def _record_identity(
         return value.owner_id
     if isinstance(value, TranscriptSeekRecord):
         return [value.owner_id, value.dimension.value, value.block_start]
-    if isinstance(value, RunRecord):
-        return value.run_id
+    if isinstance(value, AgentRunRecord):
+        return value.agent_run_id
     if isinstance(value, ContextProjection):
         return record.sort_key
     try:
@@ -753,7 +753,7 @@ def _fact_storage_identity(
             else "run_transcript"
         )
         return relation, owner.owner_id
-    if isinstance(owner, RunRecord):
+    if isinstance(owner, AgentRunRecord):
         relation = {
             "step_event": "event",
             "step_snapshot": "snapshot",
@@ -761,7 +761,7 @@ def _fact_storage_identity(
         }.get(fact.kind)
         if relation is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return relation, owner.run_id
+        return relation, owner.agent_run_id
     if isinstance(owner, TaskGraphView):
         return "task_event", owner.graph_id
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

@@ -29,9 +29,9 @@ from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from linktools.ai.runtime.state._step_archive import StateStepArchive
 from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
-    RunRecord,
+    AgentRunRecord,
 )
-from linktools.ai.runtime.state._steps import RuntimeStepStore
+from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
 from linktools.ai.storage import PayloadPolicy
 
 from pydantic_ai.messages import (
@@ -279,13 +279,13 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
     application = _application(calls)
 
     async def fail_finalize(
-        _store: RuntimeStepStore,
+        _store: RuntimeAgentRunStore,
         _plan: object,
     ) -> None:
         raise RuntimeError("injected terminal seal finalization failure")
 
     monkeypatch.setattr(
-        RuntimeStepStore,
+        RuntimeAgentRunStore,
         "finalize_execution_terminal_seal",
         fail_finalize,
     )
@@ -438,7 +438,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             namespace="tool-replay",
             tenant_id="tenant",
             execution_id="execution",
-            step_run_id="run-1",
+            agent_run_id="run-1",
             binding_digest="a" * 64,
             owner="worker-1",
             background_tasks=set(),
@@ -448,7 +448,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             deps=None,
             model=TestModel(),
             usage=RunUsage(),
-            run_id="run-1",
+            agent_run_id="run-1",
         )
         call = ToolCallPart("lookup", {}, tool_call_id="call-1")
         tool = ToolDefinition(name="lookup")
@@ -476,8 +476,8 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             namespace="tool-replay",
             tenant_id="tenant",
             execution_id="execution",
-            step_run_id="run-2",
-            recovery_step_run_id="run-1",
+            agent_run_id="run-2",
+            recovery_agent_run_id="run-1",
             binding_digest="a" * 64,
             owner="worker-2",
             background_tasks=set(),
@@ -487,7 +487,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             deps=None,
             model=TestModel(),
             usage=RunUsage(),
-            run_id="run-2",
+            agent_run_id="run-2",
         )
         replay = await replay_bridge.begin(
             replay_context,
@@ -509,7 +509,7 @@ def _crash_session_process(
 ) -> None:
     """Exit without cleanup after a selected durable boundary."""
     original_complete = RuntimeToolOperationBridge.complete
-    original_snapshot = RuntimeStepStore.save_snapshot
+    original_snapshot = RuntimeAgentRunStore.save_snapshot
     original_success = LocalExecutionBackend._commit_success
     original_activate = RuntimeStateCommands.commit_agent_attempt_checkpoint
     original_admission = RuntimeStateCommands.commit_tool_admission
@@ -536,7 +536,7 @@ def _crash_session_process(
         return cancelled
 
     async def save_snapshot(
-        self: RuntimeStepStore, snapshot: ContinuableSnapshot, **kwargs: Any
+        self: RuntimeAgentRunStore, snapshot: ContinuableSnapshot, **kwargs: Any
     ) -> None:
         await original_snapshot(self, snapshot, **kwargs)
         if phase == "request_checkpoint" and not any(
@@ -549,7 +549,7 @@ def _crash_session_process(
         ):
             if phase == "projected_tool_checkpoint":
                 await self.flush_execution_projection(
-                    snapshot.run_id, execution_id=kwargs["execution_id"]
+                    snapshot.agent_run_id, execution_id=kwargs["execution_id"]
                 )
             os._exit(91)
 
@@ -566,7 +566,7 @@ def _crash_session_process(
     RuntimeToolOperationBridge.complete = complete
     RuntimeStateCommands.commit_agent_attempt_checkpoint = activate
     RuntimeStateCommands.commit_tool_admission = admit
-    RuntimeStepStore.save_snapshot = save_snapshot
+    RuntimeAgentRunStore.save_snapshot = save_snapshot
     LocalExecutionBackend._commit_success = commit_success
 
     async def run() -> None:
@@ -718,7 +718,7 @@ async def test_snapshot_save_readback_ignores_transient_before_coordinate(
 
     async def commit_then_fail(
         self: StateStepArchive,
-        run: RunRecord,
+        run: AgentRunRecord,
         snapshot: ContinuableSnapshot,
         *,
         execution_id: str | None = None,
@@ -742,9 +742,9 @@ async def test_snapshot_save_readback_ignores_transient_before_coordinate(
         commit_then_fail,
     )
     try:
-        run = RunRecord("run", conversation_id="conversation", agent_name="default")
+        run = AgentRunRecord("run", agent_conversation_id="conversation", agent_name="default")
         snapshot = ContinuableSnapshot(
-            run_id="run",
+            agent_run_id="run",
             step_index=1,
             messages=[
                 ModelRequest(parts=[UserPromptPart("inspect")]),
@@ -753,17 +753,17 @@ async def test_snapshot_save_readback_ignores_transient_before_coordinate(
             state="complete",
             transcript_message_count_before=0,
         )
-        await state.steps.register_run(run)
-        await state.steps.save_snapshot(snapshot)
+        await state.run_store.register_agent_run(run)
+        await state.run_store.save_snapshot(snapshot)
         assert injected
 
-        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
         assert isinstance(recovery, StateStepArchive)
         assert await recovery.transcript_message_count_for_run(run) == len(
             snapshot.messages
         )
         stored = await recovery.latest_snapshot(
-            run_id=run.run_id,
+            agent_run_id=run.agent_run_id,
             include_interrupted=True,
         )
         assert stored is not None
@@ -778,19 +778,19 @@ async def test_run_snapshot_relocation_is_idempotent_and_validates_prefix() -> N
     state = RuntimeState.in_memory()
     await state.initialize(namespace="run-snapshot-relocation", tenant_id="tenant")
     try:
-        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
+        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
         assert isinstance(recovery, StateStepArchive)
-        run = RunRecord("run", conversation_id="conversation", agent_name="default")
-        await recovery.register_run(run)
+        run = AgentRunRecord("run", agent_conversation_id="conversation", agent_name="default")
+        await recovery.register_agent_run(run)
         first = ContinuableSnapshot(
-            run_id="run",
+            agent_run_id="run",
             step_index=1,
             messages=[ModelRequest(parts=[UserPromptPart("inspect")])],
             state="active",
             transcript_message_count_before=0,
         )
         final = ContinuableSnapshot(
-            run_id="run",
+            agent_run_id="run",
             step_index=2,
             messages=[
                 *first.messages,
@@ -808,16 +808,16 @@ async def test_run_snapshot_relocation_is_idempotent_and_validates_prefix() -> N
         await recovery.materialize_snapshot(run, relocated)
         assert await recovery.transcript_message_count_for_run(run) == before
 
-        bad_run = RunRecord(
+        bad_run = AgentRunRecord(
             "bad-run",
-            conversation_id="conversation",
+            agent_conversation_id="conversation",
             agent_name="default",
         )
-        await recovery.register_run(bad_run)
+        await recovery.register_agent_run(bad_run)
         await recovery.materialize_snapshot(
             bad_run,
             ContinuableSnapshot(
-                run_id="bad-run",
+                agent_run_id="bad-run",
                 step_index=1,
                 messages=[ModelRequest(parts=[UserPromptPart("stored")])],
                 state="active",
@@ -828,7 +828,7 @@ async def test_run_snapshot_relocation_is_idempotent_and_validates_prefix() -> N
             await recovery.relocate_run_snapshot(
                 bad_run,
                 ContinuableSnapshot(
-                    run_id="bad-run",
+                    agent_run_id="bad-run",
                     step_index=2,
                     messages=[
                         ModelRequest(parts=[UserPromptPart("different")]),
@@ -848,18 +848,18 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> No
     state = RuntimeState.in_memory()
     await state.initialize(namespace="session-tool-recovery", tenant_id="tenant")
     try:
-        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
-        conversation = state.steps.read_store(RuntimeDomain.CONVERSATION)
+        recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+        conversation = state.run_store.read_store(RuntimeDomain.CONVERSATION)
         assert isinstance(recovery, StateStepArchive)
         assert isinstance(conversation, StateStepArchive)
 
-        run = RunRecord(
+        run = AgentRunRecord(
             "run",
-            conversation_id="conversation",
+            agent_conversation_id="conversation",
             agent_name="default",
             metadata={"history_id": "history"},
         )
-        await recovery.register_run(run)
+        await recovery.register_agent_run(run)
         first_messages = [
             ModelRequest(parts=[UserPromptPart("inspect")]),
             ModelResponse(
@@ -888,7 +888,7 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> No
         await recovery.materialize_snapshot(
             run,
             ContinuableSnapshot(
-                run_id=run.run_id,
+                agent_run_id=run.agent_run_id,
                 step_index=1,
                 messages=first_messages,
                 state="active",
@@ -898,7 +898,7 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> No
         await recovery.materialize_snapshot(
             run,
             ContinuableSnapshot(
-                run_id=run.run_id,
+                agent_run_id=run.agent_run_id,
                 step_index=2,
                 messages=final_messages,
                 state="complete",
@@ -906,16 +906,16 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> No
             ),
         )
 
-        await state.steps.materialize_from_recovery(
+        await state.run_store.materialize_from_recovery(
             target=RuntimeDomain.CONVERSATION,
-            step_run_id=run.run_id,
+            agent_run_id=run.agent_run_id,
         )
-        await state.steps.materialize_from_recovery(
+        await state.run_store.materialize_from_recovery(
             target=RuntimeDomain.CONVERSATION,
-            step_run_id=run.run_id,
+            agent_run_id=run.agent_run_id,
         )
 
-        stored = await conversation.latest_snapshot(run_id=run.run_id)
+        stored = await conversation.latest_snapshot(agent_run_id=run.agent_run_id)
         assert stored is not None
         assert stored.state == "complete"
         assert tuple(stored.messages[-len(final_messages) :]) == tuple(final_messages)
@@ -981,7 +981,7 @@ async def test_tool_effect_waits_for_durable_response_checkpoint(
 
     async def reject_response(
         self: StateStepArchive,
-        run: RunRecord,
+        run: AgentRunRecord,
         snapshot: ContinuableSnapshot,
         **kwargs: Any,
     ) -> None:
@@ -1083,17 +1083,17 @@ async def test_recovery_preparation_failure_releases_its_owned_flight(
 ) -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="recovery-preparation", tenant_id="tenant")
-    recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
-    run = RunRecord(
+    recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    run = AgentRunRecord(
         "run",
-        conversation_id="conversation",
+        agent_conversation_id="conversation",
         agent_name="default",
         metadata={"history_id": "history"},
     )
     snapshot = ContinuableSnapshot(
-        run_id="run",
+        agent_run_id="run",
         step_index=1,
-        conversation_id=run.conversation_id,
+        agent_conversation_id=run.agent_conversation_id,
         agent_name=run.agent_name,
         messages=[ModelRequest(parts=[UserPromptPart("inspect")])],
         transcript_message_count_before=0,
@@ -1105,8 +1105,8 @@ async def test_recovery_preparation_failure_releases_its_owned_flight(
 
     monkeypatch.setattr(recovery, "resolve_model_interactions", fail_resolution)
     with pytest.raises(AIError) as raised:
-        await state.steps.materialize_from_recovery(
-            target=RuntimeDomain.CONVERSATION, step_run_id="run"
+        await state.run_store.materialize_from_recovery(
+            target=RuntimeDomain.CONVERSATION, agent_run_id="run"
         )
     assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
     await state.close()

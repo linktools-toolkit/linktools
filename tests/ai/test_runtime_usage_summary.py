@@ -13,8 +13,8 @@ from linktools.ai.core import (
     TaskStatus,
     TenantAuthorizationPolicy,
     UsageMetrics,
-    step_conversation_id,
-    step_run_id,
+    agent_conversation_id as make_agent_conversation_id,
+    agent_run_id as make_agent_run_id,
 )
 from linktools.ai.runtime import RuntimeHistory, UsageReadCutoff, UsageSummary
 from linktools.ai.runtime._history import StepExecutionHistoryReader
@@ -25,12 +25,12 @@ from linktools.ai.runtime.state._contracts import (
     ModelInteractionRecord,
     RuntimePayloadRef,
 )
-from linktools.ai.runtime.state._step_contracts import RunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 
 def _interaction(
-    run_id: str,
+    agent_run_id: str,
     sequence: int,
     *,
     status: str,
@@ -39,7 +39,7 @@ def _interaction(
     output_retry_index: int | None = None,
 ) -> ModelInteractionRecord:
     return ModelInteractionRecord(
-        run_id,
+        agent_run_id,
         0,
         sequence,
         "agent",
@@ -69,7 +69,7 @@ class _Executions:
 class _UsageStore:
     def __init__(
         self,
-        run: RunRecord,
+        run: AgentRunRecord,
         interactions: tuple[ModelInteractionRecord, ...],
         *,
         high_water: int,
@@ -78,21 +78,21 @@ class _UsageStore:
         self.interactions = interactions
         self.high_water = high_water
 
-    async def get_run(self, *, run_id: str):
-        return self.run if run_id == self.run.run_id else None
+    async def get_agent_run(self, *, agent_run_id: str):
+        return self.run if agent_run_id == self.run.agent_run_id else None
 
-    async def model_interaction_count(self, *, run_id: str) -> int:
-        assert run_id == self.run.run_id
+    async def model_interaction_count(self, *, agent_run_id: str) -> int:
+        assert agent_run_id == self.run.agent_run_id
         return self.high_water
 
     async def list_model_interactions(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         after_request_sequence: int | None = None,
         limit: int | None = None,
     ):
-        assert run_id == self.run.run_id
+        assert agent_run_id == self.run.agent_run_id
         after = 0 if after_request_sequence is None else after_request_sequence
         selected = tuple(
             value
@@ -107,26 +107,26 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
     namespace = "runtime-usage"
     tenant_id = "tenant"
     execution_id = "execution"
-    run_id = step_run_id(
+    agent_run_id = make_agent_run_id(
         namespace=namespace,
         tenant_id=tenant_id,
         execution_id=execution_id,
-        segment_sequence=1,
+        agent_run_sequence=1,
     )
-    conversation_id = step_conversation_id(
+    agent_conversation_id = make_agent_conversation_id(
         namespace=namespace,
         tenant_id=tenant_id,
         execution_id=execution_id,
     )
-    run = RunRecord(
-        run_id,
-        conversation_id,
+    run = AgentRunRecord(
+        agent_run_id,
+        agent_conversation_id,
         agent_name="agent",
-        metadata={"segment_sequence": "1", "agent_name": "agent"},
+        metadata={"agent_run_sequence": "1", "agent_name": "agent"},
     )
     interactions = (
         _interaction(
-            run_id,
+            agent_run_id,
             1,
             status="SUCCEEDED",
             usage=UsageMetrics(
@@ -138,7 +138,7 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
             duration_ns=100,
         ),
         _interaction(
-            run_id,
+            agent_run_id,
             2,
             status="FAILED",
             usage=None,
@@ -146,7 +146,7 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
             output_retry_index=1,
         ),
         _interaction(
-            run_id,
+            agent_run_id,
             3,
             status="CANCELLED",
             usage=UsageMetrics(
@@ -158,7 +158,7 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
             duration_ns=300,
         ),
         _interaction(
-            run_id,
+            agent_run_id,
             4,
             status="SUCCEEDED",
             usage=UsageMetrics(input_tokens=999, output_tokens=999),

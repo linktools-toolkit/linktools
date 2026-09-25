@@ -454,10 +454,10 @@ class ToolRepositoryImpl(_RepositoryBase):
                     self._tenant_id,
                     self._domain.value,
                     "tool_call",
-                    [step_run_id, request.tool_call_id],
+                    [agent_run_id, request.tool_call_id],
                 )
-                for step_run_id in (request.step_run_id, request.recovery_step_run_id)
-                if step_run_id is not None
+                for agent_run_id in (request.agent_run_id, request.recovery_agent_run_id)
+                if agent_run_id is not None
             )
         )
 
@@ -487,7 +487,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 value = ToolOperationRecord(
                     tool_operation_id=request.tool_operation_id,
                     execution_id=request.execution_id,
-                    step_run_id=request.step_run_id,
+                    agent_run_id=request.agent_run_id,
                     tool_call_id=request.tool_call_id,
                     idempotency_key_digest=request.idempotency_key_digest,
                     tool_name=request.tool_name,
@@ -509,7 +509,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                         request.tool_operation_id,
                         value,
                         scope=self._scope(
-                            "tool_operation", "step_run", request.step_run_id
+                            "tool_operation", "agent_run", request.agent_run_id
                         ),
                         state=value.status.value,
                     )
@@ -611,7 +611,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 self._tenant_id,
                 self._domain.value,
                 "tool_call",
-                [record.step_run_id, record.tool_call_id],
+                [record.agent_run_id, record.tool_call_id],
             )
 
             async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
@@ -639,7 +639,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                     "tool_operation",
                     record.tool_operation_id,
                     record,
-                    scope=self._scope("tool_operation", "step_run", record.step_run_id),
+                    scope=self._scope("tool_operation", "agent_run", record.agent_run_id),
                     state=record.status.value,
                 )
                 await transaction.insert_record(stored)
@@ -679,9 +679,9 @@ class ToolRepositoryImpl(_RepositoryBase):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
-    async def has_by_step_run(
+    async def has_by_agent_run(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         *,
         tenant_id: str,
     ) -> bool:
@@ -689,22 +689,22 @@ class ToolRepositoryImpl(_RepositoryBase):
             return False
         records = await self._records(
             "tool_operation",
-            scope=self._scope("tool_operation", "step_run", step_run_id),
+            scope=self._scope("tool_operation", "agent_run", agent_run_id),
             limit=1,
         )
         return bool(records)
 
     async def existing_call_ids(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         tool_call_ids: Sequence[str],
         *,
         tenant_id: str,
     ) -> frozenset[str]:
         if tenant_id != self._tenant_id:
             return frozenset()
-        if not isinstance(step_run_id, str) or not step_run_id:
-            raise ValueError("step_run_id must be a non-empty string")
+        if not isinstance(agent_run_id, str) or not agent_run_id:
+            raise ValueError("agent_run_id must be a non-empty string")
         if not isinstance(tool_call_ids, Sequence) or isinstance(
             tool_call_ids, (str, bytes)
         ):
@@ -720,7 +720,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 self._tenant_id,
                 self._domain.value,
                 "tool_call",
-                [step_run_id, tool_call_id],
+                [agent_run_id, tool_call_id],
             )
             for tool_call_id in ordered
         )
@@ -753,7 +753,7 @@ class ToolRepositoryImpl(_RepositoryBase):
 
     async def get_by_call(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         tool_call_id: str,
         *,
         tenant_id: str,
@@ -765,7 +765,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             self._tenant_id,
             self._domain.value,
             "tool_call",
-            [step_run_id, tool_call_id],
+            [agent_run_id, tool_call_id],
         )
 
         async def read(transaction: StateTransaction) -> ToolOperationRecord | None:
@@ -781,24 +781,24 @@ class ToolRepositoryImpl(_RepositoryBase):
 
         return await self._store.read(read)
 
-    async def list_by_step_run(
+    async def list_by_agent_run(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         *,
         tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
-        if not isinstance(step_run_id, str) or not step_run_id:
-            raise ValueError("step_run_id must be a non-empty string")
+        if not isinstance(agent_run_id, str) or not agent_run_id:
+            raise ValueError("agent_run_id must be a non-empty string")
         records = await self._records(
             "tool_operation",
-            scope=self._scope("tool_operation", "step_run", step_run_id),
+            scope=self._scope("tool_operation", "agent_run", agent_run_id),
         )
         values = tuple(
             [await self._decode(record, ToolOperationRecord) for record in records]
         )
-        if any(value.step_run_id != step_run_id for value in values):
+        if any(value.agent_run_id != agent_run_id for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
@@ -1198,7 +1198,7 @@ class ToolRepositoryImpl(_RepositoryBase):
 def _tool_replay_matches(left: ToolOperationRecord, right: ToolOperationRecord) -> bool:
     return (
         left.execution_id == right.execution_id
-        and left.step_run_id == right.step_run_id
+        and left.agent_run_id == right.agent_run_id
         and left.tool_call_id == right.tool_call_id
         and left.idempotency_key_digest == right.idempotency_key_digest
         and left.tool_name == right.tool_name
@@ -1228,7 +1228,7 @@ def _tool_admission_matches(
         )
         and left.binding_digest == right.binding_digest
         and left.replay_safe is right.replay_safe
-        and left.step_run_id in {right.step_run_id, right.recovery_step_run_id}
+        and left.agent_run_id in {right.agent_run_id, right.recovery_agent_run_id}
     )
 
 

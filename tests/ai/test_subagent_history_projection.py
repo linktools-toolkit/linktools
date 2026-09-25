@@ -13,13 +13,13 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
-    step_conversation_id,
-    step_run_id,
+    agent_conversation_id as make_agent_conversation_id,
+    agent_run_id as make_agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._history import StepExecutionHistoryReader
 from linktools.ai.runtime.state._contracts import ExecutionRecord
-from linktools.ai.runtime.state._step_contracts import RunRecord, StepEvent
+from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
 from linktools.ai.spec import AgentSpec
 from ._runtime_test_helpers import execution_owner_fields
 
@@ -103,48 +103,48 @@ class _Executions:
 
 class _Store:
     def __init__(self, records: tuple[ExecutionRecord, ...]) -> None:
-        self._runs: dict[str, tuple[ExecutionRecord, RunRecord]] = {}
+        self._runs: dict[str, tuple[ExecutionRecord, AgentRunRecord]] = {}
         for record in records:
-            run_id = step_run_id(
+            agent_run_id = make_agent_run_id(
                 namespace="history",
                 tenant_id="tenant",
                 execution_id=record.execution_id,
-                segment_sequence=1,
+                agent_run_sequence=1,
             )
-            conversation_id = step_conversation_id(
+            agent_conversation_id = make_agent_conversation_id(
                 namespace="history",
                 tenant_id="tenant",
                 execution_id=record.execution_id,
             )
-            self._runs[run_id] = (
+            self._runs[agent_run_id] = (
                 record,
-                RunRecord(
-                    run_id=run_id,
-                    conversation_id=conversation_id,
+                AgentRunRecord(
+                    agent_run_id=agent_run_id,
+                    agent_conversation_id=agent_conversation_id,
                     agent_name="default",
-                    metadata={"segment_sequence": "1", "agent_name": "default"},
+                    metadata={"agent_run_sequence": "1", "agent_name": "default"},
                 ),
             )
 
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
-        value = self._runs.get(run_id)
+    async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
+        value = self._runs.get(agent_run_id)
         return None if value is None else value[1]
 
-    async def list_events(self, *, run_id: str) -> list[StepEvent]:
-        record, run = self._runs[run_id]
+    async def list_events(self, *, agent_run_id: str) -> list[StepEvent]:
+        record, run = self._runs[agent_run_id]
         return [
             StepEvent(
-                run_id=run_id,
+                agent_run_id=agent_run_id,
                 kind="model_request_started",
                 step_index=0,
                 timestamp=record.created_at,
-                conversation_id=run.conversation_id,
+                agent_conversation_id=run.agent_conversation_id,
                 agent_name="default",
             )
         ]
 
-    async def iter_messages(self, *, run_id: str):
-        record, _run = self._runs[run_id]
+    async def iter_messages(self, *, agent_run_id: str):
+        record, _run = self._runs[agent_run_id]
         yield ModelRequest(
             parts=[UserPromptPart(content=f"prompt:{record.execution_id}")]
         )

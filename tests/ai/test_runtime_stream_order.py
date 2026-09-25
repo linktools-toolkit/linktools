@@ -400,7 +400,7 @@ async def test_live_semantic_events_keep_agent_source_order() -> None:
     broker.publish_event(
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
-        {"run_id": "run"},
+        {"agent_run_id": "run"},
         durable_sequence=3,
     )
     broker.complete("execution")
@@ -422,7 +422,7 @@ async def test_live_durable_terminal_publication_is_idempotent() -> None:
     broker.register_local_producer("execution", 0)
     live = broker.claim_local_producer("execution")
     assert live is not None
-    payload = {"run_id": "run"}
+    payload = {"agent_run_id": "run"}
 
     broker.publish_event(
         "execution",

@@ -7,7 +7,7 @@ CREATE TABLE ai_state_records (
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the persisted runtime record.',
     scope_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping key used by the record kind''s primary list query.',
     parent_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 identity of the logical parent used by hierarchical list queries.',
-    kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or step_run.',
+    kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable persisted record kind such as session, execution, task_node, or agent_run.',
     sort_key LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Stable canonical ordering token used for deterministic keyset pagination.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current SQL-queryable state for record kinds with persisted state-machine semantics.',
     storage_version BIGINT NOT NULL COMMENT 'Internal optimistic-concurrency version incremented by every physical record mutation.',

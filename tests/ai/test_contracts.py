@@ -197,12 +197,12 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
 
     def checkpoint(
         state: RecoveryCheckpointState,
-        step_run_id: str | None,
+        agent_run_id: str | None,
         pending_tools: PendingToolContinuation | None = None,
     ) -> RecoveryCheckpoint:
         return RecoveryCheckpoint(
             execution_id="execution",
-            step_run_id=step_run_id,
+            agent_run_id=agent_run_id,
             state=state,
             revision=0,
             created_at=now,
@@ -215,14 +215,14 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
         checkpoint(RecoveryCheckpointState.ADMITTED, "step-1")
     with pytest.raises(ValueError):
         checkpoint(RecoveryCheckpointState.ACTIVE, None)
-    assert checkpoint(RecoveryCheckpointState.COMPLETED, None).step_run_id is None
+    assert checkpoint(RecoveryCheckpointState.COMPLETED, None).agent_run_id is None
     waiting = checkpoint(
         RecoveryCheckpointState.WAITING,
         "step-1",
         _pending_tools(),
     )
     assert waiting.pending_tools is not None
-    assert waiting.pending_tools.source_step_run_id == waiting.step_run_id
+    assert waiting.pending_tools.source_agent_run_id == waiting.agent_run_id
 
 
 def test_recovery_handoff_phase_only_models_reachable_boundaries() -> None:

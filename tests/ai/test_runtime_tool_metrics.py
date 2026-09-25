@@ -81,7 +81,7 @@ def _context() -> RunContext[None]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
         tool_call_id="call",
     )
 
@@ -93,7 +93,7 @@ def _metric_context(recorder: _Recorder) -> _ToolMetricContext:
         tenant_id="tenant",
         execution_id="execution",
         session_id="session",
-        step_run_id="run",
+        agent_run_id="run",
         agent_id="agent",
     )
 
@@ -180,7 +180,7 @@ async def test_actual_tool_handler_emits_one_execution_metric() -> None:
     assert dict(observation.correlation) == {
         "execution_id": "execution",
         "session_id": "session",
-        "step_run_id": "run",
+        "agent_run_id": "run",
         "tool_call_id": "call",
     }
     assert len(observation.measurements) == 1

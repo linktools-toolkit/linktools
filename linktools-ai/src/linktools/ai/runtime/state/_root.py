@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from ._materializer import _MaterializedRuntimeState
     from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
-    from ._steps import RuntimeStepStore
+    from ._steps import RuntimeAgentRunStore
 
 
 class _RuntimeStateLifecycle(str, Enum):
@@ -107,7 +107,7 @@ class RuntimeState:
         self._evaluation: EvaluationState | None = None
         self._recovery: RecoveryState | None = None
         self._objects: _RuntimeObjectRouter | None = None
-        self._steps: RuntimeStepStore | None = None
+        self._run_store: RuntimeAgentRunStore | None = None
         self._retention: RuntimeRetentionController | None = None
         self._stores: dict[RuntimeDomain, StateStore] = {}
         self._read_only = False
@@ -248,8 +248,8 @@ class RuntimeState:
         return self._require_state(self._recovery)
 
     @property
-    def steps(self) -> "RuntimeStepStore":
-        return self._require_state(self._steps)
+    def run_store(self) -> "RuntimeAgentRunStore":
+        return self._require_state(self._run_store)
 
     @property
     def retention(self) -> "RuntimeRetentionController":
@@ -347,7 +347,7 @@ class RuntimeState:
         self._evaluation = value.evaluation
         self._recovery = value.recovery
         self._objects = value.objects
-        self._steps = value.steps
+        self._run_store = value.run_store
         self._retention = value.retention
         self._stores = dict(value.stores)
         self._close_actions = value.close_actions

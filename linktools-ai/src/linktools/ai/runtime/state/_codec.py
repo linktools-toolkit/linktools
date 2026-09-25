@@ -133,7 +133,7 @@ from ._contracts import (
 )
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._step_contracts import (
-    RunRecord,
+    AgentRunRecord,
     StepEvent,
 )
 from ._store import (
@@ -223,7 +223,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("task_terminal", TaskTerminalRecord),
     ("tool_operation", ToolOperationRecord),
     ("usage_metrics", UsageMetrics),
-    ("run_record", RunRecord),
+    ("agent_run_record", AgentRunRecord),
     ("step_event", StepEvent),
 )
 _V1_WIRE_IDS = MappingProxyType(
@@ -274,7 +274,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "approval_record": ("approval_id", "execution_id", "status", "idempotency_key_digest", "decision", "decided_by", "decision_digest", "created_at", "decided_at", "decision_message", "resolution_metadata"),
         "agent_attempt_claim": ("execution_id", "expected_execution_revision", "expected_agent_run_sequence", "expected_recovery_revision", "expected_recovery_state"),
         "artifact_record": ("artifact_id", "execution_id", "producer", "media_type", "object_ref", "created_at"),
-        "conversation_cursor": ("step_run_id", "history_id", "message_count"),
+        "conversation_cursor": ("agent_run_id", "history_id", "message_count"),
         "conversation_history_index_node": ("node_id", "segment", "tree_segment_count", "tree_message_count", "left_tree_id", "right_tree_id", "next_forest_id"),
         "conversation_history": ("history_id", "session_id", "parent_history_id", "prefix_index_head_id", "inherited_message_count"),
         "conversation_history_segment": ("owner_history_id", "through_local_message_count"),
@@ -284,9 +284,9 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "execution_event": ("execution_id", "sequence", "event_type", "payload"),
         "execution_history_head": ("execution_id", "state", "revision", "seal_digest"),
         "execution_history_seal": ("execution_id", "run_heads", "execution_event_high_water"),
-        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "source_execution_id", "base_execution_id", "lineage_kind", "status", "revision", "event_sequence", "agent_run_sequence", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_step_run_id", "result", "repository_instructions", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "retention_closed", "started_at"),
-        "execution_run_seal_head": ("run_id", "event_count", "snapshot_count", "transcript_message_count", "projection_digest", "interaction_count"),
-        "model_interaction": ("run_id", "step_index", "request_sequence", "purpose", "output_retry_index", "model", "request_context", "request_envelope", "response_context", "status", "error_code", "duration_ns", "usage", "attachments"),
+        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "source_execution_id", "base_execution_id", "lineage_kind", "status", "revision", "event_sequence", "agent_run_sequence", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_agent_run_id", "result", "repository_instructions", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "retention_closed", "started_at"),
+        "execution_run_seal_head": ("agent_run_id", "event_count", "snapshot_count", "transcript_message_count", "projection_digest", "interaction_count"),
+        "model_interaction": ("agent_run_id", "step_index", "request_sequence", "purpose", "output_retry_index", "model", "request_context", "request_envelope", "response_context", "status", "error_code", "duration_ns", "usage", "attachments"),
         "execution_start_claim": ("execution_id", "expected_revision", "expected_event_sequence", "scope", "idempotency_key_digest", "request_digest", "started_at"),
         "execution_start_unknown_commit": ("execution_id", "expected_revision", "expected_event_sequence", "scope", "idempotency_key_digest", "request_digest", "occurred_at"),
         "execution_cancel_request_commit": ("execution_id", "expected_revision", "expected_event_sequence", "operation_id", "requested_at"),
@@ -302,16 +302,16 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "operation_ledger_record": ("operation_id", "tenant_id", "resource_kind", "resource_id", "execution_id", "operation_kind", "status", "request_digest", "result_ref", "result_digest", "error_code", "compactable", "sequence", "created_at", "updated_at"),
         "principal": ("principal_id", "tenant_id", "kind"),
         "pending_deferred_call": ("tool_call_id", "tool_name", "arguments_payload", "metadata"),
-        "pending_tool_continuation": ("source_step_run_id", "approvals", "calls"),
-        "recovery_checkpoint": ("execution_id", "step_run_id", "state", "revision", "created_at", "updated_at", "pending_tools", "repository_instruction_overlay", "repository_instruction_barriers", "handoff_phase", "terminal_handoff", "pending_operation_id"),
+        "pending_tool_continuation": ("source_agent_run_id", "approvals", "calls"),
+        "recovery_checkpoint": ("execution_id", "agent_run_id", "state", "revision", "created_at", "updated_at", "pending_tools", "repository_instruction_overlay", "repository_instruction_barriers", "handoff_phase", "terminal_handoff", "pending_operation_id"),
         "recovery_conversation_intent": ("session_id", "expected_cursor", "next_cursor"),
-        "recovery_terminal_handoff": ("outcome", "source_step_run_id", "conversation"),
+        "recovery_terminal_handoff": ("outcome", "source_agent_run_id", "conversation"),
         "recovery_terminal_outcome": ("terminal_status", "error_code", "safe_error_details", "stop_reason", "output", "object_source_domain", "usage", "terminal_event_type", "terminal_event_payload", "result_created_at", "error_diagnostics"),
-        "repository_instruction_barrier": ("step_run_id", "tool_call_id", "arguments_digest"),
+        "repository_instruction_barrier": ("agent_run_id", "tool_call_id", "arguments_digest"),
         "resource_ref": ("kind", "id", "tenant_id", "owner_principal_id"),
         "result_record": ("output", "stop_reason", "usage", "created_at"),
         "session_record": ("session_id", "owner_principal_id", "status", "revision", "cwd", "metadata", "created_at", "updated_at", "closed_at", "active_execution_id", "agent_id", "continuation", "history_quality", "history_id", "timeline_parent_session_id", "timeline_parent_turn_sequence"),
-        "stored_step_snapshot": ("run_id", "step_index", "timestamp", "state", "projection_digest", "has_context_projection", "pending_request_index"),
+        "stored_step_snapshot": ("agent_run_id", "step_index", "timestamp", "state", "projection_digest", "has_context_projection", "pending_request_index"),
         "stored_payload": ("kind", "encoding", "digest", "size", "value", "ref"),
         "inline_context_block": ("content",),
         "loaded_context_message": ("message", "source"),
@@ -323,17 +323,17 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "transcript_message_ref": ("source_domain", "owner_id", "message_index"),
         "transcript_seek": ("owner_id", "dimension", "block_start", "fact_sequence", "chunk_first_message_index"),
         "transcript_span_ref": ("source_domain", "owner_id", "start", "end"),
-        "tool_operation_admission": ("execution_id", "tool_operation_id", "step_run_id", "recovery_step_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "owner", "lease_seconds", "arguments_payload"),
+        "tool_operation_admission": ("execution_id", "tool_operation_id", "agent_run_id", "recovery_agent_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "owner", "lease_seconds", "arguments_payload"),
         "task_graph": ("graph_id", "nodes"),
         "task_graph_admission": ("version", "graph_id", "principal", "limits", "operation_id", "initial_request_digest", "correlation"),
         "task_graph_limits": ("max_concurrency", "max_depth", "max_nodes", "max_budget"),
         "task_lease": ("graph_id", "node_id", "tenant_id", "owner", "fence", "lease_expires_at", "execution_id"),
         "task_expander_ref": ("id", "revision"),
         "task_terminal": ("node_id", "owner", "fence", "status", "result_digest", "error_code", "error_digest", "completed_at", "execution_id"),
-        "tool_operation": ("tool_operation_id", "execution_id", "step_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "status", "owner", "fence", "lease_expires_at", "error_code", "created_at", "updated_at", "arguments_payload", "result_payload", "error_payload"),
+        "tool_operation": ("tool_operation_id", "execution_id", "agent_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "status", "owner", "fence", "lease_expires_at", "error_code", "created_at", "updated_at", "arguments_payload", "result_payload", "error_payload"),
         "usage_metrics": ("model_requests", "tool_calls", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"),
-        "run_record": ("run_id", "conversation_id", "parent_run_id", "agent_name", "metadata", "started_at", "registration_id"),
-        "step_event": ("run_id", "kind", "step_index", "timestamp", "conversation_id", "parent_run_id", "agent_name", "tool_call_id", "tool_name", "error", "metadata", "idempotency_key", "event_index"),
+        "agent_run_record": ("agent_run_id", "agent_conversation_id", "parent_agent_run_id", "agent_name", "metadata", "started_at", "registration_id"),
+        "step_event": ("agent_run_id", "kind", "step_index", "timestamp", "agent_conversation_id", "parent_agent_run_id", "agent_name", "tool_call_id", "tool_name", "error", "metadata", "idempotency_key", "event_index"),
     }
 )
 
@@ -2349,7 +2349,7 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     if not isinstance(kind, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     targets = {
-        "run_record": RunRecord,
+        "agent_run_record": AgentRunRecord,
         "step_event": StepEvent,
         "stored_step_snapshot": StoredStepSnapshot,
         "model_interaction": ModelInteractionRecord,

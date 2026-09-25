@@ -153,7 +153,7 @@ from ._tool_return_codec import (
     tool_return_content_digest,
 )
 from .state._contracts import LoadedModelContext
-from .state._step_contracts import StepStore
+from .state._step_contracts import AgentRunStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
@@ -182,7 +182,7 @@ class UsageSink(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class AgentExecutionResult:
-    run_id: str
+    agent_run_id: str
     output: JsonValue
     messages: list[ModelMessage]
     usage: UsageMetrics
@@ -192,7 +192,7 @@ AgentExecutionOutcome = AgentExecutionResult | DeferredToolRequests
 
 
 @dataclass(frozen=True, slots=True)
-class _RunScope:
+class _AgentRunScope:
     binding: AgentBinding
     context: AgentContext[object]
     workspace: "Workspace | None"
@@ -201,10 +201,10 @@ class _RunScope:
     user_prompt: CanonicalUserInput | None
     history: list[ModelMessage]
     initial_context: LoadedModelContext
-    conversation_id: str
-    step_store: StepStore
-    step_run_id: str
-    segment_sequence: int
+    agent_conversation_id: str
+    run_store: AgentRunStore
+    agent_run_id: str
+    agent_run_sequence: int
     initial_attachments: tuple[Mapping[str, JsonValue], ...] = ()
     history_id: str | None = None
     memory_store: MemoryStore | None = None
@@ -222,7 +222,7 @@ class _RunScope:
     mode: ExecutionMode = "run"
     planning: bool = False
     thinking: ThinkingValue = False
-    parent_step_run_id: str | None = None
+    parent_agent_run_id: str | None = None
     subagent_available: bool = False
     subagent_descriptions: Mapping[str, str | None] = field(default_factory=dict)
     subagent_delegate: SubagentDelegate | None = None
@@ -266,7 +266,7 @@ class AgentExecutor:
         self._metrics = metrics
         self._sandbox = sandbox
 
-    async def execute(self, scope: _RunScope) -> AgentExecutionOutcome:
+    async def execute(self, scope: _AgentRunScope) -> AgentExecutionOutcome:
         binding = scope.binding
         compiled_agent = binding.compiled_agent
         run_usage = RunUsage()
@@ -342,13 +342,13 @@ class AgentExecutor:
                         raise
                     _logger.error(
                         "usage sink failed after agent execution failure: step=%s",
-                        scope.step_run_id,
+                        scope.agent_run_id,
                         exc_info=False,
                     )
 
     def _record_agent_run(
         self,
-        scope: _RunScope,
+        scope: _AgentRunScope,
         *,
         metric_id: str | None,
         metric_started: int | None,
@@ -375,7 +375,7 @@ class AgentExecutor:
             error_code = None
         correlation: dict[str, str | int] = {
             "execution_id": scope.context.execution_id,
-            "step_run_id": scope.step_run_id,
+            "agent_run_id": scope.agent_run_id,
         }
         if scope.context.session_id is not None:
             correlation["session_id"] = scope.context.session_id
@@ -406,7 +406,7 @@ class AgentExecutor:
 
     async def _execute_with_sandbox(
         self,
-        scope: _RunScope,
+        scope: _AgentRunScope,
         *,
         run_usage: RunUsage,
         usage_limits: UsageLimits,
@@ -495,7 +495,7 @@ class AgentExecutor:
             _logger.debug(
                 "sandbox opened for agent run: "
                 "step=%s tools=%s resources=%s",
-                scope.step_run_id,
+                scope.agent_run_id,
                 selected,
                 tuple(resource_paths),
             )
@@ -523,7 +523,7 @@ class AgentExecutor:
 
     async def _execute(
         self,
-        scope: _RunScope,
+        scope: _AgentRunScope,
         *,
         run_usage: RunUsage,
         usage_limits: UsageLimits,
@@ -531,7 +531,7 @@ class AgentExecutor:
     ) -> AgentExecutionOutcome:
         binding = scope.binding
         compiled_agent = binding.compiled_agent
-        if await scope.step_store.get_run(run_id=scope.step_run_id) is not None:
+        if await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         model = compiled_agent.model.materialize()
         deferred_step_index: int | None = None
@@ -542,14 +542,14 @@ class AgentExecutor:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             deferred_step_index = step_index
 
-        interaction_high_water = await scope.step_store.model_interaction_count(
-            run_id=scope.step_run_id
+        interaction_high_water = await scope.run_store.model_interaction_count(
+            agent_run_id=scope.agent_run_id
         )
         model_journal = ModelRequestJournal(
             source_namespace=scope.context.namespace,
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
-            step_run_id=scope.step_run_id,
+            agent_run_id=scope.agent_run_id,
             next_sequence=interaction_high_water + 1,
         )
         agent, capabilities = await _materialize_agent(
@@ -581,7 +581,7 @@ class AgentExecutor:
             "mode=%s planning=%s thinking=%s selected_tools=%s",
             compiled_agent.spec.id,
             compiled_agent.spec.revision,
-            scope.step_run_id,
+            scope.agent_run_id,
             scope.mode,
             scope.planning,
             scope.thinking,
@@ -599,7 +599,7 @@ class AgentExecutor:
                 user_prompt,
                 deps=scope.context,
                 message_history=scope.history or None,
-                conversation_id=scope.conversation_id,
+                conversation_id=scope.agent_conversation_id,
                 usage_limits=usage_limits,
                 usage=run_usage,
                 capabilities=capabilities,
@@ -611,8 +611,8 @@ class AgentExecutor:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 _validate_deferred_requests(output)
                 return output
-            run = await scope.step_store.get_run(run_id=scope.step_run_id)
-            snapshot = await scope.step_store.latest_snapshot(run_id=scope.step_run_id)
+            run = await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id)
+            snapshot = await scope.run_store.latest_snapshot(agent_run_id=scope.agent_run_id)
             operations = (
                 ()
                 if scope.tool_operations is None
@@ -628,7 +628,7 @@ class AgentExecutor:
                 run is None
                 or snapshot is None
                 or unresolved
-                or run.conversation_id != scope.conversation_id
+                or run.agent_conversation_id != scope.agent_conversation_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if binding.output_binding.mode == "text":
@@ -648,7 +648,7 @@ class AgentExecutor:
             binding.output_binding.validate_payload(payload)
             usage = _usage_metrics(run_usage)
             return AgentExecutionResult(
-                scope.step_run_id, payload, final_result.all_messages(), usage
+                scope.agent_run_id, payload, final_result.all_messages(), usage
             )
         except BaseException as error:
             primary_error = error
@@ -792,7 +792,7 @@ def _validate_deferred_requests(requests: DeferredToolRequests) -> None:
 
 
 async def _materialize_agent(
-    scope: _RunScope,
+    scope: _AgentRunScope,
     *,
     model: Model,
     skill_sources: SkillSourceRegistry,
@@ -916,14 +916,14 @@ async def _materialize_agent(
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
             session_id=scope.context.session_id,
-            step_run_id=scope.step_run_id,
+            agent_run_id=scope.agent_run_id,
             agent_id=compiled_agent.spec.id,
         )
     )
     capture_store = RuntimeCaptureStore(
-        scope.step_store,
+        scope.run_store,
         execution_id=scope.context.execution_id,
-        step_run_id=scope.step_run_id,
+        agent_run_id=scope.agent_run_id,
         initial_messages=scope.history,
         initial_context=scope.initial_context,
         initial_attachments=scope.initial_attachments,
@@ -986,7 +986,7 @@ async def _materialize_agent(
         tenant_id=scope.context.principal.tenant_id,
         execution_id=scope.context.execution_id,
         session_id=scope.context.session_id,
-        step_run_id=scope.step_run_id,
+        agent_run_id=scope.agent_run_id,
         agent_id=compiled_agent.spec.id,
         journal=model_journal,
         interaction_recorder=capture_store,
@@ -994,19 +994,19 @@ async def _materialize_agent(
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
         agent_name=compiled_agent.spec.id,
-        step_run_id=scope.step_run_id,
+        agent_run_id=scope.agent_run_id,
         execution_id=scope.context.execution_id,
-        segment_sequence=scope.segment_sequence,
+        agent_run_sequence=scope.agent_run_sequence,
         history_id=scope.history_id,
         memory_scope=scope.context.memory_scope,
-        step_store=scope.step_store,
+        run_store=scope.run_store,
         memory_store=scope.memory_store,
         ordinary_tool_policy=compiled_agent.ordinary_tool_policy,
         compaction_policy=compaction_policy,
         limits=scope.limits,
         planning=scope.planning,
         context_target_tokens=scope.context_target_tokens,
-        parent_step_run_id=scope.parent_step_run_id,
+        parent_agent_run_id=scope.parent_agent_run_id,
         plan_store_resolver=scope.plan_store_resolver,
         deferred_pause_sink=deferred_pause_sink,
         model_journal=model_journal,

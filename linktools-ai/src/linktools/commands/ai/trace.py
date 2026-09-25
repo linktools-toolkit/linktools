@@ -92,10 +92,12 @@ async def _emit_trace(
 
 def _scope(payload: Mapping[object, object]) -> str:
     value = payload.get("scope")
-    segment = payload.get("segment_sequence")
+    agent_run_sequence = payload.get("agent_run_sequence")
     if value is None:
         return "-"
-    return f"{value}/{segment}" if segment is not None else str(value)
+    if agent_run_sequence is not None:
+        return f"{value}/{agent_run_sequence}"
+    return str(value)
 
 
 def _detail(payload: Mapping[object, object]) -> str:

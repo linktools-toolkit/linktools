@@ -101,7 +101,7 @@ async def test_transcript_decoders_preserve_future_schema_unsupported(
     state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="future-transcript-schema", tenant_id="tenant")
     try:
-        history = state.steps.read_store(
+        history = state.run_store.read_store(
             RuntimeDomain.EXECUTION
         ).transcript_repository
 

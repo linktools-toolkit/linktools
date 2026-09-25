@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
+from linktools.ai.runtime._capabilities import _RuntimeAgentRunPersistence
 from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -61,7 +61,7 @@ class _Store:
     def __init__(self) -> None:
         self.snapshots: list[object] = []
 
-    async def register_run(self, record: object, *, execution_id: str | None = None) -> None:
+    async def register_agent_run(self, record: object, *, execution_id: str | None = None) -> None:
         del record, execution_id
 
     async def save_snapshot(
@@ -74,13 +74,13 @@ class _Store:
         self.snapshots.append(snapshot)
 
     async def latest_snapshot(
-        self, *, run_id: str, include_interrupted: bool = False
+        self, *, agent_run_id: str, include_interrupted: bool = False
     ) -> object | None:
-        del run_id, include_interrupted
+        del agent_run_id, include_interrupted
         return self.snapshots[-1] if self.snapshots else None
 
-    async def list_events(self, *, run_id: str) -> list[object]:
-        del run_id
+    async def list_events(self, *, agent_run_id: str) -> list[object]:
+        del agent_run_id
         return []
 
     async def append_event(
@@ -97,7 +97,7 @@ def _context() -> RunContext[None]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
         tool_call_id="call",
     )
 
@@ -106,14 +106,14 @@ def _context() -> RunContext[None]:
 async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() -> None:
     store = _Store()
     captured: list[int] = []
-    persistence = _RuntimeStepPersistence(
+    persistence = _RuntimeAgentRunPersistence(
         capture=RuntimeCaptureStore(
             store,  # type: ignore[arg-type]
             execution_id=None,
-            step_run_id="run",
+            agent_run_id="run",
         ),
         agent_name="agent",
-        run_id="run",
+        agent_run_id="run",
         deferred_pause_sink=captured.append,
     )
     node_result = object()
@@ -123,7 +123,7 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
 
     ctx = SimpleNamespace(
         run_step=7,
-        conversation_id=None,
+        agent_conversation_id=None,
         messages=[],
         emit=emit,
     )
@@ -149,14 +149,14 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
 
 @pytest.mark.asyncio
 async def test_runtime_step_persistence_requires_pause_sink_for_native_deferred() -> None:
-    persistence = _RuntimeStepPersistence(
+    persistence = _RuntimeAgentRunPersistence(
         capture=RuntimeCaptureStore(
             _Store(),  # type: ignore[arg-type]
             execution_id=None,
-            step_run_id="run",
+            agent_run_id="run",
         ),
         agent_name="agent",
-        run_id="run",
+        agent_run_id="run",
     )
     persistence._last_observed_step_index = 3
     result = SimpleNamespace(

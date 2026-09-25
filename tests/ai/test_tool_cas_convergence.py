@@ -33,7 +33,7 @@ def _record(
     return ToolOperationRecord(
         tool_operation_id="tool-operation",
         execution_id="execution",
-        step_run_id="step-run",
+        agent_run_id="agent-run",
         tool_call_id="tool-call",
         idempotency_key_digest=canonical_sha256({"call": "tool-call"}),
         tool_name="tool",
@@ -60,8 +60,8 @@ def _admission(*, owner: str = "tool-owner") -> ToolOperationAdmission:
     return ToolOperationAdmission(
         execution_id="execution",
         tool_operation_id="tool-operation",
-        step_run_id="step-run",
-        recovery_step_run_id=None,
+        agent_run_id="agent-run",
+        recovery_agent_run_id=None,
         tool_call_id="tool-call",
         idempotency_key_digest=canonical_sha256({"call": "tool-call"}),
         tool_name="tool",

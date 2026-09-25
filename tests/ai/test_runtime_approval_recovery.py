@@ -95,7 +95,7 @@ def _continuation() -> PendingToolContinuation:
 def _checkpoint(now: datetime) -> RecoveryCheckpoint:
     return RecoveryCheckpoint(
         execution_id="execution",
-        step_run_id="step-1",
+        agent_run_id="step-1",
         state=RecoveryCheckpointState.ACTIVE,
         revision=0,
         created_at=now,
@@ -114,7 +114,7 @@ def _approval(
         approval_id=approval_id_for_call(
             "tenant",
             execution.execution_id,
-            continuation.source_step_run_id,
+            continuation.source_agent_run_id,
             pending.tool_call_id,
         ),
         execution_id=execution.execution_id,
@@ -140,9 +140,9 @@ def _commands(state: RuntimeState, namespace: str) -> RuntimeStateCommands:
         recovery=state.recovery.checkpoints,
         conversation_history=state.conversation.histories,
         tools=state.recovery.tools,
-        conversation_steps=state.steps.read_store(RuntimeDomain.CONVERSATION),
-        execution_steps=state.steps.read_store(RuntimeDomain.EXECUTION),
-        recovery_steps=state.steps.read_store(RuntimeDomain.RECOVERY),
+        conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
+        execution_run_store=state.run_store.read_store(RuntimeDomain.EXECUTION),
+        recovery_run_store=state.run_store.read_store(RuntimeDomain.RECOVERY),
         background_tasks=set(),
     )
 
@@ -197,7 +197,7 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
             approval_id_for_call(
                 "tenant",
                 execution.execution_id,
-                continuation.source_step_run_id,
+                continuation.source_agent_run_id,
                 continuation.approvals[0].tool_call_id,
             ),
             tenant_id="tenant",
@@ -230,7 +230,7 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
         approval_id = approval_id_for_call(
             "tenant",
             execution.execution_id,
-            continuation.source_step_run_id,
+            continuation.source_agent_run_id,
             continuation.approvals[0].tool_call_id,
         )
         now = datetime.now(timezone.utc)
@@ -257,7 +257,7 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
         assert resumed.agent_run_sequence == 2
         assert active.state is RecoveryCheckpointState.ACTIVE
         assert active.pending_tools is None
-        assert active.step_run_id != continuation.source_step_run_id
+        assert active.agent_run_id != continuation.source_agent_run_id
     finally:
         await state.close()
 
@@ -289,7 +289,7 @@ async def test_deferred_cancel_cancels_pending_approval_and_clears_frontier() ->
             approval_id_for_call(
                 "tenant",
                 execution.execution_id,
-                continuation.source_step_run_id,
+                continuation.source_agent_run_id,
                 continuation.approvals[0].tool_call_id,
             ),
             tenant_id="tenant",

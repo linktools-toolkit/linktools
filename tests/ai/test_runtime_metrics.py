@@ -300,7 +300,7 @@ async def test_model_metric_does_not_capture_prompt_or_exception_text() -> None:
         tenant_id="tenant",
         execution_id="execution",
         session_id="session",
-        step_run_id="run",
+        agent_run_id="run",
         agent_id="agent",
     )
     secret = "DO_NOT_PERSIST_THIS_SECRET"
@@ -313,7 +313,7 @@ async def test_model_metric_does_not_capture_prompt_or_exception_text() -> None:
         deps=type("Deps", (), {"correlation": {}})(),
         model=model,
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
         run_step=1,
     )
     request_context = ModelRequestContext(

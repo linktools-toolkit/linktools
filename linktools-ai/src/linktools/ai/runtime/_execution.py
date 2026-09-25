@@ -179,7 +179,7 @@ class _ExecutionTerminalVerifier(Protocol):
         self,
         execution: ExecutionRecord,
         status: ExecutionStatus,
-        required_step_run_id: "str | None",
+        required_agent_run_id: "str | None",
     ) -> None: ...
 
 
@@ -220,9 +220,9 @@ async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> bool:
 async def _missing_terminal_verifier(
     execution: ExecutionRecord,
     status: ExecutionStatus,
-    required_step_run_id: "str | None",
+    required_agent_run_id: "str | None",
 ) -> None:
-    del execution, status, required_step_run_id
+    del execution, status, required_agent_run_id
     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
@@ -302,7 +302,7 @@ class _ExecutionRuntimePort(ExecutionBackend, Protocol):
         self,
         execution: ExecutionRecord,
         status: ExecutionStatus,
-        required_step_run_id: str | None,
+        required_agent_run_id: str | None,
     ) -> None: ...
 
     async def cancel_children(
@@ -1674,7 +1674,7 @@ class DefaultExecutionService:
         session_agent_id: "str | None" = None,
         source_execution_id: "str | None" = None,
         base_execution_id: "str | None" = None,
-        conversation_step_run_id: "str | None" = None,
+        conversation_agent_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
         root_execution_id: "str | None" = None,
         parent_invocation_id: "str | None" = None,
@@ -1692,7 +1692,7 @@ class DefaultExecutionService:
                 session_agent_id=session_agent_id,
                 source_execution_id=source_execution_id,
                 base_execution_id=base_execution_id,
-                conversation_step_run_id=conversation_step_run_id,
+                conversation_agent_run_id=conversation_agent_run_id,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
                 parent_invocation_id=parent_invocation_id,
@@ -1710,7 +1710,7 @@ class DefaultExecutionService:
                 session_agent_id=session_agent_id,
                 source_execution_id=source_execution_id,
                 base_execution_id=base_execution_id,
-                conversation_step_run_id=conversation_step_run_id,
+                conversation_agent_run_id=conversation_agent_run_id,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
                 parent_invocation_id=parent_invocation_id,
@@ -1730,7 +1730,7 @@ class DefaultExecutionService:
         session_agent_id: "str | None" = None,
         source_execution_id: "str | None" = None,
         base_execution_id: "str | None" = None,
-        conversation_step_run_id: "str | None" = None,
+        conversation_agent_run_id: "str | None" = None,
         parent_execution_id: "str | None" = None,
         root_execution_id: "str | None" = None,
         parent_invocation_id: "str | None" = None,
@@ -1762,7 +1762,7 @@ class DefaultExecutionService:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             request = replace(request, correlation=parent.correlation)
-        conversation_run_id = conversation_step_run_id
+        conversation_agent_run_id = conversation_agent_run_id
         session = None
         if session_id is not None and source_execution_id is None:
             session = await self._sessions.get(
@@ -1781,10 +1781,10 @@ class DefaultExecutionService:
                     ErrorCode.REQUEST_FIELD_INVALID,
                     safe_details={"field": "cwd", "reason": "workspace_required"},
                 )
-            conversation_run_id = (
+            conversation_agent_run_id = (
                 None
                 if session.continuation is None
-                else session.continuation.step_run_id
+                else session.continuation.agent_run_id
             )
             base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
@@ -1976,7 +1976,7 @@ class DefaultExecutionService:
             lineage_kind=lineage_kind,
             agent_run_sequence=0,
             memory_scope=request.memory_scope,
-            conversation_step_run_id=conversation_run_id,
+            conversation_agent_run_id=conversation_agent_run_id,
             mode=request.mode,
             planning=request.planning,
             thinking=request.thinking,
@@ -2647,7 +2647,7 @@ class DefaultExecutionService:
             source_execution_id=previous.execution_id,
             lineage_kind=ExecutionLineageKind.RETRY,
             base_execution_id=previous.base_execution_id,
-            conversation_step_run_id=previous.conversation_step_run_id,
+            conversation_agent_run_id=previous.conversation_agent_run_id,
             binding_snapshot=previous.binding,
         )
 

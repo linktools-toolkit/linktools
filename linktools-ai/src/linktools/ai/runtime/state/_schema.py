@@ -98,7 +98,7 @@ def build_runtime_sql_metadata(
             "kind",
             String(32),
             nullable=False,
-            comment="Stable persisted record kind such as session, execution, task_node, or step_run.",
+            comment="Stable persisted record kind such as session, execution, task_node, or agent_run.",
         ),
         Column(
             "sort_key",

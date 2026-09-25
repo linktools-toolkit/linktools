@@ -15,8 +15,8 @@ from ._ids import (
     deterministic_id,
     idempotency_key_digest,
     principal_identity_payload,
-    step_conversation_id,
-    step_run_id,
+    agent_conversation_id,
+    agent_run_id,
 )
 from ._limits import PromptLimits
 from ._json import (
@@ -156,8 +156,8 @@ __all__ = [
     "overlay_correlation",
     "principal_identity_payload",
     "service_principal",
-    "step_conversation_id",
-    "step_run_id",
+    "agent_conversation_id",
+    "agent_run_id",
     "validate_agent_id",
     "validate_asset_kind",
     "validate_asset_namespace",

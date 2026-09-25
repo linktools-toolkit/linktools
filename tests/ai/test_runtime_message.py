@@ -41,7 +41,7 @@ def test_model_message_wire_is_linktools_owned() -> None:
         "timestamp",
         "instructions",
         "run_id",
-        "conversation_id",
+        "agent_conversation_id",
         "metadata",
         "state",
     }

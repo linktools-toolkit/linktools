@@ -140,7 +140,7 @@ async def test_plan_mode_prepare_captures_wrapped_per_run_tool_metadata() -> Non
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
     )
     compaction_policy = RuntimeCompactionPolicy()
     prepare = _plan_mode_prepare(

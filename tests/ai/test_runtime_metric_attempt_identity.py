@@ -30,7 +30,7 @@ async def test_actual_model_attempts_never_reuse_observation_identity() -> None:
         tenant_id="tenant",
         execution_id="execution",
         session_id=None,
-        step_run_id="durable-step-run",
+        agent_run_id="durable-agent-run",
         agent_id="agent",
     )
 
@@ -39,7 +39,7 @@ async def test_actual_model_attempts_never_reuse_observation_identity() -> None:
         deps=type("Deps", (), {"correlation": {}})(),
         model=model,
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
         run_step=1,
     )
     request_context = ModelRequestContext(

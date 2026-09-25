@@ -22,7 +22,7 @@ from linktools.ai.runtime.state._contracts import (
     SessionRecord,
 )
 from linktools.ai.storage import StoredPayload
-from linktools.ai.runtime.state._step_contracts import RunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.task import TaskNode
 
 
@@ -168,7 +168,7 @@ def test_known_wire_type_with_wrong_target_is_integrity_error() -> None:
     with pytest.raises(AIError) as raised:
         _decode_enveloped_domain(
             _envelope(_encode_persisted_domain(_session())),
-            RunRecord,
+            AgentRunRecord,
         )
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -199,7 +199,7 @@ def test_persisted_model_interaction_accepts_legacy_attachment_without_identifie
     attachment_id = "a" * 64
     digest = "b" * 64
     interaction = ModelInteractionRecord(
-        run_id="run",
+        agent_run_id="run",
         step_index=1,
         request_sequence=1,
         purpose="agent",
@@ -248,7 +248,7 @@ def test_persisted_model_interaction_accepts_legacy_attachment_without_identifie
 
 def test_persisted_model_interaction_requires_attachments_field() -> None:
     interaction = ModelInteractionRecord(
-        run_id="run",
+        agent_run_id="run",
         step_index=1,
         request_sequence=1,
         purpose="agent",
@@ -280,24 +280,24 @@ def test_persisted_model_interaction_requires_attachments_field() -> None:
 
 def test_dynamic_v1_default_remains_required() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    run = RunRecord(run_id="run", started_at=now)
+    run = AgentRunRecord(agent_run_id="run", started_at=now)
     payload = copy.deepcopy(_encode_persisted_domain(run))
     payload["fields"].pop("started_at")
 
     with pytest.raises(AIError) as raised:
         _decode_enveloped_domain(
-            _envelope(payload, wire_id="run_record"),
-            RunRecord,
+            _envelope(payload, wire_id="agent_run_record"),
+            AgentRunRecord,
         )
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 def test_step_persistence_reads_current_payload() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    run = RunRecord(
-        run_id="run",
-        conversation_id="conversation",
-        parent_run_id=None,
+    run = AgentRunRecord(
+        agent_run_id="run",
+        agent_conversation_id="conversation",
+        parent_agent_run_id=None,
         agent_name="agent",
         metadata={},
         started_at=now,

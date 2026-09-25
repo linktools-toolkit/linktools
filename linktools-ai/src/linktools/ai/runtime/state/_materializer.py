@@ -46,8 +46,8 @@ from ._recovery_repositories import build_recovery_repository_bundle
 from ._repositories import OperationLedgerRepository, build_repository_bundle
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStorageGroup, SqlStateStore
-from ._step_materializer import build_runtime_steps
-from ._steps import RuntimeStepStore
+from ._step_materializer import build_runtime_agent_run_store
+from ._steps import RuntimeAgentRunStore
 from ._store import StateStore, state_store_digest
 from ._task_admission_repository import TaskAdmissionRepositoryImpl
 from ._task_repository import TaskRepositoryImpl
@@ -68,7 +68,7 @@ class _MaterializedRuntimeState:
     evaluation: EvaluationState
     recovery: RecoveryState
     objects: _RuntimeObjectRouter
-    steps: RuntimeStepStore
+    run_store: RuntimeAgentRunStore
     retention: RuntimeRetentionController
     stores: Mapping[RuntimeDomain, StateStore]
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
@@ -312,7 +312,7 @@ async def materialize_runtime_state(
 
         states = _states(bundles)
         objects = build_runtime_object_router(plan, object_store, stores, sql_contexts)
-        steps = build_runtime_steps(
+        run_store = build_runtime_agent_run_store(
             plan,
             stores,
             objects,
@@ -321,20 +321,20 @@ async def materialize_runtime_state(
             namespace=namespace,
             tenant_id=tenant_id,
         )
-        await steps.initialize()
+        await run_store.initialize()
         retention = RuntimeRetentionController(
             conversation=states.conversation,
             execution=states.execution,
             objects=objects,
-            steps=steps,
+            run_store=run_store,
             plan=plan,
             namespace=namespace,
         )
         actions: list[Callable[[], Awaitable[None]]] = [
-            steps.preflight_close,
+            run_store.preflight_close,
             objects.preflight_close,
             retention.close,
-            steps.close,
+            run_store.close,
         ]
         actions.extend(cleanups)
         _logger.info(
@@ -351,7 +351,7 @@ async def materialize_runtime_state(
             evaluation=states.evaluation,
             recovery=states.recovery,
             objects=objects,
-            steps=steps,
+            run_store=run_store,
             retention=retention,
             stores=dict(stores),
             close_actions=tuple(actions),

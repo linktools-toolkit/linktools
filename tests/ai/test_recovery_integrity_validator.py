@@ -25,7 +25,7 @@ def _checkpoint(
     active = state is RecoveryCheckpointState.ACTIVE
     return RecoveryCheckpoint(
         execution_id=execution_id,
-        step_run_id="run-1" if active else None,
+        agent_run_id="run-1" if active else None,
         state=state,
         revision=revision,
         created_at=now,
@@ -69,7 +69,7 @@ async def test_completed_transition_removes_recoverable_checkpoint() -> None:
             next_record=replace(
                 created,
                 state=RecoveryCheckpointState.COMPLETED,
-                step_run_id=None,
+                agent_run_id=None,
                 revision=created.revision + 1,
                 updated_at=datetime.now(timezone.utc),
             ),

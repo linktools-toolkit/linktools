@@ -74,7 +74,7 @@
     "task_terminal",
     "tool_operation",
     "usage_metrics",
-    "run_record",
+    "agent_run_record",
     "step_event"
   ],
   "enum_wire_type_ids": [
@@ -111,7 +111,7 @@
         "payload": {
           "$dataclass": "conversation_cursor",
           "fields": {
-            "step_run_id": "run",
+            "agent_run_id": "run",
             "history_id": null,
             "message_count": 0
           }

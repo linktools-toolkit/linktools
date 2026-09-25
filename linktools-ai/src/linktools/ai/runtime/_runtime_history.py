@@ -1077,7 +1077,7 @@ async def _open_runtime_history(
         reader = StepExecutionHistoryReader(
             namespace=resolved_namespace,
             executions=selected_state.execution.executions,
-            store=selected_state.steps.read_store(RuntimeDomain.EXECUTION),
+            store=selected_state.run_store.read_store(RuntimeDomain.EXECUTION),
             cursor_signer=HmacCursorSigner(
                 "execution-history",
                 token_seed(resolved_namespace),
@@ -1118,7 +1118,7 @@ async def _open_runtime_history(
                 token_seed(resolved_namespace),
             ),
             conversation=selected_state.conversation,
-            session_transcript_store=selected_state.steps,
+            session_transcript_store=selected_state.run_store,
         )
     except BaseException as error:
         body_error = error

@@ -44,9 +44,9 @@ from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
     ContinuableSnapshot,
-    RunRecord,
+    AgentRunRecord,
     SnapshotState,
-    StepStore,
+    AgentRunStore,
 )
 
 if TYPE_CHECKING:
@@ -57,13 +57,13 @@ _logger = environ.get_logger("ai.runtime.capabilities")
 
 
 @dataclass(kw_only=True, eq=False)
-class _RuntimeStepPersistence(AbstractCapability[None]):
+class _RuntimeAgentRunPersistence(AbstractCapability[None]):
     """Persist Runtime-owned step events, raw occurrences, and recovery snapshots."""
 
     capture: RuntimeCaptureStore = field(repr=False, compare=False)
     agent_name: str
-    run_id: str
-    parent_run_id: str | None = None
+    agent_run_id: str
+    parent_agent_run_id: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     id: str | None = field(
         default="linktools.ai.step-persistence",
@@ -123,19 +123,19 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
     def __post_init__(self) -> None:
         if not isinstance(self.capture, RuntimeCaptureStore):
             raise TypeError("capture must be RuntimeCaptureStore")
-        if not self.run_id or self.capture.step_run_id != self.run_id:
-            raise ValueError("Runtime persistence run id is invalid")
+        if not self.agent_run_id or self.capture.agent_run_id != self.agent_run_id:
+            raise ValueError("Runtime AgentRun identity is invalid")
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="innermost")
 
     async def before_run(self, ctx: PydanticRunContext[None]) -> None:
         self._live_messages = ctx.messages
-        await self.capture.register_run(
-            RunRecord(
-                run_id=self.run_id,
-                conversation_id=ctx.conversation_id,
-                parent_run_id=self.parent_run_id,
+        await self.capture.register_agent_run(
+            AgentRunRecord(
+                agent_run_id=self.agent_run_id,
+                agent_conversation_id=ctx.conversation_id,
+                parent_agent_run_id=self.parent_agent_run_id,
                 agent_name=self.agent_name,
                 metadata=dict(self.metadata),
                 started_at=datetime.now(timezone.utc),
@@ -341,11 +341,11 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
             return
         await self.capture.save_snapshot(
             ContinuableSnapshot(
-                run_id=self.run_id,
+                agent_run_id=self.agent_run_id,
                 step_index=ctx.run_step,
                 messages=list(raw),
-                conversation_id=ctx.conversation_id,
-                parent_run_id=self.parent_run_id,
+                agent_conversation_id=ctx.conversation_id,
+                parent_agent_run_id=self.parent_agent_run_id,
                 agent_name=self.agent_name,
                 state=state,
                 context_messages=context_messages,
@@ -362,19 +362,19 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
 async def compose_platform_capabilities(
     *,
     agent_name: str,
-    step_run_id: str,
+    agent_run_id: str,
     execution_id: str | None = None,
-    segment_sequence: int | None,
+    agent_run_sequence: int | None,
     history_id: str | None,
     memory_scope: str | None,
-    step_store: StepStore,
+    run_store: AgentRunStore,
     memory_store: MemoryStore | None,
     ordinary_tool_policy: tuple[str, ...],
     compaction_policy: RuntimeCompactionPolicy,
     limits: PromptLimits,
     planning: bool,
     context_target_tokens: int | None,
-    parent_step_run_id: str | None,
+    parent_agent_run_id: str | None,
     plan_store_resolver: Callable[[PydanticRunContext[None]], RuntimePlanStore] | None,
     deferred_pause_sink: Callable[[int], None] | None = None,
     model_journal: "ModelRequestJournal | None" = None,
@@ -383,23 +383,23 @@ async def compose_platform_capabilities(
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     capture = capture_store or RuntimeCaptureStore(
-        step_store,
+        run_store,
         execution_id=execution_id,
-        step_run_id=step_run_id,
+        agent_run_id=agent_run_id,
     )
-    persistence = _RuntimeStepPersistence(
+    persistence = _RuntimeAgentRunPersistence(
         capture=capture,
         agent_name=agent_name,
-        run_id=step_run_id,
-        parent_run_id=parent_step_run_id,
+        agent_run_id=agent_run_id,
+        parent_agent_run_id=parent_agent_run_id,
         metadata={
             "capability_scope": "parent",
             "agent_name": agent_name,
             **({} if history_id is None else {"history_id": history_id}),
             **(
                 {}
-                if segment_sequence is None
-                else {"segment_sequence": str(segment_sequence)}
+                if agent_run_sequence is None
+                else {"agent_run_sequence": str(agent_run_sequence)}
             ),
         },
         deferred_pause_sink=deferred_pause_sink,
@@ -443,7 +443,7 @@ async def compose_platform_capabilities(
         "platform capabilities composed: agent=%s step=%s memory_tools=%s "
         "planning=%s compaction_policy=per-run",
         agent_name,
-        step_run_id,
+        agent_run_id,
         selected_memory,
         planning,
     )

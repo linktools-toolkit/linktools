@@ -237,7 +237,7 @@ def test_execution_recovery_contracts_validate_identity() -> None:
     effect = ExecutionRecoveryEffect(
         operation_id="operation",
         execution_id="execution",
-        step_run_id="step",
+        agent_run_id="step",
         tool_call_id="call",
         tool_name="write_file",
         fence=2,

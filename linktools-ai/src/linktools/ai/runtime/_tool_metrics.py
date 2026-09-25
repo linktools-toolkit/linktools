@@ -42,7 +42,7 @@ class _ToolMetricContext:
     tenant_id: str
     execution_id: str
     session_id: str | None
-    step_run_id: str
+    agent_run_id: str
     agent_id: str
 
     def record_error(
@@ -58,7 +58,7 @@ class _ToolMetricContext:
                 self.source_namespace,
                 self.tenant_id,
                 self.execution_id,
-                self.step_run_id,
+                self.agent_run_id,
                 call.tool_call_id,
             ),
             call=call,
@@ -81,7 +81,7 @@ class _ToolMetricContext:
             self.source_namespace,
             self.tenant_id,
             self.execution_id,
-            self.step_run_id,
+            self.agent_run_id,
             call.tool_call_id,
         )
         started = monotonic_ns()
@@ -150,7 +150,7 @@ class _ToolMetricContext:
     ) -> None:
         correlation: dict[str, str | int] = {
             "execution_id": self.execution_id,
-            "step_run_id": self.step_run_id,
+            "agent_run_id": self.agent_run_id,
             "tool_call_id": call.tool_call_id,
         }
         if self.session_id is not None:

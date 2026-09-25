@@ -79,7 +79,7 @@ class StagedContextProjection:
 
 @dataclass(frozen=True, slots=True)
 class StagedModelInteraction:
-    run_id: str
+    agent_run_id: str
     step_index: int
     request_sequence: int
     purpose: str
@@ -96,7 +96,7 @@ class StagedModelInteraction:
 
     def __post_init__(self) -> None:
         if (
-            not self.run_id
+            not self.agent_run_id
             or self.step_index < 0
             or self.request_sequence < 1
             or self.purpose not in {"agent", "compaction"}

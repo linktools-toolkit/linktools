@@ -298,7 +298,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         namespace="diagnostics",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         binding_digest="a" * 64,
         owner="worker",
         background_tasks=set(),
@@ -315,7 +315,7 @@ def _failed_tool_record(
     return ToolOperationRecord(
         tool_operation_id="operation",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
         tool_call_id="call",
         idempotency_key_digest="b" * 64,
         tool_name="tool",

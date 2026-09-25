@@ -45,7 +45,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 from linktools.ai.runtime.state._step_contracts import (
-    RunRecord,
+    AgentRunRecord,
 )
 from sqlalchemy import event
 from sqlalchemy.dialects import mysql
@@ -66,11 +66,11 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     )
 
 
-def _tool_run(run_id: str) -> RunRecord:
-    return RunRecord(
-        run_id=run_id,
-        conversation_id="conversation",
-        parent_run_id=None,
+def _tool_run(agent_run_id: str) -> AgentRunRecord:
+    return AgentRunRecord(
+        agent_run_id=agent_run_id,
+        agent_conversation_id="conversation",
+        parent_agent_run_id=None,
         agent_name="agent",
         metadata={},
         started_at=datetime.now(timezone.utc),
@@ -249,9 +249,9 @@ def _runtime_commands(
         recovery=state.recovery.checkpoints,
         conversation_history=state.conversation.histories,
         tools=state.recovery.tools,
-        conversation_steps=state.steps.read_store(RuntimeDomain.CONVERSATION),
-        execution_steps=state.steps.read_store(RuntimeDomain.EXECUTION),
-        recovery_steps=state.steps.read_store(RuntimeDomain.RECOVERY),
+        conversation_run_store=state.run_store.read_store(RuntimeDomain.CONVERSATION),
+        execution_run_store=state.run_store.read_store(RuntimeDomain.EXECUTION),
+        recovery_run_store=state.run_store.read_store(RuntimeDomain.RECOVERY),
         background_tasks=set() if background_tasks is None else background_tasks,
     )
 
@@ -269,8 +269,8 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
     )
     await state.initialize(namespace="parallel-tools", tenant_id="tenant")
     try:
-        run_id = "run"
-        await state.steps.register_run(_tool_run(run_id))
+        agent_run_id = "run"
+        await state.run_store.register_agent_run(_tool_run(agent_run_id))
         background_tasks: set[asyncio.Task[object]] = set()
         bridge = RuntimeToolOperationBridge(
             state.recovery.tools,
@@ -278,7 +278,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             namespace="parallel-tools",
             tenant_id="tenant",
             execution_id="execution",
-            step_run_id=run_id,
+            agent_run_id=agent_run_id,
             binding_digest="a" * 64,
             owner="owner",
             background_tasks=background_tasks,
@@ -293,7 +293,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
 
         async def execute(call_id: str) -> object:
             context = RunContext(
-                deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id
+                deps=None, model=TestModel(), usage=RunUsage(), agent_run_id=agent_run_id
             )
             call = ToolCallPart("tool", {}, tool_call_id=call_id)
             tool_def = ToolDefinition(
@@ -327,7 +327,7 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
 
         for call_id in call_ids:
             operation = await state.recovery.tools.get_by_call(
-                run_id,
+                agent_run_id,
                 call_id,
                 tenant_id="tenant",
             )

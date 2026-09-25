@@ -5,16 +5,16 @@
 from collections.abc import Mapping
 
 from ._contracts import ExecutionRepository
-from ._model_interaction_runtime import ModelInteractionRuntimeStepStore
+from ._model_interaction_runtime import ModelInteractionRuntimeAgentRunStore
 from ._model_interaction_store import (
     ModelInteractionInMemoryStepArchive,
-    ModelInteractionStagingStepStore,
+    ModelInteractionStagingAgentRunStore,
     ModelInteractionStateStepArchive,
 )
 from ._object_router import _RuntimeObjectRouter
 from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
 from ._step_archive import StateStepArchive
-from ._steps import RuntimeStepStore
+from ._steps import RuntimeAgentRunStore
 
 _STEP_DOMAINS = (
     RuntimeDomain.CONVERSATION,
@@ -23,7 +23,7 @@ _STEP_DOMAINS = (
 )
 
 
-def build_runtime_steps(
+def build_runtime_agent_run_store(
     plan: RuntimeStatePlan,
     stores: Mapping[RuntimeDomain, object],
     objects: _RuntimeObjectRouter,
@@ -32,7 +32,7 @@ def build_runtime_steps(
     *,
     namespace: str,
     tenant_id: str,
-) -> RuntimeStepStore:
+) -> RuntimeAgentRunStore:
     archives: dict[RuntimeDomain, object] = {}
     for domain in _STEP_DOMAINS:
         route = plan.route(domain)
@@ -67,8 +67,8 @@ def build_runtime_steps(
             )
         else:
             archives[domain] = ModelInteractionInMemoryStepArchive(domain)
-    return ModelInteractionRuntimeStepStore(
-        ModelInteractionStagingStepStore(),
+    return ModelInteractionRuntimeAgentRunStore(
+        ModelInteractionStagingAgentRunStore(),
         conversation_archive=archives[RuntimeDomain.CONVERSATION],
         execution_archive=archives.get(RuntimeDomain.EXECUTION),
         recovery_archive=archives.get(RuntimeDomain.RECOVERY),
@@ -78,4 +78,4 @@ def build_runtime_steps(
     )
 
 
-__all__ = ["build_runtime_steps"]
+__all__ = ["build_runtime_agent_run_store"]

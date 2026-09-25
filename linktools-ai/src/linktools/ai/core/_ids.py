@@ -33,23 +33,29 @@ def deterministic_id(*parts: JsonValue) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, canonical_sha256(parts)))
 
 
-def step_conversation_id(*, namespace: str, tenant_id: str, execution_id: str) -> str:
+def agent_conversation_id(*, namespace: str, tenant_id: str, execution_id: str) -> str:
     """Return the execution-scoped conversation identity."""
     validate_persistence_namespace(namespace)
     validate_tenant_id(tenant_id)
     validate_resource_id(execution_id)
-    return "c-" + canonical_sha256(["step-conversation", namespace, tenant_id, execution_id])
+    return "c-" + canonical_sha256(["agent-conversation", namespace, tenant_id, execution_id])
 
 
-def step_run_id(*, namespace: str, tenant_id: str, execution_id: str, segment_sequence: int) -> str:
-    """Return the deterministic step identity for one execution segment."""
+def agent_run_id(
+    *,
+    namespace: str,
+    tenant_id: str,
+    execution_id: str,
+    agent_run_sequence: int,
+) -> str:
+    """Return the deterministic AgentRun identity for one execution."""
     validate_persistence_namespace(namespace)
     validate_tenant_id(tenant_id)
     validate_resource_id(execution_id)
-    if segment_sequence < 1:
-        raise ValueError("segment_sequence must be positive")
+    if agent_run_sequence < 1:
+        raise ValueError("agent_run_sequence must be positive")
     return "r-" + canonical_sha256(
-        ["step-run", namespace, tenant_id, execution_id, str(segment_sequence)]
+        ["agent-run", namespace, tenant_id, execution_id, str(agent_run_sequence)]
     )
 
 
@@ -68,6 +74,6 @@ __all__ = [
     "deterministic_id",
     "idempotency_key_digest",
     "principal_identity_payload",
-    "step_conversation_id",
-    "step_run_id",
+    "agent_conversation_id",
+    "agent_run_id",
 ]

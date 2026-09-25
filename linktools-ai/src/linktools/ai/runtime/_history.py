@@ -19,8 +19,8 @@ from ..core import (
     Page,
     ToolOperationStatus,
     canonical_sha256,
-    step_conversation_id,
-    step_run_id,
+    agent_conversation_id as make_agent_conversation_id,
+    agent_run_id as make_agent_run_id,
     validate_page_limit,
     validate_persistence_namespace,
 )
@@ -56,7 +56,7 @@ from .state._contracts import (
     SessionRepository,
     ToolOperationRecord,
 )
-from .state._step_contracts import RunRecord, StepEvent, StepStore
+from .state._step_contracts import AgentRunRecord, StepEvent, AgentRunStore
 from .state._views import (
     SESSION_HISTORY_VIEW_V1,
     project_execution_transcript_message,
@@ -83,7 +83,7 @@ class _ProjectedHistoryItem:
 class _HistoryOccurrence:
     item: ExecutionHistoryItem
     source_execution_id: str
-    segment_sequence: int
+    agent_run_sequence: int
     message_index: int
     item_offset: int
     merge_key: tuple[object, ...]
@@ -93,7 +93,7 @@ class _HistoryOccurrence:
 class _TraceOccurrence:
     item: ExecutionTraceItem
     source_execution_id: str
-    segment_sequence: int
+    agent_run_sequence: int
     event_sequence: int
     merge_key: tuple[object, ...]
 
@@ -102,7 +102,7 @@ class _TraceOccurrence:
 class _InteractionOccurrence:
     key: tuple[object, ...]
     source_execution_id: str
-    segment_sequence: int
+    agent_run_sequence: int
     depth: int
     interaction: ModelInteractionRecord
 
@@ -111,7 +111,7 @@ class _InteractionOccurrence:
 class _HistorySource:
     record: ExecutionRecord
     depth: int
-    segment_sequence: int
+    agent_run_sequence: int
     merge_prefix: tuple[object, ...]
 
 
@@ -184,7 +184,7 @@ class _RangedTranscriptStore(Protocol):
     def iter_message_range(
         self,
         *,
-        run_id: str,
+        agent_run_id: str,
         start: int,
         end: int,
     ) -> AsyncIterator[object]: ...
@@ -200,14 +200,14 @@ class _ToolOperationHistoryReader(Protocol):
 
 
 class StepExecutionHistoryReader:
-    """Own the adapter projection between StepStore facts and Runtime views."""
+    """Own the adapter projection between AgentRunStore facts and Runtime views."""
 
     def __init__(
         self,
         *,
         namespace: str,
         executions: ExecutionRepository,
-        store: StepStore,
+        store: AgentRunStore,
         cursor_signer: CursorSigner,
         tool_operations: "_ToolOperationHistoryReader | None" = None,
     ) -> None:
@@ -231,8 +231,8 @@ class StepExecutionHistoryReader:
         entries = await self._history_tree(record, tenant_id)
         current: dict[tuple[str, int], tuple[ExecutionRecord, int, list[StepEvent]]] = {}
         for item, depth in entries:
-            for segment_sequence, events in await self._segment_events(item, tenant_id):
-                identity = (item.execution_id, segment_sequence)
+            for agent_run_sequence, events in await self._agent_run_events(item, tenant_id):
+                identity = (item.execution_id, agent_run_sequence)
                 if identity in current:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 current[identity] = (item, depth, events)
@@ -249,10 +249,10 @@ class StepExecutionHistoryReader:
                 sorted(
                     (
                         source_execution_id,
-                        segment_sequence,
+                        agent_run_sequence,
                         len(events),
                     )
-                    for (source_execution_id, segment_sequence), (
+                    for (source_execution_id, agent_run_sequence), (
                         _item,
                         _depth,
                         events,
@@ -263,27 +263,27 @@ class StepExecutionHistoryReader:
             cursor_coordinate, fixed_cutoffs = cursor_state
 
         occurrences: list[_TraceOccurrence] = []
-        for source_execution_id, segment_sequence, event_count in fixed_cutoffs:
-            value = current.get((source_execution_id, segment_sequence))
+        for source_execution_id, agent_run_sequence, event_count in fixed_cutoffs:
+            value = current.get((source_execution_id, agent_run_sequence))
             if value is None:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             item, depth, events = value
             if event_count > len(events):
                 raise AIError(ErrorCode.CURSOR_INVALID)
             for ordinal, event in enumerate(events[:event_count]):
-                mapped = _trace_item(item, segment_sequence, depth, ordinal, event)
+                mapped = _trace_item(item, agent_run_sequence, depth, ordinal, event)
                 if mapped is not None:
                     occurrences.append(
                         _TraceOccurrence(
                             mapped,
                             item.execution_id,
-                            segment_sequence,
+                            agent_run_sequence,
                             ordinal + 1,
                             (
                                 _event_timestamp(event),
                                 depth,
                                 item.execution_id,
-                                segment_sequence,
+                                agent_run_sequence,
                                 ordinal + 1,
                                 mapped.payload.get("kind", ""),
                             ),
@@ -323,23 +323,23 @@ class StepExecutionHistoryReader:
         entries = await self._history_tree(record, tenant_id)
         current_sources: list[_HistorySource] = []
         for item, depth in entries:
-            for segment_sequence in await self._segment_sequences(item, tenant_id):
+            for agent_run_sequence in await self._agent_run_sequences(item, tenant_id):
                 current_sources.append(
                     _HistorySource(
                         item,
                         depth,
-                        segment_sequence,
+                        agent_run_sequence,
                         (
                             item.created_at.astimezone(timezone.utc),
                             depth,
                             item.execution_id,
-                            segment_sequence,
+                            agent_run_sequence,
                         ),
                     )
                 )
         current_sources.sort(key=lambda source: source.merge_prefix)
         source_by_identity = {
-            (source.record.execution_id, source.segment_sequence): source
+            (source.record.execution_id, source.agent_run_sequence): source
             for source in current_sources
         }
         cursor_state = _decode_history_cursor(
@@ -352,31 +352,31 @@ class StepExecutionHistoryReader:
             cursor_coordinate = None
             captured: list[tuple[str, int, int, int]] = []
             for source in current_sources:
-                run_id = step_run_id(
+                agent_run_id = make_agent_run_id(
                     namespace=self._namespace,
                     tenant_id=tenant_id,
                     execution_id=source.record.execution_id,
-                    segment_sequence=source.segment_sequence,
+                    agent_run_sequence=source.agent_run_sequence,
                 )
                 captured.append(
                     (
                         source.record.execution_id,
-                        source.segment_sequence,
-                        await self._transcript_high_water(run_id),
-                        len(await self._store.list_events(run_id=run_id)),
+                        source.agent_run_sequence,
+                        await self._transcript_high_water(agent_run_id),
+                        len(await self._store.list_events(agent_run_id=agent_run_id)),
                     )
                 )
             fixed_cutoffs = tuple(captured)
         else:
             cursor_coordinate, fixed_cutoffs = cursor_state
         cutoff_by_identity = {
-            (source_execution_id, segment_sequence): (
+            (source_execution_id, agent_run_sequence): (
                 message_count,
                 event_count,
             )
             for (
                 source_execution_id,
-                segment_sequence,
+                agent_run_sequence,
                 message_count,
                 event_count,
             ) in fixed_cutoffs
@@ -388,7 +388,7 @@ class StepExecutionHistoryReader:
         sources = tuple(
             source
             for source in current_sources
-            if (source.record.execution_id, source.segment_sequence) in cutoff_by_identity
+            if (source.record.execution_id, source.agent_run_sequence) in cutoff_by_identity
         )
         page = await self._history_page(
             sources,
@@ -431,23 +431,23 @@ class StepExecutionHistoryReader:
         entries = await self._recursive_history_tree(record, tenant_id)
         current_sources: list[_HistorySource] = []
         for item, depth in entries:
-            for segment_sequence in await self._segment_sequences(item, tenant_id):
+            for agent_run_sequence in await self._agent_run_sequences(item, tenant_id):
                 current_sources.append(
                     _HistorySource(
                         item,
                         depth,
-                        segment_sequence,
+                        agent_run_sequence,
                         (
                             item.created_at.astimezone(timezone.utc),
                             depth,
                             item.execution_id,
-                            segment_sequence,
+                            agent_run_sequence,
                         ),
                     )
                 )
         current_sources.sort(key=lambda source: source.merge_prefix)
         source_by_identity = {
-            (source.record.execution_id, source.segment_sequence): source
+            (source.record.execution_id, source.agent_run_sequence): source
             for source in current_sources
         }
 
@@ -468,17 +468,17 @@ class StepExecutionHistoryReader:
             if explicit_cutoffs is None:
                 captured: list[UsageReadCutoff] = []
                 for source in current_sources:
-                    run_id = step_run_id(
+                    agent_run_id = make_agent_run_id(
                         namespace=self._namespace,
                         tenant_id=tenant_id,
                         execution_id=source.record.execution_id,
-                        segment_sequence=source.segment_sequence,
+                        agent_run_sequence=source.agent_run_sequence,
                     )
                     captured.append(
                         UsageReadCutoff(
                             source.record.execution_id,
-                            source.segment_sequence,
-                            await self._store.model_interaction_count(run_id=run_id),
+                            source.agent_run_sequence,
+                            await self._store.model_interaction_count(agent_run_id=agent_run_id),
                         )
                     )
                 fixed_cutoffs = tuple(captured)
@@ -486,7 +486,7 @@ class StepExecutionHistoryReader:
                 fixed_cutoffs = explicit_cutoffs
 
         cutoff_by_identity = {
-            (value.execution_id, value.segment_sequence): value.request_sequence
+            (value.execution_id, value.agent_run_sequence): value.request_sequence
             for value in fixed_cutoffs
         }
         if len(cutoff_by_identity) != len(fixed_cutoffs):
@@ -496,7 +496,7 @@ class StepExecutionHistoryReader:
         sources = tuple(
             source
             for source in current_sources
-            if (source.record.execution_id, source.segment_sequence) in cutoff_by_identity
+            if (source.record.execution_id, source.agent_run_sequence) in cutoff_by_identity
         )
         cursor_source = None
         if cursor_coordinate is not None:
@@ -513,7 +513,7 @@ class StepExecutionHistoryReader:
         for source in sources:
             if cursor_prefix is not None and source.merge_prefix < cursor_prefix:
                 continue
-            identity = (source.record.execution_id, source.segment_sequence)
+            identity = (source.record.execution_id, source.agent_run_sequence)
             high_water = cutoff_by_identity[identity]
             after_request_sequence = (
                 cursor_coordinate[2]
@@ -526,15 +526,15 @@ class StepExecutionHistoryReader:
             remaining = limit + 1 - len(page)
             if remaining <= 0:
                 break
-            run_id = step_run_id(
+            agent_run_id = make_agent_run_id(
                 namespace=self._namespace,
                 tenant_id=tenant_id,
                 execution_id=source.record.execution_id,
-                segment_sequence=source.segment_sequence,
+                agent_run_sequence=source.agent_run_sequence,
             )
             fetch_limit = min(remaining, available)
             interactions = await self._store.list_model_interactions(
-                run_id=run_id,
+                agent_run_id=agent_run_id,
                 after_request_sequence=after_request_sequence,
                 limit=fetch_limit,
             )
@@ -545,7 +545,7 @@ class StepExecutionHistoryReader:
                 expected_sequence += 1
                 if (
                     not isinstance(interaction, ModelInteractionRecord)
-                    or interaction.run_id != run_id
+                    or interaction.agent_run_id != agent_run_id
                     or interaction.request_sequence != expected_sequence
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -553,7 +553,7 @@ class StepExecutionHistoryReader:
                     _InteractionOccurrence(
                         (*source.merge_prefix, interaction.request_sequence),
                         source.record.execution_id,
-                        source.segment_sequence,
+                        source.agent_run_sequence,
                         source.depth,
                         interaction,
                     )
@@ -562,7 +562,7 @@ class StepExecutionHistoryReader:
         selected_occurrences = page[:limit]
         selected_items: dict[tuple[str, int], ModelInteractionItem] = {}
         for occurrence_group in _interaction_occurrence_groups(selected_occurrences):
-            times = await self._model_request_times(occurrence_group[0].interaction.run_id)
+            times = await self._model_request_times(occurrence_group[0].interaction.agent_run_id)
             resolved_values: tuple[object, ...]
             if include_content:
                 resolved_values = await self._store.resolve_model_interactions(
@@ -582,11 +582,11 @@ class StepExecutionHistoryReader:
                     (None, None),
                 )
                 selected_items[
-                    (occurrence.interaction.run_id, occurrence.interaction.request_sequence)
+                    (occurrence.interaction.agent_run_id, occurrence.interaction.request_sequence)
                 ] = self._project_model_interaction(
                     occurrence.interaction,
                     occurrence.source_execution_id,
-                    occurrence.segment_sequence,
+                    occurrence.agent_run_sequence,
                     occurrence.depth,
                     resolved_context,
                     include_content=include_content,
@@ -595,7 +595,7 @@ class StepExecutionHistoryReader:
                 )
         selected = tuple(
             selected_items[
-                (value.interaction.run_id, value.interaction.request_sequence)
+                (value.interaction.agent_run_id, value.interaction.request_sequence)
             ]
             for value in selected_occurrences
         )
@@ -657,7 +657,7 @@ class StepExecutionHistoryReader:
 
         cutoffs: list[tuple[int, int]] = []
         if record.binding_kind != "task":
-            current_sequences = await self._segment_sequences(record, tenant_id)
+            current_sequences = await self._agent_run_sequences(record, tenant_id)
             if fixed_cutoffs is None:
                 sequences = current_sequences
             else:
@@ -668,33 +668,33 @@ class StepExecutionHistoryReader:
                     raise AIError(ErrorCode.CURSOR_INVALID)
                 sequences = tuple(sorted(fixed_cutoffs))
 
-            run_high_waters: list[tuple[int, str, int]] = []
-            for segment_sequence in sequences:
-                run_id = step_run_id(
+            agent_run_high_waters: list[tuple[int, str, int]] = []
+            for agent_run_sequence in sequences:
+                agent_run_id = make_agent_run_id(
                     namespace=self._namespace,
                     tenant_id=tenant_id,
                     execution_id=record.execution_id,
-                    segment_sequence=segment_sequence,
+                    agent_run_sequence=agent_run_sequence,
                 )
                 current_high_water = await self._store.model_interaction_count(
-                    run_id=run_id,
+                    agent_run_id=agent_run_id,
                 )
                 high_water = (
                     current_high_water
                     if fixed_cutoffs is None
-                    else fixed_cutoffs[segment_sequence]
+                    else fixed_cutoffs[agent_run_sequence]
                 )
                 if high_water > current_high_water:
                     raise AIError(ErrorCode.CURSOR_INVALID)
-                cutoffs.append((segment_sequence, high_water))
-                run_high_waters.append((segment_sequence, run_id, high_water))
+                cutoffs.append((agent_run_sequence, high_water))
+                agent_run_high_waters.append((agent_run_sequence, agent_run_id, high_water))
 
-            for segment_sequence, run_id, high_water in run_high_waters:
+            for agent_run_sequence, agent_run_id, high_water in agent_run_high_waters:
                 after_sequence = 0
                 while after_sequence < high_water and len(facts) < target:
                     batch_limit = min(256, high_water - after_sequence)
                     values = await self._store.list_model_interactions(
-                        run_id=run_id,
+                        agent_run_id=agent_run_id,
                         after_request_sequence=after_sequence,
                         limit=batch_limit,
                     )
@@ -703,7 +703,7 @@ class StepExecutionHistoryReader:
                     for value in values:
                         if (
                             not isinstance(value, ModelInteractionRecord)
-                            or value.run_id != run_id
+                            or value.agent_run_id != agent_run_id
                             or value.request_sequence != after_sequence + 1
                         ):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -712,7 +712,7 @@ class StepExecutionHistoryReader:
                             fact = _project_attachment_fact(
                                 record.execution_id,
                                 raw,
-                                segment_sequence=segment_sequence,
+                                agent_run_sequence=agent_run_sequence,
                                 request_sequence=value.request_sequence,
                                 step_index=value.step_index,
                             )
@@ -760,22 +760,22 @@ class StepExecutionHistoryReader:
         if record.binding_kind == "task":
             return UsageSummary()
 
-        current_sequences = await self._segment_sequences(record, tenant_id)
+        current_sequences = await self._agent_run_sequences(record, tenant_id)
         explicit_cutoffs = _normalize_usage_cutoffs(cutoffs)
         if explicit_cutoffs is None:
             fixed_cutoffs: list[UsageReadCutoff] = []
-            for segment_sequence in current_sequences:
-                run_id = step_run_id(
+            for agent_run_sequence in current_sequences:
+                agent_run_id = make_agent_run_id(
                     namespace=self._namespace,
                     tenant_id=tenant_id,
                     execution_id=record.execution_id,
-                    segment_sequence=segment_sequence,
+                    agent_run_sequence=agent_run_sequence,
                 )
                 fixed_cutoffs.append(
                     UsageReadCutoff(
                         record.execution_id,
-                        segment_sequence,
-                        await self._store.model_interaction_count(run_id=run_id),
+                        agent_run_sequence,
+                        await self._store.model_interaction_count(agent_run_id=agent_run_id),
                     )
                 )
         else:
@@ -783,7 +783,7 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             fixed_cutoffs = list(explicit_cutoffs)
         current_set = set(current_sequences)
-        if any(value.segment_sequence not in current_set for value in fixed_cutoffs):
+        if any(value.agent_run_sequence not in current_set for value in fixed_cutoffs):
             raise AIError(ErrorCode.CURSOR_INVALID)
 
         logical_requests = 0
@@ -800,20 +800,20 @@ class StepExecutionHistoryReader:
         unknown_duration_requests = 0
 
         for cutoff in fixed_cutoffs:
-            run_id = step_run_id(
+            agent_run_id = make_agent_run_id(
                 namespace=self._namespace,
                 tenant_id=tenant_id,
                 execution_id=record.execution_id,
-                segment_sequence=cutoff.segment_sequence,
+                agent_run_sequence=cutoff.agent_run_sequence,
             )
-            current_high_water = await self._store.model_interaction_count(run_id=run_id)
+            current_high_water = await self._store.model_interaction_count(agent_run_id=agent_run_id)
             if cutoff.request_sequence > current_high_water:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             after_sequence = 0
             while after_sequence < cutoff.request_sequence:
                 batch_limit = min(500, cutoff.request_sequence - after_sequence)
                 values = await self._store.list_model_interactions(
-                    run_id=run_id,
+                    agent_run_id=agent_run_id,
                     after_request_sequence=after_sequence,
                     limit=batch_limit,
                 )
@@ -824,7 +824,7 @@ class StepExecutionHistoryReader:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     expected = after_sequence + 1
                     if (
-                        raw.run_id != run_id
+                        raw.agent_run_id != agent_run_id
                         or raw.request_sequence != expected
                     ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -873,7 +873,7 @@ class StepExecutionHistoryReader:
         self,
         interaction: ModelInteractionRecord,
         execution_id: str,
-        segment_sequence: int,
+        agent_run_sequence: int,
         depth: int,
         resolved: object | None,
         *,
@@ -914,7 +914,7 @@ class StepExecutionHistoryReader:
                 response = projected[0] if len(projected) == 1 else projected
         return ModelInteractionItem(
             execution_id=execution_id,
-            segment_sequence=segment_sequence,
+            agent_run_sequence=agent_run_sequence,
             depth=depth,
             request_sequence=interaction.request_sequence,
             purpose=interaction.purpose,
@@ -934,10 +934,10 @@ class StepExecutionHistoryReader:
 
     async def _model_request_times(
         self,
-        run_id: str,
+        agent_run_id: str,
     ) -> dict[int, tuple[datetime | None, datetime | None]]:
         values: dict[int, list[datetime | None]] = {}
-        for event in await self._store.list_events(run_id=run_id):
+        for event in await self._store.list_events(agent_run_id=agent_run_id):
             if event.kind not in {
                 "model_request_started",
                 "model_request_completed",
@@ -961,7 +961,7 @@ class StepExecutionHistoryReader:
 
     async def _tool_call_metadata(
         self,
-        run_id: str,
+        agent_run_id: str,
         *,
         execution_id: str,
         tenant_id: str,
@@ -977,7 +977,7 @@ class StepExecutionHistoryReader:
             str | None,
         ],
     ]:
-        events = await self._store.list_events(run_id=run_id)
+        events = await self._store.list_events(agent_run_id=agent_run_id)
         if event_high_water < 0 or event_high_water > len(events):
             raise AIError(ErrorCode.CURSOR_INVALID)
         values: dict[str, list[object | None]] = {}
@@ -1020,7 +1020,7 @@ class StepExecutionHistoryReader:
             )
             by_call: dict[str, ToolOperationRecord] = {}
             for operation in operations:
-                if operation.step_run_id != run_id:
+                if operation.agent_run_id != agent_run_id:
                     continue
                 if operation.tool_call_id in by_call:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1052,7 +1052,7 @@ class StepExecutionHistoryReader:
         limit: int,
     ) -> list[_HistoryOccurrence]:
         source_by_identity = {
-            (source.record.execution_id, source.segment_sequence): source
+            (source.record.execution_id, source.agent_run_sequence): source
             for source in sources
         }
         cursor_source: _HistorySource | None = None
@@ -1081,7 +1081,7 @@ class StepExecutionHistoryReader:
                     if source is cursor_source:
                         start_message_index = cursor_coordinate[2]
                         start_item_offset = cursor_coordinate[3]
-                identity = (source.record.execution_id, source.segment_sequence)
+                identity = (source.record.execution_id, source.agent_run_sequence)
                 high_waters_for_source = high_waters.get(identity)
                 if high_waters_for_source is None:
                     raise AIError(ErrorCode.CURSOR_INVALID)
@@ -1135,20 +1135,20 @@ class StepExecutionHistoryReader:
         start_item_offset: int,
         from_cursor: bool,
     ) -> AsyncGenerator[_HistoryOccurrence, None]:
-        run_id = step_run_id(
+        agent_run_id = make_agent_run_id(
             namespace=self._namespace,
             tenant_id=tenant_id,
             execution_id=source.record.execution_id,
-            segment_sequence=source.segment_sequence,
+            agent_run_sequence=source.agent_run_sequence,
         )
         messages = self._message_range(
-            run_id,
+            agent_run_id,
             start=start_message_index,
             end=end_message_index,
             from_cursor=from_cursor,
         )
         tool_metadata = await self._tool_call_metadata(
-            run_id,
+            agent_run_id,
             execution_id=source.record.execution_id,
             tenant_id=tenant_id,
             event_high_water=event_high_water,
@@ -1179,7 +1179,7 @@ class StepExecutionHistoryReader:
                         tool_name=value.tool_name,
                         tool_call_id=value.tool_call_id,
                         content_included=True,
-                        segment_sequence=source.segment_sequence,
+                        agent_run_sequence=source.agent_run_sequence,
                         request_sequence=None if metadata is None else metadata[4],
                         tool_operation_id=None if metadata is None else metadata[5],
                         started_at=None if metadata is None else metadata[0],
@@ -1188,7 +1188,7 @@ class StepExecutionHistoryReader:
                         status=None if metadata is None else metadata[3],
                     ),
                     source.record.execution_id,
-                    source.segment_sequence,
+                    source.agent_run_sequence,
                     message_index,
                     projected_offset,
                     (*source.merge_prefix, message_index, projected_offset),
@@ -1199,21 +1199,21 @@ class StepExecutionHistoryReader:
         if (
             not saw_message
             and source.record.status is ExecutionStatus.SUCCEEDED
-            and source.segment_sequence == source.record.agent_run_sequence
+            and source.agent_run_sequence == source.record.agent_run_sequence
         ):
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
 
-    async def _transcript_high_water(self, run_id: str) -> int:
+    async def _transcript_high_water(self, agent_run_id: str) -> int:
         if isinstance(self._store, _RangedTranscriptStore):
-            return await self._store.transcript_message_count(run_id)
+            return await self._store.transcript_message_count(agent_run_id)
         count = 0
-        async for _message in self._store.iter_messages(run_id=run_id):
+        async for _message in self._store.iter_messages(agent_run_id=agent_run_id):
             count += 1
         return count
 
     async def _message_range(
         self,
-        run_id: str,
+        agent_run_id: str,
         *,
         start: int,
         end: int,
@@ -1222,18 +1222,18 @@ class StepExecutionHistoryReader:
         if start < 0 or end < start:
             raise AIError(ErrorCode.CURSOR_INVALID)
         if isinstance(self._store, _RangedTranscriptStore):
-            total = await self._store.transcript_message_count(run_id)
+            total = await self._store.transcript_message_count(agent_run_id)
             if end > total or from_cursor and start == end:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             async for message in self._store.iter_message_range(
-                run_id=run_id,
+                agent_run_id=agent_run_id,
                 start=start,
                 end=end,
             ):
                 yield message
             return
         index = 0
-        async for message in self._store.iter_messages(run_id=run_id):
+        async for message in self._store.iter_messages(agent_run_id=agent_run_id):
             if index >= end:
                 break
             if index >= start:
@@ -1261,36 +1261,36 @@ class StepExecutionHistoryReader:
             signer=self._cursor_signer,
         )
         if cursor_state is None:
-            segment_sequence = record.agent_run_sequence
-            run_id = step_run_id(
+            agent_run_sequence = record.agent_run_sequence
+            agent_run_id = make_agent_run_id(
                 namespace=self._namespace,
                 tenant_id=tenant_id,
                 execution_id=execution_id,
-                segment_sequence=segment_sequence,
+                agent_run_sequence=agent_run_sequence,
             )
             message_index = 0
             item_offset = 0
         else:
             (
-                run_id,
-                segment_sequence,
+                agent_run_id,
+                agent_run_sequence,
                 high_water,
                 message_index,
                 item_offset,
             ) = cursor_state
             if (
-                segment_sequence > record.agent_run_sequence
-                or run_id
-                != step_run_id(
+                agent_run_sequence > record.agent_run_sequence
+                or agent_run_id
+                != make_agent_run_id(
                     namespace=self._namespace,
                     tenant_id=tenant_id,
                     execution_id=execution_id,
-                    segment_sequence=segment_sequence,
+                    agent_run_sequence=agent_run_sequence,
                 )
             ):
                 raise AIError(ErrorCode.CURSOR_INVALID)
 
-        run = await self._store.get_run(run_id=run_id)
+        run = await self._store.get_agent_run(agent_run_id=agent_run_id)
         if run is None:
             if cursor is not None:
                 raise AIError(ErrorCode.CURSOR_INVALID)
@@ -1298,26 +1298,26 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
         if cursor_state is None:
-            high_water = await self._transcript_high_water(run_id)
-        elif await self._transcript_high_water(run_id) < high_water:
+            high_water = await self._transcript_high_water(agent_run_id)
+        elif await self._transcript_high_water(agent_run_id) < high_water:
             raise AIError(ErrorCode.CURSOR_INVALID)
-        _validate_run(
+        _validate_agent_run(
             run,
-            run_id,
-            step_conversation_id(
+            agent_run_id,
+            make_agent_conversation_id(
                 namespace=self._namespace,
                 tenant_id=tenant_id,
                 execution_id=execution_id,
             ),
-            segment_sequence,
+            agent_run_sequence,
         )
         messages = self._message_range(
-            run_id,
+            agent_run_id,
             start=message_index,
             end=high_water,
             from_cursor=cursor is not None,
         )
-        conversation_id = step_conversation_id(
+        agent_conversation_id = make_agent_conversation_id(
             namespace=self._namespace,
             tenant_id=tenant_id,
             execution_id=execution_id,
@@ -1328,7 +1328,7 @@ class StepExecutionHistoryReader:
             start_item_offset=item_offset,
             project=lambda message: _transcript_message_values(
                 message,
-                conversation_id,
+                agent_conversation_id,
             ),
             limit=limit,
         )
@@ -1345,8 +1345,8 @@ class StepExecutionHistoryReader:
             next_cursor = _transcript_cursor(
                 tenant_id,
                 execution_id,
-                run_id,
-                segment_sequence,
+                agent_run_id,
+                agent_run_sequence,
                 high_water,
                 next_coordinate[0],
                 next_coordinate[1],
@@ -1427,7 +1427,7 @@ class StepExecutionHistoryReader:
         return result
 
 
-    async def _segment_events(
+    async def _agent_run_events(
         self, record: ExecutionRecord, tenant_id: str
     ) -> list[tuple[int, list[StepEvent]]]:
         if record.agent_run_sequence < 0:
@@ -1437,20 +1437,20 @@ class StepExecutionHistoryReader:
             and record.agent_run_sequence == 0
         ):
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
-        conversation_id = step_conversation_id(
+        agent_conversation_id = make_agent_conversation_id(
             namespace=self._namespace,
             tenant_id=tenant_id,
             execution_id=record.execution_id,
         )
         result: list[tuple[int, list[StepEvent]]] = []
         for sequence in range(1, record.agent_run_sequence + 1):
-            deterministic_id = step_run_id(
+            deterministic_id = make_agent_run_id(
                 namespace=self._namespace,
                 tenant_id=tenant_id,
                 execution_id=record.execution_id,
-                segment_sequence=sequence,
+                agent_run_sequence=sequence,
             )
-            run = await self._store.get_run(run_id=deterministic_id)
+            run = await self._store.get_agent_run(agent_run_id=deterministic_id)
             if run is None:
                 if (
                     record.status is ExecutionStatus.SUCCEEDED
@@ -1458,18 +1458,18 @@ class StepExecutionHistoryReader:
                 ):
                     raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                 continue
-            _validate_run(run, deterministic_id, conversation_id, sequence)
-            events = await self._store.list_events(run_id=deterministic_id)
+            _validate_agent_run(run, deterministic_id, agent_conversation_id, sequence)
+            events = await self._store.list_events(agent_run_id=deterministic_id)
             if any(
-                event.run_id != deterministic_id
-                or event.conversation_id not in {None, conversation_id}
+                event.agent_run_id != deterministic_id
+                or event.agent_conversation_id not in {None, agent_conversation_id}
                 for event in events
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result.append((sequence, events))
         return result
 
-    async def _segment_sequences(
+    async def _agent_run_sequences(
         self, record: ExecutionRecord, tenant_id: str
     ) -> tuple[int, ...]:
         if record.agent_run_sequence < 0:
@@ -1479,20 +1479,20 @@ class StepExecutionHistoryReader:
             and record.agent_run_sequence == 0
         ):
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
-        conversation_id = step_conversation_id(
+        agent_conversation_id = make_agent_conversation_id(
             namespace=self._namespace,
             tenant_id=tenant_id,
             execution_id=record.execution_id,
         )
         result: list[int] = []
         for sequence in range(1, record.agent_run_sequence + 1):
-            deterministic_id = step_run_id(
+            deterministic_id = make_agent_run_id(
                 namespace=self._namespace,
                 tenant_id=tenant_id,
                 execution_id=record.execution_id,
-                segment_sequence=sequence,
+                agent_run_sequence=sequence,
             )
-            run = await self._store.get_run(run_id=deterministic_id)
+            run = await self._store.get_agent_run(agent_run_id=deterministic_id)
             if run is None:
                 if (
                     record.status is ExecutionStatus.SUCCEEDED
@@ -1500,7 +1500,7 @@ class StepExecutionHistoryReader:
                 ):
                     raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                 continue
-            _validate_run(run, deterministic_id, conversation_id, sequence)
+            _validate_agent_run(run, deterministic_id, agent_conversation_id, sequence)
             result.append(sequence)
         return tuple(result)
 
@@ -1511,7 +1511,7 @@ class StepSessionHistoryReader:
     def __init__(
         self,
         *,
-        store: StepStore,
+        store: AgentRunStore,
         cursor_signer: CursorSigner,
         sessions: SessionRepository | None = None,
     ) -> None:
@@ -1524,13 +1524,13 @@ class StepSessionHistoryReader:
         session_id: str,
         *,
         tenant_id: str,
-        continuation_step_run_id: "str | None",
+        continuation_agent_run_id: "str | None",
         continuation_history_id: "str | None" = None,
         cursor: "str | None",
         limit: int,
     ) -> "Page[SessionHistoryItem]":
         limit = validate_page_limit(limit)
-        if continuation_step_run_id is None:
+        if continuation_agent_run_id is None:
             if cursor is not None:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             return Page((), None)
@@ -1542,7 +1542,7 @@ class StepSessionHistoryReader:
             current = session.continuation
             current_history_id = current.history_id or session.history_id
             if (
-                current.step_run_id != continuation_step_run_id
+                current.agent_run_id != continuation_agent_run_id
                 or continuation_history_id is not None
                 and current_history_id != continuation_history_id
             ):
@@ -1563,7 +1563,7 @@ class StepSessionHistoryReader:
         requested_history_id = (
             continuation_history_id
             if history_store is not None and continuation_history_id is not None
-            else continuation_step_run_id
+            else continuation_agent_run_id
         )
         if cursor_values is not None and cursor_values[0] != requested_history_id:
             raise AIError(ErrorCode.CURSOR_INVALID)
@@ -1581,17 +1581,17 @@ class StepSessionHistoryReader:
             if continuation_message_count is None:
                 total_messages = physical_total
             else:
-                run = await self._store.get_run(
-                    run_id=continuation_step_run_id
+                run = await self._store.get_agent_run(
+                    agent_run_id=continuation_agent_run_id
                 )
                 snapshot = await self._store.latest_snapshot(
-                    run_id=continuation_step_run_id,
+                    agent_run_id=continuation_agent_run_id,
                     include_interrupted=True,
                 )
                 if (
                     run is None
                     or snapshot is None
-                    or snapshot.run_id != continuation_step_run_id
+                    or snapshot.agent_run_id != continuation_agent_run_id
                     or snapshot.state != "complete"
                 ):
                     raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
@@ -1618,21 +1618,21 @@ class StepSessionHistoryReader:
                 end=total_messages,
             )
         else:
-            history_id = continuation_step_run_id
-            run = await self._store.get_run(run_id=continuation_step_run_id)
+            history_id = continuation_agent_run_id
+            run = await self._store.get_agent_run(agent_run_id=continuation_agent_run_id)
             if run is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            if run.run_id != continuation_step_run_id:
+            if run.agent_run_id != continuation_agent_run_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             snapshot = await self._store.latest_snapshot(
-                run_id=continuation_step_run_id,
+                agent_run_id=continuation_agent_run_id,
                 include_interrupted=True,
             )
             if snapshot is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             if (
-                snapshot.run_id != continuation_step_run_id
-                or snapshot.conversation_id != run.conversation_id
+                snapshot.agent_run_id != continuation_agent_run_id
+                or snapshot.agent_conversation_id != run.agent_conversation_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if snapshot.state != "complete":
@@ -1685,7 +1685,7 @@ class StepSessionHistoryReader:
 
 def _trace_item(
     record: ExecutionRecord,
-    segment_sequence: int,
+    agent_run_sequence: int,
     depth: int,
     ordinal: int,
     event: StepEvent,
@@ -1712,7 +1712,7 @@ def _trace_item(
         "kind": kind,
         "status": status,
         "step_index": event.step_index,
-        "segment_sequence": segment_sequence,
+        "agent_run_sequence": agent_run_sequence,
         "scope": "root" if depth == 0 else "subagent",
         "depth": depth,
         "occurred_at": _event_timestamp(event).isoformat(),
@@ -1788,13 +1788,13 @@ def _metadata_token(
     return int(raw)
 
 
-def _validate_run(
-    run: RunRecord, expected_id: str, conversation_id: str, sequence: int
+def _validate_agent_run(
+    run: AgentRunRecord, expected_id: str, agent_conversation_id: str, sequence: int
 ) -> None:
     if (
-        run.run_id != expected_id
-        or run.conversation_id != conversation_id
-        or run.metadata.get("segment_sequence") != str(sequence)
+        run.agent_run_id != expected_id
+        or run.agent_conversation_id != agent_conversation_id
+        or run.metadata.get("agent_run_sequence") != str(sequence)
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -1899,7 +1899,7 @@ def _project_attachment_fact(
     execution_id: str,
     value: Mapping[str, JsonValue],
     *,
-    segment_sequence: int | None = None,
+    agent_run_sequence: int | None = None,
     request_sequence: int | None = None,
     step_index: int | None = None,
 ) -> AttachmentFact:
@@ -1915,7 +1915,7 @@ def _project_attachment_fact(
             digest=cast("str | None", value.get("digest")),
             position=cast(int, value.get("position")),
             processing_status="unknown",
-            segment_sequence=segment_sequence,
+            agent_run_sequence=agent_run_sequence,
             request_sequence=(
                 request_sequence if fact == "included_in_request" else None
             ),
@@ -1939,7 +1939,7 @@ def _interaction_occurrence_groups(
 ) -> tuple[tuple[_InteractionOccurrence, ...], ...]:
     groups: dict[str, list[_InteractionOccurrence]] = {}
     for value in values:
-        groups.setdefault(value.interaction.run_id, []).append(value)
+        groups.setdefault(value.interaction.agent_run_id, []).append(value)
     return tuple(tuple(group) for group in groups.values())
 
 
@@ -1952,14 +1952,14 @@ def _normalize_usage_cutoffs(
         normalized = tuple(
             sorted(
                 value,
-                key=lambda item: (item.execution_id, item.segment_sequence),
+                key=lambda item: (item.execution_id, item.agent_run_sequence),
             )
         )
     except (AttributeError, TypeError) as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
     if (
         any(not isinstance(item, UsageReadCutoff) for item in normalized)
-        or len({(item.execution_id, item.segment_sequence) for item in normalized})
+        or len({(item.execution_id, item.agent_run_sequence) for item in normalized})
         != len(normalized)
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
@@ -2049,13 +2049,13 @@ def _model_interaction_cursor(
             {
                 "position": [
                     occurrence.source_execution_id,
-                    occurrence.segment_sequence,
+                    occurrence.agent_run_sequence,
                     occurrence.interaction.request_sequence,
                 ],
                 "cutoffs": [
                     [
                         value.execution_id,
-                        value.segment_sequence,
+                        value.agent_run_sequence,
                         value.request_sequence,
                     ]
                     for value in normalized
@@ -2174,7 +2174,7 @@ def _history_cursor(
             {
                 "position": [
                     occurrence.source_execution_id,
-                    occurrence.segment_sequence,
+                    occurrence.agent_run_sequence,
                     occurrence.message_index,
                     occurrence.item_offset,
                 ],
@@ -2263,7 +2263,7 @@ def _trace_cursor_index(
     for index, occurrence in enumerate(occurrences):
         if (
             occurrence.source_execution_id,
-            occurrence.segment_sequence,
+            occurrence.agent_run_sequence,
             occurrence.event_sequence,
         ) == coordinate:
             return index
@@ -2291,7 +2291,7 @@ def _trace_cursor(
             {
                 "position": [
                     occurrence.source_execution_id,
-                    occurrence.segment_sequence,
+                    occurrence.agent_run_sequence,
                     occurrence.event_sequence,
                 ],
                 "cutoffs": [list(item) for item in normalized],
@@ -2353,16 +2353,16 @@ def _decode_transcript_cursor(
 def _transcript_cursor(
     tenant_id: str,
     execution_id: str,
-    run_id: str,
-    segment_sequence: int,
+    agent_run_id: str,
+    agent_run_sequence: int,
     high_water: int,
     message_index: int,
     item_offset: int,
     signer: CursorSigner,
 ) -> str:
     if (
-        not run_id
-        or segment_sequence < 1
+        not agent_run_id
+        or agent_run_sequence < 1
         or high_water < 0
         or message_index < 0
         or message_index > high_water
@@ -2378,8 +2378,8 @@ def _transcript_cursor(
         ),
         position=json.dumps(
             [
-                run_id,
-                segment_sequence,
+                agent_run_id,
+                agent_run_sequence,
                 high_water,
                 message_index,
                 item_offset,
@@ -2486,9 +2486,9 @@ def _project_message(message: object) -> tuple[_ProjectedHistoryItem, ...]:
 
 
 def _transcript_message_values(
-    message: object, conversation_id: str
+    message: object, agent_conversation_id: str
 ) -> tuple[str, ...]:
-    del conversation_id
+    del agent_conversation_id
     if not isinstance(message, (ModelRequest, ModelResponse)):
         return ()
     return project_execution_transcript_message(message)

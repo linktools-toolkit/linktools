@@ -24,7 +24,7 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryTerminalOutcome,
     SessionRecord,
 )
-from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, RunRecord
+from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 
@@ -59,25 +59,25 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             expected=None,
         )
 
-        archive = state.steps.read_store(RuntimeDomain.CONVERSATION)
+        archive = state.run_store.read_store(RuntimeDomain.CONVERSATION)
         now = datetime.now(timezone.utc)
-        run = RunRecord(
-            run_id="run",
-            conversation_id="conversation",
-            parent_run_id=None,
+        run = AgentRunRecord(
+            agent_run_id="run",
+            agent_conversation_id="conversation",
+            parent_agent_run_id=None,
             agent_name="agent",
             metadata={"history_id": session.history_id},
             started_at=now,
         )
         snapshot = ContinuableSnapshot(
-            run_id="run",
+            agent_run_id="run",
             step_index=1,
             messages=[
                 ModelRequest(parts=[UserPromptPart(content="prompt")]),
                 ModelResponse(parts=[TextPart(content="answer")]),
             ],
-            conversation_id="conversation",
-            parent_run_id=None,
+            agent_conversation_id="conversation",
+            parent_agent_run_id=None,
             agent_name="agent",
             timestamp=now,
             state="complete",
@@ -88,7 +88,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             async def materialize_from_recovery(self, **kwargs: object) -> None:
                 assert kwargs == {
                     "target": RuntimeDomain.CONVERSATION,
-                    "step_run_id": "run",
+                    "agent_run_id": "run",
                 }
                 await archive.materialize_snapshot(run, snapshot)
 
@@ -97,7 +97,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         backend._conversation = state.conversation
         backend._conversation_durable = True
         backend._step_reads = {RuntimeDomain.CONVERSATION: archive}
-        backend._steps = state.steps
+        backend._steps = state.run_store
         backend._step_lifecycle = Lifecycle()
 
         intent = RecoveryConversationIntent(
@@ -115,7 +115,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
                 object_source_domain=None,
                 usage=UsageMetrics(),
                 terminal_event_type=ExecutionEventType.EXECUTION_SUCCEEDED,
-                terminal_event_payload={"run_id": "run"},
+                terminal_event_payload={"agent_run_id": "run"},
                 result_created_at=now,
             ),
             "run",

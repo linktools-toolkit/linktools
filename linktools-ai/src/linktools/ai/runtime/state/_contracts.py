@@ -204,7 +204,7 @@ def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonV
 
 @dataclass(frozen=True, slots=True)
 class ConversationCursor:
-    step_run_id: str
+    agent_run_id: str
     history_id: str | None = None
     message_count: int | None = None
 
@@ -473,7 +473,7 @@ class ContextProjection:
 class ModelInteractionRecord:
     """Derived observation of one logical model request."""
 
-    run_id: str
+    agent_run_id: str
     step_index: int
     request_sequence: int
     purpose: str
@@ -490,7 +490,7 @@ class ModelInteractionRecord:
 
     def __post_init__(self) -> None:
         if (
-            not self.run_id
+            not self.agent_run_id
             or self.step_index < 0
             or self.request_sequence < 1
             or self.purpose not in {"agent", "compaction"}
@@ -516,7 +516,7 @@ class ModelInteractionRecord:
 
 @dataclass(frozen=True, slots=True)
 class StoredStepSnapshot:
-    run_id: str
+    agent_run_id: str
     step_index: int
     timestamp: datetime
     state: str
@@ -645,7 +645,7 @@ class ExecutionRecord:
     stored_user_input: StoredUserInput
     parent_invocation_id: str | None = None
     memory_scope: str | None = None
-    conversation_step_run_id: str | None = None
+    conversation_agent_run_id: str | None = None
     result: ResultRecord | None = None
     repository_instructions: RuntimePayloadRef | None = None
     error_diagnostics: ErrorDiagnostics | None = None
@@ -683,7 +683,7 @@ class ExecutionRecord:
             if (
                 self.session_id is not None
                 or self.memory_scope is not None
-                or self.conversation_step_run_id is not None
+                or self.conversation_agent_run_id is not None
                 or self.parent_execution_id is not None
                 or self.parent_invocation_id is not None
                 or self.lineage_kind is not ExecutionLineageKind.RUN
@@ -780,7 +780,7 @@ class ExecutionCandidatePage:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRunSealHead:
-    run_id: str
+    agent_run_id: str
     event_count: int
     snapshot_count: int
     transcript_message_count: int
@@ -798,7 +798,7 @@ class ExecutionRunSealHead:
             )
         ):
             raise ValueError("execution run seal counts cannot be negative")
-        if not self.run_id or not self.projection_digest:
+        if not self.agent_run_id or not self.projection_digest:
             raise ValueError("execution run seal identity cannot be empty")
 
 
@@ -813,8 +813,8 @@ class ExecutionHistorySealRecord:
             raise ValueError("execution history seal values are invalid")
         if not self.execution_id:
             raise ValueError("execution history seal identity cannot be empty")
-        run_ids = tuple(head.run_id for head in self.run_heads)
-        if run_ids != tuple(sorted(run_ids)) or len(run_ids) != len(set(run_ids)):
+        agent_run_ids = tuple(head.agent_run_id for head in self.run_heads)
+        if agent_run_ids != tuple(sorted(agent_run_ids)) or len(agent_run_ids) != len(set(agent_run_ids)):
             raise ValueError("execution history seal heads must be sorted and unique")
 
     @property
@@ -824,7 +824,7 @@ class ExecutionHistorySealRecord:
                 "execution_id": self.execution_id,
                 "run_heads": [
                     {
-                        "run_id": head.run_id,
+                        "agent_run_id": head.agent_run_id,
                         "event_count": head.event_count,
                         "snapshot_count": head.snapshot_count,
                         "transcript_message_count": head.transcript_message_count,
@@ -969,7 +969,7 @@ class ToolOperationRecord:
 
     tool_operation_id: str
     execution_id: str
-    step_run_id: str
+    agent_run_id: str
     tool_call_id: str
     idempotency_key_digest: str
     tool_name: str
@@ -1233,12 +1233,12 @@ class PendingDeferredCall:
 
 @dataclass(frozen=True, slots=True)
 class PendingToolContinuation:
-    source_step_run_id: str
+    source_agent_run_id: str
     approvals: tuple[PendingDeferredCall, ...] = ()
     calls: tuple[PendingDeferredCall, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.source_step_run_id:
+        if not self.source_agent_run_id:
             raise ValueError("deferred continuation identity is invalid")
         values = (*self.approvals, *self.calls)
         ids = tuple(item.tool_call_id for item in values)
@@ -1248,7 +1248,7 @@ class PendingToolContinuation:
 
 @dataclass(frozen=True, slots=True)
 class RepositoryInstructionBarrier:
-    step_run_id: str
+    agent_run_id: str
     tool_call_id: str
     arguments_digest: str
 
@@ -1256,7 +1256,7 @@ class RepositoryInstructionBarrier:
         if not all(
             isinstance(value, str) and value
             for value in (
-                self.step_run_id,
+                self.agent_run_id,
                 self.tool_call_id,
                 self.arguments_digest,
             )
@@ -1285,7 +1285,7 @@ class RecoveryHandoffPhase(str, Enum):
 @dataclass(frozen=True, slots=True)
 class RecoveryCheckpoint:
     execution_id: str
-    step_run_id: str | None
+    agent_run_id: str | None
     state: RecoveryCheckpointState
     revision: int
     created_at: datetime
@@ -1299,7 +1299,7 @@ class RecoveryCheckpoint:
 
     def __post_init__(self) -> None:
         if self.state is RecoveryCheckpointState.ADMITTED and (
-            self.step_run_id is not None
+            self.agent_run_id is not None
             or self.pending_operation_id is not None
             or self.pending_tools is not None
         ):
@@ -1307,12 +1307,12 @@ class RecoveryCheckpoint:
         if self.state in {
             RecoveryCheckpointState.ACTIVE,
             RecoveryCheckpointState.WAITING,
-        } and self.step_run_id is None:
+        } and self.agent_run_id is None:
             raise ValueError("active recovery checkpoint requires an attempt")
         if self.state is RecoveryCheckpointState.WAITING:
             if (
                 self.pending_tools is None
-                or self.step_run_id != self.pending_tools.source_step_run_id
+                or self.agent_run_id != self.pending_tools.source_agent_run_id
                 or self.pending_operation_id is not None
                 or self.handoff_phase is not RecoveryHandoffPhase.NONE
                 or self.terminal_handoff is not None
@@ -1329,7 +1329,7 @@ class RecoveryCheckpoint:
         if self.state is RecoveryCheckpointState.ACTIVE and self.pending_tools is not None:
             raise ValueError("active recovery checkpoint cannot retain deferred work")
         barriers = tuple(self.repository_instruction_barriers)
-        identities = tuple((item.step_run_id, item.tool_call_id) for item in barriers)
+        identities = tuple((item.agent_run_id, item.tool_call_id) for item in barriers)
         if len(identities) != len(set(identities)):
             raise ValueError("repository instruction barriers must be unique")
         object.__setattr__(self, "repository_instruction_barriers", barriers)
@@ -1418,16 +1418,16 @@ class RecoveryConversationIntent:
 @dataclass(frozen=True, slots=True)
 class RecoveryTerminalHandoff:
     outcome: RecoveryTerminalOutcome
-    source_step_run_id: str | None
+    source_agent_run_id: str | None
     conversation: RecoveryConversationIntent | None
 
     def __post_init__(self) -> None:
         if (
             self.outcome.terminal_status is ExecutionStatus.SUCCEEDED
-            and self.source_step_run_id is None
+            and self.source_agent_run_id is None
         ):
             raise ValueError("successful recovery handoff requires a source attempt")
-        if self.conversation is not None and self.source_step_run_id is None:
+        if self.conversation is not None and self.source_agent_run_id is None:
             raise ValueError("conversation recovery intent requires a source attempt")
 
 
@@ -1913,8 +1913,8 @@ class ExecutionEventAppend:
 class ToolOperationAdmission:
     execution_id: str
     tool_operation_id: str
-    step_run_id: str
-    recovery_step_run_id: str | None
+    agent_run_id: str
+    recovery_agent_run_id: str | None
     tool_call_id: str
     idempotency_key_digest: str
     tool_name: str

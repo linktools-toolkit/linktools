@@ -718,7 +718,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}
-    backend._segment_only_worker_exits = set()
+    backend._agent_run_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     with pytest.raises(AIError) as close_error:
         await backend.close()

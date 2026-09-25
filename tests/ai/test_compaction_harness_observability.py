@@ -53,7 +53,7 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
         deps=None,
         model=model,
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
     )
     messages: list[ModelMessage] = []
     for index in range(15):
@@ -73,7 +73,7 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
     )
     observed: list[tuple[str, ModelRequestFact, ModelResponse | None]] = []
     projections: list[
@@ -138,7 +138,7 @@ def test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> 
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
     )
     compaction = journal.begin(3, purpose="compaction")
     agent = journal.begin(3, purpose="agent")
@@ -158,7 +158,7 @@ def test_journal_rejects_double_finish() -> None:
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id="execution",
-        step_run_id="run",
+        agent_run_id="run",
     )
     fact = journal.begin(1)
     journal.finish(fact.request_sequence, status="SUCCEEDED")
@@ -217,7 +217,7 @@ async def test_compaction_target_does_not_rewrite_history_below_threshold() -> N
         deps=None,
         model=model,
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
     )
     messages = _duplicate_file_history()
     request_context = ModelRequestContext(
@@ -252,7 +252,7 @@ async def test_compaction_without_target_still_deduplicates_file_reads() -> None
         deps=None,
         model=model,
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
     )
     messages = _duplicate_file_history()
     request_context = ModelRequestContext(
@@ -288,7 +288,7 @@ async def test_compaction_keeps_semantic_control_results() -> None:
         deps=None,
         model=model,
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
     )
     messages: list[ModelMessage] = []
     for index in range(5):

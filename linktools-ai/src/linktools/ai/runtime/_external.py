@@ -108,7 +108,7 @@ class DefaultExternalService:
             call_id = external_call_id_for_call(
                 principal.tenant_id,
                 execution_id,
-                checkpoint.pending_tools.source_step_run_id,
+                checkpoint.pending_tools.source_agent_run_id,
                 pending.tool_call_id,
             )
             record = await self._calls.get(call_id, tenant_id=principal.tenant_id)
@@ -245,7 +245,7 @@ class DefaultExternalService:
 def external_call_id_for_call(
     tenant_id: str,
     execution_id: str,
-    source_step_run_id: str,
+    source_agent_run_id: str,
     tool_call_id: str,
 ) -> str:
     """Return the deterministic id for one external deferred call."""
@@ -254,7 +254,7 @@ def external_call_id_for_call(
             "contract": "external-call-v1",
             "tenant_id": tenant_id,
             "execution_id": execution_id,
-            "source_step_run_id": source_step_run_id,
+            "source_agent_run_id": source_agent_run_id,
             "tool_call_id": tool_call_id,
         }
     )
@@ -272,7 +272,7 @@ def _pending_call(
         candidate = external_call_id_for_call(
             tenant_id,
             checkpoint.execution_id,
-            checkpoint.pending_tools.source_step_run_id,
+            checkpoint.pending_tools.source_agent_run_id,
             pending.tool_call_id,
         )
         if candidate == call_id:

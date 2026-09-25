@@ -292,7 +292,7 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
         parent_invocation_id=None,
         source_execution_id=None,
         base_execution_id=None,
-        conversation_step_run_id=None,
+        conversation_agent_run_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         planning=False,
         thinking=False,

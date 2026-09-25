@@ -41,7 +41,7 @@ class SessionTimelineTranscriptStore(Protocol):
         self,
         *,
         history_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         tenant_id: str,
         start: int,
         end: int,
@@ -289,7 +289,7 @@ async def project_session_timeline(
                     item
                     async for item in transcript_store.iter_conversation_message_range(
                         history_id=record.history_id,
-                        step_run_id=record.continuation.step_run_id,
+                        agent_run_id=record.continuation.agent_run_id,
                         tenant_id=conversation.sessions.tenant_id,
                         start=range_start,
                         end=range_end,

@@ -136,13 +136,13 @@ class ToolStateRepository(Protocol):
         owner: str,
         fence: int,
     ) -> ToolOperationRecord: ...
-    async def has_by_step_run(self, step_run_id: str, *, tenant_id: str) -> bool: ...
+    async def has_by_agent_run(self, agent_run_id: str, *, tenant_id: str) -> bool: ...
 
 
 class _ToolOperationRuntimeRepository(Protocol):
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
 
-    async def has_by_step_run(self, step_run_id: str, *, tenant_id: str) -> bool: ...
+    async def has_by_agent_run(self, agent_run_id: str, *, tenant_id: str) -> bool: ...
 
     async def list_by_execution(
         self, execution_id: str, *, tenant_id: str
@@ -150,7 +150,7 @@ class _ToolOperationRuntimeRepository(Protocol):
 
     async def existing_call_ids(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         tool_call_ids: Sequence[str],
         *,
         tenant_id: str,
@@ -158,15 +158,15 @@ class _ToolOperationRuntimeRepository(Protocol):
 
     async def get_by_call(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         tool_call_id: str,
         *,
         tenant_id: str,
     ) -> "ToolOperationRecord | None": ...
 
-    async def list_by_step_run(
+    async def list_by_agent_run(
         self,
-        step_run_id: str,
+        agent_run_id: str,
         *,
         tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]: ...
@@ -261,12 +261,12 @@ class RuntimeToolOperationBridge:
         namespace: str,
         tenant_id: str,
         execution_id: str,
-        step_run_id: str,
+        agent_run_id: str,
         binding_digest: str,
         owner: str,
         background_tasks: "set[asyncio.Task[object]]",
         payload_policy: PayloadPolicy,
-        recovery_step_run_id: "str | None" = None,
+        recovery_agent_run_id: "str | None" = None,
         terminal_commands: "_ToolTerminalCommands | None" = None,
     ) -> None:
         self._repository = repository
@@ -274,12 +274,12 @@ class RuntimeToolOperationBridge:
         self._object_keys = RuntimeObjectKeyFactory(namespace)
         self._tenant_id = validate_tenant_id(tenant_id)
         self._execution_id = validate_resource_id(execution_id)
-        self._step_run_id = step_run_id
+        self._agent_run_id = agent_run_id
         self._binding_digest = binding_digest
         self._owner = owner
         self._background_tasks = background_tasks
         self._payload_policy = payload_policy
-        self._recovery_step_run_id = recovery_step_run_id
+        self._recovery_agent_run_id = recovery_agent_run_id
         self._terminal_commands = terminal_commands
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
         self._decision_fingerprints: dict[tuple[str, str], tuple[str, str]] = {}
@@ -308,12 +308,12 @@ class RuntimeToolOperationBridge:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return prior
         arguments_payload = await self._arguments_payload(portable_args)
-        replay_step_run_id = self._recovery_step_run_id or self._run_id(ctx)
+        replay_agent_run_id = self._recovery_agent_run_id or self._run_id(ctx)
         operation_id = canonical_sha256(
             {
                 "tenant_id": self._tenant_id,
                 "execution_id": self._execution_id,
-                "step_run_id": replay_step_run_id,
+                "agent_run_id": replay_agent_run_id,
                 "tool_call_id": call.tool_call_id,
                 "tool_name": tool_def.name,
                 "arguments_digest": arguments_digest,
@@ -323,13 +323,13 @@ class RuntimeToolOperationBridge:
         admission = ToolOperationAdmission(
             execution_id=self._execution_id,
             tool_operation_id=operation_id,
-            step_run_id=self._run_id(ctx),
-            recovery_step_run_id=self._recovery_step_run_id,
+            agent_run_id=self._run_id(ctx),
+            recovery_agent_run_id=self._recovery_agent_run_id,
             tool_call_id=call.tool_call_id,
             idempotency_key_digest=canonical_sha256(
                 {
                     "execution_id": self._execution_id,
-                    "step_run_id": replay_step_run_id,
+                    "agent_run_id": replay_agent_run_id,
                     "tool_call_id": call.tool_call_id,
                     "tool_name": tool_def.name,
                     "arguments_digest": arguments_digest,
@@ -353,7 +353,7 @@ class RuntimeToolOperationBridge:
         self._decisions[key] = decision
         self._decision_fingerprints[key] = fingerprint
         _logger.debug(
-            "tool operation admitted: execution=%s run=%s tool=%s call=%s operation=%s status=%s",
+            "tool operation admitted: execution=%s agent_run=%s tool=%s call=%s operation=%s status=%s",
             self._execution_id,
             self._run_id(ctx),
             tool_def.name,
@@ -367,14 +367,14 @@ class RuntimeToolOperationBridge:
 
     async def existing_call_ids(self, tool_call_ids: Sequence[str]) -> frozenset[str]:
         return await self._repository.existing_call_ids(
-            self._step_run_id,
+            self._agent_run_id,
             tool_call_ids,
             tenant_id=self._tenant_id,
         )
 
     async def list_operations(self) -> tuple[ToolOperationRecord, ...]:
-        return await self._repository.list_by_step_run(
-            self._step_run_id,
+        return await self._repository.list_by_agent_run(
+            self._agent_run_id,
             tenant_id=self._tenant_id,
         )
 
@@ -923,7 +923,7 @@ class RuntimeToolOperationBridge:
 
     def _run_id(self, ctx: PydanticRunContext[None]) -> str:
         del ctx
-        return self._step_run_id
+        return self._agent_run_id
 
 
 def _portable_arguments(args: dict[str, Any]) -> dict[str, Any]:

@@ -36,14 +36,14 @@ from .state._plan import RuntimeDomain
 from .state._step_contracts import (
     ContinuableSnapshot,
     EventKind,
-    RunRecord,
+    AgentRunRecord,
     StepEvent,
-    StepStore,
+    AgentRunStore,
 )
 
 
 class _InteractionStagingPort(Protocol):
-    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]: ...
+    def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]: ...
 
     def stage_model_interaction(self, interaction: object) -> None: ...
 
@@ -53,21 +53,21 @@ class RuntimeCaptureStore:
 
     def __init__(
         self,
-        store: StepStore,
+        store: AgentRunStore,
         *,
         execution_id: str | None,
-        step_run_id: str,
+        agent_run_id: str,
         initial_messages: Sequence[ModelMessage] = (),
         initial_context: LoadedModelContext | None = None,
         initial_attachments: Sequence[Mapping[str, JsonValue]] = (),
     ) -> None:
-        if not isinstance(step_run_id, str) or not step_run_id:
-            raise ValueError("step_run_id is required")
+        if not isinstance(agent_run_id, str) or not agent_run_id:
+            raise ValueError("agent_run_id is required")
         self._store = store
         self._interaction_store = cast(_InteractionStagingPort, store)
         self._execution_id = execution_id
-        self._step_run_id = step_run_id
-        self._run: RunRecord | None = None
+        self._agent_run_id = agent_run_id
+        self._run: AgentRunRecord | None = None
         self._event_sequence = 0
         self._request_sequence_by_tool_call: dict[str, int] = {}
         self._initial_attachments = tuple(dict(value) for value in initial_attachments)
@@ -95,7 +95,7 @@ class RuntimeCaptureStore:
                 value.source.message_index
                 if value.source is not None
                 and value.source.source_domain is RuntimeDomain.RECOVERY
-                and value.source.owner_id == step_run_id
+                and value.source.owner_id == agent_run_id
                 else value.source
                 if value.source is not None
                 and value.source.source_domain is RuntimeDomain.CONVERSATION
@@ -122,24 +122,24 @@ class RuntimeCaptureStore:
         ] = {}
 
     @property
-    def step_run_id(self) -> str:
-        return self._step_run_id
+    def agent_run_id(self) -> str:
+        return self._agent_run_id
 
-    async def register_run(self, record: RunRecord) -> None:
-        if record.run_id != self._step_run_id:
+    async def register_agent_run(self, record: AgentRunRecord) -> None:
+        if record.agent_run_id != self._agent_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if self._run is not None and self._run != record:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._run = record
-        await self._store.register_run(record, execution_id=self._execution_id)
+        await self._store.register_agent_run(record, execution_id=self._execution_id)
         previous = await self.latest_snapshot(include_interrupted=True)
         if previous is not None:
             self._transcript_messages = list(freeze_model_messages(previous.messages))
-        events = await self._store.list_events(run_id=record.run_id)
+        events = await self._store.list_events(agent_run_id=record.agent_run_id)
         self._event_sequence = max((event.event_index for event in events), default=-1) + 1
 
     async def append_event(self, event: StepEvent) -> None:
-        if event.run_id != self._step_run_id:
+        if event.agent_run_id != self._agent_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._store.append_event(event, execution_id=self._execution_id)
 
@@ -160,11 +160,11 @@ class RuntimeCaptureStore:
         self._event_sequence += 1
         await self.append_event(
             StepEvent(
-                run_id=run.run_id,
+                agent_run_id=run.agent_run_id,
                 kind=kind,
                 step_index=step_index,
-                conversation_id=run.conversation_id,
-                parent_run_id=run.parent_run_id,
+                agent_conversation_id=run.agent_conversation_id,
+                parent_agent_run_id=run.parent_agent_run_id,
                 agent_name=run.agent_name,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
@@ -178,7 +178,7 @@ class RuntimeCaptureStore:
         )
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
-        if snapshot.run_id != self._step_run_id:
+        if snapshot.agent_run_id != self._agent_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._store.save_snapshot(snapshot, execution_id=self._execution_id)
 
@@ -188,7 +188,7 @@ class RuntimeCaptureStore:
         include_interrupted: bool = False,
     ) -> ContinuableSnapshot | None:
         return await self._store.latest_snapshot(
-            run_id=self._step_run_id,
+            agent_run_id=self._agent_run_id,
             include_interrupted=include_interrupted,
         )
 
@@ -286,7 +286,7 @@ class RuntimeCaptureStore:
             source,
             frozen,
             lambda payload: self._interaction_store.intern_payload(
-                self._step_run_id,
+                self._agent_run_id,
                 payload,
             ),
             source_refs=source_refs,
@@ -297,7 +297,7 @@ class RuntimeCaptureStore:
             streaming=streaming,
         )
         digest, _size = self._interaction_store.intern_payload(
-            self._step_run_id,
+            self._agent_run_id,
             envelope_bytes,
         )
         self._interaction_projections[fact.request_sequence] = projection
@@ -339,13 +339,13 @@ class RuntimeCaptureStore:
             response_projection = build_inline_context_projection(
                 frozen_response,
                 lambda payload: self._interaction_store.intern_payload(
-                    self._step_run_id,
+                    self._agent_run_id,
                     payload,
                 ),
             )
         self._interaction_store.stage_model_interaction(
             StagedModelInteraction(
-                self._step_run_id,
+                self._agent_run_id,
                 fact.step_index,
                 request_sequence,
                 fact.purpose,

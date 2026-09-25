@@ -68,7 +68,7 @@ def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperati
     return ToolOperationRecord(
         tool_operation_id=operation_id,
         execution_id="execution",
-        step_run_id="step-run",
+        agent_run_id="agent-run",
         tool_call_id=f"call:{operation_id}",
         idempotency_key_digest=canonical_sha256({"operation": operation_id}),
         tool_name="tool",

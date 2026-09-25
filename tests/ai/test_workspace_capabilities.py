@@ -555,7 +555,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        run_id="run",
+        agent_run_id="run",
         tool_call_id="call",
     )
     tools = await boundary.get_tools(context)
