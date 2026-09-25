@@ -14,7 +14,8 @@ from ..agent import AgentBinding
 from ..capability import AgentContext, SubagentDelegate
 from ..core import ExecutionMode, JsonValue, PromptLimits, ThinkingValue, UsageMetrics
 from ..errors import ErrorCode, ErrorDiagnostics
-from ..workspace import RepositoryInstructions, Workspace
+from ..spec import RepositoryInstructions
+from ..workspace import Workspace
 from ._agent_executor import (
     AgentExecutor,
     AgentExecutionResult,
