@@ -86,9 +86,7 @@ from ..asset import AssetStoreReader
 from ..capability import (
     AgentContext,
     CapabilityContribution,
-    AssetVersionSkillResourceSource,
     SkillCapability,
-    SkillSourceRef,
     SkillSourceRegistry,
     SubagentCapability,
     SubagentDelegate,
@@ -348,40 +346,6 @@ class AgentExecutor:
                         exc_info=False,
                     )
 
-    def _skill_sources_for(
-        self,
-        definition: AgentDefinition,
-    ) -> SkillSourceRegistry:
-        grouped: dict[str, dict[str, SkillSourceRef]] = {}
-        for skill in definition.skill_definitions:
-            source_ref = skill.source_ref
-            if source_ref is None:
-                continue
-            if source_ref.source_id not in self._asset_sources:
-                raise AIError(
-                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                    safe_details={
-                        "kind": "skill_asset_source",
-                        "source_id": source_ref.source_id,
-                    },
-                )
-            roots = grouped.setdefault(source_ref.source_id, {})
-            existing = roots.get(source_ref.root)
-            if existing is not None and existing != source_ref:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            roots[source_ref.root] = source_ref
-        if not grouped:
-            return self._skill_sources
-        version_sources = tuple(
-            AssetVersionSkillResourceSource(
-                source_id,
-                dict(sorted(roots.items())),
-                self._asset_sources[source_id],
-            )
-            for source_id, roots in sorted(grouped.items())
-        )
-        return self._skill_sources.with_overrides(version_sources)
-
     def _record_agent_run(
         self,
         scope: _RunScope,
@@ -447,7 +411,7 @@ class AgentExecutor:
         run_usage: RunUsage,
         usage_limits: UsageLimits,
     ) -> AgentExecutionOutcome:
-        skill_sources = self._skill_sources_for(scope.binding.definition)
+        skill_sources = self._skill_sources
         selected = tuple(
             candidate.id
             for candidate in scope.binding.definition.selected_tools
