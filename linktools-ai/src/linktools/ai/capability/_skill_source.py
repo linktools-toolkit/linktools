@@ -281,7 +281,7 @@ class SkillSourceRegistry:
         return SkillSourceRegistry(tuple(values.values()))
 
 
-def normalize_skill_resource_path(path: str) -> str:
+def require_skill_resource_path(path: str) -> str:
     return _require_resource_path(path)
 
 
@@ -361,5 +361,5 @@ __all__ = [
     "SkillResourceView",
     "SkillSourceRef",
     "SkillSourceRegistry",
-    "normalize_skill_resource_path",
+    "require_skill_resource_path",
 ]
