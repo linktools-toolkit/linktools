@@ -32,7 +32,7 @@ _AGENT_AUTHOR_FIELDS = frozenset(
         "allow_tools",
         "allow_skills",
         "allow_subagents",
-        "allow_capabilities",
+        "allow_runtime_capabilities",
         "usage_limits",
         "planning",
         "thinking",
@@ -73,7 +73,7 @@ class AgentSpecCodec:
             "allow_tools": list(value.allow_tools),
             "allow_skills": list(value.allow_skills),
             "allow_subagents": list(value.allow_subagents),
-            "allow_capabilities": list(value.allow_capabilities),
+            "allow_runtime_capabilities": list(value.allow_runtime_capabilities),
             "usage_limits": None
             if value.usage_limits is None
             else {
@@ -111,7 +111,7 @@ class AgentSpecCodec:
         allow_tools = raw.get("allow_tools", ["*"])
         allow_skills = raw.get("allow_skills", ["*"])
         allow_subagents = raw.get("allow_subagents", ["*"])
-        allow_capabilities = raw.get("allow_capabilities", ["*"])
+        allow_runtime_capabilities = raw.get("allow_runtime_capabilities", ["*"])
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
         tool_retries = raw.get("tool_retries", AgentSpec.DEFAULT_TOOL_RETRIES)
@@ -135,7 +135,7 @@ class AgentSpecCodec:
             ("allow_tools", allow_tools),
             ("allow_skills", allow_skills),
             ("allow_subagents", allow_subagents),
-            ("allow_capabilities", allow_capabilities),
+            ("allow_runtime_capabilities", allow_runtime_capabilities),
         ):
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a string array")
@@ -164,7 +164,7 @@ class AgentSpecCodec:
                 allow_tools=tuple(cast("list[str]", allow_tools)),
                 allow_skills=tuple(cast("list[str]", allow_skills)),
                 allow_subagents=tuple(cast("list[str]", allow_subagents)),
-                allow_capabilities=tuple(cast("list[str]", allow_capabilities)),
+                allow_runtime_capabilities=tuple(cast("list[str]", allow_runtime_capabilities)),
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
                 planning=planning,
                 thinking=normalized_thinking,

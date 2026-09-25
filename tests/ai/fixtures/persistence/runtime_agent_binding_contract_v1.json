@@ -14,7 +14,7 @@
     "allow_subagents": [
       "*"
     ],
-    "allow_capabilities": [
+    "allow_runtime_capabilities": [
       "*"
     ],
     "usage_limits": null,

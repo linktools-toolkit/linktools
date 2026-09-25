@@ -12,7 +12,7 @@ from ._contract import AgentSpec
 
 _AGENT_FIELDS = frozenset(
     {
-        "allow_capabilities",
+        "allow_runtime_capabilities",
         "allow_skills",
         "allow_subagents",
         "allow_tools",

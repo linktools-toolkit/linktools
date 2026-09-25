@@ -17,7 +17,7 @@ class CompiledAgent:
     selected_tools: "tuple[CapabilityContribution[object], ...]"
     selected_skills: "tuple[CapabilityContribution[object], ...]"
     selected_mcp: "tuple[CapabilityContribution[object], ...]"
-    selected_capabilities: "tuple[CapabilityContribution[object], ...]"
+    selected_runtime_capabilities: "tuple[CapabilityContribution[object], ...]"
     selected_subagents: "tuple[str, ...]"
     ordinary_tool_policy: "tuple[str, ...]"
     mcp_selector_policy: "tuple[str, ...]"
@@ -29,7 +29,7 @@ class CompiledAgent:
             ("tool", self.selected_tools),
             ("skill", self.selected_skills),
             ("mcp", self.selected_mcp),
-            ("capability", self.selected_capabilities),
+            ("runtime_capability", self.selected_runtime_capabilities),
         )
         identities: set[tuple[str, str]] = set()
         for expected_kind, values in groups:
@@ -37,7 +37,7 @@ class CompiledAgent:
             for value in values:
                 if value.kind != expected_kind:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                if expected_kind != "capability" and previous is not None and value.id < previous:
+                if expected_kind != "runtime_capability" and previous is not None and value.id < previous:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 identity = (value.kind, value.id)
                 if identity in identities:

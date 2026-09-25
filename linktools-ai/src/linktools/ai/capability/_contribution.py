@@ -35,7 +35,7 @@ ContributionKind = Literal[
     "agent",
     "skill",
     "mcp",
-    "capability",
+    "runtime_capability",
     "task",
     "task_expander",
 ]
@@ -68,7 +68,7 @@ class CapabilityContribution(Generic[AppT]):
             "agent",
             "skill",
             "mcp",
-            "capability",
+            "runtime_capability",
             "task",
             "task_expander",
         } or not isinstance(self.id, str) or not self.id.strip():
@@ -81,7 +81,7 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "mcp" and not isinstance(self.value, MCPServerSpec):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "capability" and not isinstance(self.value, AbstractCapability):
+        if self.kind == "runtime_capability" and not isinstance(self.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "task" and not isinstance(self.value, TaskNodeHandler):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -95,7 +95,7 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "mcp" and cast(MCPServerSpec, self.value).id != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "capability":
+        if self.kind == "runtime_capability":
             capability = cast(AbstractCapability, self.value)
             if not isinstance(capability.defer_loading, bool):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -123,14 +123,14 @@ class CapabilityContribution(Generic[AppT]):
     @classmethod
     def from_opaque(
         cls,
-        kind: Literal["tool", "capability"],
+        kind: Literal["tool", "runtime_capability"],
         identity: str,
         value: "Tool[AgentContext[AppT]] | AbstractCapability[AgentContext[AppT]]",
         *,
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
     ) -> "CapabilityContribution[AppT]":
-        if kind not in {"tool", "capability"}:
+        if kind not in {"tool", "runtime_capability"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         _validate_revision(revision)
         return _ContractContribution(
@@ -247,7 +247,7 @@ def _contribution_contract(
     revision: "int | None" = None,
     config: "Mapping[str, JsonValue] | None" = None,
 ) -> "dict[str, JsonValue]":
-    if config is not None and kind != "capability":
+    if config is not None and kind != "runtime_capability":
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if kind == "tool" and isinstance(value, Tool):
         definition = value.tool_def
@@ -284,7 +284,7 @@ def _contribution_contract(
         return value.contract
     if kind == "mcp" and isinstance(value, MCPServerSpec):
         return MCPServerSpecCodec().to_payload(value)
-    if kind == "capability" and isinstance(value, AbstractCapability):
+    if kind == "runtime_capability" and isinstance(value, AbstractCapability):
         contract = {
             "version": 1,
             "revision": revision or 1,

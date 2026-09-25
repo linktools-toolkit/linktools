@@ -40,10 +40,10 @@ class AgentCompiler:
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        generic = tuple(item for item in candidates if item.kind == "capability")
+        generic = tuple(item for item in candidates if item.kind == "runtime_capability")
         declarations = tuple(
             sorted(
-                (item for item in candidates if item.kind != "capability"),
+                (item for item in candidates if item.kind != "runtime_capability"),
                 key=lambda item: (item.kind, item.id),
             )
         )
@@ -87,9 +87,9 @@ class AgentCompiler:
         selected_tools, selected_mcp, ordinary_policy, mcp_policy = self._select_tools(spec)
         selected_skills = self._select_exact_kind("skill", spec.allow_skills)
         selected_subagents = self._select_subagents(spec)
-        selected_capabilities = self._select_exact_kind(
-            "capability",
-            spec.allow_capabilities,
+        selected_runtime_capabilities = self._select_exact_kind(
+            "runtime_capability",
+            spec.allow_runtime_capabilities,
         )
         return self._build_compiled_agent(
             spec,
@@ -97,7 +97,7 @@ class AgentCompiler:
             selected_tools=selected_tools,
             selected_skills=selected_skills,
             selected_mcp=selected_mcp,
-            selected_capabilities=selected_capabilities,
+            selected_runtime_capabilities=selected_runtime_capabilities,
             selected_subagents=selected_subagents,
             ordinary_policy=ordinary_policy,
             mcp_policy=mcp_policy,
@@ -138,7 +138,7 @@ class AgentCompiler:
             selected_tools=compiled_agent.selected_tools,
             selected_skills=compiled_agent.selected_skills,
             selected_mcp=compiled_agent.selected_mcp,
-            selected_capabilities=compiled_agent.selected_capabilities,
+            selected_runtime_capabilities=compiled_agent.selected_runtime_capabilities,
             selected_subagents=(),
             ordinary_policy=compiled_agent.ordinary_tool_policy,
             mcp_policy=compiled_agent.mcp_selector_policy,
@@ -190,7 +190,7 @@ class AgentCompiler:
                 selected_tools=selected["tool"],
                 selected_skills=selected["skill"],
                 selected_mcp=selected["mcp"],
-                selected_capabilities=selected["capability"],
+                selected_runtime_capabilities=selected["runtime_capability"],
                 selected_subagents=binding_contract.subagent_ids,
                 ordinary_policy=ordinary_policy,
                 mcp_policy=mcp_policy,
@@ -221,7 +221,7 @@ class AgentCompiler:
             "tool": [],
             "skill": [],
             "mcp": [],
-            "capability": [],
+            "runtime_capability": [],
         }
         for pin in pins:
             if pin.kind == "skill":
@@ -248,7 +248,7 @@ class AgentCompiler:
         return {
             kind: (
                 tuple(values)
-                if kind == "capability"
+                if kind == "runtime_capability"
                 else tuple(sorted(values, key=lambda item: item.id))
             )
             for kind, values in selected.items()
@@ -316,7 +316,7 @@ class AgentCompiler:
 
     def _select_exact_kind(
         self,
-        kind: Literal["skill", "capability"],
+        kind: Literal["skill", "runtime_capability"],
         selectors: Sequence[str],
     ) -> "tuple[CapabilityContribution[object], ...]":
         values = {
@@ -336,7 +336,7 @@ class AgentCompiler:
         )
         return (
             selected
-            if kind == "capability"
+            if kind == "runtime_capability"
             else tuple(sorted(selected, key=lambda item: item.id))
         )
 
@@ -410,7 +410,7 @@ class AgentCompiler:
         selected_tools: Sequence[CapabilityContribution[object]],
         selected_skills: Sequence[CapabilityContribution[object]],
         selected_mcp: Sequence[CapabilityContribution[object]],
-        selected_capabilities: Sequence[CapabilityContribution[object]],
+        selected_runtime_capabilities: Sequence[CapabilityContribution[object]],
         selected_subagents: Sequence[str],
         ordinary_policy: Sequence[str],
         mcp_policy: Sequence[str],
@@ -424,7 +424,7 @@ class AgentCompiler:
             selected_tools=tuple(sorted(selected_tools, key=lambda item: item.id)),
             selected_skills=tuple(sorted(selected_skills, key=lambda item: item.id)),
             selected_mcp=tuple(sorted(selected_mcp, key=lambda item: item.id)),
-            selected_capabilities=tuple(selected_capabilities),
+            selected_runtime_capabilities=tuple(selected_runtime_capabilities),
             selected_subagents=tuple(sorted(set(selected_subagents))),
             ordinary_tool_policy=tuple(ordinary_policy),
             mcp_selector_policy=tuple(mcp_policy),
@@ -444,14 +444,14 @@ def _selected_candidates(
                 ),
                 key=lambda item: (item.kind, item.id),
             ),
-            *compiled_agent.selected_capabilities,
+            *compiled_agent.selected_runtime_capabilities,
         )
     )
 
 
 def _pin(candidate: CapabilityContribution[object]) -> CapabilityPin:
     return CapabilityPin(
-        cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
+        cast(Literal["tool", "skill", "mcp", "runtime_capability"], candidate.kind),
         candidate.id,
         candidate.contract,
     )

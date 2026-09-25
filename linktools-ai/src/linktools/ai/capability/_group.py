@@ -261,7 +261,7 @@ class CapabilityGroup(Generic[AppT]):
         return TaskExpanderRef(contribution.id, contribution.revision)
 
 
-    def capability(
+    def runtime_capability(
         self,
         capability: "AbstractCapability[AgentContext[AppT]]",
         *,
@@ -275,7 +275,7 @@ class CapabilityGroup(Generic[AppT]):
         _validate_external_capability_id(capability_id)
         self._contributions.append(
             CapabilityContribution.from_opaque(
-                "capability",
+                "runtime_capability",
                 capability_id,
                 capability,
                 revision=revision,
@@ -295,7 +295,7 @@ class CapabilityGroup(Generic[AppT]):
         allow_tools: Sequence[str] = ("*",),
         allow_skills: Sequence[str] = ("*",),
         allow_subagents: Sequence[str] = ("*",),
-        allow_capabilities: Sequence[str] = ("*",),
+        allow_runtime_capabilities: Sequence[str] = ("*",),
         usage_limits: "AgentUsageLimits | None" = None,
         planning: bool = False,
         thinking: ThinkingValue = False,
@@ -315,7 +315,7 @@ class CapabilityGroup(Generic[AppT]):
             allow_tools=tuple(allow_tools),
             allow_skills=tuple(allow_skills),
             allow_subagents=tuple(allow_subagents),
-            allow_capabilities=tuple(allow_capabilities),
+            allow_runtime_capabilities=tuple(allow_runtime_capabilities),
             usage_limits=usage_limits,
             planning=planning,
             thinking=thinking,
@@ -384,9 +384,9 @@ class CapabilityGroup(Generic[AppT]):
             _freeze_contribution(item) for item in contributions
         )
         _validate_unique(captured_items)
-        generic = [item for item in captured_items if item.kind == "capability"]
+        generic = [item for item in captured_items if item.kind == "runtime_capability"]
         declarations = sorted(
-            (item for item in captured_items if item.kind != "capability"),
+            (item for item in captured_items if item.kind != "runtime_capability"),
             key=lambda item: (item.kind, item.id, item.revision),
         )
         capture_contributions = tuple((*declarations, *generic))

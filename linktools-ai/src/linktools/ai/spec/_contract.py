@@ -202,7 +202,7 @@ class AgentSpec:
     allow_tools: "tuple[str, ...]" = ("*",)
     allow_skills: "tuple[str, ...]" = ("*",)
     allow_subagents: "tuple[str, ...]" = ("*",)
-    allow_capabilities: "tuple[str, ...]" = ("*",)
+    allow_runtime_capabilities: "tuple[str, ...]" = ("*",)
     usage_limits: "AgentUsageLimits | None" = None
     planning: bool = False
     thinking: ThinkingValue = False
@@ -244,9 +244,9 @@ class AgentSpec:
         thinking = normalize_thinking(self.thinking)
         allow_skills = canonical_selectors(self.allow_skills, field_name="allow_skills")
         preload_skills = canonical_selectors(self.preload_skills, field_name="preload_skills")
-        allow_capabilities = canonical_selectors(
-            self.allow_capabilities,
-            field_name="allow_capabilities",
+        allow_runtime_capabilities = canonical_selectors(
+            self.allow_runtime_capabilities,
+            field_name="allow_runtime_capabilities",
         )
         if "*" in preload_skills:
             raise AIError(
@@ -264,7 +264,7 @@ class AgentSpec:
         object.__setattr__(self, "allow_tools", canonical_selectors(self.allow_tools, field_name="allow_tools", mcp=True))
         object.__setattr__(self, "allow_skills", allow_skills)
         object.__setattr__(self, "allow_subagents", canonical_selectors(self.allow_subagents, field_name="allow_subagents"))
-        object.__setattr__(self, "allow_capabilities", allow_capabilities)
+        object.__setattr__(self, "allow_runtime_capabilities", allow_runtime_capabilities)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "preload_skills", preload_skills)
         object.__setattr__(self, "metadata", _validated_metadata(self.metadata))
