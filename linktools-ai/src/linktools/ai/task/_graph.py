@@ -703,8 +703,8 @@ class TaskNodeInfo:
     retry_delay_seconds: float
     output_contract: "Mapping[str, JsonValue] | None"
     effect_policy: str
-    reconcile: bool = False
     dependency_policy: str = "all_succeeded"
+    reconcile: bool = False
 
     @classmethod
     def from_node(cls, node: TaskNode) -> "TaskNodeInfo":
@@ -719,8 +719,8 @@ class TaskNodeInfo:
             node.retry_delay_seconds,
             node.output_contract,
             node.effect_policy,
-            node.reconcile,
             node.dependency_policy,
+            reconcile=node.reconcile,
         )
 
 
