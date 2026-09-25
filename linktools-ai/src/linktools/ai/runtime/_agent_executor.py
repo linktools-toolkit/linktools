@@ -131,7 +131,6 @@ from ._mcp import (
     close_mcp_resources,
     materialize_mcp_capabilities,
     prepare_mcp_resource_projections,
-    validate_mcp_binding_policy,
 )
 from ._memory import MemoryStore
 from ._metric_capability import RuntimeModelObservationCapability
@@ -485,11 +484,6 @@ class AgentExecutor:
                     usage_limits=usage_limits,
                     skill_sources=skill_sources,
                 )
-            if scope.binding.compiled_agent.mcp_servers:
-                validate_mcp_binding_policy(
-                    mcp_resource_bindings,
-                    backend,
-                )
             if workspace is None:
                 if scope.execution_cwd is None:
                     raise AIError(
@@ -719,8 +713,8 @@ def _mcp_resource_bindings(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result[server.id] = _MCPResourceBinding(
             versions,
-            cast("str | None", asset_source_id),
-            cast(Mapping[str, JsonValue], policy),
+            asset_source_id,
+            policy,
         )
     return result
 
