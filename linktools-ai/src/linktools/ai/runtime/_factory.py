@@ -20,7 +20,6 @@ from ..capability import (
     CapabilityGroupSnapshot,
     SkillSourceRegistry,
     TaskExpander,
-    WorkspaceAccess,
 )
 from ..core import (
     HmacCursorSigner,
@@ -46,6 +45,7 @@ from ..workspace import (
     RepositoryInstructionResolver,
     Sandbox,
     Workspace,
+    WorkspaceAccess,
 )
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
