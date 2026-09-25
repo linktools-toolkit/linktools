@@ -553,10 +553,7 @@ class AgentExecutor:
             model_journal=model_journal,
             sandbox=self._sandbox,
         )
-        capabilities = cast(
-            "tuple[AbstractCapability[AgentContext[object]], ...]",
-            (*capabilities, _thinking_capability(scope.thinking)),
-        )
+        capabilities = (*capabilities, _thinking_capability(scope.thinking))
         if scope.replace_history_system_prompt:
             capabilities = (
                 *capabilities,
@@ -566,7 +563,7 @@ class AgentExecutor:
             )
         capabilities = (
             *capabilities,
-            _event_stream_capability(cast(EventSink, scope.event_sink)),
+            _event_stream_capability(scope.event_sink),
         )
         _logger.debug(
             "agent execution started: agent=%s revision=%s step=%s "
@@ -804,7 +801,7 @@ async def _materialize_agent(
     workspace_descriptors: dict[str, ManagedToolDescriptor] = {}
     compaction_policy = RuntimeCompactionPolicy()
     for candidate in compiled_agent.selected_tools:
-        source_tool = cast("Tool[AgentContext[object]]", candidate.value)
+        source_tool = candidate.value
         metadata = _bound_tool_metadata(candidate)
         tool = _tool_with_metadata(source_tool, metadata)
         tool_class = tool_class_from_metadata(metadata)
@@ -830,11 +827,7 @@ async def _materialize_agent(
     for candidate in compiled_agent.selected_runtime_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        capability = cast(
-            "AbstractCapability[AgentContext[object]]",
-            candidate.value,
-        )
-        capabilities.append(capability)
+        capabilities.append(candidate.value)
     if compiled_agent.skill_definitions:
         skill_capability = SkillCapability(
             compiled_agent.skill_definitions,
@@ -1005,9 +998,7 @@ async def _materialize_agent(
         model_request_observer=model_observation.record_external_model_request,
         capture_store=capture_store,
     )
-    capabilities.extend(
-        cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform)
-    )
+    capabilities.extend(platform)
 
     business_output_type: object
     if scope.binding.output_binding.mode == "text":
@@ -1019,9 +1010,7 @@ async def _materialize_agent(
     runtime_instructions: list[Any] = []
     if base_instructions:
         runtime_instructions.append(base_instructions)
-    agent = cast(
-        "PydanticAgent[AgentContext[object], object]",
-        PydanticAgent(
+    agent = PydanticAgent(
             model,
             name=compiled_agent.spec.id,
             system_prompt=compiled_agent.spec.system_prompt,
@@ -1033,8 +1022,7 @@ async def _materialize_agent(
                 "output": compiled_agent.spec.output_retries,
             },
             toolsets=tuple(raw_toolsets),
-        ),
-    )
+        )
     return agent, tuple(capabilities)
 
 
@@ -1155,7 +1143,7 @@ class _RuntimeThinking(Thinking):
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
         del ctx
-        _validate_thinking_model(request_context.model, cast(ThinkingValue, self.effort))
+        _validate_thinking_model(request_context.model, self.effort)
         return await handler(request_context)
 
 
