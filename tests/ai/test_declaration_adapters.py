@@ -161,6 +161,18 @@ def test_agent_markdown_resolves_only_stable_author_defaults() -> None:
     assert spec.usage_limits is None
 
 
+def test_skill_markdown_ignores_unrelated_frontmatter_fields() -> None:
+    spec = SkillMarkdownSpecCodec().decode(
+        b"---\nname: review\ndescription: Review changes.\n"
+        b"compatibility: [future]\nlicense: {future: true}\n"
+        b"allowed-tools: [future]\ncustom-field: {nested: true}\n"
+        b"---\nReview changes.\n"
+    )
+
+    assert spec.id == "review"
+    assert spec.description == "Review changes."
+
+
 def test_agent_markdown_metadata_round_trips_without_changing_identity() -> None:
     document = (
         b"---\nmetadata:\n  author: Mei\n  version: 2\n"
