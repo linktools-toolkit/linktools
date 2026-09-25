@@ -79,7 +79,7 @@ class _DiagnosticModels:
 
 def _binding_contract() -> AgentBindingContract:
     return AgentBindingContract(
-        agent_spec=AgentSpec("default", model_route="default"),
+        agent_spec=AgentSpec("default", model="default"),
         model_contract=dict(_DiagnosticModelBinding.contract),
         selected=(),
         subagents=(),
