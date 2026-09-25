@@ -2,14 +2,7 @@
 # -*- coding: utf-8 -*-
 """Workspace identity, discovery, policy, instructions, and sandbox contracts."""
 
-from ._instructions import (
-    AssetRuleCatalog,
-    AssetRuleInstructionResolver,
-    LocalRepositoryInstructionResolver,
-    RepositoryInstructionDocument,
-    RepositoryInstructionResolver,
-    RepositoryInstructions,
-)
+from ._instructions import LocalRepositoryInstructionResolver
 from ._root import (
     PermissionDecision,
     ToolPermissionRule,
@@ -38,13 +31,8 @@ __all__ = [
     "DisabledSandbox",
     "ReadOnlySandboxPolicy",
     "BubblewrapSandbox",
-    "AssetRuleCatalog",
-    "AssetRuleInstructionResolver",
     "LocalRepositoryInstructionResolver",
     "PermissionDecision",
-    "RepositoryInstructionDocument",
-    "RepositoryInstructionResolver",
-    "RepositoryInstructions",
     "Sandbox",
     "SandboxOperationRejected",
     "SandboxResource",
