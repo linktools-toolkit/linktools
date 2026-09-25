@@ -16,7 +16,7 @@ from ..core import (
     validate_logical_id,
 )
 from ..errors import AIError, ErrorCode
-from ._resource_path import normalize_resource_path
+from ._resource_path import require_resource_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +26,7 @@ class SkillResourceVersion:
     executable_bits: int = 0
 
     def __post_init__(self) -> None:
-        _normalize_resource_path(self.path)
+        _require_resource_path(self.path)
         if not isinstance(self.asset, AssetVersionRef):
             raise TypeError("skill resource asset must be AssetVersionRef")
         _validate_resource_mode(self.executable_bits)
@@ -89,7 +89,7 @@ class SkillResourceView:
         if resources != self.resources or len(resources) != len(set(resources)):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for path in resources:
-            _normalize_resource_path(path)
+            _require_resource_path(path)
 
 
 @runtime_checkable
@@ -124,12 +124,12 @@ class LocalSkillResourceSource:
 
     async def read(self, source: SkillSourceRef, path: str) -> bytes:
         logical_root = self._root_ref(source)
-        relative = _normalize_resource_path(path)
+        relative = _require_resource_path(path)
         return await asyncio.to_thread(self._read_sync, logical_root, relative)
 
     async def resource_mode(self, source: SkillSourceRef, path: str) -> int:
         logical_root = self._root_ref(source)
-        relative = _normalize_resource_path(path)
+        relative = _require_resource_path(path)
         package = await asyncio.to_thread(self._package_path, logical_root)
         resolved = await asyncio.to_thread(
             _resolve_contained_file,
@@ -165,7 +165,7 @@ class LocalSkillResourceSource:
                     }:
                         continue
                     raise
-                resources.append(_normalize_resource_path(relative))
+                resources.append(_require_resource_path(relative))
         return SkillResourceView(
             SkillLocation("local", str(package)),
             tuple(sorted(resources)),
@@ -220,7 +220,7 @@ class AssetSkillResourceSource:
 
     async def resource_mode(self, source: SkillSourceRef, path: str) -> int:
         binding = self._binding(source)
-        relative = _normalize_resource_path(path)
+        relative = _require_resource_path(path)
         for item in binding.resource_versions:
             if item.path == relative:
                 return item.executable_bits
@@ -228,7 +228,7 @@ class AssetSkillResourceSource:
 
     async def read(self, source: SkillSourceRef, path: str) -> bytes:
         binding = self._binding(source)
-        relative = _normalize_resource_path(path)
+        relative = _require_resource_path(path)
         for item in binding.resource_versions:
             if item.path == relative:
                 return (await self._asset_reader.read_versions((item.asset,)))[0]
@@ -282,12 +282,12 @@ class SkillSourceRegistry:
 
 
 def normalize_skill_resource_path(path: str) -> str:
-    return _normalize_resource_path(path)
+    return _require_resource_path(path)
 
 
-def _normalize_resource_path(path: str) -> str:
+def _require_resource_path(path: str) -> str:
     try:
-        return normalize_resource_path(path)
+        return require_resource_path(path)
     except ValueError as error:
         raise AIError(
             ErrorCode.REQUEST_FIELD_INVALID,
