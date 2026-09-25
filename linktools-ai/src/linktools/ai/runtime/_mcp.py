@@ -332,16 +332,9 @@ async def materialize_mcp_capabilities(
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             allowed = policy[server.id]
             if sandbox is None:
-                host_args = [
-                    argument
-                    for argument in projection.args
-                    if isinstance(argument, str)
-                ]
-                if len(host_args) != len(projection.args):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 transport = StdioTransport(
                     server.command,
-                    host_args,
+                    list(projection.args),
                     cwd=host_cwd,
                 )
             else:
