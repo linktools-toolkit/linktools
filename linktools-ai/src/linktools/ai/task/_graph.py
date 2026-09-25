@@ -27,7 +27,7 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..spec import binding_identity_payload
+from ..spec import binding_digest_payload
 
 
 def normalize_timeout_seconds(value: object) -> "float | None":
@@ -500,7 +500,7 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
     ):
         node_input = dict(node_input)
         node_input["binding"] = canonical_sha256(
-            binding_identity_payload(node_input["binding"])
+            binding_digest_payload(node_input["binding"])
         )
         prompt = node_input.get("user_prompt")
         if isinstance(prompt, Mapping) and prompt.get("kind") in {

@@ -60,6 +60,14 @@ def _request_files(value: Sequence[str]) -> tuple[str, ...]:
     return files
 
 
+def _is_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
     user_prompt: "UserPromptInput"
