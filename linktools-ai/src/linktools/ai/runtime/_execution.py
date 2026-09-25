@@ -701,8 +701,8 @@ class DefaultExecutionService:
             {
                 "version": 1,
                 "kind": "task",
-                "task_type": binding.task_type,
-                "task_version": binding.task_version,
+                "task_id": binding.task_id,
+                "task_revision": binding.task_revision,
             },
         )
         scope = "execution.task"

@@ -52,8 +52,8 @@ from .service_api import (
 )
 
 _logger = environ.get_logger("ai.runtime.planner")
-_AGENT_TASK_TYPE = "linktools.ai.agent"
-_AGENT_TASK_VERSION = 1
+_AGENT_TASK_ID = "linktools.ai.agent"
+_AGENT_TASK_REVISION = 1
 _AGENT_BODY_FIELDS = frozenset(
     {
         "binding",
@@ -69,8 +69,8 @@ _AGENT_BODY_FIELDS = frozenset(
 
 
 class _AgentTaskNodeHandler:
-    type = _AGENT_TASK_TYPE
-    version = _AGENT_TASK_VERSION
+    id = _AGENT_TASK_ID
+    revision = _AGENT_TASK_REVISION
 
     def __init__(
         self,
@@ -215,8 +215,8 @@ class _AgentTaskNodeHandler:
                 safe_details={
                     "graph_id": graph_id,
                     "node_id": node_id,
-                    "task_type": self.type,
-                    "task_version": self.version,
+                    "task_id": self.id,
+                    "task_revision": self.revision,
                 },
             ) from error
 
@@ -464,12 +464,15 @@ class _AgentTaskNodeHandler:
         AgentBindingSnapshot,
     ]:
         payload = node.input
-        if payload.get("type") != self.type or payload.get("version") != self.version:
+        if (
+            payload.get("task_id") != self.id
+            or payload.get("task_revision") != self.revision
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         body = {
             key: value
             for key, value in payload.items()
-            if key not in {"type", "version"}
+            if key not in {"task_id", "task_revision"}
         }
         normalized = self.validate_recovery(
             body,

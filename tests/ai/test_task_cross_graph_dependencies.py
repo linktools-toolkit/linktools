@@ -67,7 +67,7 @@ async def test_prepare_node_authorizes_source_header_and_deduplicates_hold() -> 
     )
     node = TaskNode(
         "target-node",
-        input={"type": "example.task", "version": 1},
+        input={"task_id": "example.task", "task_revision": 1},
         input_refs={"first": reference, "second": reference},
     )
     source_header = ResourceRef(

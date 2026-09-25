@@ -317,7 +317,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "loaded_context_message": ("message", "source"),
         "loaded_model_context": ("messages",),
         "runtime_payload_ref": ("payload", "source_domain"),
-        "task_binding_snapshot": ("task_type", "task_version", "effect", "output_contract", "timeout_seconds", "max_attempts", "retry_delay_seconds", "reconcile"),
+        "task_binding_snapshot": ("task_id", "task_revision", "effect", "output_contract", "timeout_seconds", "max_attempts", "retry_delay_seconds", "reconcile"),
         "transcript_chunk": ("owner_id", "first_message_index", "message_count", "origin", "codec", "raw_digest", "raw_size", "content"),
         "transcript_head": ("owner_domain", "owner_id", "message_count", "chunk_count", "quality"),
         "transcript_message_ref": ("source_domain", "owner_id", "message_index"),
@@ -1711,7 +1711,7 @@ def _iter_runtime_object_refs(
             node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted=True))
             prompt = node.input.get("user_prompt")
             if (
-                node.input.get("type") == "linktools.ai.agent"
+                node.input.get("task_id") == "linktools.ai.agent"
                 and isinstance(prompt, Mapping)
                 and prompt.get("kind") == "stored-user-content-v1"
             ):

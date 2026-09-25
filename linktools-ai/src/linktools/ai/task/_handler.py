@@ -28,8 +28,8 @@ from ._graph import (
 )
 
 AppT = TypeVar("AppT")
-_TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
-_RESERVED_TASK_TYPE_PREFIX = "linktools.ai."
+_TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_RESERVED_TASK_ID_PREFIX = "linktools.ai."
 _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
@@ -37,8 +37,8 @@ _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 class TaskBindingSnapshot:
     """Durable semantic binding for one application-owned task handler."""
 
-    task_type: str
-    task_version: int
+    task_id: str
+    task_revision: int
     effect: Literal["none", "replay_safe", "non_replay_safe"]
     output_contract: Mapping[str, JsonValue]
     timeout_seconds: float | None
@@ -52,14 +52,14 @@ class TaskBindingSnapshot:
             self.retry_delay_seconds
         )
         if (
-            not isinstance(self.task_type, str)
-            or _TASK_TYPE.fullmatch(self.task_type) is None
+            not isinstance(self.task_id, str)
+            or _TASK_ID.fullmatch(self.task_id) is None
         ):
-            raise ValueError("task binding type is invalid")
+            raise ValueError("task binding id is invalid")
         if (
-            not isinstance(self.task_version, int)
-            or isinstance(self.task_version, bool)
-            or self.task_version < 1
+            not isinstance(self.task_revision, int)
+            or isinstance(self.task_revision, bool)
+            or self.task_revision < 1
             or self.effect not in {"none", "replay_safe", "non_replay_safe"}
             or isinstance(self.max_attempts, bool)
             or not isinstance(self.max_attempts, int)
@@ -79,8 +79,8 @@ class TaskBindingSnapshot:
         return canonical_sha256(
             {
                 "contract": "task-binding-v1",
-                "task_type": self.task_type,
-                "task_version": self.task_version,
+                "task_id": self.task_id,
+                "task_revision": self.task_revision,
                 "effect": self.effect,
                 "output_contract": dict(self.output_contract),
                 "timeout_seconds": self.timeout_seconds,
@@ -262,10 +262,10 @@ class TaskNodeContext(Generic[AppT]):
 @runtime_checkable
 class TaskNodeHandler(Protocol[AppT]):
     @property
-    def type(self) -> str: ...
+    def id(self) -> str: ...
 
     @property
-    def version(self) -> int: ...
+    def revision(self) -> int: ...
 
     def normalize(
         self,
@@ -279,25 +279,25 @@ class TaskNodeHandler(Protocol[AppT]):
 
 @dataclass(frozen=True)
 class TaskFunction(Generic[AppT]):
-    type: str
-    version: int
+    id: str
+    revision: int
     function: Callable[[TaskNodeContext[AppT]], Awaitable[JsonValue]] = field(
         repr=False,
         compare=False,
     )
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.type, str)
-            or _TASK_TYPE.fullmatch(self.type) is None
-            or self.type.startswith(_RESERVED_TASK_TYPE_PREFIX)
+            not isinstance(self.id, str)
+            or _TASK_ID.fullmatch(self.id) is None
+            or self.id.startswith(_RESERVED_TASK_ID_PREFIX)
         ):
-            raise ValueError("task handler type is invalid")
+            raise ValueError("task handler id is invalid")
         if (
-            not isinstance(self.version, int)
-            or isinstance(self.version, bool)
-            or self.version < 1
+            not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
         ):
-            raise ValueError("task handler version must be positive")
+            raise ValueError("task handler revision must be positive")
         if not callable(self.function):
             raise TypeError("task handler function must be callable")
 
@@ -310,7 +310,7 @@ class TaskFunction(Generic[AppT]):
         normalized = normalize_json_value(dict(input))
         if not isinstance(normalized, dict):
             raise TypeError("task input must be a mapping")
-        if "type" in normalized or "version" in normalized:
+        if "task_id" in normalized or "task_revision" in normalized:
             raise ValueError("task handler input cannot contain reserved fields")
         return normalized
 
@@ -339,8 +339,8 @@ class TaskFunction(Generic[AppT]):
             node_id,
             dependencies,
             input={
-                "type": self.type,
-                "version": self.version,
+                "task_id": self.id,
+                "task_revision": self.revision,
                 **normalized,
             },
             budget_cost=budget_cost,

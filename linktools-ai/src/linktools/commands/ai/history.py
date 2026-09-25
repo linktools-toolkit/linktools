@@ -136,7 +136,7 @@ def _execution_panel(execution: ExecutionInfo) -> Panel:
     table.add_row("Status", _status_text(execution.status.value))
     table.add_row("Kind", execution.binding_kind)
     table.add_row("Agent", execution.agent_id or "-")
-    table.add_row("Task", execution.task_type or "-")
+    table.add_row("Task", execution.task_id or "-")
     table.add_row("Session", execution.session_id or "-")
     table.add_row("Lineage", execution.lineage_kind.value)
     table.add_row("Parent", execution.parent_execution_id or "-")

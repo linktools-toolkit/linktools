@@ -577,7 +577,10 @@ class _SuccessfulTaskRunner:
 
 @pytest.mark.asyncio
 async def test_task_commit_unknown_readback_projects_durable_terminal_history() -> None:
-    node = TaskNode("node", input={"type": "agent"})
+    node = TaskNode(
+        "node",
+        input={"task_id": "agent", "task_revision": 1},
+    )
     repository = _CommitUnknownTaskRepository(node)
     recorder = _CaptureRecorder()
     projector = _TaskMetricProjector(

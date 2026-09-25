@@ -56,7 +56,7 @@ class TaskCapabilitySnapshotStore:
         binding_resolver: _RuntimeBindingResolver,
         object_store: ObjectStore,
         *,
-        agent_task_type: str,
+        agent_task_id: str,
     ) -> None:
         if not isinstance(namespace, str) or not namespace:
             raise ValueError("namespace is required")
@@ -64,13 +64,13 @@ class TaskCapabilitySnapshotStore:
             raise TypeError("compiler must be AgentCompiler")
         if not isinstance(binding_resolver, _RuntimeBindingResolver):
             raise TypeError("binding_resolver must be _RuntimeBindingResolver")
-        if not isinstance(agent_task_type, str) or not agent_task_type:
-            raise ValueError("agent_task_type is required")
+        if not isinstance(agent_task_id, str) or not agent_task_id:
+            raise ValueError("agent_task_id is required")
         self._namespace = namespace
         self._compiler = compiler
         self._binding_resolver = binding_resolver
         self._objects = object_store
-        self._agent_task_type = agent_task_type
+        self._agent_task_id = agent_task_id
 
     async def capture(
         self,
@@ -191,7 +191,7 @@ class TaskCapabilitySnapshotStore:
         self,
         node: TaskNode,
     ) -> AgentBindingSnapshot | None:
-        if node.input.get("type") != self._agent_task_type:
+        if node.input.get("task_id") != self._agent_task_id:
             return None
         payload = node.input.get("binding")
         if not isinstance(payload, Mapping):

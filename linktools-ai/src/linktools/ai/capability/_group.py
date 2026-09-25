@@ -57,12 +57,12 @@ class _RegisteredTaskHandler(Generic[AppT]):
     ) = field(default=None, repr=False, compare=False)
 
     @property
-    def type(self) -> str:
-        return self.handler.type
+    def id(self) -> str:
+        return self.handler.id
 
     @property
-    def version(self) -> int:
-        return self.handler.version
+    def revision(self) -> int:
+        return self.handler.revision
 
     def normalize(
         self,
@@ -219,7 +219,7 @@ class CapabilityGroup(Generic[AppT]):
             "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
         ) = None,
     ) -> "TaskNodeHandler[AppT]":
-        """Register one application-owned TaskNode handler version."""
+        """Register one application-owned TaskNode handler revision."""
         if effect not in {"none", "replay_safe", "non_replay_safe"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if reconcile is not None and not callable(reconcile):
@@ -245,7 +245,7 @@ class CapabilityGroup(Generic[AppT]):
         return handler
 
     def task_expander(self, expander: TaskExpander) -> TaskExpanderRef:
-        """Register one pure application-owned TaskGraph expander version."""
+        """Register one pure application-owned TaskGraph expander revision."""
         contribution = cast(
             "CapabilityContribution[AppT]",
             CapabilityContribution.from_task_expander(expander),

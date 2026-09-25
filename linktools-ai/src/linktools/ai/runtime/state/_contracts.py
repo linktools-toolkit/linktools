@@ -758,9 +758,9 @@ class ExecutionRecord:
         )
 
     @property
-    def task_type(self) -> str | None:
+    def task_id(self) -> str | None:
         return (
-            self.binding.task_type
+            self.binding.task_id
             if isinstance(self.binding, TaskBindingSnapshot)
             else None
         )

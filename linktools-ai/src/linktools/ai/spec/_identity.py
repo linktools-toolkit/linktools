@@ -38,13 +38,13 @@ def capability_ref_payload(
     if kind in {"tool", "capability"}:
         return _ref_payload(kind, identity, _revision(contract))
     if kind == "task":
-        ref_id = _text(contract.get("task_type"))
-        revision = _positive_int(contract.get("task_version"))
+        ref_id = _text(contract.get("id"))
+        revision = _positive_int(contract.get("revision"))
         if identity != ref_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return _ref_payload(kind, ref_id, revision)
-    ref_id = _text(contract.get("expander_id"))
-    revision = _positive_int(contract.get("expander_revision"))
+    ref_id = _text(contract.get("id"))
+    revision = _positive_int(contract.get("revision"))
     if identity != ref_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _ref_payload(kind, ref_id, revision)

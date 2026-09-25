@@ -86,15 +86,15 @@ from .state import ArtifactRecord, ArtifactState, RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.planner")
 AppT = TypeVar("AppT")
-_TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
-_DEFERRED_INPUT_TYPE = "linktools.ai.input"
-_DEFERRED_INPUT_VERSION = 1
+_DEFERRED_INPUT_ID = "linktools.ai.input"
+_DEFERRED_INPUT_REVISION = 1
 
 
 class _DeferredInputHandler:
-    type = _DEFERRED_INPUT_TYPE
-    version = _DEFERRED_INPUT_VERSION
+    id = _DEFERRED_INPUT_ID
+    revision = _DEFERRED_INPUT_REVISION
     effect = "none"
 
     def normalize(self, input: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
@@ -414,7 +414,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
     async def _materialize_node_input(self, node: TaskNode, tenant_id: str) -> TaskNode:
         body = node.input
         prompt = body.get("user_prompt")
-        if body.get("type") != self._agent.type or not isinstance(prompt, Mapping):
+        if body.get("task_id") != self._agent.id or not isinstance(prompt, Mapping):
             return node
         if prompt.get("kind") != "task-user-content-v1":
             return node
@@ -501,7 +501,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         graph_id: str,
     ) -> TaskNode:
-        if node.input.get("type") != self._agent.type:
+        if node.input.get("task_id") != self._agent.id:
             return node
         snapshot = self._resolved_agent_binding(
             node,
@@ -755,12 +755,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         return self._agent.background_failure
 
     def admit_node(self, node: TaskNode) -> TaskNode:
-        task_type, task_version, body = _parse_node(node, request=True)
+        task_id, task_revision, body = _parse_node(node, request=True)
         prompt = body.get("user_prompt")
-        if task_type == self._agent.type and isinstance(prompt, Mapping):
+        if task_id == self._agent.id and isinstance(prompt, Mapping):
             if prompt.get("kind") == "stored-user-content-v1":
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        handler = self._handler(task_type, task_version, request=True)
+        handler = self._handler(task_id, task_revision, request=True)
         if node.expander is not None:
             self._resolve_expander(node.expander, request=True)
         try:
@@ -772,8 +772,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             node.node_id,
             node.dependencies,
             input={
-                "type": task_type,
-                "version": task_version,
+                "task_id": task_id,
+                "task_revision": task_revision,
                 **canonical_body,
             },
             budget_cost=node.budget_cost,
@@ -797,10 +797,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     def validate_input(self, node: TaskNode, value: JsonValue) -> None:
         del value
-        task_type, task_version, _body = _parse_node(node, request=False)
+        task_id, task_revision, _body = _parse_node(node, request=False)
         if (
-            task_type != self._deferred_input.type
-            or task_version != self._deferred_input.version
+            task_id != self._deferred_input.id
+            or task_revision != self._deferred_input.revision
         ):
             raise AIError(ErrorCode.TASK_NOT_READY)
 
@@ -831,9 +831,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 graph_id=snapshot.graph_id,
                 request=False,
             )
-            task_type, task_version, body = _parse_node(node, request=False)
+            task_id, task_revision, body = _parse_node(node, request=False)
             try:
-                handler = self._handler(task_type, task_version, request=False)
+                handler = self._handler(task_id, task_revision, request=False)
             except AIError as error:
                 if error.code is not ErrorCode.CAPABILITY_REQUIRED_MISSING:
                     raise
@@ -841,8 +841,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
                     safe_details={
                         "kind": "task",
-                        "task_type": task_type,
-                        "task_version": task_version,
+                        "task_id": task_id,
+                        "task_revision": task_revision,
                         "graph_id": snapshot.graph_id,
                         "node_id": node.node_id,
                     },
@@ -886,16 +886,16 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         safe_details={
                             "graph_id": snapshot.graph_id,
                             "node_id": node.node_id,
-                            "task_type": task_type,
-                            "task_version": task_version,
+                            "task_id": task_id,
+                            "task_revision": task_revision,
                         },
                     ) from error
             canonical = TaskNode(
                 node.node_id,
                 node.dependencies,
                 input={
-                    "type": task_type,
-                    "version": task_version,
+                    "task_id": task_id,
+                    "task_revision": task_revision,
                     **canonical_body,
                 },
                 budget_cost=node.budget_cost,
@@ -915,8 +915,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     safe_details={
                         "graph_id": snapshot.graph_id,
                         "node_id": node.node_id,
-                        "task_type": task_type,
-                        "task_version": task_version,
+                        "task_id": task_id,
+                        "task_revision": task_revision,
                     },
                 )
 
@@ -935,8 +935,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         correlation = invocation.correlation
         dependency_results = invocation.dependency_results
         dependency_states = invocation.dependency_states
-        task_type, task_version, body = _parse_node(node, request=False)
-        handler = self._handler(task_type, task_version, request=False)
+        task_id, task_revision, body = _parse_node(node, request=False)
+        handler = self._handler(task_id, task_revision, request=False)
         dependencies = await self._dependencies(
             node,
             dependency_results=dependency_results,
@@ -966,7 +966,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 graph_id=graph_id,
             )
 
-        binding = _task_binding(node, handler, task_type, task_version)
+        binding = _task_binding(node, handler, task_id, task_revision)
         idempotency_key = _custom_idempotency_key(
             graph_id,
             node,
@@ -1468,13 +1468,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         execution_id: str,
     ) -> TaskNodeRunResult:
         node = invocation.node
-        task_type, task_version, _body = _parse_node(
+        task_id, task_revision, _body = _parse_node(
             node,
             request=False,
         )
         handler = self._handler(
-            task_type,
-            task_version,
+            task_id,
+            task_revision,
             request=False,
         )
         view = await self._execution.inspect(
@@ -1552,8 +1552,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             node_id,
             dependencies,
             input={
-                "type": self._agent.type,
-                "version": self._agent.version,
+                "task_id": self._agent.id,
+                "task_revision": self._agent.revision,
                 "binding": binding.snapshot.to_payload(),
                 "user_prompt": task_prompt_draft(user_prompt),
                 "mode": "run",
@@ -1625,8 +1625,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             node_id,
             dependencies,
             input={
-                "type": self._agent.type,
-                "version": self._agent.version,
+                "task_id": self._agent.id,
+                "task_revision": self._agent.revision,
                 "binding": binding.to_payload(),
                 "user_prompt": task_prompt_draft(user_prompt),
                 "mode": "run",
@@ -1731,8 +1731,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if execution_id is None:
             return
 
-        task_type, task_version, body = _parse_node(node, request=False)
-        handler = self._handler(task_type, task_version, request=False)
+        task_id, task_revision, body = _parse_node(node, request=False)
+        handler = self._handler(task_id, task_revision, request=False)
         dependencies = await self._dependencies(
             node,
             dependency_results=dependency_results,
@@ -1918,8 +1918,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             )
         nodes: list[TaskNode] = []
         for raw_node in raw_nodes:
-            task_type = raw_node.input.get("type")
-            if task_type == self._agent.type:
+            task_id = raw_node.input.get("task_id")
+            if task_id == self._agent.id:
                 generated = context_impl._generated_agent_task(raw_node.node_id)
                 if generated != raw_node:
                     raise _expansion_error(
@@ -1993,8 +1993,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     "request": request,
                 },
             )
-        task_type = node.input.get("type")
-        if not self._task_durable or task_type != self._agent.type:
+        task_id = node.input.get("task_id")
+        if not self._task_durable or task_id != self._agent.id:
             return
         if self._execution_durable and self._recovery_durable:
             return
@@ -2123,26 +2123,26 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     def _handler(
         self,
-        task_type: str,
-        task_version: int,
+        task_id: str,
+        task_revision: int,
         *,
         request: bool,
     ) -> TaskNodeHandler[AppT] | _AgentTaskNodeHandler:
-        if task_type == self._agent.type and task_version == self._agent.version:
+        if task_id == self._agent.id and task_revision == self._agent.revision:
             return self._agent
         if (
-            task_type == self._deferred_input.type
-            and task_version == self._deferred_input.version
+            task_id == self._deferred_input.id
+            and task_revision == self._deferred_input.revision
         ):
             return self._deferred_input
-        handler = self._handlers.get((task_type, task_version))
+        handler = self._handlers.get((task_id, task_revision))
         if handler is not None:
             return handler
         raise AIError(
             ErrorCode.REQUEST_FIELD_INVALID
             if request
             else ErrorCode.CAPABILITY_REQUIRED_MISSING,
-            safe_details={"task_type": task_type, "task_version": task_version},
+            safe_details={"task_id": task_id, "task_revision": task_revision},
         )
 
 
@@ -2152,14 +2152,14 @@ def _parse_node(
     request: bool,
 ) -> tuple[str, int, dict[str, JsonValue]]:
     payload = node.input
-    task_type = payload.get("type")
-    task_version = payload.get("version")
+    task_id = payload.get("task_id")
+    task_revision = payload.get("task_revision")
     if (
-        not isinstance(task_type, str)
-        or _TASK_TYPE.fullmatch(task_type) is None
-        or not isinstance(task_version, int)
-        or isinstance(task_version, bool)
-        or task_version < 1
+        not isinstance(task_id, str)
+        or _TASK_ID.fullmatch(task_id) is None
+        or not isinstance(task_revision, int)
+        or isinstance(task_revision, bool)
+        or task_revision < 1
     ):
         raise AIError(
             ErrorCode.REQUEST_FIELD_INVALID
@@ -2167,24 +2167,26 @@ def _parse_node(
             else ErrorCode.STORAGE_INTEGRITY_ERROR
         )
     body = {
-        key: value for key, value in payload.items() if key not in {"type", "version"}
+        key: value
+        for key, value in payload.items()
+        if key not in {"task_id", "task_revision"}
     }
-    return task_type, task_version, body
+    return task_id, task_revision, body
 
 
 def _external_handler_identity(handler: TaskNodeHandler[object]) -> tuple[str, int]:
-    task_type = handler.type
-    task_version = handler.version
+    task_id = handler.id
+    task_revision = handler.revision
     if (
-        not isinstance(task_type, str)
-        or _TASK_TYPE.fullmatch(task_type) is None
-        or task_type.startswith("linktools.ai.")
-        or not isinstance(task_version, int)
-        or isinstance(task_version, bool)
-        or task_version < 1
+        not isinstance(task_id, str)
+        or _TASK_ID.fullmatch(task_id) is None
+        or task_id.startswith("linktools.ai.")
+        or not isinstance(task_revision, int)
+        or isinstance(task_revision, bool)
+        or task_revision < 1
     ):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return task_type, task_version
+    return task_id, task_revision
 
 
 def _external_expander_identity(expander: TaskExpander) -> tuple[str, int]:
@@ -2221,7 +2223,7 @@ def _normalize_handler_body(value: Mapping[str, JsonValue]) -> dict[str, JsonVal
     normalized = normalize_json_value(dict(value))
     if not isinstance(normalized, dict):
         raise TypeError("task handler normalize must return a mapping")
-    if "type" in normalized or "version" in normalized:
+    if "task_id" in normalized or "task_revision" in normalized:
         raise ValueError("task handler normalize returned reserved fields")
     return normalized
 
@@ -2278,8 +2280,8 @@ def _custom_idempotency_key(
 def _task_binding(
     node: TaskNode,
     handler: object,
-    task_type: str,
-    task_version: int,
+    task_id: str,
+    task_revision: int,
 ) -> TaskBindingSnapshot:
     output_contract: Mapping[str, JsonValue] = (
         {"kind": "json"}
@@ -2287,8 +2289,8 @@ def _task_binding(
         else dict(node.output_contract)
     )
     return TaskBindingSnapshot(
-        task_type,
-        task_version,
+        task_id,
+        task_revision,
         node.effect,
         output_contract,
         node.timeout_seconds,

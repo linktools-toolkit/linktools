@@ -656,7 +656,7 @@ async def _build_local_components(
             compiler,
             binding_resolver,
             state.object_store(RuntimeDomain.TASK),
-            agent_task_type="linktools.ai.agent",
+            agent_task_id="linktools.ai.agent",
         )
         task_runner = RuntimeTaskNodeRunner(
             execution,

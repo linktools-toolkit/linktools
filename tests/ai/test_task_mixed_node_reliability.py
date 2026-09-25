@@ -89,7 +89,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
 
     class Expand:
         id = "example.attachments"
-        version = 1
+        revision = 1
 
         def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
             return (
@@ -397,9 +397,9 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
 
 
 class _TestTaskExpander:
-    def __init__(self, expander_id: str, version: int = 1) -> None:
+    def __init__(self, expander_id: str, revision: int = 1) -> None:
         self.id = expander_id
-        self.version = version
+        self.revision = revision
 
     def expand(self, context: object) -> tuple[TaskNode, ...]:
         del context
@@ -408,13 +408,13 @@ class _TestTaskExpander:
 
 class _ApplicationGraphExpander:
     id = "application.graph"
-    version = 1
+    revision = 1
 
     def __init__(self, handler: TaskFunction[None]) -> None:
         self._handler = handler
 
     def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
-        reference = TaskExpanderRef(self.id, self.version)
+        reference = TaskExpanderRef(self.id, self.revision)
         source_id = context.source_node.node_id
         if source_id == "application-root":
             return (
@@ -446,7 +446,7 @@ class _ApplicationGraphExpander:
 
 class _AgentGraphExpander:
     id = "application.agent-graph"
-    version = 1
+    revision = 1
 
     def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
         return (
@@ -947,7 +947,10 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
                 (
                     TaskNode(
                         "input",
-                        input={"type": "linktools.ai.input", "version": 1},
+                        input={
+                            "task_id": "linktools.ai.input",
+                            "task_revision": 1,
+                        },
                     ),
                 ),
             ),

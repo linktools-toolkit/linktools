@@ -48,8 +48,8 @@ ContributionValue: TypeAlias = (
     | TaskNodeHandler[object]
     | TaskExpander
 )
-_TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
-_RESERVED_TASK_TYPE_PREFIX = "linktools.ai."
+_TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_RESERVED_TASK_ID_PREFIX = "linktools.ai."
 _RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
 
 
@@ -298,13 +298,13 @@ def _contribution_contract(
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         return contract
     if kind == "task" and isinstance(value, TaskNodeHandler):
-        task_type, task_revision = _task_identity(value)
-        if identity != task_type:
+        task_id, task_revision = _task_identity(value)
+        if identity != task_id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return {
             "version": 1,
-            "task_type": task_type,
-            "task_version": task_revision,
+            "id": task_id,
+            "revision": task_revision,
             "effect": _task_effect(value),
             "output": _task_output_contract(value),
             "reconcile": getattr(value, "reconcile", None) is not None,
@@ -315,8 +315,8 @@ def _contribution_contract(
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return {
             "version": 1,
-            "expander_id": expander_id,
-            "expander_revision": expander_revision,
+            "id": expander_id,
+            "revision": expander_revision,
         }
     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
@@ -324,18 +324,18 @@ def _contribution_contract(
 def _task_identity(handler: object) -> tuple[str, int]:
     if not isinstance(handler, TaskNodeHandler):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    task_type = handler.type
-    task_revision = handler.version
+    task_id = handler.id
+    task_revision = handler.revision
     if (
-        not isinstance(task_type, str)
-        or _TASK_TYPE.fullmatch(task_type) is None
-        or task_type.startswith(_RESERVED_TASK_TYPE_PREFIX)
+        not isinstance(task_id, str)
+        or _TASK_ID.fullmatch(task_id) is None
+        or task_id.startswith(_RESERVED_TASK_ID_PREFIX)
         or isinstance(task_revision, bool)
         or not isinstance(task_revision, int)
         or task_revision < 1
     ):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return task_type, task_revision
+    return task_id, task_revision
 
 
 def _task_effect(handler: object) -> str:

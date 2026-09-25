@@ -248,9 +248,13 @@ class TaskNode:
     ) -> "TaskNode":
         """Declare a node whose value is supplied through the Runtime API."""
         values = {} if input is None else dict(input)
-        if "type" in values or "version" in values:
+        if "task_id" in values or "task_revision" in values:
             raise ValueError("task wait input cannot contain reserved fields")
-        values = {"type": "linktools.ai.input", "version": 1, **values}
+        values = {
+            "task_id": "linktools.ai.input",
+            "task_revision": 1,
+            **values,
+        }
         return cls(
             node_id,
             dependencies,
@@ -490,8 +494,8 @@ def _task_graph_request_digest(
 def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
     node_input = node.input
     if (
-        node_input.get("type") == "linktools.ai.agent"
-        and node_input.get("version") == 1
+        node_input.get("task_id") == "linktools.ai.agent"
+        and node_input.get("task_revision") == 1
         and isinstance(node_input.get("binding"), Mapping)
     ):
         node_input = dict(node_input)

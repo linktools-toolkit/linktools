@@ -90,7 +90,7 @@ class ExecutionInfo:
     execution_id: str
     binding_kind: str
     agent_id: str | None
-    task_type: str | None
+    task_id: str | None
     status: ExecutionStatus
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
@@ -196,7 +196,7 @@ def _project_execution_info(
         execution_id=record.execution_id,
         binding_kind=record.binding_kind,
         agent_id=record.agent_id,
-        task_type=record.task_type,
+        task_id=record.task_id,
         status=record.status,
         lineage_kind=record.lineage_kind,
         parent_execution_id=record.parent_execution_id,

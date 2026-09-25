@@ -479,7 +479,7 @@ class _ResultExecutions:
             tenant_id="tenant",
             binding_kind="task",
             agent_id=None,
-            task_type="handler",
+            task_id="handler",
             status=ExecutionStatus.SUCCEEDED,
             lineage_kind=ExecutionLineageKind.RUN,
             parent_execution_id=None,

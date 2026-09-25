@@ -200,8 +200,8 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
                 TaskNode(
                     "root",
                     input={
-                        "type": "linktools.ai.agent",
-                        "version": 1,
+                        "task_id": "linktools.ai.agent",
+                        "task_revision": 1,
                         "binding": fixture.binding.snapshot.to_payload(),
                     },
                 ),
@@ -220,7 +220,7 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
             fixture.compiler,
             fixture.resolver,
             InMemoryObjectStore("task"),
-            agent_task_type="linktools.ai.agent",
+            agent_task_id="linktools.ai.agent",
         )
 
         capability_snapshot = await snapshots.capture(admission, graph)
@@ -545,8 +545,8 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
             TaskNode(
                 "root",
                 input={
-                    "type": "linktools.ai.agent",
-                    "version": 1,
+                    "task_id": "linktools.ai.agent",
+                    "task_revision": 1,
                     "binding": fixture.binding.snapshot.to_payload(),
                 },
             ),
@@ -566,7 +566,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
             fixture.compiler,
             fixture.resolver,
             state.object_store(RuntimeDomain.TASK),
-            agent_task_type="linktools.ai.agent",
+            agent_task_id="linktools.ai.agent",
         )
         await capabilities.capture(admission, graph)
         await state.task.admissions.admit(admission, graph)
@@ -610,7 +610,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
             fixture.compiler,
             fixture.resolver,
             restored.object_store(RuntimeDomain.TASK),
-            agent_task_type="linktools.ai.agent",
+            agent_task_id="linktools.ai.agent",
         )
         loaded = await restored_capabilities.load(admission)
         binding = loaded.bindings[fixture.binding.binding_digest]

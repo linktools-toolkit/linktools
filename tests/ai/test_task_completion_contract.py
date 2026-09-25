@@ -11,7 +11,12 @@ def test_task_node_result_keeps_expansion_outside_execution_identity() -> None:
     result = TaskNodeRunResult(
         digest,
         execution_id="execution",
-        expanded_nodes=(TaskNode("child", input={"type": "app", "version": 1}),),
+        expanded_nodes=(
+            TaskNode(
+                "child",
+                input={"task_id": "app", "task_revision": 1},
+            ),
+        ),
     )
 
     assert result.result_digest == digest

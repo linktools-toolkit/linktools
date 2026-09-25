@@ -151,7 +151,7 @@ class _ExecutionViewSource(Protocol):
     parent_invocation_id: str | None
     session_id: str | None
     binding_kind: str
-    task_type: str | None
+    task_id: str | None
     task_attempt: int
     task_deadline_at: datetime | None
     task_next_attempt_at: datetime | None
@@ -169,7 +169,7 @@ class ExecutionView:
     parent_invocation_id: str | None
     session_id: str | None = None
     binding_kind: str = "agent"
-    task_type: str | None = None
+    task_id: str | None = None
     task_attempt: int = 0
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
@@ -189,7 +189,7 @@ def project_execution_view(source: object) -> ExecutionView:
         parent_invocation_id=value.parent_invocation_id,
         session_id=value.session_id,
         binding_kind=value.binding_kind,
-        task_type=value.task_type,
+        task_id=value.task_id,
         task_attempt=value.task_attempt,
         task_deadline_at=value.task_deadline_at,
         task_next_attempt_at=value.task_next_attempt_at,

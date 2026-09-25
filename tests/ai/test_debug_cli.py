@@ -57,7 +57,7 @@ def _info(
         execution_id=execution_id,
         binding_kind="agent",
         agent_id="agent",
-        task_type=None,
+        task_id=None,
         status=(
             ExecutionStatus.FAILED
             if error_code is not None
@@ -108,7 +108,7 @@ def _record(
         execution_id=info.execution_id,
         binding_kind="task",
         agent_id=None,
-        task_type="debug",
+        task_id="debug",
         status=info.status,
         lineage_kind=info.lineage_kind,
         parent_execution_id=info.parent_execution_id,
