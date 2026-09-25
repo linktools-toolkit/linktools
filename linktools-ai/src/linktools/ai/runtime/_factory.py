@@ -14,7 +14,6 @@ from linktools.core import environ
 from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
-    AssetRuleResourceSource,
     AssetSkillResourceSource,
     CapabilityContribution,
     CapabilityGroup,
@@ -173,17 +172,12 @@ async def compose_runtime_components(
                 if (reader := group.asset_reader) is not None
             )
         )
-        asset_rules: list[tuple[str, str]] = []
-        for group in groups:
-            reader = group.asset_reader
-            if reader is not None:
-                asset_rules.extend(
-                    await AssetRuleResourceSource(group.group_id, reader).load()
-                )
-        rule_ids = tuple(rule_id for rule_id, _content in asset_rules)
-        if len(rule_ids) != len(set(rule_ids)):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        rules = AssetRuleCatalog.from_asset_rules(tuple(asset_rules))
+        instruction_documents = tuple(
+            document
+            for group in groups
+            for document in group.instructions.documents
+        )
+        rules = AssetRuleCatalog(instruction_documents)
         task_handlers = tuple(
             cast("TaskNodeHandler[object]", candidate.value)
             for candidate in candidates
