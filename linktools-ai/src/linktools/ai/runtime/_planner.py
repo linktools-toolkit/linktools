@@ -928,6 +928,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 retry_delay_seconds=node.retry_delay_seconds,
                 output_contract=node.output_contract,
                 effect_policy=node.effect_policy,
+                reconcile=node.reconcile,
                 dependency_policy=node.dependency_policy,
             )
             if canonical.input != node.input:
