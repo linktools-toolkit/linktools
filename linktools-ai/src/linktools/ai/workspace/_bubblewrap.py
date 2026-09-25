@@ -56,7 +56,7 @@ _CLOSE_TIMEOUT_SECONDS = 5.0
 _MAX_RESULT_CHARS = 50_000
 _MOUNTPOINTS = (
     "workspace",
-    "skills",
+    "resources",
     "__linktools_locks",
     "proc",
     "dev",
@@ -66,7 +66,7 @@ _MOUNTPOINTS = (
     "sys",
 )
 _TMPFS_SIZES = (
-    ("/skills", 1 * 1024 * 1024),
+    ("/resources", 1 * 1024 * 1024),
     ("/tmp", 64 * 1024 * 1024),
     ("/home/sandbox", 16 * 1024 * 1024),
     ("/run", 16 * 1024 * 1024),
@@ -1373,7 +1373,7 @@ def _build_bwrap_args(
             "--size",
             str(_TMPFS_SIZES[0][1]),
             "--tmpfs",
-            "/skills",
+            "/resources",
         )
     )
     for resource in resources:
@@ -1415,7 +1415,7 @@ def _build_bwrap_args(
         target = f"/workspace/{path}"
         args.extend(("--tmpfs", target, "--remount-ro", target))
     args.append("--remount-ro")
-    args.append("/skills")
+    args.append("/resources")
     if mode == "worker":
         args.extend(("--bind", str(lock_root), "/__linktools_locks"))
     args.extend(("--proc", "/proc", "--dev", "/dev"))
