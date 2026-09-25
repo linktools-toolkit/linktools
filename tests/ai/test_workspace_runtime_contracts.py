@@ -173,7 +173,7 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     agent_path.parent.mkdir(parents=True)
     skill_path.parent.mkdir(parents=True)
     mcp_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(AgentSpecCodec().encode(AgentSpec("default", model_route="gpt-test")))
+    agent_path.write_bytes(AgentSpecCodec().encode(AgentSpec("default", model="gpt-test")))
     skill_path.write_text(
         "---\nname: review\ndescription: Review changes.\n---\n\nReview changes.\n",
         encoding="utf-8",
