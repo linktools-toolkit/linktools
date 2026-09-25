@@ -100,7 +100,7 @@ class ImmutableJsonMapping(Mapping[str, JsonValue]):
 
 
 def _normalize_mapping(
-    value: Mapping[str, JsonValue],
+    value: Mapping[object, object],
     *,
     allow_empty_keys: bool = False,
 ) -> "dict[str, JsonValue]":
@@ -125,7 +125,7 @@ def _normalize_value(value: object) -> JsonValue:
         return [_normalize_value(item) for item in value]
     if isinstance(value, Mapping):
         return _normalize_mapping(
-            cast("Mapping[str, JsonValue]", value),
+            value,
             allow_empty_keys=True,
         )
     raise TypeError(f"unsupported JSON value: {type(value).__name__}")
