@@ -127,8 +127,6 @@ def test_agent_markdown_preserves_plain_prompt_bom_and_crlf_body() -> None:
         b"---\nnull\n---\nbody",
         b"---\nmodel: first\nmodel: second\n---\nbody",
         b"---\nallow_tools: []\nallow-tools: []\n---\nbody",
-        b"---\nversion: 1\n---\nbody",
-        b"---\nsystem-prompt: hidden\n---\nbody",
         b"---\n<<: {model: inherited}\n---\nbody",
         b"---\nvalue: !!python/object/apply:os.system ['true']\n---\nbody",
     ),
@@ -139,18 +137,18 @@ def test_agent_markdown_rejects_invalid_frontmatter(document: bytes) -> None:
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_agent_markdown_resolves_defaults_without_truthiness_or_deep_merge() -> None:
+def test_agent_markdown_resolves_only_stable_author_defaults() -> None:
     codec = AgentMarkdownSpecCodec()
     defaults = {
         "model": "worker-model",
-        "tool_retries": 7,
         "allow_tools": ["tool"],
         "planning": True,
-        "usage_limits": {"model_requests": 100, "tool_calls": 50},
+        "tool_retries": 7,
+        "usage_limits": {"model_requests": 100},
     }
     spec = codec.decode(
-        b"---\nallow-tools: []\nplanning: false\n"
-        b"usage-limits: {model-requests: 2}\n---\nbody",
+        b"---\nallow-tools: []\nplanning: true\n"
+        b"tool-retries: 1\nusage-limits: {model-requests: 2}\n---\nbody",
         logical_id="team/worker",
         defaults=defaults,
     )
@@ -159,17 +157,8 @@ def test_agent_markdown_resolves_defaults_without_truthiness_or_deep_merge() -> 
     assert spec.model == "worker-model"
     assert spec.allow_tools == ()
     assert spec.planning is False
-    assert spec.tool_retries == 7
-    assert spec.usage_limits is not None
-    assert spec.usage_limits.model_requests == 2
-    assert spec.usage_limits.tool_calls is None
-
-    closed_limits = codec.from_payload(
-        {"system_prompt": "", "usage_limits": None},
-        logical_id="worker",
-        defaults={"usage_limits": {"tool_calls": 10}},
-    )
-    assert closed_limits.usage_limits is None
+    assert spec.tool_retries == AgentSpec.DEFAULT_TOOL_RETRIES
+    assert spec.usage_limits is None
 
 
 def test_agent_markdown_metadata_round_trips_without_changing_identity() -> None:
@@ -227,29 +216,32 @@ def test_agent_markdown_rejects_metadata_that_is_not_a_json_map() -> None:
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_agent_markdown_rejects_version_unknown_fields_and_invalid_defaults() -> None:
+def test_agent_markdown_ignores_unrelated_author_fields() -> None:
     codec = AgentMarkdownSpecCodec()
-    with pytest.raises(AIError) as version:
-        codec.from_payload(
-            {"system_prompt": "", "version": 1},
-            logical_id="worker",
-        )
-    assert version.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
-    with pytest.raises(AIError) as unknown:
-        codec.from_payload(
-            {"system_prompt": "", "future_field": True},
-            logical_id="worker",
-        )
-    assert unknown.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    versioned = codec.from_payload(
+        {"system_prompt": "", "version": 1, "future_field": True},
+        logical_id="worker",
+    )
+    assert versioned == AgentSpec("worker")
 
-    with pytest.raises(AIError) as defaults:
-        codec.from_payload(
-            {"system_prompt": "", "model": "explicit"},
-            logical_id="worker",
-            defaults={"future_field": True},
-        )
-    assert defaults.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    explicit = codec.from_payload(
+        {
+            "system_prompt": "",
+            "model": "explicit",
+            "planning": True,
+            "future_field": {"future": True},
+        },
+        logical_id="worker",
+        defaults={
+            "model": "configured",
+            "tool_retries": 1,
+            "future_default": True,
+        },
+    )
+    assert explicit.model == "explicit"
+    assert explicit.planning is False
+    assert explicit.tool_retries == AgentSpec.DEFAULT_TOOL_RETRIES
 
 
 @pytest.mark.asyncio
@@ -275,7 +267,7 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     assert isinstance(spec, AgentSpec)
     assert spec.id == "team"
     assert spec.model == "configured"
-    assert spec.tool_retries == 4
+    assert spec.tool_retries == AgentSpec.DEFAULT_TOOL_RETRIES
     await store.close()
 
 
