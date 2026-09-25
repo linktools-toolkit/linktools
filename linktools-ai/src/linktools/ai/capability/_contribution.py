@@ -316,7 +316,7 @@ def _contribution_contract(
         return {
             "version": 1,
             "expander_id": expander_id,
-            "expander_version": expander_revision,
+            "expander_revision": expander_revision,
         }
     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
@@ -364,12 +364,12 @@ def _expander_identity(expander: object) -> tuple[str, int]:
     if not isinstance(expander, TaskExpander):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     try:
-        reference = TaskExpanderRef(expander.id, expander.version)
+        reference = TaskExpanderRef(expander.id, expander.revision)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
     if reference.id.startswith(_RESERVED_EXPANDER_ID_PREFIX):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return reference.id, reference.version
+    return reference.id, reference.revision
 
 
 def _validate_external_capability_id(value: str) -> None:
