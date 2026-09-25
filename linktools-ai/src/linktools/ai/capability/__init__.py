@@ -17,11 +17,9 @@ from ._group import (
     CapabilityLoadEntry,
     CapabilityLoader,
 )
-from ._rule_source import AssetRuleResourceSource
 from ._skill import SkillCapability, SkillDefinition
 from ._skill_source import (
     AssetSkillResourceSource,
-    AssetVersionSkillResourceSource,
     LocalSkillResourceSource,
     SkillLocation,
     SkillResourceSource,
@@ -66,9 +64,7 @@ __all__ = [
     "CapabilityLoadContext",
     "CapabilityLoadEntry",
     "CapabilityLoader",
-    "AssetRuleResourceSource",
     "AssetSkillResourceSource",
-    "AssetVersionSkillResourceSource",
     "SkillCapability",
     "SubagentCapability",
     "LocalSkillResourceSource",
