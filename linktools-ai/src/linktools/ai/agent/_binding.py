@@ -27,7 +27,7 @@ _BINDING_FIELDS = frozenset(
     {
         "version",
         "agent_spec",
-        "base_model",
+        "model_contract",
         "selected",
         "subagents",
         "output_mode",
@@ -104,7 +104,7 @@ class AgentBindingSnapshot:
     """Persist identity inputs and locators required to restore one Agent binding."""
 
     agent_spec: AgentSpec
-    base_model: Mapping[str, JsonValue]
+    model_contract: Mapping[str, JsonValue]
     selected: "tuple[CapabilityPin, ...]"
     subagents: "tuple[SubagentRef, ...]"
     output_mode: OutputMode
@@ -126,7 +126,7 @@ class AgentBindingSnapshot:
         if not isinstance(self.agent_spec, AgentSpec) or self.output_mode not in {"text", "structured"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            base_model = ImmutableJsonMapping(self.base_model)
+            model_contract = ImmutableJsonMapping(self.model_contract)
             output_schema = ImmutableJsonMapping(self.output_schema)
             wire_extensions = ImmutableJsonMapping(self._wire_extensions)
             agent_spec_extensions = ImmutableJsonMapping(
@@ -134,7 +134,7 @@ class AgentBindingSnapshot:
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        object.__setattr__(self, "base_model", base_model)
+        object.__setattr__(self, "model_contract", model_contract)
         object.__setattr__(self, "output_schema", output_schema)
         object.__setattr__(self, "_wire_extensions", wire_extensions)
         object.__setattr__(
@@ -209,7 +209,7 @@ class AgentBindingSnapshot:
         payload: dict[str, JsonValue] = {
             "version": _BINDING_VERSION,
             "agent_spec": agent_spec,
-            "base_model": dict(self.base_model),
+            "model_contract": dict(self.model_contract),
             "selected": [item.to_payload() for item in self.selected],
             "subagents": [item.to_payload() for item in self.subagents],
             "output_mode": self.output_mode,
@@ -269,7 +269,7 @@ class AgentBindingSnapshot:
             }
             return cls(
                 agent_spec=agent_spec,
-                base_model=_normalize_mapping(value["base_model"]),
+                model_contract=_normalize_mapping(value["model_contract"]),
                 selected=tuple(CapabilityPin.from_payload(item) for item in selected),
                 subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
                 output_mode=cast(OutputMode, mode),
@@ -300,7 +300,7 @@ class AgentBinding:
             or AgentSpecCodec().to_payload(self.compiled_agent.spec)
             != AgentSpecCodec().to_payload(self.snapshot.agent_spec)
             or dict(self.compiled_agent.model.contract)
-            != dict(self.snapshot.base_model)
+            != dict(self.snapshot.model_contract)
             or _compiled_agent_selected_pins(self.compiled_agent) != self.snapshot.selected
             or self.compiled_agent.selected_subagents != self.snapshot.subagent_ids
             or self.output_binding.mode != self.snapshot.output_mode

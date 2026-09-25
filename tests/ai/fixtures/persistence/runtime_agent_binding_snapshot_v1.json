@@ -24,7 +24,7 @@
     "output_retries": 3,
     "model_route": "default"
   },
-  "base_model": {
+  "model_contract": {
     "route_id": "default",
     "model_identity": "fixture:model"
   },

@@ -36,7 +36,7 @@ def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
     spec = AgentSpec(agent_id)
     return AgentBindingSnapshot(
         agent_spec=spec,
-        base_model={},
+        model_contract={},
         selected=(),
         subagents=(),
         output_mode="text",

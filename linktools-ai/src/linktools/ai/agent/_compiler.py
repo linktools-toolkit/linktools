@@ -157,7 +157,7 @@ class AgentCompiler:
             agent_spec=AgentSpecCodec().from_payload(
                 AgentSpecCodec().to_payload(compiled_agent.spec)
             ),
-            base_model=dict(compiled_agent.model.contract),
+            model_contract=dict(compiled_agent.model.contract),
             selected=tuple(_pin(candidate) for candidate in _selected_candidates(compiled_agent)),
             subagents=tuple(subagents),
             output_mode=output_binding.mode,
@@ -175,7 +175,7 @@ class AgentCompiler:
             raise TypeError("snapshot must be AgentBindingSnapshot")
         try:
             model = self._models.restore(
-                snapshot.base_model,
+                snapshot.model_contract,
                 route_id=snapshot.agent_spec.model_route,
             )
             selected = self._restore_selected(snapshot.selected)

@@ -35,7 +35,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         agent_spec=AgentSpec("default"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
+        model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,

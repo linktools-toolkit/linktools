@@ -40,7 +40,7 @@ def test_runtime_bound_agent_does_not_expose_compile_or_registration() -> None:
 def test_agent_binding_snapshot_persists_binding_inputs() -> None:
     snapshot = AgentBindingSnapshot(
         agent_spec=AgentSpec("agent", model_route="model"),
-        base_model={"version": 1, "id": "model"},
+        model_contract={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
         output_mode="structured",
@@ -52,7 +52,7 @@ def test_agent_binding_snapshot_persists_binding_inputs() -> None:
     assert set(payload) == {
         "version",
         "agent_spec",
-        "base_model",
+        "model_contract",
         "selected",
         "subagents",
         "output_mode",
@@ -96,7 +96,7 @@ def test_capability_pin_persists_contract_once() -> None:
 def test_agent_binding_snapshot_preserves_unknown_fields() -> None:
     payload = AgentBindingSnapshot(
         agent_spec=AgentSpec("agent", model_route="model"),
-        base_model={"version": 1, "id": "model"},
+        model_contract={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
         output_mode="text",

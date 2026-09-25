@@ -58,7 +58,7 @@ pytestmark = pytest.mark.asyncio
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         agent_spec=AgentSpec("agent", model_route="default"),
-        base_model={"version": 1, "id": "default"},
+        model_contract={"version": 1, "id": "default"},
         selected=(),
         subagents=(),
         output_mode="text",

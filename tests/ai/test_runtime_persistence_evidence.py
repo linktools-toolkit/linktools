@@ -50,7 +50,7 @@ def _agent_group() -> CapabilityGroup[object]:
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         agent_spec=AgentSpec("agent", model_route="default"),
-        base_model={"provider": "test", "model": "fixture"},
+        model_contract={"provider": "test", "model": "fixture"},
         selected=(),
         subagents=(),
         output_mode="text",

@@ -21,7 +21,7 @@ from linktools.ai.storage import StoredPayload
 def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         agent_spec=AgentSpec("agent", model_route="default"),
-        base_model={"provider": "test", "model": "fixture"},
+        model_contract={"provider": "test", "model": "fixture"},
         selected=(),
         subagents=(),
         output_mode="text",

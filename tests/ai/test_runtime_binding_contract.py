@@ -87,7 +87,7 @@ def _snapshot() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         agent_spec=AgentSpec("agent"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
+        model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -399,7 +399,7 @@ def test_current_binding_snapshot_has_minimal_wire_shape() -> None:
     assert set(snapshot.to_payload()) == {
         "version",
         "agent_spec",
-        "base_model",
+        "model_contract",
         "selected",
         "subagents",
         "output_mode",

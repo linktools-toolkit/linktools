@@ -35,7 +35,7 @@ def _run() -> RunRecord:
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         agent_spec=AgentSpec("agent"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
+        model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode="text",

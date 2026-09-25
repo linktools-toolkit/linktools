@@ -2234,7 +2234,7 @@ def _binding_matches_snapshot_root(
 ) -> bool:
     return (
         binding.agent_spec == root.agent_spec
-        and dict(binding.base_model) == dict(root.base_model)
+        and dict(binding.model_contract) == dict(root.model_contract)
         and binding.selected == root.selected
         and binding.subagents == root.subagents
         and binding.subagent_bindings == root.subagent_bindings

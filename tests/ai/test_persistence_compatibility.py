@@ -50,7 +50,7 @@ def _binding_fixture_value() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         agent_spec=AgentSpec("runtime-persistence-v1", tool_retries=10000),
-        base_model={"route_id": "default", "model_identity": "fixture:model"},
+        model_contract={"route_id": "default", "model_identity": "fixture:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
