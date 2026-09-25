@@ -20,20 +20,23 @@ import shlex
 import stat
 import sys
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from subprocess import DEVNULL, PIPE
 
 from filelock import FileLock
 from linktools.core import environ
 
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ._sandbox import (
     SandboxOperationRejected,
     ReadOnlySandboxPolicy,
     SandboxResource,
+    SandboxResourcePath,
     SandboxSession,
+    SandboxStdioProcess,
     normalize_workspace_input_path,
 )
 from ._root import Workspace
@@ -98,6 +101,15 @@ class LocalSandbox:
             raise TypeError("read_policy must be ReadOnlySandboxPolicy")
         self._read_policy = read_policy
 
+    def stdio_execution_policy(self) -> Mapping[str, JsonValue]:
+        """Describe LocalSandbox stdio as an explicit host process boundary."""
+        if self._read_policy is not None:
+            raise AIError(
+                ErrorCode.SANDBOX_UNAVAILABLE,
+                safe_details={"reason": "local_stdio_read_policy_unsupported"},
+            )
+        return {"version": 1, "boundary": "host-stdio"}
+
     async def open(
         self,
         *,
@@ -114,8 +126,6 @@ class LocalSandbox:
             tuple(resource.id for resource in normalized_resources),
         )
         lock_root = workspace.locks_root
-        if policy is None:
-            _prepare_lock_root(lock_root)
         return _LocalSandboxSession(
             normalized_root,
             normalized_resources,
@@ -152,6 +162,7 @@ class _LocalSandboxSession:
         self._state_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         self._processes: dict[str, _ProcessState] = {}
+        self._stdio_processes: set[_LocalStdioProcess] = set()
         self._pending_processes: dict[
             int, tuple[asyncio.subprocess.Process, _WindowsJob | None]
         ] = {}
@@ -195,6 +206,120 @@ class _LocalSandboxSession:
             if process.pid is not None
         )
         return frozenset(values)
+
+    async def open_stdio_process(
+        self,
+        command: str,
+        args: "Sequence[str | SandboxResourcePath]" = (),
+        *,
+        resources: "Sequence[SandboxResource]" = (),
+    ) -> SandboxStdioProcess:
+        if self._read_policy is not None:
+            raise AIError(
+                ErrorCode.SANDBOX_UNAVAILABLE,
+                safe_details={"reason": "local_stdio_read_policy_unsupported"},
+            )
+        if (
+            not isinstance(command, str)
+            or not command
+            or "\x00" in command
+            or isinstance(args, (str, bytes, bytearray))
+            or isinstance(resources, (str, bytes, bytearray))
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        selected_resources = _validate_resources(
+            self._workspace,
+            tuple(resources),
+        )
+        command_args = _local_stdio_command_args(args, selected_resources)
+        current = asyncio.current_task()
+        async with self._process_lock:
+            if self._state != "OPEN":
+                raise AIError(_session_state_error(self._state))
+            if current is not None:
+                self._starting_tasks.add(current)
+
+        job: _WindowsJob | None = None
+        process: asyncio.subprocess.Process | None = None
+        process_key: int | None = None
+        try:
+            if os.name == "nt":
+                job = _WindowsJob.create()
+            process_kwargs: dict[str, object] = {
+                "cwd": str(self._root),
+                "env": dict(self._environment),
+                "stdin": PIPE,
+                "stdout": PIPE,
+                "stderr": PIPE,
+            }
+            if os.name == "nt":
+                process_kwargs["creationflags"] = 0x00000004
+            else:
+                process_kwargs["start_new_session"] = True
+
+            process_task = asyncio.create_task(
+                asyncio.create_subprocess_exec(
+                    command,
+                    *command_args,
+                    **process_kwargs,
+                ),
+                name="local-sandbox-stdio-start",
+            )
+            try:
+                process = await asyncio.shield(process_task)
+            except asyncio.CancelledError as cancellation:
+                try:
+                    process = await asyncio.shield(process_task)
+                except BaseException:
+                    if job is not None:
+                        job.close()
+                    raise
+                process_key = id(process)
+                self._pending_processes[process_key] = (process, job)
+                try:
+                    await _terminate_unregistered_process(process, job)
+                except BaseException as cleanup_error:
+                    if process.returncode is not None:
+                        self._pending_processes.pop(process_key, None)
+                    raise cancellation from cleanup_error
+                self._pending_processes.pop(process_key, None)
+                raise cancellation
+            except (OSError, ValueError) as error:
+                if job is not None:
+                    job.close()
+                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+
+            process_key = id(process)
+            self._pending_processes[process_key] = (process, job)
+            if job is not None:
+                try:
+                    job.assign_and_resume(process.pid)
+                except BaseException as error:
+                    try:
+                        await _terminate_unregistered_process(process, job)
+                    finally:
+                        self._pending_processes.pop(process_key, None)
+                    if isinstance(error, AIError):
+                        raise
+                    raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+
+            stdio_process = _LocalStdioProcess(
+                process,
+                job,
+                self._stdio_processes.discard,
+            )
+            async with self._process_lock:
+                if self._state != "OPEN":
+                    await stdio_process.close()
+                    self._pending_processes.pop(process_key, None)
+                    raise AIError(_session_state_error(self._state))
+                self._stdio_processes.add(stdio_process)
+                self._pending_processes.pop(process_key, None)
+            return stdio_process
+        finally:
+            if current is not None:
+                self._starting_tasks.discard(current)
 
     async def canonicalize_path(self, path: str) -> str:
         """Normalize one logical Workspace path without applying operation policy."""
@@ -834,7 +959,14 @@ class _LocalSandboxSession:
                 _logger.exception("local sandbox cleanup wait failed")
         async with self._process_lock:
             processes = tuple(self._processes.values())
+            stdio_processes = tuple(self._stdio_processes)
             pending_processes = tuple(self._pending_processes.items())
+        for process in stdio_processes:
+            try:
+                await process.close()
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
+                _logger.exception("local stdio process cleanup failed")
         for process in processes:
             try:
                 await _stop_process(process, force=True)
@@ -1269,6 +1401,169 @@ class _LocalSandboxSession:
             self._processes.pop(command_id, None)
 
 
+
+
+class _LocalStdioProcess:
+    def __init__(
+        self,
+        process: asyncio.subprocess.Process,
+        job: "_WindowsJob | None",
+        on_close: Callable[["_LocalStdioProcess"], None],
+    ) -> None:
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+        self._process = process
+        self._job = job
+        self._on_close = on_close
+        self._stdin_closed = False
+        self._state = "OPEN"
+        self._lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
+        self._stderr_task = asyncio.create_task(
+            self._drain_stderr(process.stderr),
+            name="local-sandbox-stdio-stderr",
+        )
+
+    async def write_stdin(self, data: bytes) -> None:
+        if not isinstance(data, bytes):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self._state != "OPEN" or self._stdin_closed:
+            raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
+        stdin = self._process.stdin
+        if stdin is None:
+            raise AIError(ErrorCode.SANDBOX_SESSION_LOST)
+        try:
+            stdin.write(data)
+            await stdin.drain()
+        except (BrokenPipeError, ConnectionError, OSError) as error:
+            raise AIError(ErrorCode.SANDBOX_SESSION_LOST) from error
+
+    async def read_stdout(self, max_bytes: int = 65536) -> bytes:
+        if (
+            not isinstance(max_bytes, int)
+            or isinstance(max_bytes, bool)
+            or max_bytes < 1
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self._state != "OPEN":
+            raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
+        stdout = self._process.stdout
+        if stdout is None:
+            raise AIError(ErrorCode.SANDBOX_SESSION_LOST)
+        try:
+            return await stdout.read(max_bytes)
+        except OSError as error:
+            raise AIError(ErrorCode.SANDBOX_SESSION_LOST) from error
+
+    async def close_stdin(self) -> None:
+        async with self._lock:
+            if self._stdin_closed:
+                return
+            self._stdin_closed = True
+            stdin = self._process.stdin
+            if stdin is not None and not stdin.is_closing():
+                stdin.close()
+                try:
+                    await stdin.wait_closed()
+                except (BrokenPipeError, ConnectionError, OSError):
+                    pass
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._state == "CLOSED":
+                return
+            if self._close_task is None:
+                self._state = "CLOSING"
+                self._close_task = asyncio.create_task(
+                    self._close_impl(),
+                    name="local-sandbox-stdio-close",
+                )
+            task = self._close_task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            try:
+                await asyncio.shield(task)
+            except BaseException as cleanup_error:
+                raise cancellation from cleanup_error
+            raise cancellation
+        except BaseException:
+            async with self._lock:
+                if self._close_task is task:
+                    self._close_task = None
+                self._state = "OPEN"
+            raise
+
+    async def _close_impl(self) -> None:
+        await self.close_stdin()
+        self._stderr_task.cancel()
+        await asyncio.gather(self._stderr_task, return_exceptions=True)
+        try:
+            await _terminate_unregistered_process(self._process, self._job)
+        except BaseException as error:
+            if isinstance(error, AIError):
+                raise
+            raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
+        self._job = None
+        self._state = "CLOSED"
+        self._on_close(self)
+
+    @staticmethod
+    async def _drain_stderr(stderr: asyncio.StreamReader) -> None:
+        retained = 0
+        try:
+            while True:
+                chunk = await stderr.read(4096)
+                if not chunk:
+                    return
+                remaining = 64 * 1024 - retained
+                if remaining > 0:
+                    visible = chunk[:remaining]
+                    if environ.debug:
+                        _logger.debug(
+                            "local stdio stderr: %s",
+                            visible.decode("utf-8", "replace"),
+                        )
+                    retained += len(visible)
+        except asyncio.CancelledError:
+            raise
+        except OSError:
+            return
+
+
+def _local_stdio_command_args(
+    args: Sequence[str | SandboxResourcePath],
+    resources: Sequence[SandboxResource],
+) -> tuple[str, ...]:
+    by_id = {resource.id: resource for resource in resources}
+    result: list[str] = []
+    for argument in args:
+        if isinstance(argument, str):
+            if "\x00" in argument:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            result.append(argument)
+            continue
+        if not isinstance(argument, SandboxResourcePath):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        resource = by_id.get(argument.resource_id)
+        if resource is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        source: Path | None = None
+        if resource.files is not None:
+            source = resource.files.get(argument.path)
+        elif resource.source is not None:
+            candidate = resource.source.joinpath(*PurePosixPath(argument.path).parts)
+            try:
+                resolved = candidate.resolve(strict=True)
+                resolved.relative_to(resource.source.resolve())
+            except (OSError, RuntimeError, ValueError) as error:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+            if resolved.is_file():
+                source = resolved
+        if source is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        result.append(str(source))
+    return tuple(result)
 
 
 def _normalize_root(root: Path) -> Path:
