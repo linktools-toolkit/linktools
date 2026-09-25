@@ -439,6 +439,28 @@ async def test_capture_rejects_asset_change_during_loader() -> None:
 
 
 @pytest.mark.asyncio
+async def test_capture_reports_directory_file_change_as_snapshot_conflict(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "captured-assets"
+    target = root / "worker" / "team"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"first")
+    backend = DirectoryAssetBackend(str(root), kinds=("worker",))
+    store = AssetStore(StorageOverlay(backend))
+    await store.initialize()
+    try:
+        context = await CapabilityLoadContext.capture("application", store)
+        target.write_bytes(b"second")
+
+        with pytest.raises(AIError) as error:
+            await context.read(AssetKey("worker", "team"))
+        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_snapshot_local_paths_ignore_unrelated_directory_revision(
     tmp_path: Path,
 ) -> None:
