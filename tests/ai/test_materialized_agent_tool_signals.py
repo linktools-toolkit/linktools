@@ -43,7 +43,7 @@ class _CompositionModelBinding:
 
 
 class _CompositionModels:
-    def snapshot(self) -> "_CompositionModels":
+    def capture(self) -> "_CompositionModels":
         return self
 
     def resolve(self, route_id: str) -> _CompositionModelBinding:

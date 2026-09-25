@@ -17,7 +17,7 @@ from ..capability import (
     AssetSkillResourceSource,
     CapabilityContribution,
     CapabilityGroup,
-    CapabilityGroupSnapshot,
+    CapabilityGroupCapture,
     SkillSourceRegistry,
     TaskExpander,
 )
@@ -66,7 +66,7 @@ from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
-from ._task_capability_snapshot import TaskCapabilitySnapshotStore
+from ._task_capability_capture import TaskCapabilityCaptureStore
 from ._runtime_identity import token_seed
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
@@ -105,11 +105,11 @@ async def compose_runtime_components(
     tenant_id: "str | None" = None,
     models: ModelRegistry,
     state: RuntimeState,
-    capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupSnapshot[AppT]]" = (),
+    capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
     metrics: "Metrics | None" = None,
     limits: "PromptLimits | None" = None,
 ) -> _RuntimeComponents:
-    """Snapshot declarations and build Runtime-private services."""
+    """Capture declarations and build Runtime-private services."""
     resolved_namespace = validate_persistence_namespace(namespace)
     if not isinstance(state, RuntimeState):
         raise TypeError("state must be RuntimeState")
@@ -120,22 +120,22 @@ async def compose_runtime_components(
         raise TypeError("limits must be PromptLimits")
     sources = tuple(capabilities)
     if any(
-        not isinstance(source, (CapabilityGroup, CapabilityGroupSnapshot))
+        not isinstance(source, (CapabilityGroup, CapabilityGroupCapture))
         for source in sources
     ):
         raise TypeError(
-            "capabilities must contain CapabilityGroup or CapabilityGroupSnapshot"
+            "capabilities must contain CapabilityGroup or CapabilityGroupCapture"
         )
-    snapshots: list[CapabilityGroupSnapshot[AppT]] = []
+    captures: list[CapabilityGroupCapture[AppT]] = []
     for source in sources:
-        snapshot = (
-            await source.snapshot()
+        capture = (
+            await source.capture()
             if isinstance(source, CapabilityGroup)
             else source
         )
-        await snapshot.verify_source_revision()
-        snapshots.append(cast(CapabilityGroupSnapshot[AppT], snapshot))
-    groups = tuple(snapshots)
+        await capture.verify_source_revision()
+        captures.append(cast(CapabilityGroupCapture[AppT], capture))
+    groups = tuple(captures)
     group_ids = tuple(group.group_id for group in groups)
     if len(group_ids) != len(set(group_ids)):
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -192,7 +192,7 @@ async def compose_runtime_components(
             for candidate in candidates
             if candidate.kind == "agent"
         }
-        resolver = models.snapshot()
+        resolver = models.capture()
         if "default" not in agents:
             try:
                 resolver.resolve("default")
@@ -300,15 +300,15 @@ async def compose_runtime_components(
             metrics=metrics,
         )
         try:
-            for snapshot in groups:
-                await snapshot.verify_source_revision()
+            for capture in groups:
+                await capture.verify_source_revision()
         except BaseException as primary_error:
             try:
                 await components.close_callback()
             except BaseException as cleanup_error:
                 raise primary_error from cleanup_error
             raise
-        _logger.info("runtime capability snapshots admitted: groups=%s", group_ids)
+        _logger.info("runtime capability captures admitted: groups=%s", group_ids)
         return components
     except BaseException:
         if not ownership_transferred:
@@ -651,7 +651,7 @@ async def _build_local_components(
             release_terminal=state.retention.release_session,
             workspace_access=input_materializer.access,
         )
-        task_capability_snapshots = TaskCapabilitySnapshotStore(
+        task_capability_captures = TaskCapabilityCaptureStore(
             namespace,
             compiler,
             binding_resolver,
@@ -671,7 +671,7 @@ async def _build_local_components(
             artifact_state=state.artifact,
             artifact_objects=state.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
-            capability_snapshots=task_capability_snapshots,
+            capability_captures=task_capability_captures,
             input_materializer=ExecutionInputMaterializer(
                 input_materializer.access,
                 limits,

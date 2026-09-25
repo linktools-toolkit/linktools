@@ -30,7 +30,7 @@ class _ModelBinding:
 
 
 class _Models:
-    def snapshot(self) -> "_Models":
+    def capture(self) -> "_Models":
         return self
 
     def resolve(self, route_id: str) -> _ModelBinding:

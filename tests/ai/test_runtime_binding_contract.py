@@ -152,7 +152,7 @@ def _execution(
 
 def _compiler() -> AgentCompiler:
     return AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=(),
         agents={"agent": AgentSpec("agent")},
     )
@@ -322,12 +322,12 @@ def test_model_contract_ignores_openai_prefix_and_connection_config() -> None:
         model="gpt-test",
         base_url="https://first.example/v1",
         api_key="first-key",
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
     prefixed = ModelRegistry.openai(
         model="openai:gpt-test",
         base_url="https://second.example/v1",
         api_key="second-key",
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
     assert dict(plain.contract) == {
         "provider": "openai",
@@ -345,7 +345,7 @@ def test_model_registry_replaces_connection_with_same_model_contract() -> None:
         base_url="https://first.example/v1",
         api_key="first-key",
     )
-    first_snapshot = registry.snapshot()
+    first_snapshot = registry.capture()
     first = first_snapshot.resolve("default")
 
     registry.register_openai(
@@ -354,7 +354,7 @@ def test_model_registry_replaces_connection_with_same_model_contract() -> None:
         base_url="https://second.example/v1",
         api_key="second-key",
     )
-    second = registry.snapshot().resolve("default")
+    second = registry.capture().resolve("default")
 
     assert second is not first
     assert dict(second.contract) == dict(first.contract)
@@ -374,7 +374,7 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
         base_url="https://second.example/v1",
     )
     compiler = AgentCompiler(
-        model_resolver=registry.snapshot(),
+        model_resolver=registry.capture(),
         candidates=(),
         agents={"agent": AgentSpec("agent", model_route="first")},
     )
@@ -464,12 +464,12 @@ def test_restore_rejects_tool_contract_drift_without_revision_bump() -> None:
     assert first_candidate.revision == second_candidate.revision
 
     first_compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=(first_candidate,),
         agents={"agent": spec},
     )
     second_compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=(second_candidate,),
         agents={"agent": spec},
     )

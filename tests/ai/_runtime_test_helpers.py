@@ -105,7 +105,7 @@ class _RuntimeUsageModelBinding:
 
 
 class RuntimeUsageModels:
-    def snapshot(self) -> "RuntimeUsageModels":
+    def capture(self) -> "RuntimeUsageModels":
         return self
 
     def resolve(self, route_id: str) -> _RuntimeUsageModelBinding:

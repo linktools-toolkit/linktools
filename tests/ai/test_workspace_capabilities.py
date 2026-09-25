@@ -272,7 +272,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
     tool_classes: set[str],
 ) -> None:
     workspace = Workspace.load(tmp_path)
-    snapshot = await CapabilityGroup("workspace", workspace=workspace).snapshot()
+    snapshot = await CapabilityGroup("workspace", workspace=workspace).capture()
     spec = AgentSpec(
         "agent",
         allow_tools=selectors,
@@ -281,7 +281,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=snapshot.contributions,
         agents={"agent": spec},
     )
@@ -304,11 +304,11 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     workspace = Workspace.load(tmp_path)
-    snapshot = await CapabilityGroup("workspace", workspace=workspace).snapshot()
+    snapshot = await CapabilityGroup("workspace", workspace=workspace).capture()
     for selectors in (("new_tool",), ("*", "new_tool")):
         spec = AgentSpec("agent", allow_tools=selectors)
         compiler = AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
             candidates=snapshot.contributions,
             agents={"agent": spec},
         )
@@ -326,7 +326,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
         }
         spec = AgentSpec("agent", **kwargs)
         compiler = AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
             candidates=(),
             agents={"agent": spec},
         )
@@ -336,7 +336,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
 
     empty = AgentSpec("agent", allow_tools=())
     empty_compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=(),
         agents={"agent": empty},
     )
@@ -354,7 +354,7 @@ def test_global_tool_wildcard_preserves_exact_mcp_requirement() -> None:
         allow_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={"agent": spec},
     )
@@ -392,7 +392,7 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
             "workspace",
             workspace=workspace,
             assets=store,
-        ).snapshot()
+        ).capture()
     finally:
         await store.close()
 
@@ -416,7 +416,7 @@ async def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(
         CapabilityGroup("workspace", workspace=workspace, sandbox=sandbox),
         CapabilityGroup("workspace", workspace=workspace, sandbox=DisabledSandbox()),
     )
-    snapshots = [await group.snapshot() for group in groups]
+    snapshots = [await group.capture() for group in groups]
     projected = tuple(
         tuple(
             (item.id, item.revision, item.contract)
@@ -638,7 +638,7 @@ async def test_workspace_group_does_not_discover_declarations(
     workspace = Workspace.load(tmp_path)
 
     group = CapabilityGroup("workspace", workspace=workspace, sandbox=sandbox)
-    snapshot = await group.snapshot()
+    snapshot = await group.capture()
 
     assert group.workspace is workspace
     assert snapshot.sandbox is sandbox

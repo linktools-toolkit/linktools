@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability groups snapshot runtime candidate definitions before execution."""
+"""Capability groups capture runtime candidate definitions before execution."""
 
 import functools
 import inspect
@@ -78,7 +78,7 @@ class _RegisteredTaskHandler(Generic[AppT]):
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityGroupSnapshot(Generic[AppT]):
+class CapabilityGroupCapture(Generic[AppT]):
     """Declarations and a versioned Asset reader captured from one revision."""
 
     group_id: str
@@ -91,7 +91,7 @@ class CapabilityGroupSnapshot(Generic[AppT]):
 
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id.strip():
-            raise ValueError("snapshot group_id must be non-empty")
+            raise ValueError("capture group_id must be non-empty")
         contributions = tuple(self.contributions)
         if any(
             not isinstance(value, CapabilityContribution)
@@ -111,11 +111,11 @@ class CapabilityGroupSnapshot(Generic[AppT]):
 
     @property
     def asset_reader(self) -> "AssetStoreReader | None":
-        """Return read-only access to this snapshot's source resources."""
+        """Return read-only access to this capture's source resources."""
         return self._asset_reader
 
     async def verify_source_revision(self) -> None:
-        """Fail if the declaration source changed after this snapshot was made."""
+        """Fail if the declaration source changed after this capture was made."""
         if self._asset_reader is None:
             return
         if not isinstance(self.source_revision, StorageRevision):
@@ -125,7 +125,7 @@ class CapabilityGroupSnapshot(Generic[AppT]):
 
 
 class CapabilityGroup(Generic[AppT]):
-    """Register and snapshot one named set of runtime candidate definitions."""
+    """Register and capture one named set of runtime candidate definitions."""
 
     def __init__(
         self,
@@ -344,7 +344,7 @@ class CapabilityGroup(Generic[AppT]):
         self._loaders[kind] = loader
         return loader
 
-    async def snapshot(self) -> "CapabilityGroupSnapshot[AppT]":
+    async def capture(self) -> "CapabilityGroupCapture[AppT]":
         """Capture registrations and declarations at one Asset revision."""
         contributions = list(tuple(self._contributions))
         instruction_documents: list[RepositoryInstructionDocument] = []
@@ -380,19 +380,19 @@ class CapabilityGroup(Generic[AppT]):
             asset_reader = context.asset_reader
         elif loaders:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        snapshot_items = tuple(
+        captured_items = tuple(
             _freeze_contribution(item) for item in contributions
         )
-        _validate_unique(snapshot_items)
-        generic = [item for item in snapshot_items if item.kind == "capability"]
+        _validate_unique(captured_items)
+        generic = [item for item in captured_items if item.kind == "capability"]
         declarations = sorted(
-            (item for item in snapshot_items if item.kind != "capability"),
+            (item for item in captured_items if item.kind != "capability"),
             key=lambda item: (item.kind, item.id, item.revision),
         )
-        snapshot_contributions = tuple((*declarations, *generic))
-        snapshot = CapabilityGroupSnapshot(
+        capture_contributions = tuple((*declarations, *generic))
+        capture = CapabilityGroupCapture(
             self._id,
-            snapshot_contributions,
+            capture_contributions,
             source_revision,
             self._workspace,
             RepositoryInstructions(tuple(instruction_documents)),
@@ -400,14 +400,14 @@ class CapabilityGroup(Generic[AppT]):
             sandbox=self._sandbox,
         )
         _logger.info(
-            "capability group snapshotted: group=%s contributions=%d instructions=%d "
+            "capability group captured: group=%s contributions=%d instructions=%d "
             "source_revision=%s",
             self._id,
-            len(snapshot_contributions),
+            len(capture_contributions),
             len(instruction_documents),
             None if source_revision is None else source_revision.value,
         )
-        return snapshot
+        return capture
 
 
 def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
@@ -511,4 +511,4 @@ def _validate_unique(values: Sequence[CapabilityContribution[object]]) -> None:
         seen.add(identity)
 
 
-__all__ = ["CapabilityGroup", "CapabilityGroupSnapshot"]
+__all__ = ["CapabilityGroup", "CapabilityGroupCapture"]

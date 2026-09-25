@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Private immutable capability snapshot used by admitted TaskGraphs."""
+"""Private immutable capability capture used by admitted TaskGraphs."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,14 +13,14 @@ from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
 from ._binding_resolver import _RuntimeBindingResolver
-from ._runtime_identity import task_capability_snapshot_key
+from ._runtime_identity import task_capability_capture_key
 
-_KIND = "task-capability-snapshot"
+_KIND = "task-capability-capture"
 _VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
-class TaskCapabilitySnapshot:
+class TaskCapabilityCapture:
     roots: Mapping[str, AgentBindingContract]
     bindings: Mapping[str, AgentBindingContract]
 
@@ -48,7 +48,7 @@ class TaskCapabilitySnapshot:
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
 
 
-class TaskCapabilitySnapshotStore:
+class TaskCapabilityCaptureStore:
     def __init__(
         self,
         namespace: str,
@@ -76,7 +76,7 @@ class TaskCapabilitySnapshotStore:
         self,
         admission: TaskGraphAdmission,
         graph: TaskGraph,
-    ) -> TaskCapabilitySnapshot:
+    ) -> TaskCapabilityCapture:
         key = self._key(admission)
         existing = await self._objects.stat(key)
         if existing is not None:
@@ -166,14 +166,14 @@ class TaskCapabilitySnapshotStore:
     async def load(
         self,
         admission: TaskGraphAdmission,
-    ) -> TaskCapabilitySnapshot:
+    ) -> TaskCapabilityCapture:
         key = self._key(admission)
         stat = await self._objects.stat(key)
         if stat is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
                 safe_details={
-                    "kind": "task_capability_snapshot",
+                    "kind": "task_capability_capture",
                     "graph_id": admission.graph_id,
                 },
             )
@@ -202,7 +202,7 @@ class TaskCapabilitySnapshotStore:
         self,
         ref: ObjectRef,
         admission: TaskGraphAdmission,
-    ) -> TaskCapabilitySnapshot:
+    ) -> TaskCapabilityCapture:
         payload = await read_object(
             self._objects,
             ref.key,
@@ -267,10 +267,10 @@ class TaskCapabilitySnapshotStore:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._compiler.restore(binding_contract)
-        return TaskCapabilitySnapshot(roots, bindings)
+        return TaskCapabilityCapture(roots, bindings)
 
     def _key(self, admission: TaskGraphAdmission) -> str:
-        return task_capability_snapshot_key(
+        return task_capability_capture_key(
             self._namespace,
             admission.principal.tenant_id,
             admission.graph_id,
@@ -279,6 +279,6 @@ class TaskCapabilitySnapshotStore:
 
 
 __all__ = [
-    "TaskCapabilitySnapshot",
-    "TaskCapabilitySnapshotStore",
+    "TaskCapabilityCapture",
+    "TaskCapabilityCaptureStore",
 ]

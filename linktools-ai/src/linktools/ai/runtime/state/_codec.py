@@ -1668,9 +1668,9 @@ def iter_runtime_object_dependencies(
             yield default_domain, nested
         return
 
-    if reference.key.startswith("v1/task-capability-snapshot/"):
+    if reference.key.startswith("v1/task-capability-capture/"):
         if (
-            manifest.get("kind") != "task-capability-snapshot"
+            manifest.get("kind") != "task-capability-capture"
             or manifest.get("format_version") != 1
             or not isinstance(manifest.get("roots"), Mapping)
             or not isinstance(manifest.get("bindings"), Mapping)

@@ -32,7 +32,7 @@ class _ToolModelBinding:
 
 
 class _ToolModels:
-    def snapshot(self) -> "_ToolModels":
+    def capture(self) -> "_ToolModels":
         return self
 
     def resolve(self, route_id: str) -> _ToolModelBinding:

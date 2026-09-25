@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Thread-safe model registry and immutable snapshots."""
+"""Thread-safe model registry and immutable resolver captures."""
 
 from collections.abc import Callable, Mapping
 from threading import RLock
@@ -112,12 +112,12 @@ class ModelRegistry:
                 del self._bindings[route_id]
                 _logger.info("model binding removed: route=%s", route_id)
 
-    def snapshot(self) -> ModelResolver:
+    def capture(self) -> ModelResolver:
         with self._lock:
-            return _ModelRegistrySnapshot(MappingProxyType(dict(self._bindings)))
+            return _CapturedModelResolver(MappingProxyType(dict(self._bindings)))
 
 
-class _ModelRegistrySnapshot:
+class _CapturedModelResolver:
     def __init__(self, bindings: "Mapping[str, ModelBinding]") -> None:
         self._bindings = bindings
 

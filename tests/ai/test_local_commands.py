@@ -88,7 +88,7 @@ def test_ai_local_runtime_models_fall_back_to_workspace_model(tmp_path: Path) ->
     workspace = Workspace(tmp_path, {"model": "workspace/model"})
     args = Namespace(model=None, vision=False, base_url=None, api_key=None)
 
-    binding = _local_runtime_models(workspace, args).snapshot().resolve("default")
+    binding = _local_runtime_models(workspace, args).capture().resolve("default")
 
     assert binding.model_identity == "openai:workspace/model"
 

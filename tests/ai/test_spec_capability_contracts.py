@@ -229,7 +229,7 @@ def test_mcp_server_token_collision_fails_at_compiler_boundary(
     )
     with pytest.raises(AIError) as error:
         AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
             candidates=candidates,
             agents={"agent": AgentSpec("agent")},
         )
@@ -397,7 +397,7 @@ async def test_business_tool_metadata_is_captured_in_tool_contract() -> None:
         effect="replay_safe",
         plan_safe=True,
     )
-    candidate = (await group.snapshot()).contributions[0]
+    candidate = (await group.capture()).contributions[0]
     assert tool.tool_def.metadata == {
         "linktools.ai.effect": "replay_safe",
         "linktools.ai.plan_safe": True,

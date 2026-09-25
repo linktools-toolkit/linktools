@@ -56,7 +56,7 @@ class _DiagnosticModelBinding:
 
 
 class _DiagnosticModels:
-    def snapshot(self) -> "_DiagnosticModels":
+    def capture(self) -> "_DiagnosticModels":
         return self
 
     def resolve(self, route_id: str) -> _DiagnosticModelBinding:

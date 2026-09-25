@@ -286,7 +286,7 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
             "workspace",
             assets=store,
         )
-        snapshot = await group.snapshot()
+        snapshot = await group.capture()
         assert {(item.kind, item.id) for item in snapshot.contributions} == {
             ("agent", "review"),
             ("mcp", "server"),

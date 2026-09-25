@@ -279,7 +279,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         allow_skills=(),
         allow_subagents=(),
     )
-    models = ModelRegistry.openai(model="gpt-test").snapshot()
+    models = ModelRegistry.openai(model="gpt-test").capture()
     compiler = AgentCompiler(
         model_resolver=models,
         candidates=candidates,

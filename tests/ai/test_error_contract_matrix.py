@@ -125,7 +125,7 @@ def test_non_ai_redaction_error_is_internal_without_message_leak() -> None:
 
 def test_unknown_model_route_has_stable_connection_error() -> None:
     with pytest.raises(AIError) as error:
-        ModelRegistry().snapshot().resolve("missing")
+        ModelRegistry().capture().resolve("missing")
     assert error.value.code is ErrorCode.MODEL_CONNECTION_NOT_FOUND
 
 

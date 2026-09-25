@@ -118,7 +118,7 @@ async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> N
 async def test_sandbox_group_can_be_composed_without_workspace() -> None:
     sandbox = DisabledSandbox()
     group = CapabilityGroup("sandbox", sandbox=sandbox)
-    snapshot = await group.snapshot()
+    snapshot = await group.capture()
     assert snapshot.workspace is None
     assert snapshot.sandbox is sandbox
 

@@ -63,7 +63,7 @@ class _TaskTestModelBinding:
 
 
 class _TaskTestModels:
-    def snapshot(self) -> "_TaskTestModels":
+    def capture(self) -> "_TaskTestModels":
         return self
 
     def resolve(self, route_id: str) -> _TaskTestModelBinding:

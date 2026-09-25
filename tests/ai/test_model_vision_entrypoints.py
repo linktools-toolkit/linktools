@@ -20,7 +20,7 @@ def test_default_runtime_reads_openai_vision(
 
     binding = _local_models(
         Workspace.load(tmp_path)
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
     assert binding.vision is True
 

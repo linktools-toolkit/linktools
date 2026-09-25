@@ -263,14 +263,14 @@ def test_rule_catalog_rejects_invalid_scope_and_ignores_symlink(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_rule_assets_follow_capability_snapshot_and_reject_duplicate_sources() -> None:
+async def test_rule_assets_follow_capability_capture_and_reject_duplicate_sources() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
     try:
         key = AssetKey("rule", "nested/review.md")
         await store.put(key, b"---\nscope: src\n---\nfirst")
-        snapshot = await CapabilityGroup("rules", assets=store).snapshot()
+        snapshot = await CapabilityGroup("rules", assets=store).capture()
         reader = snapshot.asset_reader
         assert reader is not None
         first = await AssetRuleCatalog.load({"rules": reader}, WorkspacePolicy())
@@ -284,7 +284,7 @@ async def test_rule_assets_follow_capability_snapshot_and_reject_duplicate_sourc
             await AssetRuleCatalog.load({"rules": reader}, WorkspacePolicy())
         assert stale_error.value.code is ErrorCode.SNAPSHOT_CONFLICT
 
-        fresh_reader = (await CapabilityGroup("rules", assets=store).snapshot()).asset_reader
+        fresh_reader = (await CapabilityGroup("rules", assets=store).capture()).asset_reader
         assert fresh_reader is not None
         fresh = await AssetRuleCatalog.load({"rules": fresh_reader}, WorkspacePolicy())
         assert fresh.documents[0].content == "second"

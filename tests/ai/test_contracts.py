@@ -173,7 +173,7 @@ def test_task_graph_exposes_deterministic_topological_order() -> None:
 def test_model_registry_snapshot_is_instance_owned() -> None:
     registry = ModelRegistry()
     registry.register_openai("route", model="model")
-    snapshot = registry.snapshot()
+    snapshot = registry.capture()
     assert snapshot.resolve("route").model_identity == "openai:model"
     assert snapshot.resolve("route").route_id == "route"
 

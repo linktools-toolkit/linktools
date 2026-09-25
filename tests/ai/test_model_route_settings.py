@@ -49,7 +49,7 @@ def test_openai_operational_settings_do_not_change_model_contract() -> None:
         timeout=30,
         max_retries=1,
         max_tokens=2048,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
     second = ModelRegistry.openai(
         model="openai:gpt-test",
         base_url="https://second.example/v1",
@@ -57,7 +57,7 @@ def test_openai_operational_settings_do_not_change_model_contract() -> None:
         timeout=60,
         max_retries=3,
         max_tokens=2048,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
     assert dict(first.contract) == dict(second.contract)
 
@@ -66,7 +66,7 @@ def test_openai_custom_endpoint_is_operational_configuration() -> None:
     binding = ModelRegistry.openai(
         model="gpt-test",
         base_url="https://gateway.example/v1",
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
     assert dict(binding.contract) == {
         "provider": "openai",
@@ -80,11 +80,11 @@ def test_openai_vision_is_durable_model_contract() -> None:
     without_vision = ModelRegistry.openai(
         model="gpt-test",
         vision=False,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
     with_vision = ModelRegistry.openai(
         model="gpt-test",
         vision=True,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
     assert dict(without_vision.contract)["vision"] is False
     assert dict(with_vision.contract)["vision"] is True
@@ -214,11 +214,11 @@ async def test_openai_without_vision_does_not_guess_opaque_uploaded_file_type() 
 
 
 def test_openai_max_tokens_changes_model_contract() -> None:
-    plain = ModelRegistry.openai(model="gpt-test").snapshot().resolve("default")
+    plain = ModelRegistry.openai(model="gpt-test").capture().resolve("default")
     configured = ModelRegistry.openai(
         model="gpt-test",
         max_tokens=2048,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
     assert dict(plain.contract)["settings"] == {}
     assert dict(configured.contract)["settings"] == {"max_tokens": 2048}
@@ -229,14 +229,14 @@ def test_model_registry_restore_requires_exact_model_contract() -> None:
     historical = ModelRegistry.openai(
         model="gpt-test",
         max_tokens=1024,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
     registry = ModelRegistry.openai(
         model="gpt-test",
         max_tokens=2048,
     )
 
     with pytest.raises(AIError) as raised:
-        registry.snapshot().restore(
+        registry.capture().restore(
             dict(historical.contract),
             route_id="default",
         )
@@ -251,7 +251,7 @@ def test_openai_route_materializes_settings_and_retries() -> None:
         timeout=30,
         max_retries=1,
         max_tokens=2048,
-    ).snapshot().resolve("default")
+    ).capture().resolve("default")
 
     model = binding.materialize()
 

@@ -220,7 +220,7 @@ class _TaskTestModelBinding:
 
 
 class _TaskTestModels:
-    def snapshot(self) -> "_TaskTestModels":
+    def capture(self) -> "_TaskTestModels":
         return self
 
     def resolve(self, route_id: str) -> _TaskTestModelBinding:
@@ -468,7 +468,7 @@ async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed(
 
     group.task(v1, effect="none")
     group.task(v2, effect="none")
-    snapshot = await group.snapshot()
+    snapshot = await group.capture()
 
     assert {
         (item.kind, item.id, item.revision)

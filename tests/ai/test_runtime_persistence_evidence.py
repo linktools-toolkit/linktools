@@ -165,7 +165,7 @@ class _PersistenceTestModelBinding:
 
 
 class _PersistenceTestModels:
-    def snapshot(self) -> "_PersistenceTestModels":
+    def capture(self) -> "_PersistenceTestModels":
         return self
 
     def resolve(self, route_id: str) -> _PersistenceTestModelBinding:

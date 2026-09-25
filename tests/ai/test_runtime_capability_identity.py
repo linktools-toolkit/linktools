@@ -117,8 +117,8 @@ async def test_capability_identity_is_id_and_revision() -> None:
     second = CapabilityGroup[None]("second")
     second.capability(_Capability(), revision=2)
 
-    first_candidate = (await first.snapshot()).contributions[0]
-    second_candidate = (await second.snapshot()).contributions[0]
+    first_candidate = (await first.capture()).contributions[0]
+    second_candidate = (await second.capture()).contributions[0]
 
     assert tuple(item.name for item in fields(CapabilityContribution)) == (
         "kind",
@@ -140,8 +140,8 @@ async def test_config_is_contract_data_not_a_second_identity() -> None:
     relaxed = CapabilityGroup[None]("relaxed")
     relaxed.capability(_Capability(), revision=1, config={"mode": "relaxed"})
 
-    strict_candidate = (await strict.snapshot()).contributions[0]
-    relaxed_candidate = (await relaxed.snapshot()).contributions[0]
+    strict_candidate = (await strict.capture()).contributions[0]
+    relaxed_candidate = (await relaxed.capture()).contributions[0]
 
     assert strict_candidate.revision == relaxed_candidate.revision == 1
     assert strict_candidate.contract != relaxed_candidate.contract
@@ -173,7 +173,7 @@ async def test_deferred_generic_capability_keeps_native_behavior() -> None:
     group = CapabilityGroup[None]("group")
     group.capability(capability)
 
-    candidate = (await group.snapshot()).contributions[0]
+    candidate = (await group.capture()).contributions[0]
     assert candidate.value is capability
     assert candidate.value.defer_loading is True
     assert candidate.contract["config"] == {}
@@ -193,7 +193,7 @@ async def test_duplicate_capability_id_is_rejected_when_group_freezes() -> None:
     group.capability(_Capability(), revision=1)
     group.capability(_Capability(), revision=1)
     with pytest.raises(AIError) as error:
-        await group.snapshot()
+        await group.capture()
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
@@ -201,7 +201,7 @@ async def test_duplicate_capability_id_is_rejected_when_group_freezes() -> None:
 async def test_capability_config_defaults_to_empty() -> None:
     group = CapabilityGroup[None]("group")
     group.capability(_Capability())
-    candidate = (await group.snapshot()).contributions[0]
+    candidate = (await group.capture()).contributions[0]
     assert candidate.contract["config"] == {}
 
 
@@ -212,8 +212,8 @@ async def test_capability_implementation_class_is_not_identity() -> None:
     second = CapabilityGroup[None]("second")
     second.capability(_OtherCapability(), revision=1)
 
-    first_candidate = (await first.snapshot()).contributions[0]
-    second_candidate = (await second.snapshot()).contributions[0]
+    first_candidate = (await first.capture()).contributions[0]
+    second_candidate = (await second.capture()).contributions[0]
     assert first_candidate.revision == second_candidate.revision == 1
     assert first_candidate.contract == second_candidate.contract
 
@@ -237,7 +237,7 @@ async def test_external_capability_keeps_native_pydantic_extension_surface(
 ) -> None:
     group = CapabilityGroup[None]("group")
     group.capability(capability)
-    candidate = (await group.snapshot()).contributions[0]
+    candidate = (await group.capture()).contributions[0]
     assert candidate.value is capability
     assert candidate.revision == 1
 
@@ -246,7 +246,7 @@ async def test_external_capability_keeps_native_pydantic_extension_surface(
 async def test_external_capability_keeps_output_transformation_hooks() -> None:
     group = CapabilityGroup[None]("group")
     group.capability(_OutputTransformCapability(), config={"mode": "identity"})
-    candidate = (await group.snapshot()).contributions[0]
+    candidate = (await group.capture()).contributions[0]
     assert candidate.id == "output-transform-capability"
 
 
@@ -274,7 +274,7 @@ async def test_anonymous_native_capabilities_require_explicit_ids() -> None:
 
     group.capability(select_model, id="select-model")
     group.capability(prepare_tools, id="prepare-tools")
-    candidates = (await group.snapshot()).contributions
+    candidates = (await group.capture()).contributions
 
     assert select_model.id is None
     assert prepare_tools.id is None

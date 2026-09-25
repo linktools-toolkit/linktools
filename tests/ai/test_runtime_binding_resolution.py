@@ -28,7 +28,7 @@ from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._binding_resolver import _RuntimeBindingResolver
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._runtime_service import Runtime
-from linktools.ai.runtime._task_capability_snapshot import TaskCapabilitySnapshotStore
+from linktools.ai.runtime._task_capability_capture import TaskCapabilityCaptureStore
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, SnapshotLimits
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
@@ -215,7 +215,7 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
                 TaskGraphLimits(),
             )
         )
-        snapshots = TaskCapabilitySnapshotStore(
+        captures = TaskCapabilityCaptureStore(
             "namespace",
             fixture.compiler,
             fixture.resolver,
@@ -223,10 +223,10 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
             agent_task_id="linktools.ai.agent",
         )
 
-        capability_snapshot = await snapshots.capture(admission, graph)
+        capability_capture = await captures.capture(admission, graph)
 
-        assert capability_snapshot.roots == {}
-        resolved_binding = capability_snapshot.bindings[fixture.binding.binding_digest]
+        assert capability_capture.roots == {}
+        resolved_binding = capability_capture.bindings[fixture.binding.binding_digest]
         assert resolved_binding.binding_digest != fixture.binding.binding_digest
         assert _skill_ref(_resolved_child(resolved_binding)).resource_versions
     finally:
@@ -561,7 +561,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
         )
     )
     try:
-        capabilities = TaskCapabilitySnapshotStore(
+        capabilities = TaskCapabilityCaptureStore(
             "namespace",
             fixture.compiler,
             fixture.resolver,
@@ -605,7 +605,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
         read_only=True,
     )
     try:
-        restored_capabilities = TaskCapabilitySnapshotStore(
+        restored_capabilities = TaskCapabilityCaptureStore(
             "namespace",
             fixture.compiler,
             fixture.resolver,

@@ -260,7 +260,7 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     group = CapabilityGroup("application", assets=store)
     group.loader("worker", loader)
 
-    snapshot = await group.snapshot()
+    snapshot = await group.capture()
 
     assert len(snapshot.contributions) == 1
     spec = snapshot.contributions[0].value
@@ -302,7 +302,7 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
     group = CapabilityGroup("application", assets=store)
     group.loader("worker", WorkerLoader())
 
-    snapshot = await group.snapshot()
+    snapshot = await group.capture()
 
     assert [item.id for item in snapshot.contributions] == ["security/audit"]
     assert isinstance(snapshot.contributions[0].value, AgentSpec)
@@ -332,7 +332,7 @@ async def test_snapshot_ignores_unrelated_asset_added_during_loader() -> None:
     group = CapabilityGroup("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
-        snapshot = await group.snapshot()
+        snapshot = await group.capture()
         reader = snapshot.asset_reader
         assert reader is not None
         assert late not in {
@@ -358,7 +358,7 @@ async def test_snapshot_local_paths_ignore_unrelated_directory_revision(
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
     try:
-        snapshot = await CapabilityGroup("application", assets=store).snapshot()
+        snapshot = await CapabilityGroup("application", assets=store).capture()
         reader = snapshot.asset_reader
         assert reader is not None
         refs = await reader.resolve_versions((key,))
@@ -459,7 +459,7 @@ async def test_declaration_loaders_are_backend_agnostic(
     try:
         results = []
         for store, _engine in stores:
-            snapshot = await CapabilityGroup("assets", assets=store).snapshot()
+            snapshot = await CapabilityGroup("assets", assets=store).capture()
             results.append(
                 tuple(
                     (item.kind, item.id, item.value)
@@ -500,7 +500,7 @@ async def test_explicit_mcp_resource_root_reserves_declaration_filenames() -> No
         )
 
         with pytest.raises(AIError) as error:
-            await CapabilityGroup("application", assets=store).snapshot()
+            await CapabilityGroup("application", assets=store).capture()
 
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
@@ -518,6 +518,6 @@ async def test_builtin_loader_rejects_multiple_mcp_package_declarations() -> Non
             b"version: 1\ncommand: python\n",
         )
     with pytest.raises(AIError) as error:
-        await CapabilityGroup("application", assets=store).snapshot()
+        await CapabilityGroup("application", assets=store).capture()
     assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
     await store.close()

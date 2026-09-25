@@ -77,9 +77,9 @@ from ._input import (
 )
 from .state._codec import encode_domain
 from ._object import RuntimeObjectKeyFactory
-from ._task_capability_snapshot import (
-    TaskCapabilitySnapshot,
-    TaskCapabilitySnapshotStore,
+from ._task_capability_capture import (
+    TaskCapabilityCapture,
+    TaskCapabilityCaptureStore,
 )
 from .service_api import ExecutionService, SessionService
 from .state import ArtifactRecord, ArtifactState, RuntimeDomain
@@ -320,7 +320,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         artifact_state: ArtifactState | None = None,
         artifact_objects: ObjectStore | None = None,
         object_key_factory: RuntimeObjectKeyFactory,
-        capability_snapshots: TaskCapabilitySnapshotStore,
+        capability_captures: TaskCapabilityCaptureStore,
         handlers: Sequence[TaskNodeHandler[AppT]] = (),
         expanders: Sequence[TaskExpander] = (),
         release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
@@ -341,10 +341,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._artifact_state = artifact_state
         self._artifact_objects = artifact_objects
         self._object_key_factory = object_key_factory
-        if not isinstance(capability_snapshots, TaskCapabilitySnapshotStore):
-            raise TypeError("capability_snapshots must be TaskCapabilitySnapshotStore")
-        self._capability_snapshot_store = capability_snapshots
-        self._admitted_capabilities: dict[str, TaskCapabilitySnapshot] = {}
+        if not isinstance(capability_captures, TaskCapabilityCaptureStore):
+            raise TypeError("capability_captures must be TaskCapabilityCaptureStore")
+        self._capability_capture_store = capability_captures
+        self._admitted_capabilities: dict[str, TaskCapabilityCapture] = {}
         self._agent = _AgentTaskNodeHandler(
             execution,
             catalog,
@@ -396,11 +396,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         admission: TaskGraphAdmission,
         graph: TaskGraph,
     ) -> TaskGraph:
-        capability_snapshot = await self._capability_snapshot_store.capture(
+        capability_capture = await self._capability_capture_store.capture(
             admission,
             graph,
         )
-        self._admitted_capabilities[admission.graph_id] = capability_snapshot
+        self._admitted_capabilities[admission.graph_id] = capability_capture
         return TaskGraph(
             graph.graph_id,
             tuple(
@@ -451,23 +451,23 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self,
         admission: TaskGraphAdmission,
     ) -> None:
-        capability_snapshot = await self._capability_snapshot_store.load(admission)
-        self._admitted_capabilities[admission.graph_id] = capability_snapshot
+        capability_capture = await self._capability_capture_store.load(admission)
+        self._admitted_capabilities[admission.graph_id] = capability_capture
 
-    def _require_capability_snapshot(
+    def _require_capability_capture(
         self,
         graph_id: str,
-    ) -> TaskCapabilitySnapshot:
-        capability_snapshot = self._admitted_capabilities.get(graph_id)
-        if capability_snapshot is None:
+    ) -> TaskCapabilityCapture:
+        capability_capture = self._admitted_capabilities.get(graph_id)
+        if capability_capture is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
                 safe_details={
-                    "kind": "task_capability_snapshot",
+                    "kind": "task_capability_capture",
                     "graph_id": graph_id,
                 },
             )
-        return capability_snapshot
+        return capability_capture
 
     def _resolved_agent_binding(
         self,
@@ -479,11 +479,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         binding_contract = AgentBindingContract.from_payload(payload)
-        capability_snapshot = self._require_capability_snapshot(graph_id)
-        resolved = capability_snapshot.bindings.get(binding_contract.binding_digest)
+        capability_capture = self._require_capability_capture(graph_id)
+        resolved = capability_capture.bindings.get(binding_contract.binding_digest)
         if resolved is not None:
             return resolved
-        root = capability_snapshot.roots.get(binding_contract.agent_spec.id)
+        root = capability_capture.roots.get(binding_contract.agent_spec.id)
         if root is None or not _binding_contract_matches_root(binding_contract, root):
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
@@ -1596,8 +1596,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         validate_agent_id(agent_id)
-        capability_snapshot = self._require_capability_snapshot(graph_id)
-        root = capability_snapshot.roots.get(agent_id)
+        capability_capture = self._require_capability_capture(graph_id)
+        root = capability_capture.roots.get(agent_id)
         if root is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,

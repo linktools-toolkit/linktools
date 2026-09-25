@@ -66,7 +66,7 @@ class _TextModelBinding:
 
 
 class _TextModels:
-    def snapshot(self) -> "_TextModels":
+    def capture(self) -> "_TextModels":
         return self
 
     def resolve(self, route_id: str) -> _TextModelBinding:
