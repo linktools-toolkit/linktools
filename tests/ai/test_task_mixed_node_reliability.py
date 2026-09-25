@@ -764,12 +764,19 @@ async def test_public_graph_start_canonicalizes_registered_task_semantics() -> N
         del context
         return {"value": "ok"}
 
+    async def reconcile(
+        context: TaskNodeContext[None],
+    ) -> TaskEffectResolution:
+        del context
+        return TaskEffectResolution("unknown")
+
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.public-start", 1, valid_output)
     application.task(
         handler,
         effect_policy="non_replay_safe",
         output_type=_EffectOutput,
+        reconcile=reconcile,
     )
     state = RuntimeStorage.in_memory()
 
@@ -795,6 +802,7 @@ async def test_public_graph_start_canonicalizes_registered_task_semantics() -> N
     assert node.effect_policy == "non_replay_safe"
     assert node.output_contract is not None
     assert node.output_contract["mode"] == "structured"
+    assert node.reconcile is True
 
 
 async def _invalid_effect_output(context: TaskNodeContext[None]) -> JsonValue:
