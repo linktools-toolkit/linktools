@@ -217,6 +217,7 @@ async def _load_skills(
         result.append(definition)
     return result
 
+
 async def _load_mcp(
     context: CapabilityLoadContext,
 ) -> "Sequence[MCPServerSpec]":
