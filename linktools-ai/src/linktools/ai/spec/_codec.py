@@ -625,13 +625,15 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
         "hidden_paths",
         "network",
     }
+    workspace_access = policy.get("workspace_access")
     hidden_paths = policy.get("hidden_paths")
     if (
         set(policy) != expected
         or policy.get("version") != 1
         or isinstance(policy.get("version"), bool)
         or boundary != "workspace-stdio"
-        or policy.get("workspace_access") not in {"read", "read_write", "none"}
+        or not isinstance(workspace_access, str)
+        or workspace_access not in {"read", "read_write", "none"}
         or policy.get("network") != "isolated"
         or not isinstance(hidden_paths, list)
         or any(not isinstance(path, str) or not path for path in hidden_paths)
@@ -641,7 +643,7 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
     return {
         "version": 1,
         "boundary": "workspace-stdio",
-        "workspace_access": policy["workspace_access"],
+        "workspace_access": workspace_access,
         "hidden_paths": list(hidden_paths),
         "network": "isolated",
     }
