@@ -9,7 +9,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, cast, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
 
@@ -397,7 +397,7 @@ class AssetStore:
                 if len(matches) != 1:
                     raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
                 backend = matches[0]
-            value = await cast(AssetBackend, backend).get_at_revision(
+            value = await backend.get_at_revision(
                 ref.key,
                 ref.revision,
             )
@@ -530,10 +530,7 @@ class AssetStore:
             raise TypeError("asset snapshot reference is invalid")
         if ref.store_id != object_store.store_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        return cast(
-            "AssetStore",
-            _SnapshotAssetStore(ref, object_store),
-        )
+        return _SnapshotAssetStore(ref, object_store)
 
     def _ensure_ready(self) -> None:
         if not self._ready:
@@ -970,7 +967,7 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
             size=size,
             status=StorageEntryStatus(str(raw["status"])),
             modified_at=datetime.fromisoformat(str(raw["modified_at"])),
-            metadata=cast(Mapping[str, JsonValue], raw.get("metadata", {})),
+            metadata=raw.get("metadata", {}),
         )
         if (
             content.get("store_id") != "snapshot"
