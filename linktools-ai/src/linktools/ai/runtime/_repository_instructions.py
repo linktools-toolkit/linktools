@@ -13,7 +13,7 @@ from ..capability import AgentContext
 from ..capability import ToolCallRetry
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..workspace import RepositoryInstructions
+from ..spec import RepositoryInstructions
 from ._tool_boundary import RepositoryInstructionBoundary
 from .state._contracts import ExecutionRecord, RecoveryCheckpoint
 
