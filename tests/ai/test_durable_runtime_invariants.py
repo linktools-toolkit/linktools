@@ -78,7 +78,7 @@ def _compiler(
 
 
 def _spec() -> AgentSpec:
-    return AgentSpec("durable-contract", model_route="default")
+    return AgentSpec("durable-contract", model="default")
 
 
 def test_custom_output_restore_uses_persisted_schema() -> None:
