@@ -433,6 +433,8 @@ def _encode_v1_task_node_fields(
         fields["output_contract"] = dict(value.output_contract)
     if value.effect_policy != "none":
         fields["effect_policy"] = value.effect_policy
+    if value.reconcile:
+        fields["reconcile"] = True
     return fields
 
 
@@ -507,12 +509,14 @@ def _decode_v1_task_node(
             "retry_delay_seconds",
             "output_contract",
             "effect_policy",
+            "reconcile",
         }
     )
     if keys - required - optional:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     effect_policy = raw_fields.get("effect_policy", "none")
-    if not isinstance(effect_policy, str):
+    reconcile = raw_fields.get("reconcile", False)
+    if not isinstance(effect_policy, str) or not isinstance(reconcile, bool):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return TaskNode(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
@@ -553,6 +557,7 @@ def _decode_v1_task_node(
             output_contract,
         ),
         effect_policy=effect_policy,
+        reconcile=reconcile,
         dependency_policy="all_succeeded",
     )
 
@@ -587,6 +592,7 @@ def _decode_v1_terminal_task_node(
         retry_delay_seconds=node.retry_delay_seconds,
         output_contract=node.output_contract,
         effect_policy=node.effect_policy,
+        reconcile=node.reconcile,
         dependency_policy="all_terminal",
     )
 
@@ -2442,6 +2448,7 @@ def _validate_v1_codec_definition() -> None:
         "output_type",
         "output_contract",
         "effect_policy",
+        "reconcile",
         "dependency_policy",
         "_input",
     ):
