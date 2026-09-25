@@ -4,10 +4,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
-from ..core import ImmutableJsonMapping, JsonValue, validate_logical_id
+from ..core import (
+    DEFAULT_DISCOVERY_POLICY,
+    ImmutableJsonMapping,
+    JsonValue,
+    validate_logical_id,
+)
 from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentMarkdownSpecCodec,
@@ -25,7 +31,7 @@ from ._resource_path import (
     validate_resource_tree,
 )
 from ._skill import SkillDefinition
-from ._skill_source import SkillSourceRef
+from ._skill_source import SkillResourceVersion, SkillSourceRef
 
 if TYPE_CHECKING:
     from ._group import CapabilityLoadContext, CapabilityLoadEntry
@@ -165,9 +171,40 @@ async def _load_skills(
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
             value = adapter.to_logical(logical_id, markdown.decode(by_key[key]))
+            prefix = f"{logical_id}/"
+            resources: list[tuple[str, CapabilityLoadEntry]] = []
+            for candidate in entries:
+                if not candidate.key.id.startswith(prefix):
+                    continue
+                relative = candidate.key.id[len(prefix) :]
+                if (
+                    relative == "SKILL.md"
+                    or DEFAULT_DISCOVERY_POLICY.ignores(relative)
+                ):
+                    continue
+                validate_resource_path(relative)
+                resources.append((relative, candidate))
+            resources.sort(key=lambda item: item[0])
+            resource_keys = tuple(candidate.key for _relative, candidate in resources)
+            refs = context.bind_versions(resource_keys)
+            paths = await context.asset_reader.local_paths(resource_keys)
+            versions: list[SkillResourceVersion] = []
+            for (relative, _candidate), ref, path in zip(
+                resources,
+                refs,
+                paths,
+                strict=True,
+            ):
+                mode = 0
+                if path is not None:
+                    try:
+                        mode = (await asyncio.to_thread(path.stat)).st_mode & 0o111
+                    except OSError as error:
+                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+                versions.append(SkillResourceVersion(relative, ref, mode))
             definition = SkillDefinition(
                 value,
-                SkillSourceRef(context.group_id, logical_id),
+                SkillSourceRef(context.group_id, logical_id, tuple(versions)),
             )
         elif _inside_package(key.id, roots):
             continue
@@ -179,10 +216,11 @@ async def _load_skills(
         result.append(definition)
     return result
 
-
 async def _load_mcp(
     context: CapabilityLoadContext,
-) -> "Sequence[MCPServerSpec]":
+) -> "Sequence[object]":
+    from ._group import CapabilityContribution
+
     entries = context.list(kind="mcp")
     roots, declarations = _package_declarations(
         entries,
@@ -191,7 +229,7 @@ async def _load_mcp(
     values = await context.read_many(tuple(entry.key for entry in declarations))
     by_key = dict(zip((entry.key for entry in declarations), values, strict=True))
     codec = MCPServerSpecCodec()
-    result: list[MCPServerSpec] = []
+    result: list[object] = []
     package_main_keys = {entry.key for entry in roots}
     for entry in declarations:
         key = entry.key
@@ -204,54 +242,37 @@ async def _load_mcp(
                 format=format,
                 package_id=package_id,
             )
-            _validate_package_resource_args(
-                context,
-                package_id,
-                value,
-            )
         else:
             value = codec.decode_author(by_key[key], format="json")
             if value.id != key.id:
                 raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-            _validate_resource_args(context, value)
-        result.append(value)
+
+        root = value.resource_root
+        if root is None:
+            if any(argument.startswith("resource:") for argument in value.args):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            result.append(value)
+            continue
+
+        resources = tuple(
+            (relative, candidate.key)
+            for candidate in context.list(kind=root.kind)
+            if (relative := mcp_resource_path(candidate.key, root)) is not None
+        )
+        available = {relative for relative, _key in resources}
+        validate_resource_tree(available)
+        _validate_resource_arguments(value.args, available)
+        refs = context.bind_versions(tuple(key for _relative, key in resources))
+        result.append(
+            CapabilityContribution.from_mcp_contract(
+                codec.to_execution_payload(
+                    value,
+                    refs,
+                    resource_source_id=context.group_id,
+                )
+            )
+        )
     return result
-
-
-def _validate_package_resource_args(
-    context: CapabilityLoadContext,
-    package_id: str,
-    server: MCPServerSpec,
-) -> None:
-    root = server.resource_root
-    if root is None or root.kind != "mcp" or root.id != package_id:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    available = {
-        relative
-        for entry in context.list(kind=root.kind)
-        if (relative := mcp_resource_path(entry.key, root)) is not None
-    }
-    validate_resource_tree(available)
-    _validate_resource_arguments(server.args, available)
-
-
-def _validate_resource_args(
-    context: CapabilityLoadContext,
-    server: MCPServerSpec,
-) -> None:
-    root = server.resource_root
-    if root is None:
-        if any(argument.startswith("resource:") for argument in server.args):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return
-    available = {
-        relative
-        for entry in context.list(kind=root.kind)
-        if (relative := mcp_resource_path(entry.key, root)) is not None
-    }
-    validate_resource_tree(available)
-    _validate_resource_arguments(server.args, available)
-
 
 def _validate_resource_arguments(
     args: Sequence[str],
