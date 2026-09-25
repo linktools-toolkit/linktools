@@ -486,36 +486,41 @@ def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_declaration_codecs_reject_unknown_author_fields() -> None:
-    agent_payload = {
-        "version": 1,
-        "id": "agent",
-        "future_metadata": {"future": True},
-    }
-    with pytest.raises(AIError) as error:
-        AgentSpecCodec().from_author_payload(agent_payload)
-    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
-    skill_payload = {
-        "version": 1,
-        "id": "skill",
-        "content": "skill content",
-        "future_metadata": {"future": True},
-    }
-    with pytest.raises(AIError) as error:
-        SkillSpecCodec().from_author_payload(skill_payload)
-    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
-    mcp_payload = {
-        "version": 1,
-        "id": "mcp",
-        "command": "echo",
-        "future_metadata": {"future": True},
-    }
-    with pytest.raises(AIError) as error:
-        MCPServerSpecCodec().decode_author(
-            json.dumps(mcp_payload).encode(),
-            format="json",
-        )
-    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
+    agent = AgentSpecCodec().from_author_payload(
+        {
+            "version": 1,
+            "id": "agent",
+            "model": "route",
+            "planning": True,
+            "future_metadata": {"future": True},
+        }
+    )
+    assert agent.model == "route"
+    assert agent.planning is False
+
+    skill = SkillSpecCodec().from_author_payload(
+        {
+            "version": 1,
+            "id": "skill",
+            "content": "skill content",
+            "future_metadata": {"future": True},
+        }
+    )
+    assert skill == SkillSpec("skill", "skill content")
+
+    server = MCPServerSpecCodec().decode_author(
+        json.dumps(
+            {
+                "version": 1,
+                "id": "mcp",
+                "command": "echo",
+                "future_metadata": {"future": True},
+            }
+        ).encode(),
+        format="json",
+    )
+    assert server == MCPServerSpec("mcp", "echo")
 
 
 def test_durable_spec_readers_ignore_additive_fields() -> None:
@@ -920,18 +925,32 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
         await store.close()
 
 
-def test_agent_spec_codec_rejects_unknown_usage_limit_fields() -> None:
-    payload = {
-        "version": 1,
-        "id": "agent",
-        "usage_limits": {
-            "model_requests": 1,
-            "future_limit": {"unit": "request"},
-        },
-    }
-    with pytest.raises(AIError) as error:
-        AgentSpecCodec().from_author_payload(payload)
-    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+def test_agent_authoring_ignores_runtime_only_usage_limits() -> None:
+    spec = AgentSpecCodec().from_author_payload(
+        {
+            "version": 1,
+            "id": "agent",
+            "usage_limits": {
+                "model_requests": 1,
+                "future_limit": {"unit": "request"},
+            },
+        }
+    )
+    assert spec.usage_limits is None
+
+
+def test_durable_usage_limits_ignore_additive_fields() -> None:
+    spec = AgentSpecCodec().from_payload(
+        {
+            "version": 1,
+            "id": "agent",
+            "usage_limits": {
+                "model_requests": 1,
+                "future_limit": {"unit": "request"},
+            },
+        }
+    )
+    assert spec.usage_limits == AgentUsageLimits(model_requests=1)
 
 
 def test_spec_constructors_reject_invalid_values() -> None:
