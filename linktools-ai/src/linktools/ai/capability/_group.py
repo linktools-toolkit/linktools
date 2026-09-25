@@ -42,7 +42,6 @@ from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
 from ._skill import SkillDefinition
-from ._skill_source import AssetSkillResourceSource
 from ._task import TaskExpander
 from ._tool_semantic import (
     tool_semantic_metadata,
@@ -428,20 +427,25 @@ class CapabilityLoadEntry:
 
 
 class CapabilityLoadContext:
+    """Immutable Asset capture shared by every loader in one group snapshot."""
+
     def __init__(
         self,
         group_id: str,
         store: AssetStore,
+        source_revision: StorageRevision,
         entries: Sequence[CapabilityLoadEntry],
         versions: Mapping[AssetKey, AssetVersionRef],
+        asset_reader: AssetStoreReader,
     ) -> None:
         self._group_id = group_id
         self._store = store
+        self._source_revision = source_revision
         self._entries = tuple(entries)
         self._by_key = {entry.key: entry for entry in self._entries}
         self._versions = dict(versions)
+        self._asset_reader = asset_reader
         self._cache: dict[AssetKey, bytes] = {}
-        self._read_keys: set[AssetKey] = set()
         if (
             len(self._by_key) != len(self._entries)
             or set(self._by_key) != set(self._versions)
@@ -454,9 +458,66 @@ class CapabilityLoadContext:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+    @classmethod
+    async def capture(
+        cls,
+        group_id: str,
+        store: AssetStore,
+    ) -> "CapabilityLoadContext":
+        """Capture all visible Assets once and bind them to immutable versions."""
+        if not store.ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        source_revision = await store.current_revision()
+        if not isinstance(source_revision, StorageRevision):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        metadata = await store.metadata_snapshot()
+        versions = await store.resolve_versions(
+            tuple(info.key for info in metadata)
+        )
+        if len(versions) != len(metadata) or any(
+            not ref.matches_info(info)
+            for info, ref in zip(metadata, versions, strict=True)
+        ):
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        if await store.current_revision() != source_revision:
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        version_by_key = {ref.key: ref for ref in versions}
+        entries = tuple(
+            CapabilityLoadEntry(
+                info.key,
+                info.etag,
+                info.size,
+                info.metadata,
+            )
+            for info in metadata
+        )
+        reader = _CapabilityAssetReader(
+            store,
+            source_revision,
+            version_by_key,
+            tuple(metadata),
+        )
+        return cls(
+            group_id,
+            store,
+            source_revision,
+            entries,
+            version_by_key,
+            reader,
+        )
+
     @property
     def group_id(self) -> str:
         return self._group_id
+
+    @property
+    def source_revision(self) -> StorageRevision:
+        return self._source_revision
+
+    @property
+    def asset_reader(self) -> AssetStoreReader:
+        """Return the version-pinned reader for this capture."""
+        return self._asset_reader
 
     def list(
         self,
@@ -464,7 +525,7 @@ class CapabilityLoadContext:
         kind: "str | None" = None,
         prefix: "str | None" = None,
     ) -> "tuple[CapabilityLoadEntry, ...]":
-        """List captured Asset metadata without opening the backing store."""
+        """List captured Asset metadata without reading current Store state."""
         return tuple(
             entry
             for entry in self._entries
@@ -472,56 +533,47 @@ class CapabilityLoadContext:
             and (prefix is None or entry.key.id.startswith(prefix))
         )
 
+    def bind_versions(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[AssetVersionRef, ...]":
+        """Return immutable references from this capture in requested order."""
+        result: list[AssetVersionRef] = []
+        for key in keys:
+            ref = self._versions.get(key)
+            if ref is None:
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+            result.append(ref)
+        return tuple(result)
+
     async def read(self, key: AssetKey) -> bytes:
         return (await self.read_many((key,)))[0]
 
     async def read_many(self, keys: Sequence[AssetKey]) -> "tuple[bytes, ...]":
-        """Read captured assets once, preserving the requested order."""
+        """Read captured immutable versions once, preserving requested order."""
         requested = tuple(dict.fromkeys(keys))
         if any(key not in self._by_key for key in requested):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        pending = tuple(
-            self._by_key[key]
-            for key in requested
-            if key not in self._cache
-        )
-        if not pending:
-            return tuple(self._cache[key] for key in keys)
-        refs = tuple(self._versions[entry.key] for entry in pending)
-        try:
-            values = await self._store.read_versions(refs)
-        except AIError as error:
-            if error.code in {
-                ErrorCode.ASSET_VERSION_NOT_FOUND,
-                ErrorCode.ASSET_VERSION_OWNER_UNKNOWN,
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
-            }:
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
-            raise
-        for entry, data in zip(pending, values, strict=True):
-            self._cache[entry.key] = data
-            self._read_keys.add(entry.key)
+        pending = tuple(key for key in requested if key not in self._cache)
+        if pending:
+            refs = self.bind_versions(pending)
+            try:
+                values = await self._store.read_versions(refs)
+            except AIError as error:
+                if error.code in {
+                    ErrorCode.ASSET_VERSION_NOT_FOUND,
+                    ErrorCode.ASSET_VERSION_OWNER_UNKNOWN,
+                }:
+                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
+                raise
+            for key, data in zip(pending, values, strict=True):
+                self._cache[key] = data
         return tuple(self._cache[key] for key in keys)
 
     async def verify(self) -> None:
-        """Recheck metadata for the captured assets read by loaders."""
-        if not self._read_keys:
-            return
-        current = {
-            info.key: info
-            for info in await self._store.metadata_snapshot()
-            if info.key in self._read_keys
-        }
-        for key in self._read_keys:
-            entry = self._by_key[key]
-            info = current.get(key)
-            if (
-                info is None
-                or info.etag != entry.etag
-                or info.size != entry.size
-                or info.metadata != entry.metadata
-            ):
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        """Fail when the source changed after this capture."""
+        if await self._store.current_revision() != self._source_revision:
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
 
 
 class CapabilityLoader(Protocol[AppT]):
@@ -771,45 +823,13 @@ class CapabilityGroup(Generic[AppT]):
         loaders = tuple(self._loaders.items())
         store = self._store
         source_revision: StorageRevision | None = None
+        asset_reader: AssetStoreReader | None = None
         if store is not None:
-            if not store.ready:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            capture_revision = await store.current_revision()
-            if not isinstance(capture_revision, StorageRevision):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            metadata = await store.metadata_snapshot()
-            versions = await store.resolve_versions(
-                tuple(info.key for info in metadata)
-            )
-            if len(versions) != len(metadata):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if any(
-                not ref.matches_info(info)
-                for info, ref in zip(metadata, versions, strict=True)
-            ):
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-            version_by_key = {ref.key: ref for ref in versions}
-            entries = tuple(
-                CapabilityLoadEntry(
-                    info.key,
-                    info.etag,
-                    info.size,
-                    info.metadata,
-                )
-                for info in metadata
-            )
-            asset_reader = _CapabilityAssetReader(
-                store,
-                capture_revision,
-                version_by_key,
-                tuple(metadata),
-            )
-            context = CapabilityLoadContext(self._id, store, entries, version_by_key)
+            context = await CapabilityLoadContext.capture(self._id, store)
             for kind, loader in loaders:
                 if getattr(loader, "source_kind", kind) != kind:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 loaded = await loader.load(context)
-                normalized: list[CapabilityContribution[AppT]] = []
                 for value in loaded:
                     if isinstance(
                         value,
@@ -823,37 +843,10 @@ class CapabilityGroup(Generic[AppT]):
                         item = cast("CapabilityContribution[AppT]", value)
                     else:
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                    if item.kind != "skill":
-                        normalized.append(item)
-                        continue
-                    skill = cast(SkillDefinition, item.value)
-                    if (
-                        skill.source_ref is not None
-                        and skill.source_ref.source_id != self._id
-                    ):
-                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                    if skill.source_ref is not None:
-                        resolved_ref = await AssetSkillResourceSource(
-                            self._id,
-                            asset_reader,
-                        ).resolve(skill.source_ref.root)
-                        skill = SkillDefinition(skill.spec, resolved_ref)
-                        item = cast(
-                            "CapabilityContribution[AppT]",
-                            CapabilityContribution.from_declaration(skill),
-                        )
-                    normalized.append(item)
-                contributions.extend(normalized)
-            source_revision = await store.current_revision()
-            if not isinstance(source_revision, StorageRevision):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    contributions.append(item)
             await context.verify()
-            asset_reader = _CapabilityAssetReader(
-                store,
-                source_revision,
-                version_by_key,
-                tuple(metadata),
-            )
+            source_revision = context.source_revision
+            asset_reader = context.asset_reader
         elif loaders:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         snapshot_items = tuple(_snapshot_contribution(item) for item in contributions)
@@ -869,7 +862,7 @@ class CapabilityGroup(Generic[AppT]):
             snapshot_contributions,
             source_revision,
             self._workspace,
-            None if store is None else asset_reader,
+            asset_reader,
             sandbox=self._sandbox,
         )
         _logger.info(
