@@ -31,6 +31,7 @@ from ._resource_path import (
     validate_resource_tree,
 )
 from ._skill import SkillDefinition
+from ..workspace import RepositoryInstructionDocument
 from ._skill_source import SkillResourceVersion, SkillSourceRef
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ _DECLARATION_SUFFIXES = {
     "agent": ("/AGENT.md",),
     "skill": ("/SKILL.md",),
     "mcp": ("/mcp.json", "/mcp.yaml"),
+    "rule": (".md",),
 }
 
 
@@ -102,7 +104,9 @@ class BuiltinDeclarationLoader:
             )
         if self.source_kind == "skill":
             return await _load_skills(context)
-        return await _load_mcp(context)
+        if self.source_kind == "mcp":
+            return await _load_mcp(context)
+        return await _load_rules(context)
 
 
 async def _load_agents(
@@ -270,6 +274,38 @@ async def _load_mcp(
                     refs,
                     resource_source_id=context.group_id,
                 )
+            )
+        )
+    return result
+
+
+async def _load_rules(
+    context: CapabilityLoadContext,
+) -> "Sequence[RepositoryInstructionDocument]":
+    entries = tuple(
+        entry
+        for entry in context.list(kind="rule")
+        if entry.key.id.endswith(".md")
+        and not DEFAULT_DISCOVERY_POLICY.ignores(entry.key.id)
+    )
+    values = await context.read_many(tuple(entry.key for entry in entries))
+    result: list[RepositoryInstructionDocument] = []
+    for entry, value in zip(entries, values, strict=True):
+        try:
+            content = value.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise AIError(
+                ErrorCode.ASSET_CODEC_UNKNOWN,
+                safe_details={
+                    "source_id": context.group_id,
+                    "asset_id": entry.key.id,
+                },
+            ) from error
+        result.append(
+            RepositoryInstructionDocument(
+                f"rule:{entry.key.id[:-3]}",
+                ".",
+                content,
             )
         )
     return result
