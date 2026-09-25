@@ -24,6 +24,7 @@ _USAGE_LIMIT_FIELDS = (
     "total_tokens",
 )
 
+
 class SpecCodec(Protocol[SpecT]):
     def encode(self, value: SpecT) -> bytes: ...
     def decode(self, data: bytes) -> SpecT: ...
@@ -73,7 +74,6 @@ class AgentSpecCodec:
 
     def from_payload(self, raw: Mapping[str, object]) -> AgentSpec:
         _require_v1(raw)
-        _require_usage_limit_fields(raw.get("usage_limits"))
         identity = raw.get("id")
         revision = _decode_revision(raw)
         model = raw.get("model", "default")
@@ -708,16 +708,6 @@ def _reject_json_constant(value: str) -> object:
     raise ValueError(f"unsupported JSON constant: {value}")
 
 
-def _require_usage_limit_fields(value: object) -> None:
-    if value is None:
-        return
-    if not isinstance(value, Mapping) or any(
-        not isinstance(key, str) or key not in _USAGE_LIMIT_FIELDS
-        for key in value
-    ):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-
-
 def _require_version(raw: Mapping[str, object], supported: set[int]) -> int:
     version = raw.get("version")
     if version is None:
@@ -746,7 +736,6 @@ def _decode_revision(raw: Mapping[str, object]) -> int:
 def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
     if value is None:
         return None
-    _require_usage_limit_fields(value)
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits must be an object or null")
     if any(not isinstance(name, str) for name in value):
