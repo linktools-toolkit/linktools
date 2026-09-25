@@ -786,12 +786,6 @@ def _parse_skill_markdown(content: str) -> dict[str, object]:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     if not isinstance(description, str) or not 1 <= len(description) <= 1024:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    for key, maximum in (("compatibility", 500),):
-        if key in frontmatter and (not isinstance(frontmatter[key], str) or not 1 <= len(frontmatter[key]) <= maximum):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    for key in ("license", "allowed-tools"):
-        if key in frontmatter and not isinstance(frontmatter[key], str):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     if "metadata" in frontmatter:
         metadata = frontmatter["metadata"]
         if not isinstance(metadata, Mapping):
