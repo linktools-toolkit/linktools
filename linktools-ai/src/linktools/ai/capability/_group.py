@@ -642,14 +642,7 @@ class CapabilityGroup(Generic[AppT]):
         )
         task_type, task_version = _task_identity(registered)
         identity = task_type
-        contract: dict[str, JsonValue] = {
-            "version": 1,
-            "task_type": task_type,
-            "task_version": task_version,
-            "effect": _task_effect(registered),
-            "output": _task_output_contract(registered),
-            "reconcile": registered.reconcile is not None,
-        }
+        contract = contribution_contract("task", identity, registered)
         if any(
             value.kind == "task"
             and value.id == identity
@@ -671,11 +664,7 @@ class CapabilityGroup(Generic[AppT]):
         """Register one pure application-owned TaskGraph expander version."""
         expander_id, expander_version = _expander_identity(expander)
         identity = expander_id
-        contract: dict[str, JsonValue] = {
-            "version": 1,
-            "expander_id": expander_id,
-            "expander_version": expander_version,
-        }
+        contract = contribution_contract("task_expander", identity, expander)
         if any(
             value.kind == "task_expander"
             and value.id == identity
@@ -1020,6 +1009,7 @@ def contribution_contract(
             "task_version": task_version,
             "effect": _task_effect(value),
             "output": _task_output_contract(value),
+            "reconcile": getattr(value, "reconcile", None) is not None,
         }
     if kind == "task_expander" and isinstance(value, TaskExpander):
         expander_id, expander_version = _expander_identity(value)
