@@ -110,10 +110,10 @@ def test_agent_markdown_preserves_plain_prompt_bom_and_crlf_body() -> None:
     }
 
     payload = codec.parse(
-        b"---\r\nmodel-route: test\r\nplanning: false\r\n---\r\n\r\nbody \r\n"
+        b"---\r\nmodel: test\r\nplanning: false\r\n---\r\n\r\nbody \r\n"
     )
     assert payload == {
-        "model_route": "test",
+        "model": "test",
         "planning": False,
         "system_prompt": "\r\nbody \r\n",
     }
@@ -123,13 +123,13 @@ def test_agent_markdown_preserves_plain_prompt_bom_and_crlf_body() -> None:
 @pytest.mark.parametrize(
     "document",
     (
-        b"---\nmodel-route: test\n",
+        b"---\nmodel: test\n",
         b"---\nnull\n---\nbody",
-        b"---\nmodel-route: first\nmodel-route: second\n---\nbody",
+        b"---\nmodel: first\nmodel: second\n---\nbody",
         b"---\nallow_tools: []\nallow-tools: []\n---\nbody",
         b"---\nversion: 1\n---\nbody",
         b"---\nsystem-prompt: hidden\n---\nbody",
-        b"---\n<<: {model-route: inherited}\n---\nbody",
+        b"---\n<<: {model: inherited}\n---\nbody",
         b"---\nvalue: !!python/object/apply:os.system ['true']\n---\nbody",
     ),
 )
@@ -142,7 +142,7 @@ def test_agent_markdown_rejects_invalid_frontmatter(document: bytes) -> None:
 def test_agent_markdown_resolves_defaults_without_truthiness_or_deep_merge() -> None:
     codec = AgentMarkdownSpecCodec()
     defaults = {
-        "model_route": "worker-model",
+        "model": "worker-model",
         "tool_retries": 7,
         "allow_tools": ["tool"],
         "planning": True,
@@ -156,7 +156,7 @@ def test_agent_markdown_resolves_defaults_without_truthiness_or_deep_merge() -> 
     )
 
     assert spec.id == "team/worker"
-    assert spec.model_route == "worker-model"
+    assert spec.model == "worker-model"
     assert spec.allow_tools == ()
     assert spec.planning is False
     assert spec.tool_retries == 7
@@ -245,7 +245,7 @@ def test_agent_markdown_rejects_version_unknown_fields_and_invalid_defaults() ->
 
     with pytest.raises(AIError) as defaults:
         codec.from_payload(
-            {"system_prompt": "", "model_route": "explicit"},
+            {"system_prompt": "", "model": "explicit"},
             logical_id="worker",
             defaults={"future_field": True},
         )
@@ -257,9 +257,9 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
-    defaults = {"model_route": "configured", "tool_retries": 4}
+    defaults = {"model": "configured", "tool_retries": 4}
     loader = AgentDeclarationLoader("worker", defaults)
-    defaults["model_route"] = "changed"
+    defaults["model"] = "changed"
     defaults["tool_retries"] = 40
     await store.put(
         AssetKey("worker", "team/AGENT.md"),
@@ -274,7 +274,7 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     spec = snapshot.contributions[0].value
     assert isinstance(spec, AgentSpec)
     assert spec.id == "team"
-    assert spec.model_route == "configured"
+    assert spec.model == "configured"
     assert spec.tool_retries == 4
     await store.close()
 
@@ -286,7 +286,7 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
     await store.initialize()
     await store.put(
         AssetKey("worker", "security/audit/AGENT.md"),
-        b"---\nmodel-route: test\nworker-mode: isolated\n---\nworker prompt",
+        b"---\nmodel: test\nworker-mode: isolated\n---\nworker prompt",
     )
     codec = AgentMarkdownSpecCodec()
 
@@ -395,7 +395,7 @@ async def test_custom_mcp_loader_binds_resource_versions() -> None:
         server, versions = MCPServerSpecCodec().from_execution_payload(
             contribution.contract
         )
-        assert server.resource_root == AssetKey("worker", "server")
+        assert server.resource == AssetKey("worker", "server")
         assert contribution.contract["asset_source_id"] == "application"
         assert versions is not None
         assert len(versions) == 1
@@ -496,14 +496,14 @@ def test_agent_json_and_markdown_and_mcp_json_and_yaml_converge() -> None:
             {
                 "version": 1,
                 "id": "security/audit",
-                "model_route": "test",
+                "model": "test",
                 "system_prompt": "prompt",
                 "allow_tools": ["lookup"],
             }
         ).encode()
     )
     agent_markdown = AgentMarkdownSpecCodec().decode(
-        b"---\nmodel-route: test\nallow-tools: [lookup]\n---\nprompt",
+        b"---\nmodel: test\nallow-tools: [lookup]\n---\nprompt",
         logical_id="security/audit",
     )
     assert agent_json == agent_markdown
@@ -520,7 +520,7 @@ def test_agent_json_and_markdown_and_mcp_json_and_yaml_converge() -> None:
 def _declarations() -> dict[AssetKey, bytes]:
     return {
         AssetKey("agent", "security/audit/AGENT.md"): (
-            b"---\r\nmodel-route: test\r\n---\r\naudit prompt"
+            b"---\r\nmodel: test\r\n---\r\naudit prompt"
         ),
         AssetKey("agent", "security/audit/notes.bin"): b"\x00\xff",
         AssetKey("mcp", "security/audit/mcp.yaml"): (
@@ -585,7 +585,7 @@ async def test_declaration_loaders_are_backend_agnostic(
         assert results[0][0][:2] == ("agent", "security/audit")
         mcp = results[0][1][2]
         assert isinstance(mcp, MCPServerSpec)
-        assert mcp.resource_root == AssetKey("mcp", "security/audit")
+        assert mcp.resource == AssetKey("mcp", "security/audit")
         assert results[0][2][:2] == ("skill", "audit")
     finally:
         for store, _engine in stores:
@@ -634,7 +634,7 @@ async def test_flat_mcp_declaration_owns_ordinary_resource_files() -> None:
 
 
 @pytest.mark.asyncio
-async def test_explicit_mcp_resource_root_reserves_declaration_filenames() -> None:
+async def test_explicit_mcp_resource_reserves_declaration_filenames() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()

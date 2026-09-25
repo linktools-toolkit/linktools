@@ -39,7 +39,7 @@ def test_runtime_bound_agent_does_not_expose_compile_or_registration() -> None:
 
 def test_agent_binding_contract_persists_binding_inputs() -> None:
     binding_contract = AgentBindingContract(
-        agent_spec=AgentSpec("agent", model_route="model"),
+        agent_spec=AgentSpec("agent", model="model"),
         model_contract={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
@@ -95,7 +95,7 @@ def test_capability_pin_persists_contract_once() -> None:
 
 def test_agent_binding_contract_preserves_unknown_fields() -> None:
     payload = AgentBindingContract(
-        agent_spec=AgentSpec("agent", model_route="model"),
+        agent_spec=AgentSpec("agent", model="model"),
         model_contract={"version": 1, "id": "model"},
         selected=(),
         subagents=(),

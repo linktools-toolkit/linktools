@@ -40,7 +40,7 @@ async def _store() -> AssetStore:
 @pytest.mark.asyncio
 async def test_builtin_loader_captures_agent_skill_and_mcp_declarations() -> None:
     store = await _store()
-    agent = AgentSpec("agent", model_route="model")
+    agent = AgentSpec("agent", model="model")
     skill = SkillSpec("skill", "instructions")
     mcp = MCPServerSpec("server", "python", ("-m", "server"))
     await store.put(AssetKey("agent", "agent"), AgentSpecCodec().encode(agent))
@@ -132,7 +132,7 @@ async def test_builtin_loader_rejects_declaration_identity_mismatch() -> None:
     store = await _store()
     await store.put(
         AssetKey("agent", "expected"),
-        AgentSpecCodec().encode(AgentSpec("actual", model_route="model")),
+        AgentSpecCodec().encode(AgentSpec("actual", model="model")),
     )
 
     with pytest.raises(AIError) as error:
@@ -313,7 +313,7 @@ class _DuplicateAgentLoader:
         context: CapabilityLoadContext,
     ) -> "Sequence[CapabilityContribution[object]]":
         del context
-        spec = AgentSpec("agent", model_route="other-model")
+        spec = AgentSpec("agent", model="other-model")
         contract = CapabilityContribution.from_declaration(spec).contract
         return (
             CapabilityContribution(
@@ -329,7 +329,7 @@ async def test_duplicate_candidate_identity_is_rejected_after_all_loaders_finish
     store = await _store()
     await store.put(
         AssetKey("agent", "agent"),
-        AgentSpecCodec().encode(AgentSpec("agent", model_route="model")),
+        AgentSpecCodec().encode(AgentSpec("agent", model="model")),
     )
     group = CapabilityGroup("workspace", assets=store)
     group.loader("custom", _DuplicateAgentLoader())
@@ -374,7 +374,7 @@ async def test_group_capture_rejects_source_changes_before_admission() -> None:
     store = await _store()
     await store.put(
         AssetKey("agent", "agent"),
-        AgentSpecCodec().encode(AgentSpec("agent", model_route="model")),
+        AgentSpecCodec().encode(AgentSpec("agent", model="model")),
     )
     capture = await CapabilityGroup("workspace", assets=store).capture()
     await store.put(AssetKey("other", "late"), b"changed")
@@ -445,7 +445,7 @@ async def test_builtin_loader_batches_declaration_version_reads() -> None:
     await store.initialize()
     await store.put(
         AssetKey("agent", "agent"),
-        AgentSpecCodec().encode(AgentSpec("agent", model_route="model")),
+        AgentSpecCodec().encode(AgentSpec("agent", model="model")),
     )
     await store.put(
         AssetKey("mcp", "server"),
