@@ -123,6 +123,48 @@ async def _noop_cancel(
 
 
 @pytest.mark.asyncio
+async def test_sqlite_state_group_serializes_mutation_callbacks(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "serialized.sqlite"
+    await _provision_sqlite(database)
+    state = RuntimeStorage.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
+    await state.initialize(namespace="sqlite-serialize", tenant_id="default")
+    store = state.task.tasks.state_store
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first(transaction):
+        await transaction.next_sequence(b"a" * 32)
+        first_entered.set()
+        await release_first.wait()
+
+    async def second(transaction):
+        second_entered.set()
+        await transaction.next_sequence(b"b" * 32)
+
+    try:
+        first_task = asyncio.create_task(store.mutate(first))
+        await asyncio.wait_for(first_entered.wait(), timeout=1)
+        second_task = asyncio.create_task(store.mutate(second))
+        await asyncio.sleep(0.05)
+        assert not second_entered.is_set()
+        release_first.set()
+        await asyncio.wait_for(
+            asyncio.gather(first_task, second_task),
+            timeout=2,
+        )
+        assert second_entered.is_set()
+    finally:
+        release_first.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
