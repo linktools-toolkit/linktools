@@ -7,42 +7,31 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast, get_type_hints
+from typing import Generic, Literal, TypeVar, cast, get_type_hints
 
 from linktools.core import environ
-from pydantic import BaseModel
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..asset import (
-    AssetInfo,
-    AssetKey,
-    AssetStore,
-    AssetStoreReader,
-    AssetVersionRef,
-)
-from ..core import ImmutableJsonMapping, JsonValue
+from ..asset import AssetStore, AssetStoreReader
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentSpec,
-    AgentSpecCodec,
     AgentUsageLimits,
     MCPServerSpec,
-    MCPServerSpecCodec,
     RepositoryInstructionDocument,
     RepositoryInstructions,
     ThinkingValue,
-    canonicalize_json_schema,
-    canonicalize_pydantic_model_schema,
-    capability_ref_payload,
     parse_mcp_tool_selector,
 )
 from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
 from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
+from ._contribution import CapabilityContribution, _freeze_contribution
+from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillDefinition
 from ._task import TaskExpander
 from ._tool_semantic import (
@@ -55,28 +44,7 @@ AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.capability.group")
 
 
-ContributionKind = Literal[
-    "tool",
-    "agent",
-    "skill",
-    "mcp",
-    "capability",
-    "task",
-    "task_expander",
-]
-ContributionValue: TypeAlias = (
-    Tool
-    | AgentSpec
-    | SkillDefinition
-    | MCPServerSpec
-    | AbstractCapability
-    | TaskNodeHandler[object]
-    | TaskExpander
-)
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
-_TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
-_RESERVED_TASK_TYPE_PREFIX = "linktools.ai."
-_RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,258 +75,6 @@ class _RegisteredTaskHandler(Generic[AppT]):
 
     async def cancel(self, context: TaskNodeContext[AppT]) -> None:
         await self.handler.cancel(context)
-
-
-@dataclass(frozen=True, slots=True)
-class CapabilityContribution(Generic[AppT]):
-    kind: ContributionKind
-    id: str
-    value: (
-        "Tool[AgentContext[AppT]] | AgentSpec | SkillDefinition | MCPServerSpec | "
-        "AbstractCapability[AgentContext[AppT]] | TaskNodeHandler[AppT] | TaskExpander"
-    )
-
-    def __post_init__(self) -> None:
-        if self.kind not in {
-            "tool",
-            "agent",
-            "skill",
-            "mcp",
-            "capability",
-            "task",
-            "task_expander",
-        }:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if not isinstance(self.id, str) or not self.id.strip():
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "tool" and not isinstance(self.value, Tool):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "agent" and not isinstance(self.value, AgentSpec):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "skill" and not isinstance(self.value, SkillDefinition):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "mcp" and not isinstance(self.value, MCPServerSpec):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "capability" and not isinstance(self.value, AbstractCapability):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "task" and not isinstance(self.value, TaskNodeHandler):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "task_expander" and not isinstance(self.value, TaskExpander):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "tool" and cast(Tool, self.value).name != self.id:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "agent" and cast(AgentSpec, self.value).id != self.id:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "skill" and cast(SkillDefinition, self.value).id != self.id:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "mcp" and cast(MCPServerSpec, self.value).id != self.id:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "capability":
-            capability = cast(AbstractCapability, self.value)
-            capability_id = capability.id
-            if not isinstance(capability.defer_loading, bool):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            if capability_id is not None and capability_id != self.id:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            if capability_id is None and capability.defer_loading:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            _validate_external_capability_id(self.id)
-        if self.kind == "task":
-            handler = cast("TaskNodeHandler[object]", self.value)
-            task_type, task_version = _task_identity(handler)
-            if self.id != task_type:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "task_expander":
-            expander = cast(TaskExpander, self.value)
-            expander_id, expander_version = _expander_identity(expander)
-            if self.id != expander_id:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-    @property
-    def revision(self) -> int:
-        value = capability_ref_payload(self.kind, self.id, self.contract)["revision"]
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return value
-
-    @classmethod
-    def from_opaque(
-        cls,
-        kind: Literal["tool", "capability"],
-        identity: str,
-        value: "Tool[AgentContext[AppT]] | AbstractCapability[AgentContext[AppT]]",
-        *,
-        revision: int = 1,
-        config: "Mapping[str, JsonValue] | None" = None,
-    ) -> "CapabilityContribution[AppT]":
-        """Create an opaque Python Tool or Capability from its declared inputs."""
-        if kind not in {"tool", "capability"}:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        _validate_revision(revision)
-        contract = contribution_contract(
-            kind,
-            identity,
-            value,
-            revision=revision,
-            config=config,
-        )
-        return _ContractContribution(
-            kind,
-            identity,
-            value,
-            contract,
-        )
-
-    @classmethod
-    def from_declaration(
-        cls,
-        value: AgentSpec | SkillDefinition | MCPServerSpec,
-    ) -> "CapabilityContribution[object]":
-        """Create a contribution from a durable declaration."""
-        if isinstance(value, AgentSpec):
-            kind: Literal["agent", "skill", "mcp"] = "agent"
-        elif isinstance(value, SkillDefinition):
-            kind = "skill"
-        elif isinstance(value, MCPServerSpec):
-            kind = "mcp"
-        else:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        contract = contribution_contract(kind, value.id, value)
-        return _ContractContribution(
-            kind,
-            value.id,
-            value,
-            contract,
-        )
-
-    @classmethod
-    def from_mcp_contract(
-        cls,
-        contract: Mapping[str, JsonValue],
-    ) -> "CapabilityContribution[object]":
-        """Restore an MCP contribution from its execution-bound contract."""
-        if not isinstance(contract, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value, _resource_versions = MCPServerSpecCodec().from_execution_payload(
-            cast("Mapping[str, object]", contract)
-        )
-        return _ContractContribution(
-            "mcp",
-            value.id,
-            value,
-            contract,
-        )
-
-    @property
-    def contract(self) -> "dict[str, JsonValue]":
-        return contribution_contract(
-            self.kind,
-            self.id,
-            self.value,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class _ContractContribution(CapabilityContribution[AppT]):
-    _contract: Mapping[str, JsonValue] = field(repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        try:
-            contract = ImmutableJsonMapping(self._contract)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        object.__setattr__(self, "_contract", contract)
-        CapabilityContribution.__post_init__(self)
-
-    @property
-    def contract(self) -> "dict[str, JsonValue]":
-        return dict(self._contract)
-
-
-@dataclass(frozen=True, slots=True)
-class _CapabilityAssetReader:
-    _store: AssetStore = field(repr=False, compare=False)
-    _revision: StorageRevision
-    _versions: Mapping[AssetKey, AssetVersionRef] = field(repr=False, compare=False)
-    _metadata: tuple[AssetInfo, ...] = field(repr=False, compare=False)
-
-    async def _verify(self) -> None:
-        if await self._store.current_revision() != self._revision:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-
-    async def current_revision(self) -> StorageRevision:
-        await self._verify()
-        return self._revision
-
-    async def get(self, key: AssetKey) -> "bytes | None":
-        ref = self._versions.get(key)
-        if ref is None:
-            return None
-        return (await self._store.read_versions((ref,)))[0]
-
-    async def get_many(
-        self,
-        keys: Sequence[AssetKey],
-    ) -> "tuple[bytes | None, ...]":
-        refs = tuple(self._versions.get(key) for key in keys)
-        captured = tuple(ref for ref in refs if ref is not None)
-        values = iter(await self._store.read_versions(captured))
-        return tuple(next(values) if ref is not None else None for ref in refs)
-
-    async def local_paths(
-        self,
-        keys: Sequence[AssetKey],
-    ) -> "tuple[Path | None, ...]":
-        requested = tuple(
-            dict.fromkeys(key for key in keys if key in self._versions)
-        )
-        if not requested:
-            return tuple(None for _ in keys)
-        paths = await self._store.local_paths(requested)
-        path_by_key = dict(zip(requested, paths, strict=True))
-        present = tuple(
-            key
-            for key, path in zip(requested, paths, strict=True)
-            if path is not None
-        )
-        if present:
-            try:
-                current = await self._store.resolve_versions(present)
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_NOT_FOUND:
-                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
-                raise
-            if any(
-                ref != self._versions[key]
-                for key, ref in zip(present, current, strict=True)
-            ):
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        return tuple(
-            path_by_key.get(key) if key in self._versions else None
-            for key in keys
-        )
-
-    async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
-        return self._metadata
-
-    async def resolve_versions(
-        self,
-        keys: Sequence[AssetKey],
-    ) -> "tuple[AssetVersionRef, ...]":
-        result: list[AssetVersionRef] = []
-        for key in keys:
-            ref = self._versions.get(key)
-            if ref is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            result.append(ref)
-        return tuple(result)
-
-    async def read_versions(
-        self,
-        refs: Sequence[AssetVersionRef],
-    ) -> "tuple[bytes, ...]":
-        return await self._store.read_versions(refs)
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,189 +122,6 @@ class CapabilityGroupSnapshot(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if await self._asset_reader.current_revision() != self.source_revision:
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-
-
-@dataclass(frozen=True, slots=True)
-class CapabilityLoadEntry:
-    """Asset metadata captured at the start of a group snapshot."""
-
-    key: AssetKey
-    etag: str
-    size: int
-    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if len(self.etag) != 64 or any(
-            character not in "0123456789abcdef" for character in self.etag
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if self.size < 0:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            metadata = ImmutableJsonMapping(self.metadata)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        object.__setattr__(self, "metadata", metadata)
-
-
-class CapabilityLoadContext:
-    """Immutable Asset capture shared by every loader in one group snapshot."""
-
-    def __init__(
-        self,
-        group_id: str,
-        store: AssetStore,
-        source_revision: StorageRevision,
-        entries: Sequence[CapabilityLoadEntry],
-        versions: Mapping[AssetKey, AssetVersionRef],
-        asset_reader: AssetStoreReader,
-    ) -> None:
-        self._group_id = group_id
-        self._store = store
-        self._source_revision = source_revision
-        self._entries = tuple(entries)
-        self._by_key = {entry.key: entry for entry in self._entries}
-        self._versions = dict(versions)
-        self._asset_reader = asset_reader
-        self._cache: dict[AssetKey, bytes] = {}
-        if (
-            len(self._by_key) != len(self._entries)
-            or set(self._by_key) != set(self._versions)
-            or any(
-                self._versions[entry.key].key != entry.key
-                or self._versions[entry.key].etag != entry.etag
-                or self._versions[entry.key].size != entry.size
-                for entry in self._entries
-            )
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    @classmethod
-    async def capture(
-        cls,
-        group_id: str,
-        store: AssetStore,
-    ) -> "CapabilityLoadContext":
-        """Capture all visible Assets once and bind them to immutable versions."""
-        if not store.ready:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        source_revision = await store.current_revision()
-        if not isinstance(source_revision, StorageRevision):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        metadata = await store.metadata_snapshot()
-        versions = await store.resolve_versions(
-            tuple(info.key for info in metadata)
-        )
-        if len(versions) != len(metadata) or any(
-            not ref.matches_info(info)
-            for info, ref in zip(metadata, versions, strict=True)
-        ):
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        if await store.current_revision() != source_revision:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        version_by_key = {ref.key: ref for ref in versions}
-        entries = tuple(
-            CapabilityLoadEntry(
-                info.key,
-                info.etag,
-                info.size,
-                info.metadata,
-            )
-            for info in metadata
-        )
-        reader = _CapabilityAssetReader(
-            store,
-            source_revision,
-            version_by_key,
-            tuple(metadata),
-        )
-        return cls(
-            group_id,
-            store,
-            source_revision,
-            entries,
-            version_by_key,
-            reader,
-        )
-
-    @property
-    def group_id(self) -> str:
-        return self._group_id
-
-    @property
-    def source_revision(self) -> StorageRevision:
-        return self._source_revision
-
-    @property
-    def asset_reader(self) -> AssetStoreReader:
-        """Return the version-pinned reader for this capture."""
-        return self._asset_reader
-
-    def list(
-        self,
-        *,
-        kind: "str | None" = None,
-        prefix: "str | None" = None,
-    ) -> "tuple[CapabilityLoadEntry, ...]":
-        """List captured Asset metadata without reading current Store state."""
-        return tuple(
-            entry
-            for entry in self._entries
-            if (kind is None or entry.key.kind == kind)
-            and (prefix is None or entry.key.id.startswith(prefix))
-        )
-
-    def bind_versions(
-        self,
-        keys: Sequence[AssetKey],
-    ) -> "tuple[AssetVersionRef, ...]":
-        """Return immutable references from this capture in requested order."""
-        result: list[AssetVersionRef] = []
-        for key in keys:
-            ref = self._versions.get(key)
-            if ref is None:
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-            result.append(ref)
-        return tuple(result)
-
-    async def read(self, key: AssetKey) -> bytes:
-        return (await self.read_many((key,)))[0]
-
-    async def read_many(self, keys: Sequence[AssetKey]) -> "tuple[bytes, ...]":
-        """Read captured immutable versions once, preserving requested order."""
-        requested = tuple(dict.fromkeys(keys))
-        if any(key not in self._by_key for key in requested):
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        pending = tuple(key for key in requested if key not in self._cache)
-        if pending:
-            refs = self.bind_versions(pending)
-            try:
-                values = await self._store.read_versions(refs)
-            except AIError as error:
-                if error.code in {
-                    ErrorCode.ASSET_VERSION_NOT_FOUND,
-                    ErrorCode.ASSET_VERSION_OWNER_UNKNOWN,
-                }:
-                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
-                raise
-            for key, data in zip(pending, values, strict=True):
-                self._cache[key] = data
-        return tuple(self._cache[key] for key in keys)
-
-    async def verify(self) -> None:
-        """Fail when the source changed after this capture."""
-        if await self._store.current_revision() != self._source_revision:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-
-
-class CapabilityLoader(Protocol[AppT]):
-    async def load(
-        self,
-        context: CapabilityLoadContext,
-    ) -> (
-        "Sequence[CapabilityContribution[AppT] | AgentSpec | SkillDefinition "
-        "| MCPServerSpec | RepositoryInstructionDocument]"
-    ): ...
 
 
 class CapabilityGroup(Generic[AppT]):
@@ -697,47 +230,36 @@ class CapabilityGroup(Generic[AppT]):
             output,
             reconcile,
         )
-        task_type, task_version = _task_identity(registered)
-        identity = task_type
-        contract = contribution_contract("task", identity, registered)
+        contribution = cast(
+            "CapabilityContribution[AppT]",
+            CapabilityContribution.from_task(registered),
+        )
         if any(
             value.kind == "task"
-            and value.id == identity
-            and value.revision == task_version
+            and value.id == contribution.id
+            and value.revision == contribution.revision
             for value in self._contributions
         ):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        self._contributions.append(
-            _ContractContribution(
-                "task",
-                identity,
-                registered,
-                contract,
-            )
-        )
+        self._contributions.append(contribution)
         return handler
 
     def task_expander(self, expander: TaskExpander) -> TaskExpanderRef:
         """Register one pure application-owned TaskGraph expander version."""
-        expander_id, expander_version = _expander_identity(expander)
-        identity = expander_id
-        contract = contribution_contract("task_expander", identity, expander)
+        contribution = cast(
+            "CapabilityContribution[AppT]",
+            CapabilityContribution.from_task_expander(expander),
+        )
         if any(
             value.kind == "task_expander"
-            and value.id == identity
-            and value.revision == expander_version
+            and value.id == contribution.id
+            and value.revision == contribution.revision
             for value in self._contributions
         ):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        self._contributions.append(
-            _ContractContribution(
-                "task_expander",
-                identity,
-                expander,
-                contract,
-            )
-        )
-        return TaskExpanderRef(expander_id, expander_version)
+        self._contributions.append(contribution)
+        return TaskExpanderRef(contribution.id, contribution.revision)
+
 
     def capability(
         self,
@@ -858,7 +380,9 @@ class CapabilityGroup(Generic[AppT]):
             asset_reader = context.asset_reader
         elif loaders:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        snapshot_items = tuple(_snapshot_contribution(item) for item in contributions)
+        snapshot_items = tuple(
+            _freeze_contribution(item) for item in contributions
+        )
         _validate_unique(snapshot_items)
         generic = [item for item in snapshot_items if item.kind == "capability"]
         declarations = sorted(
@@ -884,19 +408,6 @@ class CapabilityGroup(Generic[AppT]):
             None if source_revision is None else source_revision.value,
         )
         return snapshot
-
-
-def _snapshot_contribution(
-    value: CapabilityContribution[AppT],
-) -> CapabilityContribution[AppT]:
-    if isinstance(value, _ContractContribution):
-        return value
-    return _ContractContribution(
-        value.kind,
-        value.id,
-        value.value,
-        value.contract,
-    )
 
 
 def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
@@ -944,145 +455,6 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
         parameters[0].name: first.annotation,
     }
     return Tool(invoke, takes_ctx=True, name=name)
-
-
-def contribution_contract(
-    kind: ContributionKind,
-    identity: str,
-    value: ContributionValue,
-    *,
-    revision: "int | None" = None,
-    config: "Mapping[str, JsonValue] | None" = None,
-) -> "dict[str, JsonValue]":
-    if config is not None and kind != "capability":
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    if kind == "tool" and isinstance(value, Tool):
-        definition = value.tool_def
-        validate_tool_semantic_metadata(
-            definition.metadata,
-            require_effect=True,
-            require_tool_class=True,
-        )
-        contract: dict[str, JsonValue] = {
-            "version": 1,
-            "description": definition.description,
-            "parameters": cast(JsonValue, definition.parameters_json_schema),
-            "return_schema": cast(JsonValue, definition.return_schema),
-            "strict": definition.strict,
-            "metadata": cast(JsonValue, definition.metadata),
-        }
-        if value.max_retries is not None:
-            contract["max_retries"] = value.max_retries
-        if definition.sequential:
-            contract["sequential"] = True
-        if definition.kind != "function":
-            contract["kind"] = definition.kind
-        if definition.timeout is not None:
-            contract["timeout"] = float(definition.timeout)
-        if definition.defer_loading:
-            contract["defer_loading"] = True
-        if definition.include_return_schema is not None:
-            contract["include_return_schema"] = definition.include_return_schema
-        contract["revision"] = revision or 1
-        return contract
-    if kind == "agent" and isinstance(value, AgentSpec):
-        return AgentSpecCodec().to_payload(value)
-    if kind == "skill" and isinstance(value, SkillDefinition):
-        return value.contract
-    if kind == "mcp" and isinstance(value, MCPServerSpec):
-        return MCPServerSpecCodec().to_payload(value)
-    if kind == "capability" and isinstance(value, AbstractCapability):
-        contract: dict[str, JsonValue] = {
-            "version": 1,
-            "revision": revision or 1,
-            "defer_loading": value.defer_loading,
-            "config": {},
-        }
-        if config is not None:
-            try:
-                contract["config"] = dict(ImmutableJsonMapping(config))
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        return contract
-    if kind == "task" and isinstance(value, TaskNodeHandler):
-        task_type, task_version = _task_identity(value)
-        if identity != task_type:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return {
-            "version": 1,
-            "task_type": task_type,
-            "task_version": task_version,
-            "effect": _task_effect(value),
-            "output": _task_output_contract(value),
-            "reconcile": getattr(value, "reconcile", None) is not None,
-        }
-    if kind == "task_expander" and isinstance(value, TaskExpander):
-        expander_id, expander_version = _expander_identity(value)
-        if identity != expander_id:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return {
-            "version": 1,
-            "expander_id": expander_id,
-            "expander_version": expander_version,
-        }
-    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
-def _task_identity(handler: object) -> tuple[str, int]:
-    if not isinstance(handler, TaskNodeHandler):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    task_type = handler.type
-    task_version = handler.version
-    if (
-        not isinstance(task_type, str)
-        or _TASK_TYPE.fullmatch(task_type) is None
-        or task_type.startswith(_RESERVED_TASK_TYPE_PREFIX)
-    ):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    if (
-        not isinstance(task_version, int)
-        or isinstance(task_version, bool)
-        or task_version < 1
-    ):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return task_type, task_version
-
-
-def _task_effect(handler: object) -> str:
-    effect = getattr(handler, "effect", "none")
-    if effect not in {"none", "replay_safe", "non_replay_safe"}:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return effect
-
-
-def _task_output_contract(handler: object) -> JsonValue:
-    output = getattr(handler, "output", None)
-    if output is None:
-        return {"kind": "json"}
-    model_schema = getattr(output, "model_json_schema", None)
-    if not callable(model_schema):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    schema = (
-        canonicalize_pydantic_model_schema(output)
-        if isinstance(output, type) and issubclass(output, BaseModel)
-        else canonicalize_json_schema(model_schema())
-    )
-    return {
-        "kind": "schema",
-        "schema": schema,
-    }
-
-
-def _expander_identity(expander: object) -> tuple[str, int]:
-    if not isinstance(expander, TaskExpander):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    try:
-        reference = TaskExpanderRef(expander.id, expander.version)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    if reference.id.startswith(_RESERVED_EXPANDER_ID_PREFIX):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return reference.id, reference.version
 
 
 def _validate_business_tool_name(value: str) -> None:
@@ -1139,11 +511,4 @@ def _validate_unique(values: Sequence[CapabilityContribution[object]]) -> None:
         seen.add(identity)
 
 
-__all__ = [
-    "CapabilityContribution",
-    "CapabilityGroup",
-    "CapabilityLoadContext",
-    "CapabilityLoadEntry",
-    "CapabilityLoader",
-    "contribution_contract",
-]
+__all__ = ["CapabilityGroup", "CapabilityGroupSnapshot"]
