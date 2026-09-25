@@ -348,20 +348,21 @@ class CapabilityGroup(Generic[AppT]):
                 loaded = await loader.load(context)
                 for value in loaded:
                     _validate_skill_source(value, context)
-                    if isinstance(
-                        value,
-                        (AgentSpec, SkillDefinition, MCPServerSpec),
-                    ):
+                    if isinstance(value, MCPServerSpec):
+                        item = _bind_mcp_declaration(value, context)
+                    elif isinstance(value, (AgentSpec, SkillDefinition)):
                         item = CapabilityContribution.from_declaration(value)
                     elif isinstance(value, CapabilityContribution):
-                        item = value
+                        item = (
+                            _bind_mcp_declaration(value.value, context)
+                            if value.kind == "mcp"
+                            else value
+                        )
                     elif isinstance(value, RepositoryInstructionDocument):
                         instruction_documents.append(value)
                         continue
                     else:
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                    if item.kind == "mcp":
-                        item = _bind_mcp_declaration(item.value, context)
                     contributions.append(item)
             await context.verify()
             source_revision = context.source_revision
