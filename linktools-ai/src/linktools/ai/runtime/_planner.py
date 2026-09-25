@@ -1960,7 +1960,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         request: bool,
     ) -> TaskExpander:
-        expander = self._expanders.get((reference.id, reference.version))
+        expander = self._expanders.get((reference.id, reference.revision))
         if expander is not None:
             return expander
         raise AIError(
@@ -1970,7 +1970,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             safe_details={
                 "kind": "task_expander",
                 "expander_id": reference.id,
-                "expander_version": reference.version,
+                "expander_revision": reference.revision,
             },
         )
 
@@ -2189,12 +2189,12 @@ def _external_handler_identity(handler: TaskNodeHandler[object]) -> tuple[str, i
 
 def _external_expander_identity(expander: TaskExpander) -> tuple[str, int]:
     try:
-        reference = TaskExpanderRef(expander.id, expander.version)
+        reference = TaskExpanderRef(expander.id, expander.revision)
     except (TypeError, ValueError, AttributeError) as error:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
     if reference.id.startswith(_RESERVED_EXPANDER_ID_PREFIX):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return reference.id, reference.version
+    return reference.id, reference.revision
 
 
 def _expansion_error(
