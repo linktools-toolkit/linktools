@@ -161,32 +161,10 @@ async def compose_runtime_components(
     try:
         candidates: list[CapabilityContribution[object]] = []
         asset_sources: dict[str, AssetStoreReader] = {}
-        mcp_assets: dict[str, tuple[str, AssetStoreReader]] = {}
         for group in groups:
-            values = group.contributions
-            candidates.extend(values)
-            reader = group.asset_reader
-            resource_mcp = tuple(
-                candidate
-                for candidate in values
-                if (
-                    candidate.kind == "mcp"
-                    and isinstance(candidate.value, MCPServerSpec)
-                    and candidate.value.resource_root is not None
-                )
-            )
-            if resource_mcp and reader is None:
-                raise AIError(
-                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                    safe_details={
-                        "kind": "mcp_asset_source",
-                        "group_id": group.group_id,
-                    },
-                )
-            if reader is not None:
-                asset_sources[group.group_id] = reader
-                for candidate in resource_mcp:
-                    mcp_assets[candidate.id] = (group.group_id, reader)
+            candidates.extend(group.contributions)
+            if group.asset_reader is not None:
+                asset_sources[group.group_id] = group.asset_reader
         _validate_candidate_uniqueness(candidates)
         skill_sources = SkillSourceRegistry(
             tuple(
@@ -324,7 +302,6 @@ async def compose_runtime_components(
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
             asset_sources=asset_sources,
-            mcp_assets=mcp_assets,
             runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
@@ -513,7 +490,6 @@ async def _build_local_components(
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
     asset_sources: Mapping[str, AssetStoreReader],
-    mcp_assets: Mapping[str, tuple[str, AssetStoreReader]],
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: RuntimeObjectKeyFactory,
@@ -560,7 +536,6 @@ async def _build_local_components(
             catalog,
             compiler,
             sandbox=sandbox,
-            mcp_assets=mcp_assets,
         )
         execution = DefaultExecutionService(
             state.execution,
