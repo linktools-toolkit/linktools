@@ -148,6 +148,7 @@ class TaskNode:
     output_type: object | None
     output_contract: "Mapping[str, JsonValue] | None"
     effect_policy: str
+    reconcile: bool
     dependency_policy: str
     _input: bytes = field(repr=False)
 
@@ -166,6 +167,7 @@ class TaskNode:
         output_type: object | None = None,
         output_contract: "Mapping[str, JsonValue] | None" = None,
         effect_policy: str = "none",
+        reconcile: bool = False,
         dependency_policy: str = "all_succeeded",
     ) -> None:
         if isinstance(dependencies, (str, bytes)):
@@ -192,6 +194,7 @@ class TaskNode:
             or not isinstance(max_attempts, int)
             or max_attempts < 1
             or effect_policy not in {"none", "replay_safe", "non_replay_safe"}
+            or not isinstance(reconcile, bool)
             or dependency_policy not in _TASK_DEPENDENCY_POLICIES
         ):
             raise ValueError("task node identity is invalid")
@@ -232,6 +235,7 @@ class TaskNode:
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "output_contract", contract)
         object.__setattr__(self, "effect_policy", effect_policy)
+        object.__setattr__(self, "reconcile", reconcile)
         object.__setattr__(self, "dependency_policy", dependency_policy)
         object.__setattr__(self, "_input", canonical_json_bytes(normalized))
 
@@ -548,6 +552,8 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
         value["output_contract"] = dict(node.output_contract)
     if node.effect_policy != "none":
         value["effect_policy"] = node.effect_policy
+    if node.reconcile:
+        value["reconcile"] = True
     if node.dependency_policy != "all_succeeded":
         value["dependency_policy"] = node.dependency_policy
     return value
@@ -697,6 +703,7 @@ class TaskNodeInfo:
     retry_delay_seconds: float
     output_contract: "Mapping[str, JsonValue] | None"
     effect_policy: str
+    reconcile: bool
     dependency_policy: str = "all_succeeded"
 
     @classmethod
@@ -712,6 +719,7 @@ class TaskNodeInfo:
             node.retry_delay_seconds,
             node.output_contract,
             node.effect_policy,
+            node.reconcile,
             node.dependency_policy,
         )
 
