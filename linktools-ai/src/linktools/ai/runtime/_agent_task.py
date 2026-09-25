@@ -71,6 +71,9 @@ _AGENT_BODY_FIELDS = frozenset(
 class _AgentTaskNodeHandler:
     id = _AGENT_TASK_ID
     revision = _AGENT_TASK_REVISION
+    effect_policy = "none"
+    output_type = None
+    reconcile = None
 
     def __init__(
         self,
