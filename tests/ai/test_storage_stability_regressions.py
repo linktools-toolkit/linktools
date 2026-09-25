@@ -16,6 +16,7 @@ import linktools.ai.runtime.state._materializer as materializer
 import linktools.ai.storage._files as files_module
 import linktools.ai.storage._object_filesystem as object_module
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.storage import (
     FilesystemObjectStore,

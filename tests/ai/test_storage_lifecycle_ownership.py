@@ -82,16 +82,18 @@ async def test_sql_storage_context_close_retries_failed_owned_engine_dispose(
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'close.db'}")
     context = create_sql_storage_context(engine, owns_engine=True)
     calls = 0
-    original = engine.dispose
+    engine_type = type(engine)
+    original = engine_type.dispose
 
-    async def dispose() -> None:
+    async def dispose(current_engine: object, *args: object, **kwargs: object) -> None:
         nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("dispose failed")
-        await original()
+        if current_engine is engine:
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("dispose failed")
+        await original(current_engine, *args, **kwargs)
 
-    monkeypatch.setattr(engine, "dispose", dispose)
+    monkeypatch.setattr(engine_type, "dispose", dispose)
     with pytest.raises(RuntimeError, match="dispose failed"):
         await context.close()
     assert context.closed is False
@@ -108,16 +110,18 @@ async def test_sql_state_store_close_retries_failed_owned_group_close(
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'store-close.db'}")
     store = SqlStateStore(engine)
     calls = 0
-    original = store.context.close
+    context_type = type(store.context)
+    original = context_type.close
 
-    async def close_context() -> None:
+    async def close_context(current_context: object) -> None:
         nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("context close failed")
-        await original()
+        if current_context is store.context:
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("context close failed")
+        await original(current_context)
 
-    monkeypatch.setattr(store.context, "close", close_context)
+    monkeypatch.setattr(context_type, "close", close_context)
     with pytest.raises(RuntimeError, match="context close failed"):
         await store.close()
     assert store._closed is False
