@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Generic, Literal, TypeVar, get_type_hints
 
 from linktools.core import environ
+from pydantic import BaseModel
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -180,7 +181,7 @@ class CapabilityGroup(Generic[AppT]):
         handler: "TaskNodeHandler[AppT]",
         *,
         effect_policy: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
-        output_type: object | None = None,
+        output_type: "type[BaseModel] | None" = None,
         reconcile: (
             "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
         ) = None,
