@@ -4,8 +4,6 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import cast
-
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
@@ -193,10 +191,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         ) -> dict[str, str | list[str]]:
             """Load skill instructions or one relative text resource."""
             try:
-                return cast(
-                    dict[str, str | list[str]],
-                    await self.load_skill(skill_id, path),
-                )
+                return await self.load_skill(skill_id, path)
             except AIError as error:
                 if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
                     raise ToolCallRetry(
@@ -282,7 +277,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         self,
         skill_id: str,
         path: "str | None" = None,
-    ) -> "dict[str, JsonValue]":
+    ) -> "dict[str, str | list[str]]":
         definition = self._by_id.get(skill_id)
         if definition is None:
             raise AIError(
@@ -312,8 +307,11 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             "content": content,
         }
 
-    async def _load_root(self, definition: SkillDefinition) -> "dict[str, JsonValue]":
-        result: dict[str, JsonValue] = {
+    async def _load_root(
+        self,
+        definition: SkillDefinition,
+    ) -> "dict[str, str | list[str]]":
+        result: dict[str, str | list[str]] = {
             "id": definition.id,
             "description": _skill_description(definition.spec),
             "instructions": definition.model_content,
