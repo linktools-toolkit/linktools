@@ -503,11 +503,15 @@ class MCPServerSpecCodec:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         if package_id is not None:
             payload["id"] = package_id
-            package_root = {"kind": "mcp", "id": package_id}
-            explicit_root = payload.get("resource")
-            if "resource" in payload and explicit_root != package_root:
+            package_resource = AssetKey("mcp", package_id)
+            if "resource" in payload and _decode_asset_key(
+                payload["resource"]
+            ) != package_resource:
                 raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-            payload["resource"] = package_root
+            payload["resource"] = {
+                "kind": package_resource.kind,
+                "id": package_resource.id,
+            }
         return self.from_payload(payload)
 
     def from_execution_payload(
