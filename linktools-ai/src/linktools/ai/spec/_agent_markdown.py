@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Strict authoring adapter for Agent Markdown declarations."""
+"""Authoring adapter for Agent Markdown declarations."""
 
 from collections.abc import Mapping
 from ..core import normalize_json_value, validate_logical_id
