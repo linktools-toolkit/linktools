@@ -206,17 +206,6 @@ def build_context_projection(
             raise TypeError("context source reference is invalid")
         return False
 
-    if projected_values == source_values:
-        for message, ref in zip(projected_values, refs, strict=True):
-            if append_source(ref):
-                continue
-            items.append(
-                StagedContextInline(
-                    *intern_payload(encode_model_messages((message,)))
-                )
-            )
-        return StagedContextProjection(tuple(items))
-
     signatures: dict[bytes, list[int]] = {}
     for index, key in enumerate(keys):
         signatures.setdefault(key, []).append(index)
