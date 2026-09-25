@@ -175,7 +175,7 @@ class AgentSpecCodec:
                 output_retries=output_retries,
                 description=description,
                 preload_skills=tuple(preload_skills),
-                metadata=cast("Mapping[str, JsonValue]", metadata),
+                metadata=metadata,
                 revision=revision,
             )
         except AIError as error:
@@ -254,7 +254,7 @@ class SkillSpecCodec:
                 identity,
                 content,
                 description,
-                cast("Mapping[str, JsonValue]", metadata),
+                metadata,
                 revision=revision,
             )
         except (TypeError, ValueError, UnicodeError) as error:
@@ -333,7 +333,7 @@ class SkillMarkdownSpecCodec:
             if isinstance(error, AIError):
                 raise
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        metadata = dict(cast("Mapping[str, object]", frontmatter.get("metadata", {})))
+        metadata = dict(frontmatter.get("metadata", {}))
         revision = metadata.pop("linktools-revision", 1)
         if (
             frontmatter["name"] != value.id
@@ -351,16 +351,14 @@ class SkillMarkdownSpecCodec:
         try:
             content = data.decode("utf-8")
             frontmatter = _parse_skill_markdown(content)
-            metadata = dict(
-                cast("Mapping[str, JsonValue]", frontmatter.get("metadata", {}))
-            )
+            metadata = dict(frontmatter.get("metadata", {}))
             revision = metadata.pop("linktools-revision", 1)
             return SkillSpec(
-                cast(str, frontmatter["name"]),
+                frontmatter["name"],
                 content,
-                cast(str, frontmatter["description"]),
+                frontmatter["description"],
                 metadata,
-                revision=cast(int, revision),
+                revision=revision,
             )
         except AIError:
             raise
