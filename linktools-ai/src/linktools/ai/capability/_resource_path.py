@@ -11,7 +11,7 @@ from ..errors import AIError, ErrorCode
 _MCP_DECLARATION_FILES = frozenset({"mcp.json", "mcp.yaml"})
 
 
-def normalize_resource_path(path: str) -> str:
+def require_resource_path(path: str) -> str:
     """Return one canonical package-relative POSIX resource path."""
     if not isinstance(path, str) or not path or "\x00" in path or "\\" in path:
         raise ValueError("resource path is invalid")
@@ -38,7 +38,7 @@ def normalize_resource_path(path: str) -> str:
 
 def validate_resource_path(path: str) -> None:
     try:
-        normalize_resource_path(path)
+        require_resource_path(path)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
 
@@ -61,7 +61,7 @@ def mcp_resource_path(key: AssetKey, root: AssetKey) -> "str | None":
         return None
     relative = key.id[len(prefix) :]
     try:
-        relative = normalize_resource_path(relative)
+        relative = require_resource_path(relative)
     except ValueError as error:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
     if relative in _MCP_DECLARATION_FILES:
