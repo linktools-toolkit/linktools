@@ -273,7 +273,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     candidates = _workspace_tool_contributions(workspace)
     spec = AgentSpec(
         "workspace-persistence-v1",
-        model_route="default",
+        model="default",
         allow_tools=("read_file",),
         allow_skills=(),
         allow_subagents=(),
