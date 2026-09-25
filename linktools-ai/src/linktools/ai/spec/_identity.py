@@ -44,7 +44,7 @@ def capability_ref_payload(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return _ref_payload(kind, ref_id, revision)
     ref_id = _text(contract.get("expander_id"))
-    revision = _positive_int(contract.get("expander_version"))
+    revision = _positive_int(contract.get("expander_revision"))
     if identity != ref_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _ref_payload(kind, ref_id, revision)
