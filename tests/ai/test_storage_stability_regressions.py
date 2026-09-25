@@ -25,7 +25,16 @@ from linktools.ai.storage import (
     read_object,
     validate_sql,
 )
-from sqlalchemy import Column, Integer, MetaData, String, Table, UniqueConstraint
+from sqlalchemy import (
+    Column,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    UniqueConstraint,
+    event,
+    insert,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.engine import URL
@@ -60,6 +69,77 @@ async def test_sql_object_store_accepts_maximum_store_id(tmp_path: Path) -> None
         )
         assert result.digest == digest
         assert await store.stat("payload") == result
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_object_integrity_does_not_read_other_store_payloads(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(
+        URL.create("sqlite+aiosqlite", database=str(tmp_path / "integrity.db"))
+    )
+    await provision_database(engine)
+    first = SqlObjectStore(engine, store_id="first")
+    second = SqlObjectStore(engine, store_id="second")
+    payload = b"x" * (1024 * 1024)
+    digest = hashlib.sha256(payload).hexdigest()
+    await second.put(
+        "payload",
+        _chunks(payload),
+        expected_size=len(payload),
+        expected_digest=digest,
+    )
+    content_queries: list[str] = []
+
+    def track_content_query(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if "ai_object_chunks.content" in statement:
+            content_queries.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", track_content_query)
+    try:
+        await first.validate_integrity()
+    finally:
+        event.remove(
+            engine.sync_engine,
+            "before_cursor_execute",
+            track_content_query,
+        )
+        await engine.dispose()
+    assert content_queries == []
+
+
+@pytest.mark.asyncio
+async def test_sql_object_integrity_still_rejects_orphan_chunks(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(
+        URL.create("sqlite+aiosqlite", database=str(tmp_path / "orphan.db"))
+    )
+    await provision_database(engine)
+    store = SqlObjectStore(engine)
+    metadata = build_object_sql_metadata()
+    chunks = metadata.tables["ai_object_chunks"]
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                insert(chunks).values(
+                    key_digest="a" * 64,
+                    chunk_index=0,
+                    content=b"orphan",
+                )
+            )
+        with pytest.raises(AIError) as raised:
+            await store.validate_integrity()
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await engine.dispose()
 

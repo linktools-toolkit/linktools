@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import shutil
 import tempfile
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
@@ -200,82 +200,70 @@ class SqlObjectStore:
 
         objects = self._metadata.tables["ai_objects"]
         chunks = self._metadata.tables["ai_object_chunks"]
+
         session = self._context.sessions()
         try:
-            headers = (
-                (
-                    await session.execute(
-                        select(
-                            objects.c.key_digest,
-                            objects.c.store_id,
-                            objects.c.object_key,
-                            objects.c.size,
-                            objects.c.content_digest,
-                        ).where(objects.c.store_id == self.store_id)
+            orphan = (
+                await session.execute(
+                    select(chunks.c.key_digest)
+                    .outerjoin(
+                        objects,
+                        objects.c.key_digest == chunks.c.key_digest,
                     )
+                    .where(objects.c.key_digest.is_(None))
+                    .limit(1)
                 )
-                .mappings()
-                .all()
-            )
-            rows = (
-                (
-                    await session.execute(
-                        select(
-                            chunks.c.key_digest,
-                            chunks.c.chunk_index,
-                            chunks.c.content,
-                        )
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            all_object_keys = {
-                str(value)
-                for value in await session.scalars(select(objects.c.key_digest))
-            }
+            ).scalar_one_or_none()
         finally:
             await session.close()
-        header_keys = {str(row["key_digest"]) for row in headers}
-        if any(str(row["key_digest"]) not in all_object_keys for row in rows):
+        if orphan is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        grouped: dict[str, list[Mapping[str, object]]] = {}
-        for row in rows:
-            key = str(row["key_digest"])
-            if key not in all_object_keys:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if key not in header_keys:
-                continue
-            grouped.setdefault(key, []).append(row)
-        for header in headers:
-            key = str(header["key_digest"])
-            if (
-                _key_digest(
-                    str(header["store_id"]),
-                    str(header["object_key"]),
-                ).hex()
-                != key
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values = sorted(
-                grouped.get(key, ()),
-                key=lambda row: int(row["chunk_index"]),
-            )
-            if [int(row["chunk_index"]) for row in values] != list(
-                range(len(values))
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            digest = hashlib.sha256()
-            size = 0
-            for row in values:
-                content = bytes(row["content"])
-                digest.update(content)
-                size += len(content)
-            if (
-                size != int(header["size"])
-                or digest.hexdigest() != str(header["content_digest"])
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        cursor = 0
+        while True:
+            session = self._context.sessions()
+            try:
+                headers = (
+                    (
+                        await session.execute(
+                            select(
+                                objects.c.id,
+                                objects.c.key_digest,
+                                objects.c.store_id,
+                                objects.c.object_key,
+                            )
+                            .where(
+                                objects.c.store_id == self.store_id,
+                                objects.c.id > cursor,
+                            )
+                            .order_by(objects.c.id)
+                            .limit(128)
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+            finally:
+                await session.close()
+            if not headers:
+                return
+
+            for header in headers:
+                key = str(header["key_digest"])
+                object_key = str(header["object_key"])
+                if (
+                    str(header["store_id"]) != self.store_id
+                    or _key_digest(self.store_id, object_key).hex() != key
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                stream = self._stream_open(object_key)
+                try:
+                    async for _chunk in stream:
+                        pass
+                finally:
+                    await stream.aclose()
+            cursor = int(headers[-1]["id"])
+
 
     async def _list_objects(self) -> AsyncIterator[ObjectStat]:
         from sqlalchemy import select
