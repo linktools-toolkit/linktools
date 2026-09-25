@@ -31,6 +31,8 @@ from ..spec import (
     AgentUsageLimits,
     MCPServerSpec,
     MCPServerSpecCodec,
+    RepositoryInstructionDocument,
+    RepositoryInstructions,
     ThinkingValue,
     canonicalize_json_schema,
     canonicalize_pydantic_model_schema,
@@ -39,12 +41,7 @@ from ..spec import (
 )
 from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
 from ..storage import StorageRevision
-from ..workspace import (
-    RepositoryInstructionDocument,
-    RepositoryInstructions,
-    Sandbox,
-    Workspace,
-)
+from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
 from ._skill import SkillDefinition
 from ._task import TaskExpander
