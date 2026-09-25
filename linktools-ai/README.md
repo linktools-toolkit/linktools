@@ -157,24 +157,28 @@ byte versions.
 
 Repository rules use the `rule` Asset kind and Markdown keys such as
 `AssetKey("rule", "review.md")` or `AssetKey("rule", "python/strict.md")`.
-Optional YAML frontmatter can declare a Workspace-relative `scope`; without it,
-the rule applies at the root. Runtime reads rules from the captured Asset
-versions when a Workspace is present, while `AGENTS.md` is resolved from the
-Workspace directory. The Workspace's `.linktools/rules` directory is not an
-implicit rule source. A directory-backed AssetStore can expose local rule files
-through `DirectoryAssetBackend` and a `PrefixAssetPathAdapter`.
+Rule Markdown is an instruction document at root scope; its content is not
+reinterpreted as Workspace configuration. Captured Rule instructions work with
+or without a Workspace. When a Workspace exists, `AGENTS.md` is additionally
+resolved from the Workspace directory. The Workspace's `.linktools/rules`
+directory is not an implicit rule source. A directory-backed AssetStore can
+expose local rule files through `DirectoryAssetBackend` and a
+`PrefixAssetPathAdapter`.
 
 For downstream declaration formats or custom kinds such as `worker` or
 `audit`, implement `CapabilityLoader` and register it for its input Asset
 kind with `group.loader("audit", loader)`. One kind has exactly one loader;
-registering `agent`, `skill`, or `mcp` replaces that built-in parser slot
-instead of chaining with it. The loader receives one `CapabilityLoadContext`,
-can inspect captured metadata and read captured keys with `read()` /
-`read_many()`, and returns normal `CapabilityContribution` values. Use
+registering `agent`, `skill`, `mcp`, or `rule` replaces that built-in
+parser slot instead of chaining with it. Every loader receives the same
+`CapabilityLoadContext`: `read()` / `read_many()` read the captured
+immutable versions, while `bind_versions()` returns their `AssetVersionRef`
+values for execution-bound resources. Loaders return normal
+`CapabilityContribution` values, or `RepositoryInstructionDocument` for
+instruction-only inputs such as Rule. Use
 `CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP
-declarations. Resource-backed Skill declarations remain owned by the same
-CapabilityGroup AssetStore; a custom loader may change the declaration format
-or layout but cannot redirect Skill resources to another source. No additional
+declarations. Resource-backed declarations remain owned by the same
+CapabilityGroup AssetStore; a custom loader may change declaration format or
+layout but does not implement a second version store. No additional
 Registry/Provider abstraction is required.
 
 The built-in Agent loader accepts flat JSON at `<id>` and Markdown packages
@@ -196,10 +200,10 @@ instructions shown to the model.
 `CapabilityGroup.snapshot()` returns a `CapabilityGroupSnapshot`. Pass that
 snapshot to `Runtime.open()` when the host also needs to inspect the same
 snapshotted contributions; this avoids parsing the source declarations twice.
-The snapshot contains the group id, contributions, source revision, and
-Workspace association. A changed source revision fails Runtime admission.
-Runtime reads snapshot resources through `AssetStoreReader`, a read-only view
-that does not expose the mutable `AssetStore`.
+The snapshot contains the group id, contributions, captured Rule instructions,
+source revision, and Workspace association. A changed source revision fails
+Runtime admission. Runtime reads snapshot resources through `AssetStoreReader`,
+a read-only view that does not expose the mutable `AssetStore`.
 
 Directory-backed Skill packages retain a native absolute package path when
 all effective Skill assets under the declared resource root map to one
@@ -220,11 +224,13 @@ can be observed by an already running process.
 
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
 `resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
-value starts with `resource:` then name files below that root. Runtime resolves the selected resource files to Asset version references,
-rejects absolute paths, traversal, and missing files, and verifies those refs
-through AssetStore before use. `resource:` arguments require local Asset files:
-host MCP receives their original absolute paths and Bubblewrap mounts each
-selected file read-only. Asset updates after the
+value starts with `resource:` then name files below that root. The MCP loader
+binds selected files to Asset version references in the same group snapshot,
+rejecting absolute paths, traversal, and missing files. Runtime preserves those
+refs and adds only the execution policy required by the selected Sandbox.
+`resource:` arguments require local Asset files: LocalSandbox receives their
+verified original absolute paths and Bubblewrap mounts each selected file
+read-only. Asset updates after the
 CapabilityGroup snapshot do not alter that declaration snapshot; a later
 CapabilityGroup snapshot sees the newer Asset versions. Runtime does not copy
 MCP resource bytes to a temporary directory or persist a second copy.
@@ -253,11 +259,13 @@ read-only runtime rootfs containing the same LinkTools build and Python >=
 file/command execution and sandboxed MCP stdio. The host Agent, model
 requests, and Python custom tools remain outside it. A restricted MCP process
 sees the selected execution root under its configured read policy and its own
-declared resources as read-only, with no external network route. LocalSandbox,
-DisabledSandbox, and file-only custom sessions reject sandboxed MCP
-stdio. MCP stdio without a configured Sandbox remains a trusted host process.
+declared resources as read-only, with no external network route. LocalSandbox provides supervised trusted host stdio and is the Runtime default
+when no Sandbox is explicitly selected; it does not claim OS isolation.
+Read-policy-restricted LocalSandbox sessions reject stdio rather than bypassing
+their policy. DisabledSandbox and file-only custom sessions still reject MCP
+stdio.
 
-Selected local Skills are exposed at `/skills/r<hash>` in Bubblewrap through
+Selected local Skills are exposed at `/resources/r<hash>` in Bubblewrap through
 read-only file mounts and at their original package location in Local sessions.
 The mapping is derived for the current run and is not persisted into Skill
 declarations. Background command state is ephemeral and is cleaned up
@@ -571,7 +579,7 @@ Package-specific public contracts remain available from their owning packages,
 for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
 `linktools.ai.capability`, `linktools.ai.workspace`, and `linktools.ai.runtime`.
 These include `AgentMarkdownSpecCodec`, `AgentDeclarationLoader`,
-`CapabilityGroupSnapshot`, MCP selector helpers, `ToolDeclaration`, and the
+`CapabilityGroupSnapshot`, MCP selector helpers, `WorkspaceToolDeclaration`, and the
 optional stdio sandbox protocols. `ErrorDiagnostics` is available from
 `linktools.ai.errors`.
 
