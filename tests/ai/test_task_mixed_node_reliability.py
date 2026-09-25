@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from ._task_test_helpers import admit_graph
 from linktools.ai.agent import AgentBindingContract
-from linktools.ai.capability import CapabilityGroup, TaskExpansionContext
+from linktools.ai.capability import CapabilityContribution, CapabilityGroup, TaskExpansionContext
 from linktools.ai.core import (
     JsonValue,
     Principal,
@@ -239,6 +239,23 @@ class _TaskTestModels:
         if dict(payload) != _TaskTestModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _TaskTestModelBinding()
+
+
+def test_direct_task_contribution_uses_group_task_defaults() -> None:
+    handler = TaskFunction[None]("example.direct", 1, _echo_task)
+    direct = CapabilityContribution.from_task(handler)
+
+    group = CapabilityGroup[None]("application")
+    group.task(handler)
+    captured = asyncio.run(group.capture())
+    registered = next(
+        item
+        for item in captured.contributions
+        if item.kind == "task" and item.id == handler.id
+    )
+
+    assert direct.contract == registered.contract
+    assert direct.contract["effect_policy"] == "non_replay_safe"
 
 
 def test_task_registration_returns_original_handler() -> None:
@@ -491,6 +508,34 @@ async def test_task_handler_revisions_are_exact_and_reserved_namespace_is_closed
 
 
 @pytest.mark.asyncio
+async def test_runtime_accepts_multiple_task_handler_revisions() -> None:
+    group = CapabilityGroup[None]("application")
+    v1 = TaskFunction[None]("example.runtime-revision", 1, _echo_task)
+    v2 = TaskFunction[None]("example.runtime-revision", 2, _echo_task)
+    group.task(v1, effect_policy="none")
+    group.task(v2, effect_policy="none")
+    state = RuntimeStorage.in_memory()
+
+    async with Runtime.open(
+        "task-revisions",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(group,),
+    ) as runtime:
+        run = await runtime.start_graph(
+            TaskGraph(
+                "task-revisions",
+                (v1.node("v1"), v2.node("v2")),
+            ),
+            idempotency_key="task-revisions-run-0001",
+        )
+        result = await run.wait(timeout_seconds=10)
+
+    assert result.status is TaskStatus.SUCCEEDED
+    assert {item.node_id for item in result.node_results} == {"v1", "v2"}
+
+
+@pytest.mark.asyncio
 async def test_task_result_commit_preserves_early_execution_binding() -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-result-regression", tenant_id="tenant")
@@ -711,6 +756,45 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
 
 class _EffectOutput(BaseModel):
     value: str
+
+
+@pytest.mark.asyncio
+async def test_public_graph_start_canonicalizes_registered_task_semantics() -> None:
+    async def valid_output(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        return {"value": "ok"}
+
+    application = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.public-start", 1, valid_output)
+    application.task(
+        handler,
+        effect_policy="non_replay_safe",
+        output_type=_EffectOutput,
+    )
+    state = RuntimeStorage.in_memory()
+
+    async with Runtime.open(
+        "task-public-start",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(application,),
+    ) as runtime:
+        request = TaskGraphRequest(
+            TaskGraph("task-public-start", (handler.node("node"),)),
+            runtime.default_principal,
+            "task-public-start-0001",
+        )
+        await runtime.graph.start(request)
+        graph_state = await state.task.tasks.graph_state(
+            "task-public-start",
+            tenant_id=runtime.default_principal.tenant_id,
+        )
+
+    assert graph_state is not None
+    node = graph_state.nodes[0]
+    assert node.effect_policy == "non_replay_safe"
+    assert node.output_contract is not None
+    assert node.output_contract["mode"] == "structured"
 
 
 async def _invalid_effect_output(context: TaskNodeContext[None]) -> JsonValue:
