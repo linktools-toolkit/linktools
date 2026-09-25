@@ -247,7 +247,7 @@ class _TaskExpansionContext:
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
-        output: type[BaseModel] | None = None,
+        output_type: type[BaseModel] | None = None,
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         expander: TaskExpanderRef | None = None,
@@ -266,7 +266,7 @@ class _TaskExpansionContext:
             validate_user_input(user_prompt),
             dependencies=dependencies,
             budget_cost=budget_cost,
-            output=output,
+            output_type=output_type,
             planning=planning,
             thinking=thinking,
             expander=expander,
@@ -1515,7 +1515,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
-        output: type[BaseModel] | None = None,
+        output_type: type[BaseModel] | None = None,
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         expander: TaskExpanderRef | None = None,
@@ -1547,7 +1547,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if thinking is None
             else normalize_thinking(thinking)
         )
-        binding = self._compiler.bind(compiled_agent, output=output)
+        binding = self._compiler.bind(compiled_agent, output=output_type)
         return TaskNode(
             node_id,
             dependencies,
@@ -1569,7 +1569,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
-            output_type=output,
+            output_type=output_type,
             dependency_policy=dependency_policy,
         )
 
@@ -1582,7 +1582,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
-        output: type[BaseModel] | None = None,
+        output_type: type[BaseModel] | None = None,
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         expander: TaskExpanderRef | None = None,
@@ -1604,7 +1604,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 safe_details={"kind": "agent", "agent_id": agent_id},
             )
         compiled_agent = self._compiler.restore(root).compiled_agent
-        binding_contract = self._compiler.bind(compiled_agent, output=output).binding_contract
+        binding_contract = self._compiler.bind(
+            compiled_agent,
+            output=output_type,
+        ).binding_contract
         binding_contract = replace(
             binding_contract,
             subagent_bindings=root.subagent_bindings,
@@ -1642,7 +1645,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
-            output_type=output,
+            output_type=output_type,
             dependency_policy=dependency_policy,
         )
 
@@ -1654,7 +1657,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
-        output: type[BaseModel] | None = None,
+        output_type: type[BaseModel] | None = None,
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         expander: TaskExpanderRef | None = None,
@@ -1684,7 +1687,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             user_prompt,
             dependencies=dependencies,
             budget_cost=budget_cost,
-            output=output,
+            output_type=output_type,
             planning=planning,
             thinking=thinking,
             expander=expander,

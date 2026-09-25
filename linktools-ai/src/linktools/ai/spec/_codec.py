@@ -104,7 +104,7 @@ class AgentSpecCodec:
         _require_v1(raw)
         _require_usage_limit_fields(raw.get("usage_limits"))
         identity = raw.get("id")
-        revision = _semantic_revision(raw)
+        revision = _decode_revision(raw)
         model_route = raw.get("model_route", "default")
         system_prompt = raw.get("system_prompt", "")
         instructions = raw.get("instructions", [])
@@ -140,7 +140,10 @@ class AgentSpecCodec:
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a string array")
         if not isinstance(planning, bool):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "planning must be bool")
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                "planning must be bool",
+            )
         for name, value in (
             ("tool_retries", tool_retries),
             ("output_retries", output_retries),
@@ -236,7 +239,7 @@ class SkillSpecCodec:
     def from_payload(self, raw: Mapping[str, object]) -> SkillSpec:
         _require_v1(raw)
         identity = raw.get("id")
-        revision = _semantic_revision(raw)
+        revision = _decode_revision(raw)
         content = raw.get("content")
         if not isinstance(identity, str) or not identity.strip() or not isinstance(content, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
@@ -540,7 +543,7 @@ class MCPServerSpecCodec:
                 "MCP execution resource fields are Runtime-owned",
             )
         identity = raw.get("id")
-        revision = _semantic_revision(raw)
+        revision = _decode_revision(raw)
         command = raw.get("command")
         resource_root = _decode_asset_key(raw.get("resource_root"))
         resource_versions: tuple[AssetVersionRef, ...] | None = None
@@ -747,7 +750,7 @@ def _require_v1(raw: Mapping[str, object]) -> None:
     _require_version(raw, {1})
 
 
-def _semantic_revision(raw: Mapping[str, object]) -> int:
+def _decode_revision(raw: Mapping[str, object]) -> int:
     value = raw.get("revision", 1)
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise AIError(

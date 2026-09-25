@@ -67,7 +67,7 @@ async with Runtime.open(
     result = await runtime.agent("default").run(
         "review this change",
         memory_scope="default",
-        planning_enabled=True,
+        planning=True,
     )
 ```
 
@@ -123,11 +123,11 @@ Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, M
 
 Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 
-LinkTools-owned Tool declarations carry their runtime semantics in
+LinkTools-owned Tool declarations carry their runtime metadata in
 `ToolDefinition.metadata`. `CapabilityGroup.tool()` writes the registered
-`effect`, `plan_safe`, and `tool_class=business` values there; Workspace and
-MCP owners declare their own effect, class, path, and context semantics. Plan
-filtering, sandbox selection, leaf effect handling, and compaction consume
+`effect_policy`, `plan_safe`, and `tool_class=business` values there; Workspace
+and MCP owners declare their own effect policy, class, path, and context
+metadata. Plan filtering, sandbox selection, leaf effect handling, and compaction consume
 these declarations instead of inferring behavior from Tool names.
 
 `CapabilityGroup.agent()` creates an `AgentSpec`; the declaration carries its explicit positive `revision` in the single v1 wire contract.
@@ -325,7 +325,7 @@ Model-visible control text is partitioned by lifecycle. Binding-static Agent ins
 
 The fixed prefix is not appended as a new conversation message on each model call. Lazy Skill bodies/resources, Memory contents, the current-plan reminder, user input, tool and Subagent results, attachments, and retry/error feedback remain dynamic request or conversation context. Memory guidance is fixed only for an Execution that enables Memory; Memory contents stay pull-based through the Memory tools, so updates from another Execution are observed when the Agent reads/searches Memory again rather than being pushed into the standing prompt. Workspace instruction text describes stable usage constraints only; authorization and approval remain Runtime-enforced behavior. Recorded requests may therefore contain the same fixed instruction parts repeatedly without representing repeated historical messages.
 
-`allow_tools` controls ordinary/external model-visible tools. Planning is an execution mode and is not enabled or disabled by pretending `write_plan` is an ordinary business tool. Runtime infrastructure capabilities such as planning, memory, Skill loading, and Subagent delegation are composed by Runtime according to the resolved execution contract.
+`allow_tools` controls ordinary/external model-visible tools. `mode="plan"` selects plan mode for an execution; `planning` controls whether the Agent has the planning capability. Plan mode implies `planning=True`. Runtime infrastructure capabilities such as planning, memory, Skill loading, and Subagent delegation are composed by Runtime according to the resolved execution contract.
 
 Subagents are root Agent definitions selected from the same captured catalog. A root Agent cannot select itself as a Subagent, and the Runtime does not create a second registration system for child Agents.
 

@@ -99,7 +99,7 @@ def _context() -> RunContext[None]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
         tool_call_id="call",
     )
 

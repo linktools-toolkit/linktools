@@ -215,7 +215,7 @@ class AgentSpec:
 
     def __post_init__(self) -> None:
         validate_logical_id(self.id)
-        _validate_semantic_revision(self.revision)
+        _validate_revision(self.revision)
         if not isinstance(self.model_route, str) or not self.model_route.strip():
             raise ValueError("agent model_route must be a non-empty string")
         if not isinstance(self.system_prompt, str):
@@ -280,7 +280,7 @@ class SkillSpec:
 
     def __post_init__(self) -> None:
         validate_logical_id(self.id)
-        _validate_semantic_revision(self.revision)
+        _validate_revision(self.revision)
         if not isinstance(self.content, str):
             raise TypeError("skill content must be a string")
         if self.description is not None and (
@@ -290,9 +290,9 @@ class SkillSpec:
         object.__setattr__(self, "metadata", _validated_metadata(self.metadata))
 
 
-def _validate_semantic_revision(value: object) -> int:
+def _validate_revision(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("semantic revision must be a positive integer")
+        raise ValueError("revision must be a positive integer")
     return value
 
 
@@ -321,7 +321,7 @@ class SubagentRef:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             validate_logical_id(self.id)
-            _validate_semantic_revision(self.revision)
+            _validate_revision(self.revision)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if self.description is not None and (
@@ -372,7 +372,7 @@ class MCPServerSpec:
     revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
-        _validate_semantic_revision(self.revision)
+        _validate_revision(self.revision)
         if not isinstance(self.id, str) or not self.id.strip():
             raise ValueError("MCP server id must be non-empty")
         if not isinstance(self.command, str) or not self.command.strip():

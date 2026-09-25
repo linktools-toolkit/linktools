@@ -314,12 +314,12 @@ def test_task_dependency_state_exposes_only_terminal_semantics() -> None:
         error_code=ErrorCode.REQUEST_FIELD_INVALID.value,
         error_digest="a" * 64,
     )
-    assert failed.contract == {
+    assert failed.to_payload() == {
         "status": TaskStatus.FAILED.value,
         "error_code": ErrorCode.REQUEST_FIELD_INVALID.value,
         "error_digest": "a" * 64,
     }
-    assert "execution_id" not in failed.contract
+    assert "execution_id" not in failed.to_payload()
 
 
 
@@ -459,7 +459,7 @@ class _AgentGraphExpander:
 
 
 @pytest.mark.asyncio
-async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed() -> (
+async def test_task_handler_revisions_are_exact_and_reserved_namespace_is_closed() -> (
     None
 ):
     group = CapabilityGroup[None]("application")

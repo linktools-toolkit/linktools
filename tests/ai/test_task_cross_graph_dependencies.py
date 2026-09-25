@@ -158,7 +158,7 @@ async def test_prepare_node_authorizes_source_header_and_deduplicates_hold() -> 
     runner._task_durable = True
     runner._execution_durable = True
     runner._recovery_durable = True
-    runner._agent = SimpleNamespace(type="linktools.ai.agent")
+    runner._agent = SimpleNamespace(id="linktools.ai.agent")
 
     await runner.prepare_node(
         node,

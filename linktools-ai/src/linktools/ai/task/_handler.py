@@ -37,14 +37,15 @@ _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 class TaskBindingContract:
     """Durable semantic binding for one application-owned task handler."""
 
-    task_id: str
-    task_revision: int
+    id: str
+    revision: int
     effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
     output_contract: Mapping[str, JsonValue]
     timeout_seconds: float | None
     max_attempts: int
     retry_delay_seconds: float
     reconcile: bool = False
+    version: int = 1
 
     def __post_init__(self) -> None:
         normalized_timeout = normalize_timeout_seconds(self.timeout_seconds)
@@ -52,19 +53,22 @@ class TaskBindingContract:
             self.retry_delay_seconds
         )
         if (
-            not isinstance(self.task_id, str)
-            or _TASK_ID.fullmatch(self.task_id) is None
+            not isinstance(self.id, str)
+            or _TASK_ID.fullmatch(self.id) is None
         ):
             raise ValueError("task binding id is invalid")
         if (
-            not isinstance(self.task_revision, int)
-            or isinstance(self.task_revision, bool)
-            or self.task_revision < 1
+            not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
             or self.effect_policy not in {"none", "replay_safe", "non_replay_safe"}
             or isinstance(self.max_attempts, bool)
             or not isinstance(self.max_attempts, int)
             or self.max_attempts < 1
             or not isinstance(self.reconcile, bool)
+            or not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version != 1
         ):
             raise ValueError("task binding contract is invalid")
         normalized = normalize_json_value(dict(self.output_contract))
@@ -79,8 +83,8 @@ class TaskBindingContract:
         return canonical_sha256(
             {
                 "contract": "task-binding-v1",
-                "task_id": self.task_id,
-                "task_revision": self.task_revision,
+                "id": self.id,
+                "revision": self.revision,
                 "effect_policy": self.effect_policy,
                 "output_contract": dict(self.output_contract),
                 "timeout_seconds": self.timeout_seconds,

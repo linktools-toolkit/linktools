@@ -110,7 +110,7 @@ class _TaskNodeRuntimePort(Protocol):
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
-        output: "type[BaseModel] | None" = None,
+        output_type: "type[BaseModel] | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         expander: "TaskExpanderRef | None" = None,
@@ -783,7 +783,7 @@ class Runtime(Generic[AppT]):
         *,
         dependencies: tuple[str, ...],
         budget_cost: int,
-        output: "type[BaseModel] | None",
+        output_type: "type[BaseModel] | None",
         planning: "bool | None",
         thinking: "ThinkingValue | None",
         expander: "TaskExpanderRef | None",
@@ -804,7 +804,7 @@ class Runtime(Generic[AppT]):
             user_prompt,
             dependencies=dependencies,
             budget_cost=budget_cost,
-            output=output,
+            output_type=output_type,
             planning=planning,
             thinking=thinking,
             expander=expander,
@@ -1179,7 +1179,11 @@ def _execution_policy(
     resolved_mode = normalize_execution_mode(mode)
     if planning is not None and not isinstance(planning, bool):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    resolved_planning = compiled_agent.spec.planning if planning is None else planning
+    resolved_planning = (
+        compiled_agent.spec.planning
+        if planning is None
+        else planning
+    )
     if resolved_mode == "plan":
         resolved_planning = True
     resolved_thinking = (

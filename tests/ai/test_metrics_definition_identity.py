@@ -17,7 +17,7 @@ from linktools.ai.observe import (
 from linktools.ai.observe._codec import (
     decode_definition_envelope,
     definition_envelope,
-    definition_contract_digest,
+    same_definition_contract,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -81,7 +81,7 @@ def test_definition_description_is_nonsemantic_and_v1_optional() -> None:
         description="changed description",
     )
 
-    assert definition_contract_digest(first) == definition_contract_digest(changed)
+    assert same_definition_contract(first, changed)
 
     legacy = definition_envelope(
         "definition-description",
@@ -126,7 +126,7 @@ def test_definition_identity_is_name_and_revision_only() -> None:
     )
 
     assert (first.name, first.revision) == (changed.name, changed.revision)
-    assert definition_contract_digest(first) != definition_contract_digest(changed)
+    assert not same_definition_contract(first, changed)
     revised = replace(changed, revision=2)
     assert (first.name, first.revision) != (revised.name, revised.revision)
 

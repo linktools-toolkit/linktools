@@ -578,9 +578,9 @@ class TaskGraphAdmission:
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.revision, int)
-            or isinstance(self.revision, bool)
-            or self.revision < 1
+            not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version < 1
             or not isinstance(self.graph_id, str)
             or not self.graph_id.strip()
             or re.fullmatch(r"[0-9a-f]{64}", self.operation_id) is None
@@ -604,7 +604,7 @@ class TaskGraphAdmission:
         )
 
     def launch(self) -> TaskGraphLaunch:
-        if self.revision != 1:
+        if self.version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         return TaskGraphLaunch(
             self.graph_id,

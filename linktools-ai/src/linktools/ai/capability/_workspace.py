@@ -33,7 +33,7 @@ _ResultT = TypeVar("_ResultT")
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceToolDeclaration:
-    """Immutable semantic declaration for one Workspace tool."""
+    """Immutable metadata declaration for one Workspace tool."""
 
     name: str
     metadata: Mapping[str, object]

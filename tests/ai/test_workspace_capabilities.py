@@ -23,6 +23,7 @@ from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
     MCPServerSpec,
+    RepositoryInstructions,
     mcp_server_selector,
     mcp_tool_selector,
 )
@@ -33,7 +34,6 @@ from linktools.ai.runtime._tool_boundary import (
 )
 from linktools.ai.workspace import (
     DisabledSandbox,
-    RepositoryInstructions,
     SandboxResource,
     SandboxSession,
     ToolPermissionRule,
@@ -194,6 +194,7 @@ def _tool_contract(tool: object) -> dict[str, object]:
     definition = tool.tool_def  # type: ignore[attr-defined]
     return {
         "version": 1,
+        "revision": 1,
         "description": definition.description,
         "parameters": definition.parameters_json_schema,
         "return_schema": definition.return_schema,
@@ -231,7 +232,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         "write_file",
     )
     assert all(item.kind == "tool" for item in contributions)
-    assert all(len(item.revision) == 64 for item in contributions)
+    assert all(item.revision == 1 for item in contributions)
     assert tuple(
         tool_class_from_metadata(item.value.tool_def.metadata)
         for item in contributions
@@ -555,7 +556,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
         tool_call_id="call",
     )
     tools = await boundary.get_tools(context)

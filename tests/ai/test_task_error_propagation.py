@@ -23,7 +23,6 @@ def test_execution_failure_preserves_task_execution_identity() -> None:
             "execution-failed",
             ExecutionStatus.FAILED,
             None,
-            None,
             UsageMetrics(),
             ErrorCode.MODEL_CONFIG_INVALID.value,
             {"reason": "missing_required_field", "field": "base_url"},

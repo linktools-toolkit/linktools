@@ -200,13 +200,18 @@ def test_agent_markdown_metadata_round_trips_without_changing_identity() -> None
         document.replace(b"Review requests.", b"Review carefully."),
         logical_id="worker",
     )
-    assert (
-        CapabilityContribution.from_declaration(spec).fingerprint
-        == CapabilityContribution.from_declaration(changed_metadata).fingerprint
+    identity = CapabilityContribution.from_declaration(spec)
+    metadata_identity = CapabilityContribution.from_declaration(changed_metadata)
+    prompt_identity = CapabilityContribution.from_declaration(changed_prompt)
+    assert (identity.kind, identity.id, identity.revision) == (
+        metadata_identity.kind,
+        metadata_identity.id,
+        metadata_identity.revision,
     )
-    assert (
-        CapabilityContribution.from_declaration(spec).fingerprint
-        != CapabilityContribution.from_declaration(changed_prompt).fingerprint
+    assert (identity.kind, identity.id, identity.revision) == (
+        prompt_identity.kind,
+        prompt_identity.id,
+        prompt_identity.revision,
     )
 
 
@@ -310,7 +315,7 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
 
 
 @pytest.mark.asyncio
-async def test_snapshot_ignores_unrelated_asset_added_during_loader() -> None:
+async def test_capture_rejects_asset_change_during_loader() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -332,15 +337,9 @@ async def test_snapshot_ignores_unrelated_asset_added_during_loader() -> None:
     group = CapabilityGroup("application", assets=store)
     group.loader("worker", WorkerLoader())
     try:
-        snapshot = await group.capture()
-        reader = snapshot.asset_reader
-        assert reader is not None
-        assert late not in {
-            info.key
-            for info in await reader.capture_metadata()
-        }
-        assert snapshot.source_revision == await store.current_revision()
-        await snapshot.verify_source_revision()
+        with pytest.raises(AIError) as error:
+            await group.capture()
+        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
     finally:
         await store.close()
 

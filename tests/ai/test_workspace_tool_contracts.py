@@ -32,7 +32,7 @@ def _golden_contract() -> dict[str, object]:
         Path(__file__).parent
         / "fixtures"
         / "persistence"
-        / "workspace_tool_semantics_v1.json"
+        / "workspace_tool_metadata_v1.json"
     )
     return json.loads(path.read_text(encoding="utf-8"))
 

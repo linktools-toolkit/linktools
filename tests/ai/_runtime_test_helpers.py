@@ -36,7 +36,7 @@ def execution_owner_fields(prompt: str = "prompt") -> dict[str, object]:
     }
 
 
-def semantic_tool(
+def tool_with_metadata(
     function: Callable[..., Any],
     descriptor: ManagedToolDescriptor,
 ) -> Tool[Any]:

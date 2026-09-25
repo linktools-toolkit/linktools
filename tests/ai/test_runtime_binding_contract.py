@@ -126,8 +126,8 @@ def _execution(
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.PENDING_START,
         revision=0,
@@ -174,9 +174,10 @@ def _versioned_skill(
     )
     return SkillDefinition(
         SkillSpec("review", "review instructions"),
-        SkillSourceRef("application", "review").with_asset_versions(
+        SkillSourceRef(
+            "application",
+            "review",
             (SkillResourceVersion("guide.md", asset),),
-            "b" * 64,
         ),
     )
 
@@ -196,10 +197,12 @@ def test_skill_asset_version_locator_is_not_named_identity() -> None:
 
 def test_skill_asset_content_change_requires_revision_bump() -> None:
     first = _versioned_skill(layer_id="source", revision=1, size=1)
+    assert first.source_ref is not None
     changed = SkillDefinition(
         first.spec,
-        first.source_ref.with_asset_versions(
-            (
+        replace(
+            first.source_ref,
+            resource_versions=(
                 SkillResourceVersion(
                     "guide.md",
                     AssetVersionRef(
@@ -211,7 +214,6 @@ def test_skill_asset_content_change_requires_revision_bump() -> None:
                     ),
                 ),
             ),
-            "d" * 64,
         ),
     )
     revised = SkillDefinition(
