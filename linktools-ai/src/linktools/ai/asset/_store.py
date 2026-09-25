@@ -31,7 +31,7 @@ from ..storage import (
     StorageOverlay,
     StorageResetResult,
     StorageRevision,
-    StorageOwnedInfo,
+    StorageLocatedInfo,
     StorageWriteState,
     VersionSummary,
 )
@@ -395,7 +395,7 @@ class AssetStore:
                     if layer.id == ref.layer_id
                 )
                 if len(matches) != 1:
-                    raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
+                    raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
                 backend = matches[0]
             value = await cast(AssetBackend, backend).get_at_revision(
                 ref.key,
@@ -409,26 +409,26 @@ class AssetStore:
             values.append(data)
         return tuple(values)
 
-    async def list_info_with_owners(
+    async def list_info_with_locations(
         self,
         *,
         kind: "str | None" = None,
         prefix: "str | None" = None,
         cursor: "str | None" = None,
         limit: int = 100,
-    ) -> "Page[StorageOwnedInfo[AssetInfo]]":
-        """Page active file metadata together with its effective storage owner."""
+    ) -> "Page[StorageLocatedInfo[AssetInfo]]":
+        """Page active file metadata together with its effective storage layer."""
         self._ensure_ready()
         limit = validate_page_limit(limit)
         values = [
-            owned
-            for owned in await self._storage.list_info_with_owners()
-            if owned.info.status is StorageEntryStatus.NORMAL
-            and (kind is None or owned.info.key.kind == kind)
-            and (prefix is None or owned.info.key.id.startswith(prefix))
+            located
+            for located in await self._storage.list_info_with_locations()
+            if located.info.status is StorageEntryStatus.NORMAL
+            and (kind is None or located.info.key.kind == kind)
+            and (prefix is None or located.info.key.id.startswith(prefix))
         ]
         ordered = tuple(
-            sorted(values, key=lambda owned: (owned.info.key.kind, owned.info.key.id))
+            sorted(values, key=lambda located: (located.info.key.kind, located.info.key.id))
         )
         revision = await self._storage.current_revision()
         start = _cursor_start(cursor, revision, kind, prefix, ordered)
@@ -789,7 +789,7 @@ class _SnapshotAssetStore(AssetStore):
             if not isinstance(ref, AssetVersionRef):
                 raise TypeError("refs must contain AssetVersionRef values")
             if ref.layer_id != "snapshot":
-                raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
+                raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
             info = self._entries.get(ref.key)
             if info is None or not ref.matches_info(info):
                 raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
@@ -799,14 +799,14 @@ class _SnapshotAssetStore(AssetStore):
             values.append(value)
         return tuple(values)
 
-    async def list_info_with_owners(
+    async def list_info_with_locations(
         self,
         *,
         kind: str | None = None,
         prefix: str | None = None,
         cursor: str | None = None,
         limit: int = 100,
-    ) -> Page[StorageOwnedInfo[AssetInfo]]:
+    ) -> Page[StorageLocatedInfo[AssetInfo]]:
         page = await self.list_info(
             kind=kind,
             prefix=prefix,
@@ -814,7 +814,7 @@ class _SnapshotAssetStore(AssetStore):
             limit=limit,
         )
         return Page(
-            tuple(StorageOwnedInfo(info, "snapshot", False) for info in page.items),
+            tuple(StorageLocatedInfo(info, "snapshot", False) for info in page.items),
             page.next_cursor,
         )
 
@@ -827,7 +827,7 @@ class _SnapshotAssetStore(AssetStore):
             key: StorageWriteState(
                 None
                 if (info := self._entries.get(key)) is None
-                else StorageOwnedInfo(info, "snapshot", False),
+                else StorageLocatedInfo(info, "snapshot", False),
                 info,
                 False,
             )
@@ -1021,7 +1021,7 @@ def _cursor_start(
     revision: StorageRevision,
     kind: "str | None",
     prefix: "str | None",
-    values: "Sequence[AssetInfo | StorageOwnedInfo[AssetInfo]]",
+    values: "Sequence[AssetInfo | StorageLocatedInfo[AssetInfo]]",
 ) -> int:
     if cursor is None:
         return 0
@@ -1060,8 +1060,8 @@ def _cursor_start(
     )
 
 
-def _info_key(value: "AssetInfo | StorageOwnedInfo[AssetInfo]") -> AssetKey:
-    return value.info.key if isinstance(value, StorageOwnedInfo) else value.key
+def _info_key(value: "AssetInfo | StorageLocatedInfo[AssetInfo]") -> AssetKey:
+    return value.info.key if isinstance(value, StorageLocatedInfo) else value.key
 
 
 __all__ = ["AssetCacheAdapter", "AssetStore"]
