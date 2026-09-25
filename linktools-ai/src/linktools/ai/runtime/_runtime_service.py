@@ -1042,20 +1042,14 @@ class Runtime(Generic[AppT]):
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
-        task_runtime = self._require_task_node_runtime()
-        admitted = TaskGraph(
-            graph.graph_id,
-            tuple(task_runtime.admit_node(node) for node in graph.nodes),
-        )
-        admitted.validate_limits(selected_limits)
         _logger.info(
-            "task graph admitted: graph=%s tenant=%s nodes=%s",
+            "task graph request prepared: graph=%s tenant=%s nodes=%s",
             graph.graph_id,
             resolved_principal.tenant_id,
-            len(admitted.nodes),
+            len(graph.nodes),
         )
         return TaskGraphRequest(
-            admitted,
+            graph,
             resolved_principal,
             idempotency_key,
             selected_limits,
