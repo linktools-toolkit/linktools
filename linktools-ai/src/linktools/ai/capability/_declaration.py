@@ -220,7 +220,7 @@ async def _load_skills(
 
 async def _load_mcp(
     context: CapabilityLoadContext,
-) -> "Sequence[CapabilityContribution[object] | MCPServerSpec]":
+) -> "Sequence[MCPServerSpec]":
     entries = context.list(kind="mcp")
     roots, declarations = _package_declarations(
         entries,
@@ -229,7 +229,7 @@ async def _load_mcp(
     values = await context.read_many(tuple(entry.key for entry in declarations))
     by_key = dict(zip((entry.key for entry in declarations), values, strict=True))
     codec = MCPServerSpecCodec()
-    result: list[CapabilityContribution[object] | MCPServerSpec] = []
+    result: list[MCPServerSpec] = []
     package_main_keys = {entry.key for entry in roots}
     for entry in declarations:
         key = entry.key
@@ -246,33 +246,36 @@ async def _load_mcp(
             value = codec.decode_author(by_key[key], format="json")
             if value.id != key.id:
                 raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-
-        root = value.resource_root
-        if root is None:
-            if any(argument.startswith("resource:") for argument in value.args):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            result.append(value)
-            continue
-
-        resources = tuple(
-            (relative, candidate.key)
-            for candidate in context.list(kind=root.kind)
-            if (relative := mcp_resource_path(candidate.key, root)) is not None
-        )
-        available = {relative for relative, _key in resources}
-        validate_resource_tree(available)
-        _validate_resource_arguments(value.args, available)
-        refs = context.bind_versions(tuple(key for _relative, key in resources))
-        result.append(
-            CapabilityContribution.from_mcp_contract(
-                codec.to_execution_payload(
-                    value,
-                    refs,
-                    asset_source_id=context.group_id,
-                )
-            )
-        )
+        result.append(value)
     return result
+
+
+def _bind_mcp_declaration(
+    value: MCPServerSpec,
+    context: CapabilityLoadContext,
+) -> CapabilityContribution[object]:
+    root = value.resource_root
+    if root is None:
+        if any(argument.startswith("resource:") for argument in value.args):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return CapabilityContribution.from_declaration(value)
+
+    resources = tuple(
+        (relative, candidate.key)
+        for candidate in context.list(kind=root.kind)
+        if (relative := mcp_resource_path(candidate.key, root)) is not None
+    )
+    available = {relative for relative, _key in resources}
+    validate_resource_tree(available)
+    _validate_resource_arguments(value.args, available)
+    refs = context.bind_versions(tuple(key for _relative, key in resources))
+    return CapabilityContribution.from_mcp_contract(
+        MCPServerSpecCodec().to_execution_payload(
+            value,
+            refs,
+            asset_source_id=context.group_id,
+        )
+    )
 
 
 async def _load_rules(
