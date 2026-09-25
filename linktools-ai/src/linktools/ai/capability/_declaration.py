@@ -8,6 +8,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
+from ..asset import AssetKey
 from ..core import (
     DEFAULT_DISCOVERY_POLICY,
     ImmutableJsonMapping,
@@ -220,33 +221,89 @@ async def _load_mcp(
     context: CapabilityLoadContext,
 ) -> "Sequence[MCPServerSpec]":
     entries = context.list(kind="mcp")
-    roots, declarations = _package_declarations(
-        entries,
-        ("/mcp.json", "/mcp.yaml"),
+    roots = tuple(
+        entry
+        for entry in entries
+        if entry.key.id.endswith(("/mcp.json", "/mcp.yaml"))
     )
-    values = await context.read_many(tuple(entry.key for entry in declarations))
-    by_key = dict(zip((entry.key for entry in declarations), values, strict=True))
+    root_ids: list[str] = []
+    for entry in roots:
+        suffix = "/mcp.json" if entry.key.id.endswith("/mcp.json") else "/mcp.yaml"
+        root = entry.key.id[: -len(suffix)]
+        if not root or root in root_ids:
+            raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+        root_ids.append(root)
+    ordered_roots = tuple(sorted(root_ids))
+    _validate_package_roots(ordered_roots)
+
+    package_keys = {entry.key for entry in roots}
+    flat = tuple(
+        entry
+        for entry in entries
+        if entry.key not in package_keys
+        and not _inside_package(entry.key.id, ordered_roots)
+    )
+    selected = tuple(sorted((*roots, *flat), key=lambda entry: entry.key.id))
+    values = await context.read_many(tuple(entry.key for entry in selected))
+    by_key = dict(zip((entry.key for entry in selected), values, strict=True))
     codec = MCPServerSpecCodec()
-    result: list[MCPServerSpec] = []
-    package_main_keys = {entry.key for entry in roots}
-    for entry in declarations:
+
+    declarations: list[tuple[CapabilityLoadEntry, MCPServerSpec]] = []
+    failures: list[tuple[CapabilityLoadEntry, AIError]] = []
+    for entry in selected:
         key = entry.key
-        if key in package_main_keys:
-            suffix = "/mcp.json" if key.id.endswith("/mcp.json") else "/mcp.yaml"
-            package_id = key.id[: -len(suffix)]
-            format = "json" if suffix.endswith(".json") else "yaml"
-            value = codec.decode_author(
-                by_key[key],
-                format=format,
-                package_id=package_id,
-            )
-        else:
-            value = codec.decode_author(by_key[key], format="json")
-            if value.id != key.id:
-                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+        try:
+            if key in package_keys:
+                suffix = "/mcp.json" if key.id.endswith("/mcp.json") else "/mcp.yaml"
+                value = codec.decode_author(
+                    by_key[key],
+                    format="json" if suffix.endswith(".json") else "yaml",
+                    package_id=key.id[: -len(suffix)],
+                )
+            else:
+                value = codec.decode_author(by_key[key], format="json")
+                if value.id != key.id:
+                    raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+        except AIError as error:
+            failures.append((entry, error))
+            continue
+        declarations.append((entry, value))
+
+    resource_roots = tuple(
+        value.resource_root
+        for _entry, value in declarations
+        if value.resource_root is not None
+    )
+    for entry, error in failures:
+        if not _inside_mcp_resource_root(entry.key, resource_roots):
+            raise error
+    for entry, _value in declarations:
+        if entry.key not in package_keys and _inside_mcp_resource_root(
+            entry.key,
+            resource_roots,
+            exclude=entry.key,
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+    result: list[MCPServerSpec] = []
+    for _entry, value in declarations:
         _bind_mcp_declaration(value, context)
         result.append(value)
     return result
+
+
+def _inside_mcp_resource_root(
+    key: AssetKey,
+    roots: Sequence[AssetKey],
+    *,
+    exclude: "AssetKey | None" = None,
+) -> bool:
+    if exclude is not None and key == exclude:
+        return False
+    return any(
+        key.kind == root.kind and key.id.startswith(f"{root.id}/")
+        for root in roots
+    )
 
 
 def _bind_mcp_declaration(
