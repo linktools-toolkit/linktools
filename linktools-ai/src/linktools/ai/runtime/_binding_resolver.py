@@ -4,7 +4,6 @@
 
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import cast
 
 from ..agent import (
     AgentBinding,
@@ -95,7 +94,7 @@ class _RuntimeBindingResolver:
             if execution_policy is None:
                 execution_policy = _mcp_execution_policy(self._sandbox)
             server, resource_versions = codec.from_execution_payload(
-                cast("Mapping[str, object]", pin.contract)
+                pin.contract
             )
             current_policy = dict(execution_policy)
             bound_policy = pin.contract.get("execution_policy")
