@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Filesystem and process execution boundary."""
 
+import asyncio
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -113,8 +115,9 @@ class SandboxResource:
         files: Mapping[str, AssetVersionRef],
         *,
         executable_bits: Mapping[str, int] | None = None,
+        materialize_root: Path | None = None,
     ) -> "SandboxResource | None":
-        """Expose pinned Asset files only when their backend has native paths."""
+        """Expose pinned Asset files, materializing exact bytes only when needed."""
         if not files:
             return None
         ordered = tuple(sorted(files.items()))
@@ -125,56 +128,68 @@ class SandboxResource:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
             if relative == "." or not isinstance(ref, AssetVersionRef):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        refs = tuple(ref for _relative, ref in ordered)
-        paths = await reader.local_paths(tuple(ref.key for ref in refs))
-        if any(path is None for path in paths):
-            return None
-        if await reader.resolve_versions(tuple(ref.key for ref in refs)) != refs:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        await reader.read_versions(refs)
-        local: dict[str, Path] = {}
-        roots: set[Path] = set()
-        for (relative, _ref), path in zip(ordered, paths, strict=True):
-            if path is None:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            try:
-                resolved = path.resolve(strict=True)
-            except (OSError, RuntimeError) as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            if not resolved.is_file():
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            if executable_bits is not None:
-                expected = executable_bits.get(relative)
-                try:
-                    mode = resolved.stat().st_mode & 0o111
-                except OSError as error:
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-                if expected is None or mode != expected:
-                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-            local[relative] = resolved
-            root = path
-            for _part in PurePosixPath(relative).parts:
-                root = root.parent
-            try:
-                roots.add(root.resolve(strict=True))
-            except (OSError, RuntimeError) as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        if executable_bits is not None and set(executable_bits) != set(local):
+        if executable_bits is not None and set(executable_bits) != {
+            relative for relative, _ref in ordered
+        }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        source = next(iter(roots)) if len(roots) == 1 else None
-        if source is not None:
-            for relative, path in local.items():
-                try:
-                    actual = source.joinpath(
-                        *PurePosixPath(relative).parts
-                    ).resolve(strict=True)
-                except (OSError, RuntimeError):
-                    source = None
-                    break
-                if actual != path:
-                    source = None
-                    break
-        return cls(resource_id, source, local)
+
+        refs = tuple(ref for _relative, ref in ordered)
+        keys = tuple(ref.key for ref in refs)
+        paths = await reader.local_paths(keys)
+        if all(path is not None for path in paths):
+            current = await reader.resolve_versions(keys)
+            if current == refs:
+                local: dict[str, Path] = {}
+                roots: set[Path] = set()
+                usable = True
+                for (relative, _ref), path in zip(ordered, paths, strict=True):
+                    assert path is not None
+                    try:
+                        resolved = path.resolve(strict=True)
+                        if not resolved.is_file():
+                            usable = False
+                            break
+                        if executable_bits is not None:
+                            mode = resolved.stat().st_mode & 0o111
+                            if mode != executable_bits[relative]:
+                                usable = False
+                                break
+                    except (OSError, RuntimeError):
+                        usable = False
+                        break
+                    local[relative] = resolved
+                    root = path
+                    for _part in PurePosixPath(relative).parts:
+                        root = root.parent
+                    try:
+                        roots.add(root.resolve(strict=True))
+                    except (OSError, RuntimeError):
+                        usable = False
+                        break
+                if usable:
+                    await reader.read_versions(refs)
+                    source = next(iter(roots)) if len(roots) == 1 else None
+                    if source is not None and all(
+                        source.joinpath(*PurePosixPath(relative).parts).resolve()
+                        == path
+                        for relative, path in local.items()
+                    ):
+                        return cls(resource_id, source, local)
+                    return cls(resource_id, None, local)
+
+        values = await reader.read_versions(refs)
+        if materialize_root is None:
+            return None
+        await asyncio.to_thread(materialize_root.mkdir, parents=True, exist_ok=True)
+        local = {}
+        for (relative, _ref), data in zip(ordered, values, strict=True):
+            target = materialize_root.joinpath(*PurePosixPath(relative).parts)
+            await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(target.write_bytes, data)
+            mode = 0 if executable_bits is None else executable_bits[relative]
+            await asyncio.to_thread(os.chmod, target, 0o444 | mode)
+            local[relative] = target.resolve()
+        return cls(resource_id, materialize_root.resolve(), local)
 
 
 @dataclass(frozen=True, slots=True)
