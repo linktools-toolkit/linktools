@@ -61,7 +61,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 def _binding() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("default", model_route="default"),
+        agent_spec=AgentSpec("default", model="default"),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
