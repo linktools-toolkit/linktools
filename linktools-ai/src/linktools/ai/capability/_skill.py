@@ -13,7 +13,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..core import JsonValue
 from ..asset import AssetVersionRef
 from ..errors import AIError, ErrorCode
-from ..spec import SkillMarkdownSpecCodec, SkillSpec
+from ..spec import SkillMarkdownSpecCodec, SkillSpec, SkillSpecCodec
 from ._context import AgentContext
 from ._skill_source import (
     SkillLocation,
@@ -48,16 +48,7 @@ class SkillDefinition:
 
     @property
     def contract(self) -> "dict[str, JsonValue]":
-        contract: dict[str, JsonValue] = {
-            "version": 1,
-            "id": self.spec.id,
-            "revision": self.spec.revision,
-            "content": self.spec.content,
-        }
-        if self.spec.description is not None:
-            contract["description"] = self.spec.description
-        if self.spec.metadata:
-            contract["metadata"] = dict(self.spec.metadata)
+        contract = SkillSpecCodec().to_wire_payload(self.spec)
         if self.source_ref is not None:
             source: dict[str, JsonValue] = {
                 "source_id": self.source_ref.source_id,
@@ -77,28 +68,15 @@ class SkillDefinition:
 
     @classmethod
     def from_contract(cls, contract: Mapping[str, object]) -> "SkillDefinition":
-        version = contract.get("version")
-        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if version != 1:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        identity = contract.get("id")
-        revision = contract.get("revision", 1)
-        content = contract.get("content")
-        description = contract.get("description")
-        metadata = contract.get("metadata", {})
         source = contract.get("source")
-        if (
-            not isinstance(identity, str)
-            or not identity.strip()
-            or isinstance(revision, bool)
-            or not isinstance(revision, int)
-            or revision < 1
-            or not isinstance(content, str)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if description is not None and not isinstance(description, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            specification = SkillSpecCodec().from_payload(
+                {key: value for key, value in contract.items() if key != "source"}
+            )
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+                raise
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         source_ref: SkillSourceRef | None
         if source is None:
             source_ref = None
@@ -144,16 +122,6 @@ class SkillDefinition:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         else:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            specification = SkillSpec(
-                identity,
-                content,
-                description,
-                metadata,
-                revision=revision,
-            )
-        except (TypeError, ValueError, UnicodeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         return cls(specification, source_ref)
 
 
