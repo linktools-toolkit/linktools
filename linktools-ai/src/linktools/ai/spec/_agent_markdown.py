@@ -8,37 +8,6 @@ from ..errors import AIError, ErrorCode
 from ._codec import AgentSpecCodec, decode_author_yaml_mapping
 from ._contract import AgentSpec
 
-_AGENT_FIELDS = frozenset(
-    {
-        "allow_runtime_capabilities",
-        "allow_skills",
-        "allow_subagents",
-        "allow_tools",
-        "description",
-        "id",
-        "instructions",
-        "metadata",
-        "model_route",
-        "output_retries",
-        "planning",
-        "preload_skills",
-        "revision",
-        "thinking",
-        "tool_retries",
-        "usage_limits",
-    }
-)
-_USAGE_LIMIT_FIELDS = frozenset(
-    {
-        "input_tokens",
-        "model_requests",
-        "output_tokens",
-        "tool_calls",
-        "total_tokens",
-    }
-)
-_FORBIDDEN_FIELDS = frozenset({"system_prompt", "system-prompt", "version"})
-
 
 class AgentMarkdownSpecCodec:
     """Parse and decode one `AGENT.md` authoring document."""
@@ -67,8 +36,6 @@ class AgentMarkdownSpecCodec:
         frontmatter_bytes = "".join(lines[1:closing]).encode("utf-8")
         frontmatter = decode_author_yaml_mapping(frontmatter_bytes)
         canonical = _canonicalize_agent_fields(frontmatter)
-        if _FORBIDDEN_FIELDS.intersection(canonical):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         canonical["system_prompt"] = "".join(lines[closing + 1 :])
         return canonical
 
@@ -83,8 +50,6 @@ class AgentMarkdownSpecCodec:
         validate_logical_id(logical_id)
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if "version" in payload:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         if "id" in payload:
             declared_id = payload["id"]
             try:
@@ -96,9 +61,6 @@ class AgentMarkdownSpecCodec:
         system_prompt = payload.get("system_prompt")
         if not isinstance(system_prompt, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if "usage_limits" in payload:
-            _validate_usage_limit_fields(payload["usage_limits"])
-
         resolved_defaults = _validated_defaults(defaults, logical_id)
         merged = dict(resolved_defaults)
         merged.update(payload)
@@ -126,35 +88,13 @@ def _canonicalize_agent_fields(
 ) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in payload.items():
-        canonical = _canonical_field(key, _AGENT_FIELDS)
+        if not isinstance(key, str):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        canonical = key.replace("-", "_")
         if canonical in result:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         result[canonical] = value
-    usage_limits = result.get("usage_limits")
-    if isinstance(usage_limits, Mapping):
-        result["usage_limits"] = _canonicalize_usage_limits(usage_limits)
     return normalize_json_value(result)
-
-
-def _canonicalize_usage_limits(
-    value: Mapping[str, object],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, item in value.items():
-        canonical = _canonical_field(key, _USAGE_LIMIT_FIELDS)
-        if canonical in result:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        result[canonical] = item
-    return result
-
-
-def _canonical_field(key: object, fields: frozenset[str]) -> str:
-    if not isinstance(key, str):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    for field in fields:
-        if key == field or key == field.replace("_", "-"):
-            return field
-    return key
 
 
 def _validated_defaults(
@@ -180,19 +120,6 @@ def _validated_defaults(
     }
     AgentSpecCodec().from_author_payload(probe)
     return normalized
-
-
-def _validate_usage_limit_fields(value: object) -> None:
-    if value is None:
-        return
-    if not isinstance(value, Mapping):
-        return
-    if any(
-        not isinstance(key, str)
-        or _canonical_field(key, _USAGE_LIMIT_FIELDS) not in _USAGE_LIMIT_FIELDS
-        for key in value
-    ):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
 
 
 def _without_line_ending(value: str) -> str:

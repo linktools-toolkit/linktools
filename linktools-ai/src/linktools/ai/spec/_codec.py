@@ -23,35 +23,6 @@ _USAGE_LIMIT_FIELDS = (
     "output_tokens",
     "total_tokens",
 )
-_AGENT_AUTHOR_FIELDS = frozenset(
-    {
-        "id",
-        "model_route",
-        "instructions",
-        "metadata",
-        "allow_tools",
-        "allow_skills",
-        "allow_subagents",
-        "allow_runtime_capabilities",
-        "usage_limits",
-        "planning",
-        "thinking",
-        "tool_retries",
-        "output_retries",
-        "description",
-        "preload_skills",
-        "system_prompt",
-        "version",
-        "revision",
-    }
-)
-_MCP_AUTHOR_FIELDS = frozenset(
-    {"version", "revision", "id", "command", "args", "resource_root"}
-)
-_SKILL_AUTHOR_FIELDS = frozenset(
-    {"version", "revision", "id", "content", "description", "metadata"}
-)
-
 
 class SpecCodec(Protocol[SpecT]):
     def encode(self, value: SpecT) -> bytes: ...
@@ -67,7 +38,7 @@ class AgentSpecCodec:
             "version": 1,
             "id": value.id,
             "revision": value.revision,
-            "model_route": value.model_route,
+            "model": value.model,
             "system_prompt": value.system_prompt,
             "instructions": list(value.instructions),
             "allow_tools": list(value.allow_tools),
@@ -105,7 +76,7 @@ class AgentSpecCodec:
         _require_usage_limit_fields(raw.get("usage_limits"))
         identity = raw.get("id")
         revision = _decode_revision(raw)
-        model_route = raw.get("model_route", "default")
+        model = raw.get("model", "default")
         system_prompt = raw.get("system_prompt", "")
         instructions = raw.get("instructions", [])
         allow_tools = raw.get("allow_tools", ["*"])
@@ -125,8 +96,8 @@ class AgentSpecCodec:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "preload_skills must be a string array")
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
-        if not isinstance(model_route, str) or not model_route.strip():
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent model_route must be a non-empty string")
+        if not isinstance(model, str) or not model.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent model must be a non-empty string")
         if not isinstance(system_prompt, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "system_prompt must be a string")
         if not isinstance(instructions, list) or any(not isinstance(item, str) for item in instructions):
@@ -161,7 +132,7 @@ class AgentSpecCodec:
             normalized_thinking = normalize_thinking(thinking)
             return AgentSpec(
                 id=identity,
-                model_route=model_route,
+                model=model,
                 system_prompt=system_prompt,
                 instructions=tuple(instructions),
                 allow_tools=tuple(allow_tools),
@@ -186,14 +157,25 @@ class AgentSpecCodec:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
 
     def from_author_payload(self, raw: Mapping[str, object]) -> AgentSpec:
-        """Strictly decode one canonical authoring payload."""
-        _require_author_fields(raw, _AGENT_AUTHOR_FIELDS)
-        _require_usage_limit_fields(raw.get("usage_limits"))
-        if "version" not in raw or "revision" not in raw:
-            raw = dict(raw)
-            raw.setdefault("version", _VERSION)
-            raw.setdefault("revision", 1)
-        return self.from_payload(raw)
+        """Decode the stable Agent authoring fields and ignore unrelated keys."""
+        if not isinstance(raw, Mapping):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        payload: dict[str, object] = {
+            "version": raw.get("version", _VERSION),
+            "id": raw.get("id"),
+            "revision": raw.get("revision", 1),
+            "model": raw.get("model", "default"),
+            "system_prompt": raw.get("system_prompt", ""),
+            "instructions": raw.get("instructions", []),
+            "allow_tools": raw.get("allow_tools", ["*"]),
+            "allow_skills": raw.get("allow_skills", ["*"]),
+            "allow_subagents": raw.get("allow_subagents", ["*"]),
+        }
+        if "description" in raw:
+            payload["description"] = raw["description"]
+        if "metadata" in raw:
+            payload["metadata"] = raw["metadata"]
+        return self.from_payload(payload)
 
     def decode_author_mapping(self, data: bytes) -> dict[str, object]:
         """Decode a strict JSON author mapping for contextual adapters."""
@@ -261,11 +243,20 @@ class SkillSpecCodec:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
 
     def from_author_payload(self, raw: Mapping[str, object]) -> SkillSpec:
-        """Decode one strict flat Skill declaration."""
-        _require_author_fields(raw, _SKILL_AUTHOR_FIELDS)
-        if "revision" not in raw:
-            raw = {**raw, "revision": 1}
-        return self.from_payload(raw)
+        """Decode the stable Skill authoring fields and ignore unrelated keys."""
+        if not isinstance(raw, Mapping):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        payload: dict[str, object] = {
+            "version": raw.get("version", _VERSION),
+            "id": raw.get("id"),
+            "revision": raw.get("revision", 1),
+            "content": raw.get("content"),
+        }
+        if "description" in raw:
+            payload["description"] = raw["description"]
+        if "metadata" in raw:
+            payload["metadata"] = raw["metadata"]
+        return self.from_payload(payload)
 
     def decode_author(self, data: bytes) -> SkillSpec:
         """Decode one strict JSON Skill declaration."""
@@ -416,10 +407,10 @@ class MCPServerSpecCodec:
             "command": value.command,
             "args": list(value.args),
         }
-        if value.resource_root is not None:
-            payload["resource_root"] = {
-                "kind": value.resource_root.kind,
-                "id": value.resource_root.id,
+        if value.resource is not None:
+            payload["resource"] = {
+                "kind": value.resource.kind,
+                "id": value.resource.id,
             }
         return payload
 
@@ -437,7 +428,7 @@ class MCPServerSpecCodec:
             payload["execution_policy"] = _execution_policy_payload(
                 execution_policy
             )
-        if value.resource_root is None:
+        if value.resource is None:
             if resource_versions is not None or asset_source_id is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return payload
@@ -485,36 +476,38 @@ class MCPServerSpecCodec:
             if format == "json"
             else decode_author_yaml_mapping(data)
         )
-        _require_author_fields(raw, _MCP_AUTHOR_FIELDS)
-        if "revision" not in raw:
-            raw = {**raw, "revision": 1}
-        version = raw.get("version")
+        payload: dict[str, object] = {
+            "version": raw.get("version", _VERSION),
+            "revision": raw.get("revision", 1),
+            "id": raw.get("id"),
+            "command": raw.get("command"),
+            "args": raw.get("args", []),
+        }
+        if "resource" in raw:
+            payload["resource"] = raw["resource"]
+        version = payload.get("version")
         if (
             isinstance(version, bool)
             or not isinstance(version, int)
             or version != _VERSION
         ):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        identity = raw.get("id")
+        identity = payload.get("id")
         if package_id is None:
             if not isinstance(identity, str) or not identity.strip():
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         elif "id" in raw and identity != package_id:
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        resource_root = raw.get("resource_root")
-        if resource_root is not None and (
-            not isinstance(resource_root, Mapping)
-            or set(resource_root) != {"kind", "id"}
-        ):
+        resource = payload.get("resource")
+        if resource is not None and not isinstance(resource, Mapping):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        payload = dict(raw)
         if package_id is not None:
             payload["id"] = package_id
             package_root = {"kind": "mcp", "id": package_id}
-            explicit_root = payload.get("resource_root")
-            if "resource_root" in raw and explicit_root != package_root:
+            explicit_root = payload.get("resource")
+            if "resource" in payload and explicit_root != package_root:
                 raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-            payload["resource_root"] = package_root
+            payload["resource"] = package_root
         return self.from_payload(payload)
 
     def from_execution_payload(
@@ -543,7 +536,7 @@ class MCPServerSpecCodec:
         identity = raw.get("id")
         revision = _decode_revision(raw)
         command = raw.get("command")
-        resource_root = _decode_asset_key(raw.get("resource_root"))
+        resource = _decode_asset_key(raw.get("resource"))
         resource_versions: tuple[AssetVersionRef, ...] | None = None
         raw_versions = raw.get("resource_versions") if execution else None
         if raw_versions is not None:
@@ -564,7 +557,7 @@ class MCPServerSpecCodec:
             )
         if execution and "execution_policy" in raw:
             _execution_policy_payload(raw["execution_policy"])
-            if resource_root is not None and resource_versions is None:
+            if resource is not None and resource_versions is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         asset_source_id = raw.get("asset_source_id") if execution else None
         if resource_versions is None:
@@ -572,7 +565,7 @@ class MCPServerSpecCodec:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
             if (
-                resource_root is None
+                resource is None
                 or not isinstance(asset_source_id, str)
                 or not asset_source_id
             ):
@@ -589,7 +582,7 @@ class MCPServerSpecCodec:
                 identity,
                 command,
                 tuple(args),
-                resource_root,
+                resource,
                 revision=revision,
             )
         except (TypeError, ValueError) as error:
@@ -650,16 +643,16 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
 def _decode_asset_key(value: object) -> AssetKey | None:
     if value is None:
         return None
-    if not isinstance(value, Mapping) or set(value) != {"kind", "id"}:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid")
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource is invalid")
     kind = value.get("kind")
     identity = value.get("id")
     if not isinstance(kind, str) or not isinstance(identity, str):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid")
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource is invalid")
     try:
         return AssetKey(kind, identity)
     except ValueError as error:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid") from error
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource is invalid") from error
 
 
 def _decode(data: bytes) -> "dict[str, object]":
@@ -713,16 +706,6 @@ def _strict_json_mapping(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _reject_json_constant(value: str) -> object:
     raise ValueError(f"unsupported JSON constant: {value}")
-
-
-def _require_author_fields(
-    raw: Mapping[str, object],
-    allowed: frozenset[str],
-) -> None:
-    if not isinstance(raw, Mapping) or any(
-        not isinstance(key, str) or key not in allowed for key in raw
-    ):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
 
 
 def _require_usage_limit_fields(value: object) -> None:

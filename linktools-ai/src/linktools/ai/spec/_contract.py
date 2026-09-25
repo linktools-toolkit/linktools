@@ -196,7 +196,7 @@ class AgentSpec:
     DEFAULT_OUTPUT_RETRIES: ClassVar[int] = 3
 
     id: str
-    model_route: str = "default"
+    model: str = "default"
     system_prompt: str = ""
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
@@ -216,8 +216,8 @@ class AgentSpec:
     def __post_init__(self) -> None:
         validate_logical_id(self.id)
         _validate_revision(self.revision)
-        if not isinstance(self.model_route, str) or not self.model_route.strip():
-            raise ValueError("agent model_route must be a non-empty string")
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError("agent model must be a non-empty string")
         if not isinstance(self.system_prompt, str):
             raise TypeError("agent system_prompt must be a string")
         if isinstance(self.instructions, (str, bytes, bytearray)) or not isinstance(self.instructions, Sequence):
@@ -366,7 +366,7 @@ class MCPServerSpec:
     id: str
     command: str
     args: "tuple[str, ...]" = ()
-    resource_root: "AssetKey | None" = None
+    resource: "AssetKey | None" = None
     revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -381,8 +381,8 @@ class MCPServerSpec:
         if any(not isinstance(item, str) for item in args):
             raise TypeError("MCP server args must be strings")
         object.__setattr__(self, "args", args)
-        if self.resource_root is not None and not isinstance(self.resource_root, AssetKey):
-            raise TypeError("MCP resource root must be an AssetKey")
+        if self.resource is not None and not isinstance(self.resource, AssetKey):
+            raise TypeError("MCP resource must be an AssetKey")
 
 
 __all__ = [
