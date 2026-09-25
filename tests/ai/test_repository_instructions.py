@@ -214,7 +214,10 @@ def test_rule_capture_is_recursive_scoped_and_frozen(tmp_path: Path) -> None:
     base = rules / "base.md"
     strict = rules / "nested" / "strict.md"
     base.write_text("base-v1", encoding="utf-8")
-    strict.write_text("---\nscope: src\n---\nstrict", encoding="utf-8")
+    strict.write_text(
+        "---\nscope: src\nowner: security\nfuture-field: enabled\n---\nstrict",
+        encoding="utf-8",
+    )
 
     policy = WorkspacePolicy()
     rules = asyncio.run(_capture_rules(tmp_path))
