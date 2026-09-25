@@ -992,7 +992,7 @@ def _resource_source_conflicts(
 
 def _resource_guest_path(resource_id: str) -> str:
     digest = hashlib.sha256(resource_id.encode("utf-8")).hexdigest()[:24]
-    return f"/skills/r{digest}"
+    return f"/resources/r{digest}"
 
 
 def _read_workspace_bytes(
