@@ -178,7 +178,7 @@ class AgentSpecCodec:
         return self.from_payload(payload)
 
     def decode_author_mapping(self, data: bytes) -> dict[str, object]:
-        """Decode a strict JSON author mapping for contextual adapters."""
+        """Decode an author JSON mapping while rejecting malformed syntax and duplicate keys."""
         return decode_author_json_mapping(data)
 
     def encode(self, value: AgentSpec) -> bytes:
@@ -681,7 +681,7 @@ def decode_author_json_mapping(data: bytes) -> dict[str, object]:
 
 
 def decode_author_yaml_mapping(data: bytes) -> dict[str, object]:
-    """Decode finite JSON-shaped YAML with duplicate and merge keys rejected."""
+    """Decode finite JSON-shaped author YAML while rejecting duplicate and merge keys."""
     try:
         text = data.decode("utf-8", errors="strict")
         value = yaml.load(text, Loader=_StrictSafeLoader)
