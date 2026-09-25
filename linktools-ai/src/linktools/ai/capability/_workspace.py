@@ -35,7 +35,7 @@ _ResultT = TypeVar("_ResultT")
 
 
 @dataclass(frozen=True, slots=True)
-class ToolDeclaration:
+class WorkspaceToolDeclaration:
     """Immutable semantic declaration for one Workspace tool."""
 
     name: str
@@ -56,7 +56,7 @@ def _immutable_tool_metadata(
 
 
 def _runtime_tool_metadata(
-    declaration: ToolDeclaration,
+    declaration: WorkspaceToolDeclaration,
 ) -> dict[str, object]:
     metadata = dict(declaration.metadata)
     path_fields = metadata.get("linktools.ai.path_fields")
@@ -66,72 +66,72 @@ def _runtime_tool_metadata(
 
 
 _WORKSPACE_TOOL_DECLARATIONS = (
-    ToolDeclaration("attach_files", tool_semantic_metadata(
+    WorkspaceToolDeclaration("attach_files", tool_semantic_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("paths",),
     )),
-    ToolDeclaration("create_directory", tool_semantic_metadata(
+    WorkspaceToolDeclaration("create_directory", tool_semantic_metadata(
         effect="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
-    ToolDeclaration("edit_file", tool_semantic_metadata(
+    WorkspaceToolDeclaration("edit_file", tool_semantic_metadata(
         effect="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
-    ToolDeclaration("file_info", tool_semantic_metadata(
+    WorkspaceToolDeclaration("file_info", tool_semantic_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    ToolDeclaration("find_files", tool_semantic_metadata(
+    WorkspaceToolDeclaration("find_files", tool_semantic_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    ToolDeclaration("list_directory", tool_semantic_metadata(
+    WorkspaceToolDeclaration("list_directory", tool_semantic_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    ToolDeclaration("read_file", tool_semantic_metadata(
+    WorkspaceToolDeclaration("read_file", tool_semantic_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
         context_dedupe="workspace_file_read_v1",
     )),
-    ToolDeclaration("search_files", tool_semantic_metadata(
+    WorkspaceToolDeclaration("search_files", tool_semantic_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    ToolDeclaration("write_file", tool_semantic_metadata(
+    WorkspaceToolDeclaration("write_file", tool_semantic_metadata(
         effect="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
-    ToolDeclaration("check_command", tool_semantic_metadata(
+    WorkspaceToolDeclaration("check_command", tool_semantic_metadata(
         effect="none",
         plan_safe=True,
         tool_class="shell",
     )),
-    ToolDeclaration("run_command", tool_semantic_metadata(
+    WorkspaceToolDeclaration("run_command", tool_semantic_metadata(
         effect="non_replay_safe",
         tool_class="shell",
     )),
-    ToolDeclaration("start_command", tool_semantic_metadata(
+    WorkspaceToolDeclaration("start_command", tool_semantic_metadata(
         effect="non_replay_safe",
         tool_class="shell",
     )),
-    ToolDeclaration("stop_command", tool_semantic_metadata(
+    WorkspaceToolDeclaration("stop_command", tool_semantic_metadata(
         effect="non_replay_safe",
         tool_class="shell",
     )),
@@ -848,14 +848,14 @@ def _workspace_tool_definitions(workspace: Workspace) -> tuple[Tool[Any], ...]:
     )
 
 
-def workspace_tool_declarations() -> tuple[ToolDeclaration, ...]:
+def workspace_tool_declarations() -> tuple[WorkspaceToolDeclaration, ...]:
     """Return the canonical Workspace tool declarations in name order."""
     return tuple(
         sorted(_WORKSPACE_TOOL_DECLARATIONS, key=lambda item: item.name)
     )
 
 
-def _declaration_for(name: str) -> ToolDeclaration:
+def _declaration_for(name: str) -> WorkspaceToolDeclaration:
     try:
         return _WORKSPACE_TOOL_DECLARATIONS_BY_NAME[name]
     except KeyError as error:
@@ -947,7 +947,7 @@ def _workspace_tool_rejected(
 
 
 __all__ = [
-    "ToolDeclaration",
+    "WorkspaceToolDeclaration",
     "WorkspaceAccess",
     "workspace_tool_declarations",
     "workspace_capabilities",
