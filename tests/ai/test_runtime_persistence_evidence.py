@@ -43,13 +43,13 @@ from ._runtime_test_helpers import execution_owner_fields
 
 def _agent_group() -> CapabilityGroup[object]:
     group = CapabilityGroup[object]("application")
-    group.agent("default", model_route="default", allow_tools=())
+    group.agent("default", model="default", allow_tools=())
     return group
 
 
 def _binding_contract() -> AgentBindingContract:
     return AgentBindingContract(
-        agent_spec=AgentSpec("agent", model_route="default"),
+        agent_spec=AgentSpec("agent", model="default"),
         model_contract={"provider": "test", "model": "fixture"},
         selected=(),
         subagents=(),

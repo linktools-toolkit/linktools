@@ -202,7 +202,7 @@ async def test_closing_session_can_commit_owned_continuation_then_close() -> Non
 def _binding() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("agent", model_route="model"),
+        agent_spec=AgentSpec("agent", model="model"),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),

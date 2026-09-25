@@ -57,7 +57,7 @@ from ._runtime_test_helpers import execution_owner_fields
 def _binding_contract() -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec("default", model_route="default"),
+        agent_spec=AgentSpec("default", model="default"),
         model_contract={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
