@@ -96,7 +96,7 @@ class _CandidateRepository:
 def _binding(agent_id: str) -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
-        agent_spec=AgentSpec(agent_id, model_route="model"),
+        agent_spec=AgentSpec(agent_id, model="model"),
         model_contract={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),

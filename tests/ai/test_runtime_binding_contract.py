@@ -305,13 +305,13 @@ def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
 
 def test_agent_declaration_identity_uses_explicit_revision() -> None:
     first = CapabilityContribution.from_declaration(
-        AgentSpec("agent", model_route="first", revision=1)
+        AgentSpec("agent", model="first", revision=1)
     )
     changed = CapabilityContribution.from_declaration(
-        AgentSpec("agent", model_route="second", revision=1)
+        AgentSpec("agent", model="second", revision=1)
     )
     revised = CapabilityContribution.from_declaration(
-        AgentSpec("agent", model_route="second", revision=2)
+        AgentSpec("agent", model="second", revision=2)
     )
 
     assert first.contract != changed.contract
@@ -363,7 +363,7 @@ def test_model_registry_replaces_connection_with_same_model_contract() -> None:
     assert first_snapshot.resolve("default") is first
 
 
-def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -> None:
+def test_agent_identity_ignores_model_but_catalog_uses_current_binding() -> None:
     registry = ModelRegistry()
     registry.register_openai(
         "first",
@@ -378,10 +378,10 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     compiler = AgentCompiler(
         model_resolver=registry.capture(),
         candidates=(),
-        agents={"agent": AgentSpec("agent", model_route="first")},
+        agents={"agent": AgentSpec("agent", model="first")},
     )
-    first = compiler.bind(compiler.compile(AgentSpec("agent", model_route="first")))
-    second = compiler.bind(compiler.compile(AgentSpec("agent", model_route="second")))
+    first = compiler.bind(compiler.compile(AgentSpec("agent", model="first")))
+    second = compiler.bind(compiler.compile(AgentSpec("agent", model="second")))
 
     assert first.compiled_agent.spec.id == second.compiled_agent.spec.id
     assert first.compiled_agent.spec.revision == second.compiled_agent.spec.revision
