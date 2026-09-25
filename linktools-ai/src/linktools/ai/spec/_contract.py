@@ -6,7 +6,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import ClassVar, Literal, cast
+from typing import ClassVar, Literal
 
 from ..asset import AssetKey
 from ..core import (
@@ -302,9 +302,7 @@ def _validated_metadata(value: object) -> Mapping[str, JsonValue]:
     if "linktools-revision" in value:
         raise ValueError("linktools-revision is reserved")
     normalized = normalize_json_value(dict(value))
-    return ImmutableJsonMapping(
-        cast("dict[str, JsonValue]", normalized), allow_empty_keys=True
-    )
+    return ImmutableJsonMapping(normalized, allow_empty_keys=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,9 +353,9 @@ class SubagentRef:
         try:
             return cls(
                 "agent",
-                cast(str, identity),
+                identity,
                 description,
-                revision=cast(int, revision),
+                revision=revision,
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
