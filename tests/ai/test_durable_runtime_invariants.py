@@ -41,7 +41,7 @@ from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskEvent,
     TaskEventType,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskNode,
     TaskNodeView,
     open_local_task_graph_service,
@@ -549,7 +549,7 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
     assert await task == "terminal"
 
 
-def _running_task_snapshot() -> TaskGraphSnapshot:
+def _running_task_graph_state() -> TaskGraphState:
     node = TaskNode("node")
     state = TaskNodeView(
         "graph",
@@ -563,7 +563,7 @@ def _running_task_snapshot() -> TaskGraphSnapshot:
         None,
         None,
     )
-    return TaskGraphSnapshot(
+    return TaskGraphState(
         "graph",
         TaskStatus.RUNNING,
         (node,),
@@ -571,8 +571,8 @@ def _running_task_snapshot() -> TaskGraphSnapshot:
     )
 
 
-def _terminal_task_snapshot() -> TaskGraphSnapshot:
-    return TaskGraphSnapshot("graph", TaskStatus.SUCCEEDED, (), ())
+def _terminal_task_graph_state() -> TaskGraphState:
+    return TaskGraphState("graph", TaskStatus.SUCCEEDED, (), ())
 
 
 def _running_task_event() -> TaskEvent:
@@ -620,14 +620,14 @@ class _RunningTaskRepository:
         del graph_id, tenant_id
         return SimpleNamespace(status=TaskStatus.RUNNING)
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del graph_id, tenant_id
-        return _running_task_snapshot()
+        return _running_task_graph_state()
 
     async def latest_event(
         self,
@@ -701,14 +701,14 @@ class _TerminalTaskRepository:
             status=TaskStatus.SUCCEEDED,
         )
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del graph_id, tenant_id
-        return _terminal_task_snapshot()
+        return _terminal_task_graph_state()
 
     async def latest_event(
         self,
@@ -722,7 +722,7 @@ class _TerminalTaskRepository:
 
 class _TransitionTaskRepository(_TerminalTaskRepository):
     def __init__(self) -> None:
-        self.snapshot_reads = 0
+        self.graph_state_reads = 0
         self.event_reads = 0
 
     async def latest_event(
@@ -748,15 +748,15 @@ class _TransitionTaskRepository(_TerminalTaskRepository):
             return Page(())
         return Page((_terminal_task_event(after_sequence + 1),))
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del graph_id, tenant_id
-        self.snapshot_reads += 1
-        return _terminal_task_snapshot()
+        self.graph_state_reads += 1
+        return _terminal_task_graph_state()
 
 
 class _TerminalTaskWaiter:
@@ -807,7 +807,7 @@ def _terminal_task_service(
 
 
 @pytest.mark.asyncio
-async def test_task_wait_returns_current_terminal_snapshot_without_local_wait() -> None:
+async def test_task_wait_returns_current_terminal_graph_state_without_local_wait() -> None:
     waiter = _TerminalTaskWaiter()
     service = _terminal_task_service(waiter)
 
@@ -834,7 +834,7 @@ async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> Non
     )
 
     assert waiter.started.is_set()
-    assert repository.snapshot_reads == 1
+    assert repository.graph_state_reads == 1
     assert repository.event_reads == 2
     assert result.status is TaskStatus.SUCCEEDED
 

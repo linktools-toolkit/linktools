@@ -727,18 +727,18 @@ class TaskGraphInfo:
     event_sequence: int = 0
 
     @classmethod
-    def from_snapshot(cls, snapshot: "TaskGraphSnapshot") -> "TaskGraphInfo":
+    def from_state(cls, state: "TaskGraphState") -> "TaskGraphInfo":
         return cls(
-            snapshot.graph_id,
-            snapshot.status,
-            tuple(TaskNodeInfo.from_node(node) for node in snapshot.nodes),
-            snapshot.node_states,
-            snapshot.event_sequence,
+            state.graph_id,
+            state.status,
+            tuple(TaskNodeInfo.from_node(node) for node in state.nodes),
+            state.node_states,
+            state.event_sequence,
         )
 
 
 @dataclass(frozen=True, slots=True)
-class TaskGraphSnapshot:
+class TaskGraphState:
     graph_id: str
     status: TaskStatus
     nodes: "tuple[TaskNode, ...]"
@@ -747,25 +747,25 @@ class TaskGraphSnapshot:
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
-            raise ValueError("task graph snapshot id is required")
+            raise ValueError("task graph state id is required")
         if (
             isinstance(self.event_sequence, bool)
             or not isinstance(self.event_sequence, int)
             or self.event_sequence < 0
         ):
-            raise ValueError("task graph snapshot event sequence is invalid")
+            raise ValueError("task graph state event sequence is invalid")
         nodes = tuple(self.nodes)
         states = tuple(self.node_states)
         node_ids = tuple(node.node_id for node in nodes)
         state_ids = tuple(state.node_id for state in states)
         if len(set(node_ids)) != len(node_ids) or node_ids != state_ids:
-            raise ValueError("task graph snapshot node set is invalid")
+            raise ValueError("task graph state node set is invalid")
         for node, state in zip(nodes, states, strict=True):
             if (
                 state.graph_id != self.graph_id
                 or state.dependencies != node.dependencies
             ):
-                raise ValueError("task graph snapshot node identity is invalid")
+                raise ValueError("task graph state node identity is invalid")
         aggregate = _aggregate_graph_status(states)
         if aggregate is not self.status:
             terminal = {
@@ -781,7 +781,7 @@ class TaskGraphSnapshot:
                 and any(state.status is TaskStatus.CANCELLED for state in states)
             )
             if not explicit_cancelled:
-                raise ValueError("task graph snapshot aggregate status is invalid")
+                raise ValueError("task graph state aggregate status is invalid")
         object.__setattr__(self, "nodes", nodes)
         object.__setattr__(self, "node_states", states)
 
@@ -861,7 +861,7 @@ __all__ = [
     "TaskGraphLimits",
     "TaskGraphRequest",
     "TaskGraphResult",
-    "TaskGraphSnapshot",
+    "TaskGraphState",
     "TaskGraphValidationError",
     "TaskGraphView",
     "TaskLease",

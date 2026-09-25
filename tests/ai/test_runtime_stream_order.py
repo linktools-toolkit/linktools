@@ -47,7 +47,7 @@ from linktools.ai.task import (
     TaskEvent,
     TaskEventType,
     TaskGraphResult,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskNode,
     TaskNodeView,
 )
@@ -245,12 +245,12 @@ async def test_graph_wait_terminal_result_waits_for_observer_completion() -> Non
     )
 
     class GraphService:
-        async def snapshot(
+        async def state(
             self,
             graph_id: str,
             *,
             principal: Principal,
-        ) -> TaskGraphSnapshot:
+        ) -> TaskGraphState:
             del principal
             state = TaskNodeView(
                 graph_id,
@@ -265,7 +265,7 @@ async def test_graph_wait_terminal_result_waits_for_observer_completion() -> Non
                 None,
                 "execution",
             )
-            return TaskGraphSnapshot(
+            return TaskGraphState(
                 graph_id,
                 TaskStatus.RUNNING,
                 (TaskNode("node"),),

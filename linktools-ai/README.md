@@ -9,7 +9,7 @@ namespace
     + CapabilityGroup(s)
         -> optional, independent Workspace and Sandbox via CapabilityGroup(...)
         -> Runtime.open(...)
-        -> snapshotted capability/declaration candidates
+        -> captured capability/declaration candidates
         -> AgentCompiler
         -> CompiledAgent
         -> Runtime.agent(id)
@@ -24,7 +24,7 @@ The main ownership rules are:
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
 - `CapabilityGroup` is the only public registration/discovery composition unit. It can provide a Workspace or Sandbox independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
 - `AgentSpec` is a runtime-independent Agent declaration.
-- `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the snapshotted Runtime candidate set.
+- `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the captured Runtime candidate set.
 - `Runtime` is the composition root and owns the service graph.
 - `Runtime.agent(id)` returns a Runtime-bound `Agent`; it does not compile or register new definitions.
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
@@ -103,7 +103,7 @@ def lookup_ticket(ctx: AgentContext[None], ticket_id: str) -> str:
 
 application.agent(
     "audit",
-    model="default",
+    model_route="default",
     system_prompt="Review the supplied evidence carefully.",
     allow_tools=("lookup_ticket",),
     allow_skills=("review",),
@@ -140,8 +140,8 @@ MCP declarations from Workspace paths.
 
 Agent, Skill, MCP, and repository rule files use one explicit source: pass a ready
 `AssetStore` with `CapabilityGroup(..., assets=store)`. A store-backed group
-captures the declaration metadata visible when snapshot capture starts. Assets added
-afterward are ignored for that snapshot; assets actually read by a loader must
+captures the declaration metadata visible when capture begins. Assets added
+afterward are ignored for that capture; assets actually read by a loader must
 still match their captured metadata through verification. Conflicting
 identities or layouts fail closed.
 
@@ -197,12 +197,12 @@ Metadata is retained in Agent and Skill specs and their spec wire payloads,
 but does not affect named revisions. Skill metadata is omitted from the
 instructions shown to the model.
 
-`CapabilityGroup.snapshot()` returns a `CapabilityGroupSnapshot`. Pass that
-snapshot to `Runtime.open()` when the host also needs to inspect the same
-snapshotted contributions; this avoids parsing the source declarations twice.
-The snapshot contains the group id, contributions, captured Rule instructions,
+`CapabilityGroup.capture()` returns a `CapabilityGroupCapture`. Pass that
+capture to `Runtime.open()` when the host also needs to inspect the same
+captured contributions; this avoids parsing the source declarations twice.
+The capture contains the group id, contributions, captured Rule instructions,
 source revision, and Workspace association. A changed source revision fails
-Runtime admission. Runtime reads snapshot resources through `AssetStoreReader`,
+Runtime admission. Runtime reads captured resources through `AssetStoreReader`,
 a read-only view that does not expose the mutable `AssetStore`.
 
 Directory-backed Skill packages retain a native absolute package path when
@@ -225,14 +225,14 @@ can be observed by an already running process.
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
 `resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
 value starts with `resource:` then name files below that root. The MCP loader
-binds selected files to Asset version references in the same group snapshot,
+binds selected files to Asset version references in the same group capture,
 rejecting absolute paths, traversal, and missing files. Runtime preserves those
 refs and adds only the execution policy required by the selected Sandbox.
 `resource:` arguments require local Asset files: LocalSandbox receives their
 verified original absolute paths and Bubblewrap mounts each selected file
 read-only. Asset updates after the
-CapabilityGroup snapshot do not alter that declaration snapshot; a later
-CapabilityGroup snapshot sees the newer Asset versions. Runtime does not copy
+CapabilityGroup capture do not alter that declaration capture; a later
+CapabilityGroup capture sees the newer Asset versions. Runtime does not copy
 MCP resource bytes to a temporary directory or persist a second copy.
 Without `resource_root`, existing argument strings keep their original
 meaning.
@@ -302,7 +302,7 @@ from linktools.ai.spec import AgentSpec
 
 spec = AgentSpec(
     id="audit",
-    model="default",
+    model_route="default",
     system_prompt="Audit the supplied change.",
     instructions=("Cite concrete evidence.",),
     allow_tools=("read_file", "mcp:security:*"),
@@ -313,7 +313,7 @@ spec = AgentSpec(
 )
 ```
 
-The compiler resolves these selectors once from the snapshotted candidate universe.
+The compiler resolves these selectors once from the captured candidate universe.
 Missing or conflicting required candidates fail closed. MCP selectors use
 `mcp:<encoded-server>:<encoded-tool>` or `mcp:<encoded-server>:*`; use
 `mcp_server_selector()` and `mcp_tool_selector()` to encode logical ids and
@@ -327,7 +327,7 @@ The fixed prefix is not appended as a new conversation message on each model cal
 
 `allow_tools` controls ordinary/external model-visible tools. Planning is an execution mode and is not enabled or disabled by pretending `write_plan` is an ordinary business tool. Runtime infrastructure capabilities such as planning, memory, Skill loading, and Subagent delegation are composed by Runtime according to the resolved execution contract.
 
-Subagents are root Agent definitions selected from the same snapshotted catalog. A root Agent cannot select itself as a Subagent, and the Runtime does not create a second registration system for child Agents.
+Subagents are root Agent definitions selected from the same captured catalog. A root Agent cannot select itself as a Subagent, and the Runtime does not create a second registration system for child Agents.
 
 ## 5. Output contracts
 
@@ -357,7 +357,7 @@ The exact durable binding stores:
 - the canonical output JSON Schema;
 - one `binding_digest`.
 
-The snapshot does not persist Python output import paths or duplicate identity hashes. `ExecutionResult` exposes the derived `output_contract_digest` together with the terminal output.
+The binding contract does not persist Python output import paths or duplicate identity hashes. `ExecutionResult` exposes the derived `output_contract_digest` together with the terminal output.
 
 ## 6. Sessions and executions
 
@@ -424,7 +424,7 @@ If an Agent needs to inspect a Workspace file again, select `attach_files` in `a
 
 Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `RuntimeHistory.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose known media type/size/digest, request association, and the optional opaque `input_identifier` originally supplied by the caller. Runtime does not interpret or synthesize that identifier for Workspace or `attach_files` inputs, and keeps `processing_status="unknown"` unless it has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
 
-`Agent.task()` prompts support both `BinaryContent` and `WorkspaceFileInput`. Runtime materializes their bytes when accepting the graph, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph snapshots retain the captured input objects.
+`Agent.task()` prompts support both `BinaryContent` and `WorkspaceFileInput`. Runtime materializes their bytes when accepting the graph, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph state retains the captured input objects.
 
 ### Runtime context and execution queries
 
@@ -579,7 +579,7 @@ Package-specific public contracts remain available from their owning packages,
 for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
 `linktools.ai.capability`, `linktools.ai.workspace`, and `linktools.ai.runtime`.
 These include `AgentMarkdownSpecCodec`, `AgentDeclarationLoader`,
-`CapabilityGroupSnapshot`, MCP selector helpers, `WorkspaceToolDeclaration`, and the
+`CapabilityGroupCapture`, MCP selector helpers, `WorkspaceToolDeclaration`, and the
 optional stdio sandbox protocols. `ErrorDiagnostics` is available from
 `linktools.ai.errors`.
 

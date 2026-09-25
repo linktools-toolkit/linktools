@@ -51,7 +51,7 @@ from ..task import (
     TaskDependencyResult,
     TaskGraph,
     TaskGraphAdmission,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskNode,
     TaskExpanderRef,
     TaskNodeContext,
@@ -197,12 +197,12 @@ class _TaskStateReader(Protocol):
         tenant_id: str,
     ) -> ResourceRef | None: ...
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot | None: ...
+    ) -> TaskGraphState | None: ...
 
     async def get_results(
         self,
@@ -303,7 +303,7 @@ class _TaskExpansionContext:
 
 
 class RuntimeTaskNodeRunner(Generic[AppT]):
-    """Interpret admitted TaskNodes using the snapshotted Runtime handler map."""
+    """Interpret admitted TaskNodes using the captured Runtime handler map."""
 
     def __init__(
         self,
@@ -577,30 +577,30 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     async def prepare_graph(
         self,
-        snapshot: TaskGraphSnapshot,
+        graph_state: TaskGraphState,
         *,
         principal: Principal,
     ) -> None:
-        if snapshot.graph_id == "":
+        if graph_state.graph_id == "":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         prepared: list[TaskNode] = []
         try:
-            for node, state in zip(
-                snapshot.nodes,
-                snapshot.node_states,
+            for node, node_state in zip(
+                graph_state.nodes,
+                graph_state.node_states,
                 strict=True,
             ):
-                if state.node_id != node.node_id:
+                if node_state.node_id != node.node_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await self.prepare_node(
                     node,
-                    graph_id=snapshot.graph_id,
+                    graph_id=graph_state.graph_id,
                     principal=principal,
                 )
                 prepared.append(node)
         except BaseException:
             await self._release_nodes_dependencies(
-                snapshot.graph_id,
+                graph_state.graph_id,
                 prepared,
                 tenant_id=principal.tenant_id,
             )
@@ -608,18 +608,18 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     async def release_graph_dependencies(
         self,
-        snapshot: TaskGraphSnapshot,
+        graph_state: TaskGraphState,
         *,
         tenant_id: str,
     ) -> None:
         try:
             await self._release_nodes_dependencies(
-                snapshot.graph_id,
-                snapshot.nodes,
+                graph_state.graph_id,
+                graph_state.nodes,
                 tenant_id=tenant_id,
             )
         finally:
-            self._admitted_capabilities.pop(snapshot.graph_id, None)
+            self._admitted_capabilities.pop(graph_state.graph_id, None)
 
     async def _release_nodes_dependencies(
         self,
@@ -705,32 +705,32 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node_ids,
                 tenant_id=resolved_tenant,
             )
-            snapshot = await self._task_state.snapshot_graph(
+            graph_state = await self._task_state.graph_state(
                 source_graph_id,
                 tenant_id=resolved_tenant,
             )
-            if snapshot is None:
+            if graph_state is None:
                 raise AIError(ErrorCode.TASK_NOT_READY)
             states = {
-                state.node_id: state
-                for state in snapshot.node_states
+                node_state.node_id: node_state
+                for node_state in graph_state.node_states
             }
             for reference in references:
                 record = records.get(reference.node_id)
-                state = states.get(reference.node_id)
+                node_state = states.get(reference.node_id)
                 if (
                     record is None
-                    or state is None
-                    or state.status is not TaskStatus.SUCCEEDED
-                    or state.result_digest != reference.result_digest
-                    or state.execution_id is None
+                    or node_state is None
+                    or node_state.status is not TaskStatus.SUCCEEDED
+                    or node_state.result_digest != reference.result_digest
+                    or node_state.execution_id is None
                     or (
                         record.execution_id is not None
-                        and record.execution_id != state.execution_id
+                        and record.execution_id != node_state.execution_id
                     )
                 ):
                     raise AIError(ErrorCode.TASK_NOT_READY)
-                execution_id = state.execution_id
+                execution_id = node_state.execution_id
                 if authorize:
                     assert principal is not None
                     execution = await self._execution.inspect(
@@ -813,13 +813,17 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if node.effect != "non_replay_safe":
             raise AIError(ErrorCode.TASK_NOT_READY)
 
-    def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None:
-        for node, state in zip(snapshot.nodes, snapshot.node_states, strict=True):
+    def validate_recovery(self, graph_state: TaskGraphState) -> None:
+        for node, node_state in zip(
+            graph_state.nodes,
+            graph_state.node_states,
+            strict=True,
+        ):
             node = self._resolved_agent_node(
                 node,
-                graph_id=snapshot.graph_id,
+                graph_id=graph_state.graph_id,
             )
-            if state.status in {
+            if node_state.status in {
                 TaskStatus.SUCCEEDED,
                 TaskStatus.FAILED,
                 TaskStatus.BLOCKED,
@@ -828,7 +832,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 continue
             self._validate_durability(
                 node,
-                graph_id=snapshot.graph_id,
+                graph_id=graph_state.graph_id,
                 request=False,
             )
             task_id, task_revision, body = _parse_node(node, request=False)
@@ -843,7 +847,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         "kind": "task",
                         "task_id": task_id,
                         "task_revision": task_revision,
-                        "graph_id": snapshot.graph_id,
+                        "graph_id": graph_state.graph_id,
                         "node_id": node.node_id,
                     },
                 ) from error
@@ -853,7 +857,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     safe_details={
-                        "graph_id": snapshot.graph_id,
+                        "graph_id": graph_state.graph_id,
                         "node_id": node.node_id,
                         "reason": "task_effect_changed",
                     },
@@ -866,7 +870,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     safe_details={
-                        "graph_id": snapshot.graph_id,
+                        "graph_id": graph_state.graph_id,
                         "node_id": node.node_id,
                         "reason": "task_output_contract_changed",
                     },
@@ -874,7 +878,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if handler is self._agent:
                 canonical_body = self._agent.validate_recovery(
                     body,
-                    graph_id=snapshot.graph_id,
+                    graph_id=graph_state.graph_id,
                     node_id=node.node_id,
                 )
             else:
@@ -884,7 +888,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     raise AIError(
                         ErrorCode.STORAGE_INTEGRITY_ERROR,
                         safe_details={
-                            "graph_id": snapshot.graph_id,
+                            "graph_id": graph_state.graph_id,
                             "node_id": node.node_id,
                             "task_id": task_id,
                             "task_revision": task_revision,
@@ -913,7 +917,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     safe_details={
-                        "graph_id": snapshot.graph_id,
+                        "graph_id": graph_state.graph_id,
                         "node_id": node.node_id,
                         "task_id": task_id,
                         "task_revision": task_revision,
@@ -1711,23 +1715,23 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         dependency_states = invocation.dependency_states
         execution_id = invocation.execution_id
         if execution_id is None:
-            snapshot = await self._task_state.snapshot_graph(
+            graph_state = await self._task_state.graph_state(
                 graph_id,
                 tenant_id=principal.tenant_id,
             )
-            if snapshot is None:
+            if graph_state is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            state = next(
+            node_state = next(
                 (
                     value
-                    for value in snapshot.node_states
+                    for value in graph_state.node_states
                     if value.node_id == node.node_id
                 ),
                 None,
             )
-            if state is None:
+            if node_state is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            execution_id = state.execution_id
+            execution_id = node_state.execution_id
         if execution_id is None:
             return
 
@@ -2061,34 +2065,34 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node_ids,
                 tenant_id=principal.tenant_id,
             )
-            snapshot = await self._task_state.snapshot_graph(
+            graph_state = await self._task_state.graph_state(
                 source_graph_id,
                 tenant_id=principal.tenant_id,
             )
             states = (
                 {}
-                if snapshot is None
+                if graph_state is None
                 else {
-                    state.node_id: state
-                    for state in snapshot.node_states
+                    node_state.node_id: node_state
+                    for node_state in graph_state.node_states
                 }
             )
             for name, reference in entries:
                 record = records.get(reference.node_id)
-                state = states.get(reference.node_id)
+                node_state = states.get(reference.node_id)
                 if (
                     record is None
-                    or state is None
-                    or state.status is not TaskStatus.SUCCEEDED
-                    or state.result_digest != reference.result_digest
-                    or state.execution_id is None
+                    or node_state is None
+                    or node_state.status is not TaskStatus.SUCCEEDED
+                    or node_state.result_digest != reference.result_digest
+                    or node_state.execution_id is None
                     or (
                         record.execution_id is not None
-                        and record.execution_id != state.execution_id
+                        and record.execution_id != node_state.execution_id
                     )
                 ):
                     raise AIError(ErrorCode.TASK_NOT_READY)
-                execution_id = state.execution_id
+                execution_id = node_state.execution_id
                 execution = await self._execution.inspect(
                     execution_id,
                     principal=principal,

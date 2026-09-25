@@ -79,7 +79,7 @@ async def test_scheduler_retries_transient_reconcile_conflict(
         repository = state.task.tasks
         graph = TaskGraph("reconcile-retry", (TaskNode("node"),))
         await admit_graph(state, graph)
-        original_reconcile = repository.scheduler_snapshot
+        original_reconcile = repository.scheduler_state
         attempts = 0
 
         async def reconcile(graph_id: str, *, tenant_id: str):
@@ -89,7 +89,7 @@ async def test_scheduler_retries_transient_reconcile_conflict(
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return await original_reconcile(graph_id, tenant_id=tenant_id)
 
-        monkeypatch.setattr(repository, "scheduler_snapshot", reconcile)
+        monkeypatch.setattr(repository, "scheduler_state", reconcile)
         runner = _BlockingRunner()
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
@@ -240,7 +240,7 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
         after_sequence = history.items[-1].sequence
 
         snapshot_calls = 0
-        original_snapshot = repository.snapshot_graph
+        original_snapshot = repository.graph_state
 
         async def counting_snapshot(
             graph_id: str,
@@ -251,7 +251,7 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
             snapshot_calls += 1
             return await original_snapshot(graph_id, tenant_id=tenant_id)
 
-        monkeypatch.setattr(repository, "snapshot_graph", counting_snapshot)
+        monkeypatch.setattr(repository, "graph_state", counting_snapshot)
         streams = [
             service.stream_events(
                 graph.graph_id,

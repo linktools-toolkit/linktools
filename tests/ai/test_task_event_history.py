@@ -130,15 +130,15 @@ async def test_task_admission_starts_contiguous_durable_event_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_snapshot_captures_event_high_water_with_state() -> None:
+async def test_task_graph_state_captures_event_high_water_with_state() -> None:
     state = RuntimeState.in_memory()
-    await state.initialize(namespace="task-event-snapshot-cutoff", tenant_id="tenant")
+    await state.initialize(namespace="task-event-graph_state-cutoff", tenant_id="tenant")
     try:
         repository = state.task.tasks
-        graph = TaskGraph("event-snapshot-cutoff", (TaskNode("node"),))
+        graph = TaskGraph("event-graph_state-cutoff", (TaskNode("node"),))
         await admit_graph(state, graph)
 
-        admitted = await repository.snapshot_graph(
+        admitted = await repository.graph_state(
             graph.graph_id,
             tenant_id="tenant",
         )
@@ -152,7 +152,7 @@ async def test_task_snapshot_captures_event_high_water_with_state() -> None:
             owner="worker",
             lease_seconds=30,
         )
-        running = await repository.snapshot_graph(
+        running = await repository.graph_state(
             graph.graph_id,
             tenant_id="tenant",
         )
@@ -190,7 +190,7 @@ async def test_task_expansion_commits_topology_and_events_atomically() -> None:
             owner="worker",
             lease_seconds=30,
         )
-        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_state(graph.graph_id, tenant_id="tenant")
         expanded = (
             TaskNode("child-b", dependencies=("child-a",)),
             TaskNode("disconnected"),
@@ -205,20 +205,20 @@ async def test_task_expansion_commits_topology_and_events_atomically() -> None:
             expanded_nodes=expanded,
         )
 
-        snapshot = await repository.snapshot_graph(
+        graph_state = await repository.graph_state(
             graph.graph_id,
             tenant_id="tenant",
         )
-        assert snapshot is not None
-        assert [node.node_id for node in snapshot.nodes] == [
+        assert graph_state is not None
+        assert [node.node_id for node in graph_state.nodes] == [
             "child-a",
             "child-b",
             "disconnected",
             "root",
         ]
-        assert snapshot.status is TaskStatus.PENDING
-        assert snapshot.node_states[0].status is TaskStatus.READY
-        assert snapshot.node_states[1].status is TaskStatus.PENDING
+        assert graph_state.status is TaskStatus.PENDING
+        assert graph_state.node_states[0].status is TaskStatus.READY
+        assert graph_state.node_states[1].status is TaskStatus.PENDING
 
         events = await repository.list_events(
             graph.graph_id,
@@ -247,7 +247,7 @@ async def test_task_expansion_commits_topology_and_events_atomically() -> None:
             node_id="root",
             expanded_nodes=(TaskNode("not-committed"),),
         )
-        replayed = await repository.snapshot_graph(
+        replayed = await repository.graph_state(
             graph.graph_id,
             tenant_id="tenant",
         )
@@ -350,12 +350,12 @@ async def test_concurrent_task_expansions_retry_graph_header_cas() -> None:
             ),
         )
 
-        snapshot = await repository.snapshot_graph(
+        graph_state = await repository.graph_state(
             graph.graph_id,
             tenant_id="tenant",
         )
-        assert snapshot is not None
-        assert {node.node_id for node in snapshot.nodes} == {
+        assert graph_state is not None
+        assert {node.node_id for node in graph_state.nodes} == {
             "child-a",
             "child-b",
             "source-a",
@@ -412,7 +412,7 @@ async def test_empty_graph_create_is_terminal_from_first_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_node_event_mutations_do_not_read_full_graph_snapshot(
+async def test_node_event_mutations_do_not_read_full_graph_graph_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeState.in_memory()
@@ -422,12 +422,12 @@ async def test_node_event_mutations_do_not_read_full_graph_snapshot(
         graph = TaskGraph("event-local-mutations", (TaskNode("node"),))
         await admit_graph(state, graph)
 
-        async def forbidden_snapshot(*args: object, **kwargs: object):
+        async def forbidden_graph_state(*args: object, **kwargs: object):
             del args, kwargs
             raise AssertionError("node event mutation must not scan the full graph")
 
         monkeypatch.setattr(
-            repository, "_snapshot_graph_in_transaction", forbidden_snapshot
+            repository, "_graph_state_in_transaction", forbidden_graph_state
         )
 
         lease = await repository.claim(
@@ -494,7 +494,7 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
         assert claimed.items[0].owner == "worker"
         assert claimed.items[0].fence == 1
 
-        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_state(graph.graph_id, tenant_id="tenant")
         running = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
@@ -667,7 +667,7 @@ async def test_terminal_event_stream_replays_from_durable_sequence(
             execution_id="execution-node",
             result_digest="b" * 64,
         )
-        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_state(graph.graph_id, tenant_id="tenant")
         durable = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
@@ -764,7 +764,7 @@ async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None
             error_code="TASK_NODE_FAILED",
             error_digest="c" * 64,
         )
-        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_state(graph.graph_id, tenant_id="tenant")
         before = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",

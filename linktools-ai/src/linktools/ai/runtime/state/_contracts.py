@@ -57,7 +57,7 @@ from ...task import (
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLaunch,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskLease,
     TaskNode,
@@ -2137,9 +2137,9 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def get_graph(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskGraphView | None: ...
-    async def snapshot_graph(
+    async def graph_state(
         self, graph_id: str, *, tenant_id: str
-    ) -> TaskGraphSnapshot | None: ...
+    ) -> TaskGraphState | None: ...
     async def get_results(
         self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str
     ) -> Mapping[str, TaskResultRecord]: ...
@@ -2149,9 +2149,9 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def latest_event(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskEvent | None: ...
-    async def scheduler_snapshot(
+    async def scheduler_state(
         self, graph_id: str, *, tenant_id: str
-    ) -> TaskGraphSnapshot: ...
+    ) -> TaskGraphState: ...
     async def recover_graph(
         self,
         graph_id: str,

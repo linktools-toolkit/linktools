@@ -43,7 +43,7 @@ from linktools.ai.task import (
     DefaultTaskGraphService,
     TaskEvent,
     TaskEventType,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskNode,
     TaskNodeView,
 )
@@ -256,12 +256,12 @@ class _RunningTasks:
         del graph_id, tenant_id
         return SimpleNamespace(status=TaskStatus.RUNNING)
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del tenant_id
         node = TaskNode("node")
         state = TaskNodeView(
@@ -276,7 +276,7 @@ class _RunningTasks:
             None,
             None,
         )
-        return TaskGraphSnapshot(
+        return TaskGraphState(
             graph_id,
             TaskStatus.PENDING,
             (node,),

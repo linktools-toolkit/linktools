@@ -60,7 +60,7 @@ class _ExecutionService:
 
 
 class _TaskGraphService:
-    async def snapshot(self, graph_id: str, *, principal: Principal):
+    async def state(self, graph_id: str, *, principal: Principal):
         del principal
 
         class State:
@@ -300,7 +300,7 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
         def __init__(self) -> None:
             self.stream_calls = 0
 
-        async def snapshot(self, graph_id: str, *, principal: Principal):
+        async def state(self, graph_id: str, *, principal: Principal):
             del principal
             assert graph_id == "graph"
             state = type(
@@ -357,7 +357,7 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
     now = datetime.now(timezone.utc)
 
     class GraphService:
-        async def snapshot(self, graph_id: str, *, principal: Principal):
+        async def state(self, graph_id: str, *, principal: Principal):
             del principal
             assert graph_id == "graph"
             return type(
@@ -442,7 +442,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
     now = datetime.now(timezone.utc)
 
     class ReplayGraphService:
-        async def snapshot(self, graph_id: str, *, principal: Principal):
+        async def state(self, graph_id: str, *, principal: Principal):
             del principal
             assert graph_id == "graph"
             return type(
@@ -606,7 +606,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
     now = datetime.now(timezone.utc)
 
     class GraphService:
-        async def snapshot(self, graph_id: str, *, principal: Principal):
+        async def state(self, graph_id: str, *, principal: Principal):
             del principal
             assert graph_id == "graph"
             return type(
@@ -763,7 +763,7 @@ class _WaitGraphService:
         self.wait_cancelled = asyncio.Event()
         self.stream_release = asyncio.Event()
 
-    async def snapshot(self, graph_id: str, *, principal: Principal):
+    async def state(self, graph_id: str, *, principal: Principal):
         del principal
         assert graph_id == "graph"
         return type("Snapshot", (), {"node_states": ()})()

@@ -49,7 +49,7 @@ async def test_failure_does_not_terminalize_graph_before_independent_expansion_s
             error_code=ErrorCode.TASK_NODE_FAILED.value,
             error_digest="a" * 64,
         )
-        active = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        active = await repository.graph_state(graph.graph_id, tenant_id="tenant")
         assert active is not None
         assert active.status is TaskStatus.RUNNING
 
@@ -60,7 +60,7 @@ async def test_failure_does_not_terminalize_graph_before_independent_expansion_s
             result_digest="b" * 64,
             expanded_nodes=(TaskNode("child"),),
         )
-        expanded = await repository.scheduler_snapshot(
+        expanded = await repository.scheduler_state(
             graph.graph_id,
             tenant_id="tenant",
         )
@@ -85,7 +85,7 @@ async def test_failure_does_not_terminalize_graph_before_independent_expansion_s
             execution_id="execution-child",
             result_digest="c" * 64,
         )
-        terminal = await repository.scheduler_snapshot(
+        terminal = await repository.scheduler_state(
             graph.graph_id,
             tenant_id="tenant",
         )
@@ -124,14 +124,14 @@ async def test_waiting_node_keeps_graph_running_without_task_lease() -> None:
             execution_id="execution",
         )
 
-        snapshot = await repository.scheduler_snapshot(
+        graph_state = await repository.scheduler_state(
             graph.graph_id,
             tenant_id="tenant",
         )
         assert waiting.status is TaskStatus.WAITING
         assert waiting.owner is None
         assert waiting.lease_expires_at is None
-        assert snapshot.status is TaskStatus.RUNNING
-        assert snapshot.node_states[0].status is TaskStatus.WAITING
+        assert graph_state.status is TaskStatus.RUNNING
+        assert graph_state.node_states[0].status is TaskStatus.WAITING
     finally:
         await state.close()

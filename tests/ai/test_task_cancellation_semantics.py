@@ -47,15 +47,15 @@ async def test_explicit_cancel_preserves_terminal_nodes_and_cancels_active_work(
             error_code=ErrorCode.TASK_NODE_FAILED.value,
             error_digest="a" * 64,
         )
-        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_state(graph.graph_id, tenant_id="tenant")
 
         cancelled = await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-        snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
-        assert snapshot is not None
-        states = {item.node_id: item.status for item in snapshot.node_states}
+        graph_state = await repository.graph_state(graph.graph_id, tenant_id="tenant")
+        assert graph_state is not None
+        states = {item.node_id: item.status for item in graph_state.node_states}
 
         assert cancelled.status is TaskStatus.CANCELLED
-        assert snapshot.status is TaskStatus.CANCELLED
+        assert graph_state.status is TaskStatus.CANCELLED
         assert states == {
             "failed": TaskStatus.FAILED,
             "blocked": TaskStatus.BLOCKED,

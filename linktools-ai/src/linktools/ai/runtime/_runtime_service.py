@@ -891,12 +891,12 @@ class Runtime(Generic[AppT]):
     ) -> JsonValue:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        snapshot = await self.graph.snapshot(
+        graph_state = await self.graph.state(
             graph_id,
             principal=resolved_principal,
         )
         state = next(
-            (value for value in snapshot.node_states if value.node_id == node_id),
+            (value for value in graph_state.node_states if value.node_id == node_id),
             None,
         )
         if state is None:

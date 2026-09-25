@@ -25,7 +25,7 @@ from ._graph import (
     TaskDependencyResult,
     TaskGraphHandle,
     TaskGraphLaunch,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskLease,
     TaskNode,
@@ -79,7 +79,7 @@ class _TaskDependencyPreparation(Protocol):
 
     async def release_graph_dependencies(
         self,
-        snapshot: TaskGraphSnapshot,
+        state: TaskGraphState,
         *,
         tenant_id: str,
     ) -> None: ...
@@ -98,13 +98,13 @@ class _RunnerBackgroundOwner(Protocol):
 
 
 class _TaskRepository(Protocol):
-    async def scheduler_snapshot(
+    async def scheduler_state(
         self, graph_id: str, *, tenant_id: str
-    ) -> "TaskGraphSnapshot": ...
+    ) -> "TaskGraphState": ...
 
-    async def snapshot_graph(
+    async def graph_state(
         self, graph_id: str, *, tenant_id: str
-    ) -> "TaskGraphSnapshot | None": ...
+    ) -> "TaskGraphState | None": ...
 
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView | None": ...
 
@@ -422,18 +422,18 @@ class LocalTaskGraphLauncher:
     ) -> TaskGraphView:
         tenant_id = launch.principal.tenant_id
         graph_id = launch.graph_id
-        snapshot = await self._repository.snapshot_graph(
+        graph_state = await self._repository.graph_state(
             graph_id,
             tenant_id=tenant_id,
         )
-        if snapshot is None:
+        if graph_state is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         state = next(
-            (item for item in snapshot.node_states if item.node_id == node_id),
+            (item for item in graph_state.node_states if item.node_id == node_id),
             None,
         )
         node = next(
-            (item for item in snapshot.nodes if item.node_id == node_id),
+            (item for item in graph_state.nodes if item.node_id == node_id),
             None,
         )
         if (
@@ -489,18 +489,18 @@ class LocalTaskGraphLauncher:
     ) -> TaskGraphView:
         tenant_id = launch.principal.tenant_id
         graph_id = launch.graph_id
-        snapshot = await self._repository.snapshot_graph(
+        graph_state = await self._repository.graph_state(
             graph_id,
             tenant_id=tenant_id,
         )
-        if snapshot is None:
+        if graph_state is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         state = next(
-            (value for value in snapshot.node_states if value.node_id == node_id),
+            (value for value in graph_state.node_states if value.node_id == node_id),
             None,
         )
         node = next(
-            (value for value in snapshot.nodes if value.node_id == node_id),
+            (value for value in graph_state.nodes if value.node_id == node_id),
             None,
         )
         allowed_status = (
@@ -611,14 +611,14 @@ class LocalTaskGraphLauncher:
     ) -> TaskGraphView:
         tenant_id = launch.principal.tenant_id
         graph_id = launch.graph_id
-        snapshot = await self._repository.snapshot_graph(
+        graph_state = await self._repository.graph_state(
             graph_id,
             tenant_id=tenant_id,
         )
-        if snapshot is None:
+        if graph_state is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         state = next(
-            (item for item in snapshot.node_states if item.node_id == node_id),
+            (item for item in graph_state.node_states if item.node_id == node_id),
             None,
         )
         if state is None or state.execution_id != execution_id:
@@ -631,7 +631,7 @@ class LocalTaskGraphLauncher:
         if run is not None and node_id in run.inflight:
             await self._quiesce_node(
                 run,
-                snapshot,
+                graph_state,
                 node_id,
                 invoke_cancel=state.status is TaskStatus.CANCELLED,
             )
@@ -647,7 +647,7 @@ class LocalTaskGraphLauncher:
     async def _quiesce_node(
         self,
         run: _GraphRun,
-        snapshot: TaskGraphSnapshot,
+        graph_state: TaskGraphState,
         node_id: str,
         *,
         invoke_cancel: bool,
@@ -656,11 +656,11 @@ class LocalTaskGraphLauncher:
         if inflight is None:
             return
         node = next(
-            (item for item in snapshot.nodes if item.node_id == node_id),
+            (item for item in graph_state.nodes if item.node_id == node_id),
             None,
         )
         state = next(
-            (item for item in snapshot.node_states if item.node_id == node_id),
+            (item for item in graph_state.node_states if item.node_id == node_id),
             None,
         )
         if node is None or state is None:
@@ -669,14 +669,14 @@ class LocalTaskGraphLauncher:
         if invoke_cancel and state.execution_id is not None:
             try:
                 dependency_results, dependency_states = await self._dependency_context(
-                    snapshot.graph_id,
+                    graph_state.graph_id,
                     node,
                     tenant_id=run.request.principal.tenant_id,
                 )
                 await self._runner.cancel(
                     TaskNodeInvocation(
                         node,
-                        snapshot.graph_id,
+                        graph_state.graph_id,
                         run.request.principal,
                         run.request.correlation,
                         dependency_results,
@@ -698,7 +698,7 @@ class LocalTaskGraphLauncher:
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
                 safe_details={
                     "phase": "task_node_cancel_cleanup",
-                    "graph_id": snapshot.graph_id,
+                    "graph_id": graph_state.graph_id,
                     "node_id": node_id,
                 },
             ) from cancellation_error
@@ -706,9 +706,12 @@ class LocalTaskGraphLauncher:
     async def _quiesce_persisted_nodes(
         self,
         run: _GraphRun,
-        snapshot: TaskGraphSnapshot,
+        graph_state: TaskGraphState,
     ) -> None:
-        states = {state.node_id: state for state in snapshot.node_states}
+        states = {
+            node_state.node_id: node_state
+            for node_state in graph_state.node_states
+        }
         for node_id in tuple(run.inflight):
             state = states.get(node_id)
             if state is None:
@@ -723,7 +726,7 @@ class LocalTaskGraphLauncher:
                 continue
             await self._quiesce_node(
                 run,
-                snapshot,
+                graph_state,
                 node_id,
                 invoke_cancel=state.status is TaskStatus.CANCELLED,
             )
@@ -743,16 +746,16 @@ class LocalTaskGraphLauncher:
         )
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        snapshot = await self._repository.snapshot_graph(
+        state = await self._repository.graph_state(
             graph_id,
             tenant_id=tenant_id,
         )
-        if snapshot is None:
+        if state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         cleanup_error: BaseException | None = None
         if run is not None:
             try:
-                await self._quiesce_persisted_nodes(run, snapshot)
+                await self._quiesce_persisted_nodes(run, state)
             except asyncio.CancelledError:
                 raise
             except BaseException as error:  # noqa: BLE001
@@ -881,7 +884,7 @@ class LocalTaskGraphLauncher:
         try:
             while not run.closed:
                 try:
-                    snapshot = await self._repository.scheduler_snapshot(
+                    state = await self._repository.scheduler_state(
                         request.graph_id,
                         tenant_id=tenant_id,
                     )
@@ -891,24 +894,24 @@ class LocalTaskGraphLauncher:
                     await asyncio.sleep(0)
                     continue
                 view = TaskGraphView(
-                    snapshot.graph_id,
-                    snapshot.status,
-                    snapshot.nodes,
+                    state.graph_id,
+                    state.status,
+                    state.nodes,
                 )
-                states = snapshot.node_states
+                states = state.node_states
                 now = datetime.now(timezone.utc)
                 fingerprint = _scheduler_observation_fingerprint(view, states, now)
                 if fingerprint != observed_fingerprint:
                     observed_fingerprint = fingerprint
                     run.observation_backoff = 1.0
                     await self._notify(run)
-                await self._quiesce_persisted_nodes(run, snapshot)
+                await self._quiesce_persisted_nodes(run, state)
                 if view.status is TaskStatus.RECOVERY_REQUIRED:
                     return
                 if view.status in _TERMINAL:
                     if isinstance(self._runner, _TaskDependencyPreparation):
                         await self._runner.release_graph_dependencies(
-                            snapshot,
+                            state,
                             tenant_id=tenant_id,
                         )
                     if self._metric_projector is not None:
@@ -930,7 +933,7 @@ class LocalTaskGraphLauncher:
                     for state in states
                     if state.status is TaskStatus.WAITING
                 }
-                static = {node.node_id: node for node in snapshot.nodes}
+                static = {node.node_id: node for node in state.nodes}
                 for state in states:
                     if state.status is not TaskStatus.WAITING:
                         continue

@@ -135,7 +135,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         source.unlink()
         repeated = await runtime.start_graph(graph, idempotency_key="attachment-1")
         assert repeated.graph_id == run.graph_id
-        snapshot = await state.task.tasks.scheduler_snapshot(
+        snapshot = await state.task.tasks.scheduler_state(
             run.graph_id,
             tenant_id=runtime.tenant_id,
         )
@@ -522,7 +522,7 @@ async def test_task_result_commit_preserves_early_execution_binding() -> None:
         )
 
         assert terminal.execution_id == "execution"
-        snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        snapshot = await repository.graph_state(graph.graph_id, tenant_id="tenant")
         assert snapshot is not None
         assert snapshot.status is TaskStatus.SUCCEEDED
         assert snapshot.node_states[0].execution_id == "execution"
@@ -664,7 +664,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
             "empty-root",
             "grandchild",
         }
-        snapshot = await runtime.graph.snapshot(
+        snapshot = await runtime.graph.state(
             graph.graph_id,
             principal=runtime.default_principal,
         )
@@ -754,7 +754,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
         initial = await run.wait(timeout_seconds=10)
         assert initial.status is TaskStatus.RECOVERY_REQUIRED
 
-        snapshot = await runtime.graph.snapshot(
+        snapshot = await runtime.graph.state(
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -822,7 +822,7 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
         )
         initial = await run.wait(timeout_seconds=10)
         assert initial.status is TaskStatus.RECOVERY_REQUIRED
-        snapshot = await runtime.graph.snapshot(
+        snapshot = await runtime.graph.state(
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -891,7 +891,7 @@ async def test_not_applied_retries_same_execution_once(
         )
         initial = await run.wait(timeout_seconds=10)
         assert initial.status is TaskStatus.RECOVERY_REQUIRED
-        before = await runtime.graph.snapshot(
+        before = await runtime.graph.state(
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -909,7 +909,7 @@ async def test_not_applied_retries_same_execution_once(
 
         assert final.status is TaskStatus.SUCCEEDED
         assert calls == 2
-        after = await runtime.graph.snapshot(
+        after = await runtime.graph.state(
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -1054,7 +1054,7 @@ async def test_local_activity_generation_does_not_lose_pre_wait_handoff_signal()
             ),
             0.2,
         )
-        snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        snapshot = await repository.graph_state(graph.graph_id, tenant_id="tenant")
         assert snapshot is not None
         assert snapshot.node_states[0].status is TaskStatus.WAITING
         assert snapshot.node_states[0].execution_id == "execution"
@@ -1139,7 +1139,7 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
             hold_id: str,
         ) -> None:
             del tenant_id
-            snapshot = await state.task.tasks.snapshot_graph(
+            snapshot = await state.task.tasks.graph_state(
                 graph.graph_id,
                 tenant_id="tenant",
             )
@@ -1160,7 +1160,7 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
 
         async def wait_terminal() -> None:
             while True:
-                snapshot = await state.task.tasks.snapshot_graph(
+                snapshot = await state.task.tasks.graph_state(
                     graph.graph_id,
                     tenant_id="tenant",
                 )
@@ -1225,7 +1225,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
             idempotency_key="shutdown-graph-run-0001",
         )
         await asyncio.wait_for(entered.wait(), 10)
-        snapshot = await runtime.graph.snapshot(
+        snapshot = await runtime.graph.state(
             graph.graph_id,
             principal=runtime.default_principal,
         )
@@ -1235,7 +1235,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
     probe = RuntimeState.filesystem(state_root)
     await probe.initialize(namespace="default", tenant_id="default")
     try:
-        snapshot = await probe.task.tasks.snapshot_graph(
+        snapshot = await probe.task.tasks.graph_state(
             graph.graph_id,
             tenant_id="default",
         )

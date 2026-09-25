@@ -38,7 +38,7 @@ from linktools.ai.storage import StoredPayload
 from linktools.ai.task import (
     TaskBindingContract,
     TaskGraph,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskNode,
     TaskNodeView,
     TaskResultRecord,
@@ -594,7 +594,7 @@ class _TaskResults:
             None,
             "execution",
         )
-        self.snapshot = TaskGraphSnapshot(
+        self.graph_state = TaskGraphState(
             "graph",
             TaskStatus.SUCCEEDED,
             TaskGraph("graph", (node,)).nodes,
@@ -617,14 +617,14 @@ class _TaskResults:
             return ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
         return None
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot | None:
+    ) -> TaskGraphState | None:
         if graph_id == "graph" and tenant_id == "tenant":
-            return self.snapshot
+            return self.graph_state
         return None
 
     async def get_results(

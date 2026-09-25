@@ -460,13 +460,13 @@ class RuntimeHistory:
             AuthorizationAction.TASK_READ,
             header,
         )
-        snapshot = await tasks.snapshot_graph(
+        state = await tasks.graph_state(
             graph_id,
             tenant_id=principal.tenant_id,
         )
-        if snapshot is None:
+        if state is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        return TaskGraphInfo.from_snapshot(snapshot)
+        return TaskGraphInfo.from_state(state)
 
     async def task_events(
         self,

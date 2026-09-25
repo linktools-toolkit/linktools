@@ -34,7 +34,7 @@ from linktools.ai.task import (
     TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphRequest,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskLease,
     TaskNode,
@@ -353,7 +353,7 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
     )
     await reopened.initialize(namespace="task-cas-recovery", tenant_id="tenant")
     try:
-        view = await reopened.task.tasks.scheduler_snapshot(
+        view = await reopened.task.tasks.scheduler_state(
             request.graph.graph_id,
             tenant_id="tenant",
         )
@@ -389,14 +389,14 @@ class _ReadOnlyTaskRepository:
         del graph_id, tenant_id
         return self.view
 
-    async def snapshot_graph(
+    async def graph_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         del graph_id, tenant_id
-        return TaskGraphSnapshot(
+        return TaskGraphState(
             self.view.graph_id,
             self.view.status,
             self.view.nodes,
@@ -419,7 +419,7 @@ class _ReadOnlyTaskRepository:
             self.view.status,
         )
 
-    async def scheduler_snapshot(
+    async def scheduler_state(
         self,
         graph_id: str,
         *,
@@ -515,7 +515,7 @@ async def test_task_node_dependency_projection_fails_closed() -> None:
     await repository.state_store.mutate(corrupt)
     try:
         with pytest.raises(AIError) as reconcile_error:
-            await repository.scheduler_snapshot(
+            await repository.scheduler_state(
                 request.graph.graph_id,
                 tenant_id="tenant",
             )
@@ -890,7 +890,7 @@ async def test_task_reconcile_conflict_uses_readback_without_retry(
         mutate_with_event_retry,
     )
     try:
-        view = await repository.scheduler_snapshot(
+        view = await repository.scheduler_state(
             request.graph.graph_id,
             tenant_id="tenant",
         )
@@ -906,7 +906,7 @@ async def test_task_reconcile_conflict_uses_readback_without_retry(
         assert nodes["a"].status is TaskStatus.SUCCEEDED
         assert nodes["b"].status is TaskStatus.PENDING
 
-        view = await repository.scheduler_snapshot(
+        view = await repository.scheduler_state(
             request.graph.graph_id,
             tenant_id="tenant",
         )

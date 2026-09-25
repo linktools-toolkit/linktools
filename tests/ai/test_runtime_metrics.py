@@ -25,7 +25,7 @@ from linktools.ai.task import (
     TaskGraph,
     TaskGraphLaunch,
     TaskGraphLimits,
-    TaskGraphSnapshot,
+    TaskGraphState,
     TaskGraphView,
     TaskLease,
     TaskNode,
@@ -368,14 +368,14 @@ class _CommitUnknownTaskRepository:
         )
         return TaskGraphView("graph", graph_status, (self.node,))
 
-    async def scheduler_snapshot(
+    async def scheduler_state(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphSnapshot:
+    ) -> TaskGraphState:
         view = await self.reconcile_graph(graph_id, tenant_id=tenant_id)
-        return TaskGraphSnapshot(
+        return TaskGraphState(
             view.graph_id,
             view.status,
             view.nodes,

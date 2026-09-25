@@ -100,7 +100,7 @@ async def test_prepare_node_authorizes_source_header_and_deduplicates_hold() -> 
                 )
             }
 
-        async def snapshot_graph(self, graph_id: str, *, tenant_id: str):
+        async def graph_state(self, graph_id: str, *, tenant_id: str):
             assert (graph_id, tenant_id) == ("source-graph", "tenant")
             return SimpleNamespace(
                 node_states=(
