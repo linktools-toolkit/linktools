@@ -14,6 +14,7 @@ from ..errors import AIError, ErrorCode
 
 _CHUNK_SIZE = 1024 * 1024
 _TaskT = TypeVar("_TaskT")
+_STORE_ID_MAX_LENGTH = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +189,7 @@ def _validate_store_id(value: str) -> None:
     if (
         not isinstance(value, str)
         or not value
-        or len(value) > 128
+        or len(value) > _STORE_ID_MAX_LENGTH
         or any(
             character
             not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"

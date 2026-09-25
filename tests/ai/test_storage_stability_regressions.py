@@ -20,6 +20,8 @@ from linktools.ai.runtime import RuntimeStorage
 from linktools.ai.storage import (
     FilesystemObjectStore,
     MySQLDialect,
+    SqlObjectStore,
+    build_object_sql_metadata,
     read_object,
     validate_sql,
 )
@@ -31,6 +33,35 @@ from sqlalchemy.engine import URL
 
 async def _chunks(value: bytes) -> AsyncIterator[bytes]:
     yield value
+
+
+def test_object_store_id_limit_matches_sql_schema() -> None:
+    metadata = build_object_sql_metadata()
+    store_id_type = metadata.tables["ai_objects"].c.store_id.type
+    assert store_id_type.length == 128
+
+
+@pytest.mark.asyncio
+async def test_sql_object_store_accepts_maximum_store_id(tmp_path: Path) -> None:
+    engine = create_async_engine(
+        URL.create("sqlite+aiosqlite", database=str(tmp_path / "objects.db"))
+    )
+    await provision_database(engine)
+    store_id = "s" * 128
+    store = SqlObjectStore(engine, store_id=store_id)
+    payload = b"object-store-id"
+    digest = hashlib.sha256(payload).hexdigest()
+    try:
+        result = await store.put(
+            "payload",
+            _chunks(payload),
+            expected_size=len(payload),
+            expected_digest=digest,
+        )
+        assert result.digest == digest
+        assert await store.stat("payload") == result
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

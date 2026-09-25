@@ -26,6 +26,7 @@ from ._dialects import (
 from ._object import (
     ObjectStat,
     _CHUNK_SIZE,
+    _STORE_ID_MAX_LENGTH,
     _finish_owned_task,
     _key_digest,
     _spool_file,
@@ -451,7 +452,7 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
         ),
         Column(
             "store_id",
-            sql_text_key(64),
+            sql_text_key(_STORE_ID_MAX_LENGTH),
             nullable=False,
             comment="Logical ObjectStore identifier that namespaces object keys.",
         ),
