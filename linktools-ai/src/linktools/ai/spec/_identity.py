@@ -3,8 +3,6 @@
 """Stable references for named behavior and digest inputs for Agent bindings."""
 
 from collections.abc import Mapping
-from typing import cast
-
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._schema import canonicalize_json_schema
@@ -90,7 +88,7 @@ def binding_digest_payload(
             capability_ref_payload(
                 kind,
                 identity,
-                cast(Mapping[str, JsonValue], contract),
+                contract,
             )
         )
 
@@ -122,9 +120,7 @@ def binding_digest_payload(
         "subagents": subagent_refs,
         "output": {
             "mode": output_mode,
-            "schema": canonicalize_json_schema(
-                cast(Mapping[str, JsonValue], output_schema)
-            ),
+            "schema": canonicalize_json_schema(output_schema),
         },
     }
     children = payload.get("subagent_bindings")
@@ -143,12 +139,7 @@ def binding_digest_payload(
                     ),
                 }
             )
-        child_refs.sort(
-            key=lambda value: cast(
-                str,
-                cast(Mapping[str, JsonValue], value["agent"])["id"],
-            )
-        )
+        child_refs.sort(key=lambda value: value["agent"]["id"])
         result["subagent_bindings"] = child_refs
     return result
 
@@ -188,7 +179,7 @@ def _text(value: object) -> str:
 def _mapping(value: object) -> "dict[str, JsonValue]":
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return dict(cast(Mapping[str, JsonValue], value))
+    return dict(value)
 
 
 __all__ = [
