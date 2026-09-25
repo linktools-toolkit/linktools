@@ -26,6 +26,14 @@ from ._contract import (
     parse_mcp_tool_selector,
 )
 from ..core import validate_logical_id
+from ._instructions import (
+    AssetRuleInstructionResolver,
+    DEFAULT_REPOSITORY_INSTRUCTION_BYTES,
+    DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS,
+    RepositoryInstructionDocument,
+    RepositoryInstructionResolver,
+    RepositoryInstructions,
+)
 from ._identity import (
     agent_ref_payload,
     binding_digest_payload,
@@ -38,6 +46,9 @@ __all__ = [
     "AgentSpecCodec",
     "AgentMarkdownSpecCodec",
     "AgentUsageLimits",
+    "AssetRuleInstructionResolver",
+    "DEFAULT_REPOSITORY_INSTRUCTION_BYTES",
+    "DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS",
     "agent_ref_payload",
     "binding_digest_payload",
     "canonicalize_json_schema",
@@ -46,6 +57,9 @@ __all__ = [
     "capability_ref_payload",
     "MCPServerSpec",
     "MCPServerSpecCodec",
+    "RepositoryInstructionDocument",
+    "RepositoryInstructionResolver",
+    "RepositoryInstructions",
     "SkillMarkdownSpecAdapter",
     "SkillMarkdownSpecCodec",
     "SkillSpec",
