@@ -407,6 +407,8 @@ def _encode_v1_task_node_fields(
         ),
         "expander": _encode_domain(value.expander, codec, persisted=persisted),
     }
+    if value.output_type is not None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if value.input_refs:
         fields["input_refs"] = [
             [
@@ -571,7 +573,6 @@ def _decode_v1_terminal_task_node(
         timeout_seconds=node.timeout_seconds,
         max_attempts=node.max_attempts,
         retry_delay_seconds=node.retry_delay_seconds,
-        output_schema=node.output_schema,
         output_contract=node.output_contract,
         effect=node.effect,
         dependency_policy="all_terminal",
@@ -2426,7 +2427,6 @@ def _validate_v1_codec_definition() -> None:
         "timeout_seconds",
         "max_attempts",
         "retry_delay_seconds",
-        "output_schema",
         "output_contract",
         "effect",
         "dependency_policy",

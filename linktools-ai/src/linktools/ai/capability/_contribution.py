@@ -306,7 +306,7 @@ def _contribution_contract(
             "id": task_id,
             "revision": task_revision,
             "effect": _task_effect(value),
-            "output": _task_output_contract(value),
+            "output_contract": _task_output_contract(value),
             "reconcile": getattr(value, "reconcile", None) is not None,
         }
     if kind == "task_expander" and isinstance(value, TaskExpander):
@@ -346,15 +346,15 @@ def _task_effect(handler: object) -> str:
 
 
 def _task_output_contract(handler: object) -> JsonValue:
-    output = getattr(handler, "output", None)
-    if output is None:
+    output_type = getattr(handler, "output_type", None)
+    if output_type is None:
         return {"kind": "json"}
-    model_schema = getattr(output, "model_json_schema", None)
+    model_schema = getattr(output_type, "model_json_schema", None)
     if not callable(model_schema):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     schema = (
-        canonicalize_pydantic_model_schema(output)
-        if isinstance(output, type) and issubclass(output, BaseModel)
+        canonicalize_pydantic_model_schema(output_type)
+        if isinstance(output_type, type) and issubclass(output_type, BaseModel)
         else canonicalize_json_schema(model_schema())
     )
     return {"kind": "schema", "schema": schema}

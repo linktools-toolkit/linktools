@@ -441,7 +441,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             timeout_seconds=node.timeout_seconds,
             max_attempts=node.max_attempts,
             retry_delay_seconds=node.retry_delay_seconds,
-            output_schema=node.output_schema,
             output_contract=node.output_contract,
             effect=node.effect,
             dependency_policy=node.dependency_policy,
@@ -524,7 +523,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             timeout_seconds=node.timeout_seconds,
             max_attempts=node.max_attempts,
             retry_delay_seconds=node.retry_delay_seconds,
-            output_schema=node.output_schema,
             output_contract=node.output_contract,
             effect=node.effect,
             dependency_policy=node.dependency_policy,
@@ -782,8 +780,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             timeout_seconds=node.timeout_seconds,
             max_attempts=node.max_attempts,
             retry_delay_seconds=node.retry_delay_seconds,
-            output_schema=node.output_schema,
-            output_contract=_output_contract(handler, node.output_schema),
+            output_contract=_output_contract(handler, node.output_type),
             effect=_handler_effect(handler),
             dependency_policy=node.dependency_policy,
         )
@@ -908,7 +905,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 timeout_seconds=node.timeout_seconds,
                 max_attempts=node.max_attempts,
                 retry_delay_seconds=node.retry_delay_seconds,
-                output_schema=node.output_schema,
                 output_contract=node.output_contract,
                 effect=node.effect,
                 dependency_policy=node.dependency_policy,
@@ -1573,7 +1569,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
-            output_schema=output,
+            output_type=output,
             dependency_policy=dependency_policy,
         )
 
@@ -1646,7 +1642,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
-            output_schema=output,
+            output_type=output,
             dependency_policy=dependency_policy,
         )
 
@@ -2307,11 +2303,6 @@ def _task_binding(
 def _validate_task_output(node: TaskNode, output: JsonValue) -> None:
     if node.output_contract is not None:
         _restore_output_contract(node.output_contract).validate_payload(output)
-    elif isinstance(node.output_schema, type) and issubclass(
-        node.output_schema,
-        BaseModel,
-    ):
-        bind_output(node.output_schema).validate_payload(output)
 
 
 def _handler_effect(handler: object) -> str:
@@ -2321,9 +2312,10 @@ def _handler_effect(handler: object) -> str:
 
 def _output_contract(
     handler: object,
-    output_schema: object | None,
+    output_type: object | None,
 ) -> dict[str, JsonValue] | None:
-    output = getattr(handler, "output", None) or output_schema
+    handler_output_type = getattr(handler, "output_type", None)
+    output = output_type if handler_output_type is None else handler_output_type
     if output is None:
         return None
     binding = bind_output(cast("type[BaseModel]", output))

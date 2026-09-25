@@ -51,7 +51,7 @@ _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 class _RegisteredTaskHandler(Generic[AppT]):
     handler: TaskNodeHandler[AppT]
     effect: Literal["none", "replay_safe", "non_replay_safe"]
-    output: object | None
+    output_type: object | None
     reconcile: (
         Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None
     ) = field(default=None, repr=False, compare=False)
@@ -214,7 +214,7 @@ class CapabilityGroup(Generic[AppT]):
         handler: "TaskNodeHandler[AppT]",
         *,
         effect: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
-        output: object | None = None,
+        output_type: object | None = None,
         reconcile: (
             "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
         ) = None,
@@ -227,7 +227,7 @@ class CapabilityGroup(Generic[AppT]):
         registered = _RegisteredTaskHandler(
             handler,
             effect,
-            output,
+            output_type,
             reconcile,
         )
         contribution = cast(

@@ -145,7 +145,7 @@ class TaskNode:
     timeout_seconds: "float | None"
     max_attempts: int
     retry_delay_seconds: float
-    output_schema: object | None
+    output_type: object | None
     output_contract: "Mapping[str, JsonValue] | None"
     effect: str
     dependency_policy: str
@@ -163,7 +163,7 @@ class TaskNode:
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
         retry_delay_seconds: float = 0,
-        output_schema: object | None = None,
+        output_type: object | None = None,
         output_contract: "Mapping[str, JsonValue] | None" = None,
         effect: str = "none",
         dependency_policy: str = "all_succeeded",
@@ -219,6 +219,8 @@ class TaskNode:
             if not isinstance(normalized_contract, dict):
                 raise ValueError("task node output contract is invalid")
             contract = ImmutableJsonMapping(normalized_contract)
+        if output_type is not None and contract is not None:
+            raise ValueError("task node cannot contain both output type and contract")
         object.__setattr__(self, "node_id", node_id)
         object.__setattr__(self, "dependencies", normalized_dependencies)
         object.__setattr__(self, "budget_cost", budget_cost)
@@ -227,7 +229,7 @@ class TaskNode:
         object.__setattr__(self, "timeout_seconds", normalized_timeout)
         object.__setattr__(self, "max_attempts", max_attempts)
         object.__setattr__(self, "retry_delay_seconds", normalized_retry_delay)
-        object.__setattr__(self, "output_schema", output_schema)
+        object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "output_contract", contract)
         object.__setattr__(self, "effect", effect)
         object.__setattr__(self, "dependency_policy", dependency_policy)
@@ -244,7 +246,7 @@ class TaskNode:
         *,
         dependencies: "tuple[str, ...]" = (),
         input: "Mapping[str, JsonValue] | None" = None,
-        output_schema: object | None = None,
+        output_type: object | None = None,
     ) -> "TaskNode":
         """Declare a node whose value is supplied through the Runtime API."""
         values = {} if input is None else dict(input)
@@ -259,7 +261,7 @@ class TaskNode:
             node_id,
             dependencies,
             input=values,
-            output_schema=output_schema,
+            output_type=output_type,
         )
 
 
@@ -693,7 +695,6 @@ class TaskNodeInfo:
     timeout_seconds: "float | None"
     max_attempts: int
     retry_delay_seconds: float
-    output_schema: object | None
     output_contract: "Mapping[str, JsonValue] | None"
     effect: str
     dependency_policy: str = "all_succeeded"
@@ -709,7 +710,6 @@ class TaskNodeInfo:
             node.timeout_seconds,
             node.max_attempts,
             node.retry_delay_seconds,
-            node.output_schema,
             node.output_contract,
             node.effect,
             node.dependency_policy,
