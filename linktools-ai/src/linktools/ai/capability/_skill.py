@@ -298,7 +298,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         if source_ref is None:
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
         source = self._sources.resolve(source_ref.source_id)
-        data = await source.read(source_ref.root, relative)
+        data = await source.read(source_ref, relative)
         try:
             content = data.decode("utf-8")
         except UnicodeDecodeError as error:
@@ -323,14 +323,14 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         if source_ref is None:
             return result
         source = self._sources.resolve(source_ref.source_id)
-        view = await source.inspect(source_ref.root)
+        view = await source.inspect(source_ref)
         _validate_view(view)
         if definition.id in self._resource_paths:
             native_path = self._resource_paths[definition.id]
             location = (
                 SkillLocation(
                     "virtual",
-                    f"{source_ref.source_id}/skills/{source_ref.root}",
+                    f"{source_ref.source_id}/resources/{source_ref.root}",
                 )
                 if native_path is None
                 else SkillLocation("local", native_path)
