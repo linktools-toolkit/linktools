@@ -35,7 +35,7 @@ from ._skill import SkillDefinition
 from ._skill_source import SkillResourceVersion, SkillSourceRef
 
 if TYPE_CHECKING:
-    from ._group import CapabilityLoadContext, CapabilityLoadEntry
+    from ._loading import CapabilityLoadContext, CapabilityLoadEntry
 
 _DECLARATION_SUFFIXES = {
     "agent": ("/AGENT.md",),
@@ -223,7 +223,7 @@ async def _load_skills(
 async def _load_mcp(
     context: CapabilityLoadContext,
 ) -> "Sequence[object]":
-    from ._group import CapabilityContribution
+    from ._contribution import CapabilityContribution
 
     entries = context.list(kind="mcp")
     roots, declarations = _package_declarations(
