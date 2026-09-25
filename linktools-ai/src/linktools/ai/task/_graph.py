@@ -122,15 +122,15 @@ class TaskResultRef:
 @dataclass(frozen=True, slots=True)
 class TaskExpanderRef:
     id: str
-    version: int
+    revision: int
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.id, str)
             or _TASK_EXPANDER_ID.fullmatch(self.id) is None
-            or not isinstance(self.version, int)
-            or isinstance(self.version, bool)
-            or self.version < 1
+            or not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
         ):
             raise ValueError("task expander reference is invalid")
 
@@ -517,7 +517,7 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
             if node.expander is None
             else {
                 "id": node.expander.id,
-                "version": node.expander.version,
+                "revision": node.expander.revision,
             }
         ),
     }
@@ -572,9 +572,9 @@ class TaskGraphAdmission:
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.version, int)
-            or isinstance(self.version, bool)
-            or self.version < 1
+            not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 1
             or not isinstance(self.graph_id, str)
             or not self.graph_id.strip()
             or re.fullmatch(r"[0-9a-f]{64}", self.operation_id) is None
@@ -598,7 +598,7 @@ class TaskGraphAdmission:
         )
 
     def launch(self) -> TaskGraphLaunch:
-        if self.version != 1:
+        if self.revision != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         return TaskGraphLaunch(
             self.graph_id,
