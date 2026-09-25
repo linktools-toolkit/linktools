@@ -3,7 +3,7 @@
 """Capability contribution contracts and deterministic serialization."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Generic, Literal, TypeAlias, TypeVar
 
@@ -22,7 +22,12 @@ from ..spec import (
     canonicalize_pydantic_model_schema,
     capability_ref_payload,
 )
-from ..task import TaskExpanderRef, TaskNodeHandler
+from ..task import (
+    TaskEffectResolution,
+    TaskExpanderRef,
+    TaskNodeContext,
+    TaskNodeHandler,
+)
 from ._context import AgentContext
 from ._skill import SkillDefinition
 from ._task import TaskExpander
@@ -51,6 +56,36 @@ ContributionValue: TypeAlias = (
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESERVED_TASK_ID_PREFIX = "linktools.ai."
 _RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskHandlerAdapter(Generic[AppT]):
+    handler: TaskNodeHandler[AppT]
+    effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
+    output_type: object | None
+    reconcile: (
+        Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None
+    ) = field(default=None, repr=False, compare=False)
+
+    @property
+    def id(self) -> str:
+        return self.handler.id
+
+    @property
+    def revision(self) -> int:
+        return self.handler.revision
+
+    def normalize(
+        self,
+        input: Mapping[str, JsonValue],
+    ) -> Mapping[str, JsonValue]:
+        return self.handler.normalize(input)
+
+    async def run(self, context: TaskNodeContext[AppT]) -> JsonValue:
+        return await self.handler.run(context)
+
+    async def cancel(self, context: TaskNodeContext[AppT]) -> None:
+        await self.handler.cancel(context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,13 +217,29 @@ class CapabilityContribution(Generic[AppT]):
     def from_task(
         cls,
         value: "TaskNodeHandler[AppT]",
+        *,
+        effect_policy: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
+        output_type: object | None = None,
+        reconcile: (
+            "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
+        ) = None,
     ) -> "CapabilityContribution[AppT]":
-        identity, _revision = _task_identity(value)
+        if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if reconcile is not None and not callable(reconcile):
+            raise TypeError("reconcile must be callable")
+        adapted = _TaskHandlerAdapter(
+            value,
+            effect_policy,
+            output_type,
+            reconcile,
+        )
+        identity, _revision = _task_identity(adapted)
         return _ContractContribution(
             "task",
             identity,
-            value,
-            _contribution_contract("task", identity, value),
+            adapted,
+            _contribution_contract("task", identity, adapted),
         )
 
     @classmethod
@@ -339,7 +390,7 @@ def _task_identity(handler: object) -> tuple[str, int]:
 
 
 def _task_effect_policy(handler: object) -> str:
-    effect_policy = getattr(handler, "effect_policy", "none")
+    effect_policy = getattr(handler, "effect_policy", None)
     if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return effect_policy
