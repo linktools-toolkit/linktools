@@ -310,6 +310,11 @@ async def materialize_mcp_capabilities(
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
     values: list[AbstractCapability[AgentContext[object]]] = []
     current_policy = _mcp_execution_policy(sandbox)
+    if sandbox is not None and not isinstance(
+        sandbox_session,
+        StdioSandboxSession,
+    ):
+        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
     if policy and sandbox is None and host_cwd is None:
         raise AIError(
             ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
@@ -340,8 +345,6 @@ async def materialize_mcp_capabilities(
                     cwd=host_cwd,
                 )
             else:
-                if not isinstance(sandbox_session, StdioSandboxSession):
-                    raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
                 transport = _SandboxMCPTransport(
                     sandbox_session,
                     server.command,
