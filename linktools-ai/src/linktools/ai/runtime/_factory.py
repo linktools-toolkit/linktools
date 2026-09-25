@@ -399,7 +399,14 @@ def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
 def _validate_candidate_uniqueness(
     candidates: Sequence[CapabilityContribution[object]],
 ) -> None:
-    identities = tuple((candidate.kind, candidate.id) for candidate in candidates)
+    identities = tuple(
+        (
+            (candidate.kind, candidate.id, candidate.revision)
+            if candidate.kind in {"task", "task_expander"}
+            else (candidate.kind, candidate.id)
+        )
+        for candidate in candidates
+    )
     if len(identities) != len(set(identities)):
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
