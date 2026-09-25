@@ -21,7 +21,7 @@ from ._skill_source import (
     SkillResourceView,
     SkillSourceRef,
     SkillSourceRegistry,
-    normalize_skill_resource_path,
+    require_skill_resource_path,
 )
 from ._tool_signal import ToolCallFailed, ToolCallRetry
 from ._tool_semantic import tool_semantic_metadata
@@ -291,7 +291,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             )
         if path is None:
             return await self._load_root(definition)
-        relative = normalize_skill_resource_path(path)
+        relative = require_skill_resource_path(path)
         if relative == "SKILL.md":
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         source_ref = definition.source_ref
