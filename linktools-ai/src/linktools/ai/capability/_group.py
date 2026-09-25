@@ -49,36 +49,6 @@ _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 
 
 @dataclass(frozen=True, slots=True)
-class _RegisteredTaskHandler(Generic[AppT]):
-    handler: TaskNodeHandler[AppT]
-    effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
-    output_type: object | None
-    reconcile: (
-        Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None
-    ) = field(default=None, repr=False, compare=False)
-
-    @property
-    def id(self) -> str:
-        return self.handler.id
-
-    @property
-    def revision(self) -> int:
-        return self.handler.revision
-
-    def normalize(
-        self,
-        input: Mapping[str, JsonValue],
-    ) -> Mapping[str, JsonValue]:
-        return self.handler.normalize(input)
-
-    async def run(self, context: TaskNodeContext[AppT]) -> JsonValue:
-        return await self.handler.run(context)
-
-    async def cancel(self, context: TaskNodeContext[AppT]) -> None:
-        await self.handler.cancel(context)
-
-
-@dataclass(frozen=True, slots=True)
 class CapabilityGroupCapture(Generic[AppT]):
     """Declarations and a versioned Asset reader captured from one revision."""
 
@@ -216,17 +186,12 @@ class CapabilityGroup(Generic[AppT]):
         ) = None,
     ) -> "TaskNodeHandler[AppT]":
         """Register one application-owned TaskNode handler revision."""
-        if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if reconcile is not None and not callable(reconcile):
-            raise TypeError("reconcile must be callable")
-        registered = _RegisteredTaskHandler(
+        contribution = CapabilityContribution.from_task(
             handler,
-            effect_policy,
-            output_type,
-            reconcile,
+            effect_policy=effect_policy,
+            output_type=output_type,
+            reconcile=reconcile,
         )
-        contribution = CapabilityContribution.from_task(registered)
         if any(
             value.kind == "task"
             and value.id == contribution.id
