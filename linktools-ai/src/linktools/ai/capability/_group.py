@@ -353,13 +353,10 @@ class CapabilityGroup(Generic[AppT]):
         asset_reader: AssetStoreReader | None = None
         if store is not None:
             context = await CapabilityLoadContext.capture(self._id, store)
-            for kind, loader in loaders:
-                if getattr(loader, "source_kind", kind) != kind:
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            for _kind, loader in loaders:
                 loaded = await loader.load(context)
                 for value in loaded:
-                    if not isinstance(loader, BuiltinDeclarationLoader):
-                        _validate_custom_skill_source(value, context)
+                    _validate_skill_source(value, context)
                     if isinstance(
                         value,
                         (AgentSpec, SkillDefinition, MCPServerSpec),
@@ -411,7 +408,7 @@ class CapabilityGroup(Generic[AppT]):
         return capture
 
 
-def _validate_custom_skill_source(
+def _validate_skill_source(
     value: object,
     context: CapabilityLoadContext,
 ) -> None:
