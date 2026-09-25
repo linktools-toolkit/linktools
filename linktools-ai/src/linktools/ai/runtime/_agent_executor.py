@@ -16,7 +16,6 @@ from collections.abc import (
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -421,45 +420,27 @@ class AgentExecutor:
         workspace = scope.workspace
         backend = self._sandbox
         mcp_resource_bindings = _mcp_resource_bindings(scope.binding)
-        needs_materialization = (
-            backend is not None
-            and any(
-                skill.source_ref is not None
-                and skill.source_ref.resource_versions
+        if backend is None:
+            skill_resources: tuple[SandboxResource, ...] = ()
+            resource_keys: Mapping[str, "str | None"] = {
+                skill.id: None
                 for skill in scope.binding.compiled_agent.skill_definitions
+            }
+        else:
+            skill_resources, resource_keys = await _skill_sandbox_resources(
+                scope.binding.compiled_agent,
+                self._asset_sources,
             )
-        ) or any(
-            binding.versions
-            for binding in mcp_resource_bindings.values()
+        mcp_projections = await prepare_mcp_resource_projections(
+            scope.binding.compiled_agent.mcp_servers,
+            mcp_resource_bindings,
+            asset_readers=self._asset_sources,
+            sandboxed=backend is not None,
         )
-        materialized = (
-            TemporaryDirectory(prefix="linktools-agent-assets-")
-            if needs_materialization
-            else None
-        )
-        materialize_root = None if materialized is None else Path(materialized.name)
+
         session: SandboxSession | None = None
         primary_error: BaseException | None = None
         try:
-            if backend is None:
-                skill_resources: tuple[SandboxResource, ...] = ()
-                resource_keys: Mapping[str, "str | None"] = {
-                    skill.id: None
-                    for skill in scope.binding.compiled_agent.skill_definitions
-                }
-            else:
-                skill_resources, resource_keys = await _skill_sandbox_resources(
-                    scope.binding.compiled_agent,
-                    self._asset_sources,
-                    materialize_root=materialize_root,
-                )
-            mcp_projections = await prepare_mcp_resource_projections(
-                scope.binding.compiled_agent.mcp_servers,
-                mcp_resource_bindings,
-                asset_readers=self._asset_sources,
-                sandboxed=backend is not None,
-                materialize_root=materialize_root,
-            )
             if backend is None and selected:
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
             if (
@@ -526,14 +507,10 @@ class AgentExecutor:
             primary_error = error
             raise
         finally:
-            try:
-                await _cleanup_agent_run_resources(
-                    session,
-                    primary_error,
-                )
-            finally:
-                if materialized is not None:
-                    await asyncio.to_thread(materialized.cleanup)
+            await _cleanup_agent_run_resources(
+                session,
+                primary_error,
+            )
 
 
     async def _execute(
@@ -735,15 +712,13 @@ async def _close_sandbox_session(session: SandboxSession) -> None:
 async def _skill_sandbox_resources(
     compiled_agent: CompiledAgent,
     asset_readers: Mapping[str, AssetStoreReader],
-    *,
-    materialize_root: "Path | None" = None,
 ) -> tuple[
     tuple[SandboxResource, ...],
     Mapping[str, "str | None"],
 ]:
     resources: dict[str, SandboxResource] = {}
     resource_keys: dict[str, str | None] = {}
-    for index, skill in enumerate(compiled_agent.skill_definitions):
+    for skill in compiled_agent.skill_definitions:
         source_ref = skill.source_ref
         if source_ref is None:
             continue
@@ -765,11 +740,6 @@ async def _skill_sandbox_resources(
                 item.path: item.executable_bits
                 for item in source_ref.resource_versions
             },
-            materialize_root=(
-                None
-                if materialize_root is None
-                else materialize_root / "skills" / str(index)
-            ),
         )
         if resource is None:
             continue
