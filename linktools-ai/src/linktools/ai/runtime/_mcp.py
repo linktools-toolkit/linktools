@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
+from fastmcp import Client
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.mcp import MCPToolset
@@ -119,8 +120,6 @@ class _MCPModelToolset(WrapperToolset[object]):
             previous = self._published.get(model_name)
             if previous is not None and previous != upstream_name:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            if model_name in result:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             self._published[model_name] = upstream_name
             identity = json.dumps(
                 {"server_id": self._server_id, "tool_name": upstream_name},
@@ -179,11 +178,11 @@ class _MCPRuntimeCapability(AbstractCapability[AgentContext[object]]):
         self,
         capability_id: str,
         toolset: AbstractToolset[AgentContext[object]],
-        client: object,
+        client: Client,
     ) -> None:
         self.id = capability_id
         self._toolset = toolset
-        self._client: object | None = client
+        self._client: Client | None = client
 
     def get_toolset(self) -> AbstractToolset[AgentContext[object]]:
         return self._toolset
@@ -191,7 +190,7 @@ class _MCPRuntimeCapability(AbstractCapability[AgentContext[object]]):
     async def close_resources(self) -> None:
         client = self._client
         if client is not None:
-            await cast(Any, client).close()
+            await client.close()
             self._client = None
 
 
@@ -227,18 +226,6 @@ def _raise_primary_after_cleanup(
         _raise_cleanup_failure(cleanup_error)
     except BaseException as typed_cleanup_error:
         raise primary_error from typed_cleanup_error
-
-
-def validate_mcp_binding_policy(
-    resources: Mapping[str, _MCPResourceBinding],
-    sandbox: Sandbox | None,
-) -> None:
-    current_policy = _mcp_execution_policy(sandbox)
-    if any(
-        dict(binding.execution_policy) != dict(current_policy)
-        for binding in resources.values()
-    ):
-        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
 
 
 async def prepare_mcp_resource_projections(
@@ -288,13 +275,6 @@ async def prepare_mcp_resource_projections(
             ),
         )
         local_files = None if resource is None else resource.files
-        if local_files is None and any(
-            argument.startswith("resource:") for argument in server.args
-        ):
-            raise AIError(
-                ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                safe_details={"kind": "mcp_local_resource", "server_id": server.id},
-            )
         arguments: list[str | SandboxResourcePath] = []
         for argument in server.args:
             if not argument.startswith("resource:"):
@@ -302,7 +282,10 @@ async def prepare_mcp_resource_projections(
                 continue
             relative = argument[len("resource:") :]
             if local_files is None:
-                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+                raise AIError(
+                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                    safe_details={"kind": "mcp_local_resource", "server_id": server.id},
+                )
             arguments.append(
                 SandboxResourcePath(server.id, relative)
                 if sandboxed
@@ -329,7 +312,6 @@ async def materialize_mcp_capabilities(
     tool_metrics: "_ToolMetricContext | None",
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Materialize only compiler-selected stdio MCP servers."""
-    from fastmcp import Client
     from fastmcp.client.transports import StdioTransport
     policy, required = _selector_policy(selectors)
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
@@ -357,14 +339,23 @@ async def materialize_mcp_capabilities(
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             allowed = policy[server.id]
             if sandbox is None:
+                host_args = [
+                    argument
+                    for argument in projection.args
+                    if isinstance(argument, str)
+                ]
+                if len(host_args) != len(projection.args):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 transport = StdioTransport(
                     server.command,
-                    list(cast("Sequence[str]", projection.args)),
+                    host_args,
                     cwd=host_cwd,
                 )
             else:
+                if not isinstance(sandbox_session, StdioSandboxSession):
+                    raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
                 transport = _SandboxMCPTransport(
-                    cast(StdioSandboxSession, sandbox_session),
+                    sandbox_session,
                     server.command,
                     projection.args,
                     projection.resources,
