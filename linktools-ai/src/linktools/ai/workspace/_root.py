@@ -12,6 +12,10 @@ from linktools.core import environ
 
 from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
+from ..spec import (
+    DEFAULT_REPOSITORY_INSTRUCTION_BYTES,
+    DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS,
+)
 
 _logger = environ.get_logger("ai.workspace")
 
@@ -137,8 +141,8 @@ class WorkspacePolicy:
     tool_permissions: WorkspaceToolPermissionPolicy = field(
         default_factory=WorkspaceToolPermissionPolicy
     )
-    max_repository_instruction_documents: int = 128
-    max_repository_instruction_bytes: int = 256 * 1024
+    max_repository_instruction_documents: int = DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS
+    max_repository_instruction_bytes: int = DEFAULT_REPOSITORY_INSTRUCTION_BYTES
 
     def validate(self) -> None:
         if not isinstance(self.tool_permissions, WorkspaceToolPermissionPolicy):
