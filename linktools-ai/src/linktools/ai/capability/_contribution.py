@@ -18,7 +18,6 @@ from ..spec import (
     AgentSpecCodec,
     MCPServerSpec,
     MCPServerSpecCodec,
-    canonicalize_json_schema,
     canonicalize_pydantic_model_schema,
     capability_ref_payload,
 )
@@ -62,7 +61,7 @@ _RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
 class _TaskHandlerAdapter(Generic[AppT]):
     handler: TaskNodeHandler[AppT]
     effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
-    output_type: object | None
+    output_type: "type[BaseModel] | None"
     reconcile: (
         Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None
     ) = field(default=None, repr=False, compare=False)
@@ -219,7 +218,7 @@ class CapabilityContribution(Generic[AppT]):
         value: "TaskNodeHandler[AppT]",
         *,
         effect_policy: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
-        output_type: object | None = None,
+        output_type: "type[BaseModel] | None" = None,
         reconcile: (
             "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
         ) = None,
@@ -400,15 +399,12 @@ def _task_output_contract(handler: object) -> JsonValue:
     output_type = getattr(handler, "output_type", None)
     if output_type is None:
         return {"kind": "json"}
-    model_schema = getattr(output_type, "model_json_schema", None)
-    if not callable(model_schema):
+    if not isinstance(output_type, type) or not issubclass(output_type, BaseModel):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    schema = (
-        canonicalize_pydantic_model_schema(output_type)
-        if isinstance(output_type, type) and issubclass(output_type, BaseModel)
-        else canonicalize_json_schema(model_schema())
-    )
-    return {"kind": "schema", "schema": schema}
+    return {
+        "kind": "schema",
+        "schema": canonicalize_pydantic_model_schema(output_type),
+    }
 
 
 def _expander_identity(expander: object) -> tuple[str, int]:
