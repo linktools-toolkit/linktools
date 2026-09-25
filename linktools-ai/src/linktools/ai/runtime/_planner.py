@@ -95,7 +95,9 @@ _DEFERRED_INPUT_REVISION = 1
 class _DeferredInputHandler:
     id = _DEFERRED_INPUT_ID
     revision = _DEFERRED_INPUT_REVISION
-    effect = "none"
+    effect_policy = "none"
+    output_type = None
+    reconcile = None
 
     def normalize(self, input: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         return normalize_json_value(dict(input))
@@ -785,12 +787,18 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             dependency_policy=node.dependency_policy,
         )
 
-    def validate_request(self, graph: TaskGraph) -> None:
-        for node in graph.nodes:
-            canonical = self.admit_node(node)
-            if canonical.input != node.input:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            self._validate_durability(node, graph_id=graph.graph_id, request=True)
+    def admit_request(self, graph: TaskGraph) -> TaskGraph:
+        canonical = TaskGraph(
+            graph.graph_id,
+            tuple(self.admit_node(node) for node in graph.nodes),
+        )
+        for node in canonical.nodes:
+            self._validate_durability(
+                node,
+                graph_id=graph.graph_id,
+                request=True,
+            )
+        return canonical
 
     def validate_input(self, node: TaskNode, value: JsonValue) -> None:
         del value
@@ -859,8 +867,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         "reason": "task_effect_changed",
                     },
                 )
-            handler_output = getattr(handler, "output", None)
-            if handler_output is not None and node.output_contract != _output_contract(
+            if node.output_contract != _output_contract(
                 handler,
                 None,
             ):
@@ -2309,8 +2316,10 @@ def _validate_task_output(node: TaskNode, output: JsonValue) -> None:
 
 
 def _handler_effect_policy(handler: object) -> str:
-    value = getattr(handler, "effect_policy", "none")
-    return value if value in {"none", "replay_safe", "non_replay_safe"} else "none"
+    value = getattr(handler, "effect_policy", None)
+    if value not in {"none", "replay_safe", "non_replay_safe"}:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return value
 
 
 def _output_contract(
