@@ -102,19 +102,18 @@ class _RuntimeBindingResolver:
             if bound_policy is not None and dict(bound_policy) != current_policy:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
 
-            resource_source_id = pin.contract.get("resource_source_id")
+            asset_source_id = pin.contract.get("asset_source_id")
             if server.resource_root is None:
-                if resource_versions is not None or resource_source_id is not None:
+                if resource_versions is not None or asset_source_id is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                source_id = None
+                asset_source_id = None
             else:
                 if (
                     resource_versions is None
-                    or not isinstance(resource_source_id, str)
-                    or not resource_source_id
+                    or not isinstance(asset_source_id, str)
+                    or not asset_source_id
                 ):
                     raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
-                source_id = resource_source_id
 
             selected.append(
                 CapabilityPin(
@@ -123,7 +122,7 @@ class _RuntimeBindingResolver:
                     codec.to_execution_payload(
                         server,
                         resource_versions,
-                        resource_source_id=source_id,
+                        asset_source_id=asset_source_id,
                         execution_policy=current_policy,
                     ),
                 )

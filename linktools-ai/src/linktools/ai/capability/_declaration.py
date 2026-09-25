@@ -271,7 +271,7 @@ async def _load_mcp(
                 codec.to_execution_payload(
                     value,
                     refs,
-                    resource_source_id=context.group_id,
+                    asset_source_id=context.group_id,
                 )
             )
         )
@@ -296,7 +296,7 @@ async def _load_rules(
             raise AIError(
                 ErrorCode.ASSET_CODEC_UNKNOWN,
                 safe_details={
-                    "source_id": context.group_id,
+                    "asset_source_id": context.group_id,
                     "asset_id": entry.key.id,
                 },
             ) from error

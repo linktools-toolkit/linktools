@@ -681,15 +681,15 @@ def _mcp_resource_bindings(
         if pin.kind != "mcp":
             continue
         server, versions = codec.from_execution_payload(pin.contract)
-        source_id = pin.contract.get("resource_source_id")
+        asset_source_id = pin.contract.get("asset_source_id")
         if server.resource_root is not None:
             if (
                 versions is None
-                or not isinstance(source_id, str)
-                or not source_id
+                or not isinstance(asset_source_id, str)
+                or not asset_source_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        elif versions is not None or source_id is not None:
+        elif versions is not None or asset_source_id is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if server.id in result:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -698,7 +698,7 @@ def _mcp_resource_bindings(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result[server.id] = _MCPResourceBinding(
             versions,
-            cast("str | None", source_id),
+            cast("str | None", asset_source_id),
             cast(Mapping[str, JsonValue], policy),
         )
     return result
@@ -731,13 +731,13 @@ async def _skill_sandbox_resources(
         if source_ref is None:
             continue
         resource_keys[skill.id] = None
-        reader = asset_readers.get(source_ref.source_id)
+        reader = asset_readers.get(source_ref.asset_source_id)
         if reader is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
                 safe_details={
                     "kind": "skill_asset_source",
-                    "source_id": source_ref.source_id,
+                    "asset_source_id": source_ref.asset_source_id,
                 },
             )
         resource = await SandboxResource.from_asset_versions(

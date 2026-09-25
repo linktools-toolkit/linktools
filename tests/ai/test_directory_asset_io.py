@@ -120,7 +120,7 @@ async def test_directory_asset_versions_ignore_revision_but_verify_content(
         ref = (await store.resolve_versions((key,)))[0]
         other_revision = AssetVersionRef(
             ref.key,
-            ref.source_id,
+            ref.layer_id,
             StorageEntryRevision(ref.revision.value + 1),
             ref.etag,
             ref.size,

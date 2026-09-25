@@ -100,7 +100,7 @@ async def test_asset_version_ref_reads_exact_historical_content() -> None:
         second = (await store.resolve_versions((key,)))[0]
 
         assert first != second
-        assert first.source_id == second.source_id == "primary"
+        assert first.layer_id == second.layer_id == "primary"
         assert await store.read_versions((first, second)) == (
             b"first",
             b"second",

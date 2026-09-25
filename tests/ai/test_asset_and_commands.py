@@ -205,7 +205,7 @@ def test_asset_version_ref_pins_effective_layer() -> None:
         )
         await store.initialize()
         frozen = (await store.resolve_versions((key,)))[0]
-        assert frozen.source_id == "fallback"
+        assert frozen.layer_id == "fallback"
 
         await store.put(key, b"primary")
         assert await store.get(key) == b"primary"

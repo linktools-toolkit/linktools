@@ -34,12 +34,12 @@ class SkillResourceVersion:
 
 @dataclass(frozen=True, slots=True)
 class SkillSourceRef:
-    source_id: str
+    asset_source_id: str
     root: str
     resource_versions: tuple[SkillResourceVersion, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source_id, str) or not self.source_id.strip():
+        if not isinstance(self.asset_source_id, str) or not self.asset_source_id.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         try:
             validate_logical_id(self.root)
@@ -103,7 +103,7 @@ class LocalSkillResourceSource:
         return self._id
 
     def _root_ref(self, source: SkillSourceRef) -> str:
-        if not isinstance(source, SkillSourceRef) or source.source_id != self._id:
+        if not isinstance(source, SkillSourceRef) or source.asset_source_id != self._id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return source.root
 
@@ -182,7 +182,7 @@ class AssetSkillResourceSource:
         return self._asset_reader
 
     def _binding(self, source: SkillSourceRef) -> SkillSourceRef:
-        if not isinstance(source, SkillSourceRef) or source.source_id != self._id:
+        if not isinstance(source, SkillSourceRef) or source.asset_source_id != self._id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return source
 

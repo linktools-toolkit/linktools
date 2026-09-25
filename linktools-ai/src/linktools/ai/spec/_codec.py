@@ -427,7 +427,7 @@ class MCPServerSpecCodec:
         value: MCPServerSpec,
         resource_versions: "Sequence[AssetVersionRef] | None",
         *,
-        resource_source_id: "str | None" = None,
+        asset_source_id: "str | None" = None,
         execution_policy: "Mapping[str, JsonValue] | None" = None,
     ) -> "dict[str, JsonValue]":
         """Return the MCP contract stored in an execution binding."""
@@ -437,7 +437,7 @@ class MCPServerSpecCodec:
                 execution_policy
             )
         if value.resource_root is None:
-            if resource_versions is not None or resource_source_id is not None:
+            if resource_versions is not None or asset_source_id is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return payload
         if resource_versions is None or any(
@@ -452,12 +452,12 @@ class MCPServerSpecCodec:
         )
         if len({item.key for item in versions}) != len(versions):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not isinstance(resource_source_id, str) or not resource_source_id:
+        if not isinstance(asset_source_id, str) or not asset_source_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["resource_versions"] = [
             item.to_payload() for item in versions
         ]
-        payload["resource_source_id"] = resource_source_id
+        payload["asset_source_id"] = asset_source_id
         return payload
 
     def to_wire_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
@@ -532,7 +532,7 @@ class MCPServerSpecCodec:
         _require_v1(raw)
         if not execution and (
             "resource_versions" in raw
-            or "resource_source_id" in raw
+            or "asset_source_id" in raw
             or "execution_policy" in raw
         ):
             raise AIError(
@@ -565,15 +565,15 @@ class MCPServerSpecCodec:
             _execution_policy_payload(raw["execution_policy"])
             if resource_root is not None and resource_versions is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        resource_source_id = raw.get("resource_source_id") if execution else None
+        asset_source_id = raw.get("asset_source_id") if execution else None
         if resource_versions is None:
-            if execution and "resource_source_id" in raw:
+            if execution and "asset_source_id" in raw:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
             if (
                 resource_root is None
-                or not isinstance(resource_source_id, str)
-                or not resource_source_id
+                or not isinstance(asset_source_id, str)
+                or not asset_source_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         args = raw.get("args", [])

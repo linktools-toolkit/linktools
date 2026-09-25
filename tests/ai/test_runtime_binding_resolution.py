@@ -431,7 +431,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
             resolved.subagent_bindings[0].selected[0].contract
         )
         assert server.resource_root == root
-        assert resolved.subagent_bindings[0].selected[0].contract["resource_source_id"] == "application"
+        assert resolved.subagent_bindings[0].selected[0].contract["asset_source_id"] == "application"
         assert versions is not None
         assert await store.read_versions(versions) == (b"print('updated')",)
         assert await resolver.resolve_contract(resolved) == resolved

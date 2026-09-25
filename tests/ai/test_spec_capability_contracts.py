@@ -295,7 +295,7 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
                 "id": "review",
                 "content": "instructions",
                 "source": {
-                    "source_id": "application",
+                    "asset_source_id": "application",
                     "root": "review",
                     "resource_versions": [
                         {
@@ -304,7 +304,7 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
                                 "version": 1,
                                 "kind": "skill",
                                 "id": "review/guide.md",
-                                "source_id": "",
+                                "layer_id": "",
                                 "revision": 1,
                                 "etag": "a" * 64,
                                 "size": 1,
@@ -590,18 +590,18 @@ def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
     first = codec.to_execution_payload(
         server,
         (first_ref,),
-        resource_source_id="group-a",
+        asset_source_id="group-a",
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
     second = codec.to_execution_payload(
         server,
         (second_ref,),
-        resource_source_id="group-b",
+        asset_source_id="group-b",
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
 
     assert first["args"] == ["resource:script.py"]
-    assert first["resource_source_id"] == "group-a"
+    assert first["asset_source_id"] == "group-a"
     restored, versions = codec.from_execution_payload(first)
     assert restored == server
     assert versions == (first_ref,)

@@ -51,7 +51,7 @@ class SkillDefinition:
         contract = SkillSpecCodec().to_wire_payload(self.spec)
         if self.source_ref is not None:
             source: dict[str, JsonValue] = {
-                "source_id": self.source_ref.source_id,
+                "asset_source_id": self.source_ref.asset_source_id,
                 "root": self.source_ref.root,
             }
             if self.source_ref.resource_versions:
@@ -81,7 +81,7 @@ class SkillDefinition:
         if source is None:
             source_ref = None
         elif isinstance(source, Mapping):
-            source_id = source.get("source_id")
+            asset_source_id = source.get("asset_source_id")
             root = source.get("root")
             raw_versions = source.get("resource_versions")
             versions: tuple[SkillResourceVersion, ...] = ()
@@ -114,7 +114,7 @@ class SkillDefinition:
                 versions = tuple(sorted(parsed, key=lambda item: item.path))
             try:
                 source_ref = SkillSourceRef(
-                    source_id,
+                    asset_source_id,
                     root,
                     versions,
                 )
@@ -297,7 +297,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         source_ref = definition.source_ref
         if source_ref is None:
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
-        source = self._sources.resolve(source_ref.source_id)
+        source = self._sources.resolve(source_ref.asset_source_id)
         data = await source.read(source_ref, relative)
         try:
             content = data.decode("utf-8")
@@ -322,7 +322,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         source_ref = definition.source_ref
         if source_ref is None:
             return result
-        source = self._sources.resolve(source_ref.source_id)
+        source = self._sources.resolve(source_ref.asset_source_id)
         view = await source.inspect(source_ref)
         _validate_view(view)
         if definition.id in self._resource_paths:
@@ -330,7 +330,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             location = (
                 SkillLocation(
                     "virtual",
-                    f"{source_ref.source_id}/resources/{source_ref.root}",
+                    f"{source_ref.asset_source_id}/resources/{source_ref.root}",
                 )
                 if native_path is None
                 else SkillLocation("local", native_path)

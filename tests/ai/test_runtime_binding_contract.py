@@ -160,14 +160,14 @@ def _compiler() -> AgentCompiler:
 
 def _versioned_skill(
     *,
-    source_id: str,
+    layer_id: str,
     revision: int,
     size: int,
     etag: str = "a" * 64,
 ) -> SkillDefinition:
     asset = AssetVersionRef(
         AssetKey("skill", "review/guide.md"),
-        source_id,
+        layer_id,
         StorageEntryRevision(revision),
         etag,
         size,
@@ -182,8 +182,8 @@ def _versioned_skill(
 
 
 def test_skill_asset_version_locator_is_not_named_identity() -> None:
-    first = _versioned_skill(source_id="source-a", revision=1, size=1)
-    second = _versioned_skill(source_id="source-b", revision=9, size=99)
+    first = _versioned_skill(layer_id="source-a", revision=1, size=1)
+    second = _versioned_skill(layer_id="source-b", revision=9, size=99)
 
     assert first.contract != second.contract
     first_pin = CapabilityPin("skill", "review", first.contract)
@@ -195,7 +195,7 @@ def test_skill_asset_version_locator_is_not_named_identity() -> None:
 
 
 def test_skill_asset_content_change_requires_revision_bump() -> None:
-    first = _versioned_skill(source_id="source", revision=1, size=1)
+    first = _versioned_skill(layer_id="source", revision=1, size=1)
     changed = SkillDefinition(
         first.spec,
         first.source_ref.with_asset_versions(
@@ -240,7 +240,7 @@ def test_skill_asset_content_change_requires_revision_bump() -> None:
             "version": 1,
             "kind": "skill",
             "id": "review/guide.md",
-            "source_id": "",
+            "layer_id": "",
             "revision": 1,
             "etag": "a" * 64,
             "size": 1,
@@ -249,7 +249,7 @@ def test_skill_asset_content_change_requires_revision_bump() -> None:
             "version": 1,
             "kind": "skill",
             "id": "review/guide.md",
-            "source_id": "source",
+            "layer_id": "source",
             "revision": "1",
             "etag": "a" * 64,
             "size": 1,
@@ -266,7 +266,7 @@ def test_skill_asset_version_reference_rejects_malformed_fields(
                 "id": "review",
                 "content": "instructions",
                 "source": {
-                    "source_id": "application",
+                    "asset_source_id": "application",
                     "root": "review",
                     "resource_versions": [
                         {
@@ -286,7 +286,7 @@ def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
         "skill",
         "review",
         _versioned_skill(
-            source_id="source",
+            layer_id="source",
             revision=1,
             size=1,
         ).contract,

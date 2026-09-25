@@ -386,13 +386,13 @@ class AssetStore:
         for ref in refs:
             if not isinstance(ref, AssetVersionRef):
                 raise TypeError("refs must contain AssetVersionRef values")
-            if ref.source_id == "primary":
+            if ref.layer_id == "primary":
                 backend = self._storage.primary
             else:
                 matches = tuple(
                     layer.backend
                     for layer in self._storage.layers
-                    if layer.id == ref.source_id
+                    if layer.id == ref.layer_id
                 )
                 if len(matches) != 1:
                     raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
@@ -788,7 +788,7 @@ class _SnapshotAssetStore(AssetStore):
         for ref in refs:
             if not isinstance(ref, AssetVersionRef):
                 raise TypeError("refs must contain AssetVersionRef values")
-            if ref.source_id != "snapshot":
+            if ref.layer_id != "snapshot":
                 raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
             info = self._entries.get(ref.key)
             if info is None or not ref.matches_info(info):

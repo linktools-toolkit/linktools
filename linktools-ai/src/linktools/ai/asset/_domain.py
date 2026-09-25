@@ -43,10 +43,10 @@ class AssetKey:
 
 @dataclass(frozen=True, slots=True)
 class AssetVersionRef:
-    """Stable reference to one immutable Asset version."""
+    """Stable reference to one immutable Asset version on a storage layer."""
 
     key: AssetKey
-    source_id: str
+    layer_id: str
     revision: StorageEntryRevision
     etag: str
     size: int
@@ -54,8 +54,8 @@ class AssetVersionRef:
     def __post_init__(self) -> None:
         if not isinstance(self.key, AssetKey):
             raise TypeError("asset version key must be AssetKey")
-        if not isinstance(self.source_id, str) or not self.source_id:
-            raise ValueError("asset version source_id must be non-empty")
+        if not isinstance(self.layer_id, str) or not self.layer_id:
+            raise ValueError("asset version layer_id must be non-empty")
         if not isinstance(self.revision, StorageEntryRevision):
             raise TypeError("asset version revision must be StorageEntryRevision")
         if (
@@ -73,7 +73,7 @@ class AssetVersionRef:
             "version": 1,
             "kind": self.key.kind,
             "id": self.key.id,
-            "source_id": self.source_id,
+            "layer_id": self.layer_id,
             "revision": self.revision.value,
             "etag": self.etag,
             "size": self.size,
@@ -94,7 +94,7 @@ class AssetVersionRef:
             "version",
             "kind",
             "id",
-            "source_id",
+            "layer_id",
             "revision",
             "etag",
             "size",
@@ -105,14 +105,14 @@ class AssetVersionRef:
             raise ValueError("asset version payload version is unsupported")
         kind = value.get("kind")
         identity = value.get("id")
-        source_id = value.get("source_id")
+        layer_id = value.get("layer_id")
         revision = value.get("revision")
         etag = value.get("etag")
         size = value.get("size")
         if (
             not isinstance(kind, str)
             or not isinstance(identity, str)
-            or not isinstance(source_id, str)
+            or not isinstance(layer_id, str)
             or isinstance(revision, bool)
             or not isinstance(revision, int)
             or not isinstance(etag, str)
@@ -122,7 +122,7 @@ class AssetVersionRef:
             raise ValueError("asset version payload is invalid")
         return cls(
             AssetKey(kind, identity),
-            source_id,
+            layer_id,
             StorageEntryRevision(revision),
             etag,
             size,

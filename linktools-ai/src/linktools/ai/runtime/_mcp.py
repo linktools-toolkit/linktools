@@ -65,7 +65,7 @@ def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
 @dataclass(frozen=True, slots=True)
 class _MCPResourceBinding:
     versions: "tuple[AssetVersionRef, ...] | None"
-    source_id: "str | None"
+    asset_source_id: "str | None"
     execution_policy: Mapping[str, JsonValue]
 
 
@@ -262,15 +262,15 @@ async def prepare_mcp_resource_projections(
                 (),
             )
             continue
-        if binding.source_id is None:
+        if binding.asset_source_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        reader = asset_readers.get(binding.source_id)
+        reader = asset_readers.get(binding.asset_source_id)
         if reader is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
                 safe_details={
                     "kind": "mcp_asset_source",
-                    "source_id": binding.source_id,
+                    "asset_source_id": binding.asset_source_id,
                     "server_id": server.id,
                 },
             )
