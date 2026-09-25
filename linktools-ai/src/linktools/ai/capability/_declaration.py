@@ -281,7 +281,6 @@ async def _load_mcp(
         if entry.key not in package_keys and _inside_mcp_resource_root(
             entry.key,
             resource_roots,
-            exclude=entry.key,
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
@@ -295,11 +294,7 @@ async def _load_mcp(
 def _inside_mcp_resource_root(
     key: AssetKey,
     roots: Sequence[AssetKey],
-    *,
-    exclude: "AssetKey | None" = None,
 ) -> bool:
-    if exclude is not None and key == exclude:
-        return False
     return any(
         key.kind == root.kind and key.id.startswith(f"{root.id}/")
         for root in roots
