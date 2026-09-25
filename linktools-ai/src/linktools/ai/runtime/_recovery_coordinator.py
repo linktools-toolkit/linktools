@@ -40,7 +40,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..storage import StoredPayload
-from ..workspace import RepositoryInstructionResolver, RepositoryInstructions
+from ..spec import RepositoryInstructionResolver, RepositoryInstructions
 from ._input import CanonicalUserInput
 from ._pydantic_tool_control import build_model_retry, build_tool_failed
 from ._repository_instructions import (
