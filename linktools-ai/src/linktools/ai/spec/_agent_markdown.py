@@ -3,8 +3,6 @@
 """Strict authoring adapter for Agent Markdown declarations."""
 
 from collections.abc import Mapping
-from typing import cast
-
 from ..core import normalize_json_value, validate_logical_id
 from ..errors import AIError, ErrorCode
 from ._codec import AgentSpecCodec, decode_author_yaml_mapping
@@ -90,7 +88,7 @@ class AgentMarkdownSpecCodec:
         if "id" in payload:
             declared_id = payload["id"]
             try:
-                validate_logical_id(cast(str, declared_id))
+                validate_logical_id(declared_id)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
             if declared_id != logical_id:
@@ -135,7 +133,7 @@ def _canonicalize_agent_fields(
     usage_limits = result.get("usage_limits")
     if isinstance(usage_limits, Mapping):
         result["usage_limits"] = _canonicalize_usage_limits(usage_limits)
-    return cast(dict[str, object], normalize_json_value(result))
+    return normalize_json_value(result)
 
 
 def _canonicalize_usage_limits(
