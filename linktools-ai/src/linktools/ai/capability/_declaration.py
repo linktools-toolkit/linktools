@@ -24,6 +24,7 @@ from ..spec import (
     SkillMarkdownSpecAdapter,
     SkillMarkdownSpecCodec,
     SkillSpecCodec,
+    RepositoryInstructionDocument,
 )
 from ._resource_path import (
     mcp_resource_path,
@@ -31,7 +32,6 @@ from ._resource_path import (
     validate_resource_tree,
 )
 from ._skill import SkillDefinition
-from ..workspace import RepositoryInstructionDocument
 from ._skill_source import SkillResourceVersion, SkillSourceRef
 
 if TYPE_CHECKING:
