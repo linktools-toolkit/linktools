@@ -34,7 +34,7 @@ from linktools.ai.storage import ObjectRef, StorageEntryRevision, StoredPayload
 def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model_route="model"),
         base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -150,7 +150,7 @@ def test_object_ref_traversal_allows_additive_skill_asset_fields() -> None:
     assert isinstance(source, dict)
     source["future_metadata"] = {"version": 2}
     binding = AgentBindingSnapshot(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model_route="model"),
         base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(CapabilityPin("skill", "review", contract),),
         subagents=(),

@@ -90,7 +90,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     application.capability(_FailingCapability())
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=("business", "read_file"),
         allow_skills=(),
         allow_subagents=(),

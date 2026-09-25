@@ -28,7 +28,7 @@ from ._runtime_test_helpers import execution_owner_fields
 def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        agent_spec=AgentSpec("default", model="default"),
+        agent_spec=AgentSpec("default", model_route="default"),
         base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),

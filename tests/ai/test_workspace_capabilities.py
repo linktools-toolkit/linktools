@@ -372,7 +372,7 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
     agent_dir = declaration_root / "custom-agents"
     agent_dir.mkdir(parents=True)
     (agent_dir / "audit").write_bytes(
-        AgentSpecCodec().encode(AgentSpec("audit", model="default"))
+        AgentSpecCodec().encode(AgentSpec("audit", model_route="default"))
     )
     backend = DirectoryAssetBackend(
         str(declaration_root),

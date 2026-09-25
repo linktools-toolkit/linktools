@@ -71,7 +71,7 @@ async def test_service_principal_keeps_tenant_authorization() -> None:
 def test_agent_spec_codec_preserves_system_prompt_and_instructions() -> None:
     spec = AgentSpec(
         "agent",
-        model="model",
+        model_route="model",
         system_prompt="system",
         instructions=("instruction",),
     )

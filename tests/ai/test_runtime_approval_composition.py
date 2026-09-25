@@ -72,7 +72,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
     application = CapabilityGroup("application")
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=("read_file",),
     )
 

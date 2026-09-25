@@ -168,7 +168,7 @@ class _CommitUnknownOnceMetricStore(_FailingMetricStore):
 
 def _agent_group() -> CapabilityGroup[object]:
     group = CapabilityGroup[object]("application")
-    group.agent("default", model="default", allow_tools=())
+    group.agent("default", model_route="default", allow_tools=())
     return group
 
 

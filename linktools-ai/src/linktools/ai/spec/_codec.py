@@ -26,7 +26,7 @@ _USAGE_LIMIT_FIELDS = (
 _AGENT_AUTHOR_FIELDS = frozenset(
     {
         "id",
-        "model",
+        "model_route",
         "instructions",
         "metadata",
         "allow_tools",
@@ -67,7 +67,7 @@ class AgentSpecCodec:
             "version": 1,
             "id": value.id,
             "revision": value.revision,
-            "model": value.model,
+            "model_route": value.model_route,
             "system_prompt": value.system_prompt,
             "instructions": list(value.instructions),
             "allow_tools": list(value.allow_tools),
@@ -105,7 +105,7 @@ class AgentSpecCodec:
         _require_usage_limit_fields(raw.get("usage_limits"))
         identity = raw.get("id")
         revision = _semantic_revision(raw)
-        model = raw.get("model", "default")
+        model_route = raw.get("model_route", "default")
         system_prompt = raw.get("system_prompt", "")
         instructions = raw.get("instructions", [])
         allow_tools = raw.get("allow_tools", ["*"])
@@ -125,8 +125,8 @@ class AgentSpecCodec:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "preload_skills must be a string array")
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent id must be a non-empty string")
-        if not isinstance(model, str) or not model.strip():
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent model must be a non-empty string")
+        if not isinstance(model_route, str) or not model_route.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent model_route must be a non-empty string")
         if not isinstance(system_prompt, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "system_prompt must be a string")
         if not isinstance(instructions, list) or any(not isinstance(item, str) for item in instructions):
@@ -158,7 +158,7 @@ class AgentSpecCodec:
             normalized_thinking = normalize_thinking(thinking)
             return AgentSpec(
                 id=identity,
-                model=model,
+                model_route=model_route,
                 system_prompt=system_prompt,
                 instructions=tuple(instructions),
                 allow_tools=tuple(cast("list[str]", allow_tools)),

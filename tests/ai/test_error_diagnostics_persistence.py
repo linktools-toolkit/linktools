@@ -79,7 +79,7 @@ class _DiagnosticModels:
 
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        agent_spec=AgentSpec("default", model="default"),
+        agent_spec=AgentSpec("default", model_route="default"),
         base_model=dict(_DiagnosticModelBinding.contract),
         selected=(),
         subagents=(),

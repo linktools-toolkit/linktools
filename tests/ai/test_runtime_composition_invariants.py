@@ -85,7 +85,7 @@ class _UncertainExecution:
 def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model_route="model"),
         base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
@@ -287,7 +287,7 @@ async def test_subagent_unknown_cancel_requires_recovery() -> None:
 @pytest.mark.asyncio
 async def test_runtime_persists_model_usage_through_history_views() -> None:
     application = CapabilityGroup("application")
-    application.agent("default", model="default", allow_tools=())
+    application.agent("default", model_route="default", allow_tools=())
 
     async with Runtime.open(
         "default",

@@ -15,7 +15,7 @@ from ._runtime_test_helpers import RuntimeUsageModels
 @pytest.mark.asyncio
 async def test_in_memory_session_run_restores_timeline() -> None:
     application = CapabilityGroup("application")
-    application.agent("default", model="default", allow_tools=())
+    application.agent("default", model_route="default", allow_tools=())
 
     async with Runtime.open(
         "default",
@@ -52,7 +52,7 @@ async def test_in_memory_session_run_restores_timeline() -> None:
 @pytest.mark.asyncio
 async def test_in_memory_fork_survives_parent_close() -> None:
     application = CapabilityGroup("application")
-    application.agent("default", model="default", allow_tools=())
+    application.agent("default", model_route="default", allow_tools=())
 
     async with Runtime.open(
         "default",

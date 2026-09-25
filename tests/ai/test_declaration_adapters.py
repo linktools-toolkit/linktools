@@ -107,10 +107,10 @@ def test_agent_markdown_preserves_plain_prompt_bom_and_crlf_body() -> None:
     }
 
     payload = codec.parse(
-        b"---\r\nmodel: test\r\nplanning: false\r\n---\r\n\r\nbody \r\n"
+        b"---\r\nmodel-route: test\r\nplanning: false\r\n---\r\n\r\nbody \r\n"
     )
     assert payload == {
-        "model": "test",
+        "model_route": "test",
         "planning": False,
         "system_prompt": "\r\nbody \r\n",
     }
@@ -120,13 +120,13 @@ def test_agent_markdown_preserves_plain_prompt_bom_and_crlf_body() -> None:
 @pytest.mark.parametrize(
     "document",
     (
-        b"---\nmodel: test\n",
+        b"---\nmodel-route: test\n",
         b"---\nnull\n---\nbody",
-        b"---\nmodel: first\nmodel: second\n---\nbody",
+        b"---\nmodel-route: first\nmodel-route: second\n---\nbody",
         b"---\nallow_tools: []\nallow-tools: []\n---\nbody",
         b"---\nversion: 1\n---\nbody",
         b"---\nsystem-prompt: hidden\n---\nbody",
-        b"---\n<<: {model: inherited}\n---\nbody",
+        b"---\n<<: {model-route: inherited}\n---\nbody",
         b"---\nvalue: !!python/object/apply:os.system ['true']\n---\nbody",
     ),
 )
@@ -139,7 +139,7 @@ def test_agent_markdown_rejects_invalid_frontmatter(document: bytes) -> None:
 def test_agent_markdown_resolves_defaults_without_truthiness_or_deep_merge() -> None:
     codec = AgentMarkdownSpecCodec()
     defaults = {
-        "model": "worker-model",
+        "model_route": "worker-model",
         "tool_retries": 7,
         "allow_tools": ["tool"],
         "planning": True,
@@ -153,7 +153,7 @@ def test_agent_markdown_resolves_defaults_without_truthiness_or_deep_merge() -> 
     )
 
     assert spec.id == "team/worker"
-    assert spec.model == "worker-model"
+    assert spec.model_route == "worker-model"
     assert spec.allow_tools == ()
     assert spec.planning is False
     assert spec.tool_retries == 7
@@ -237,7 +237,7 @@ def test_agent_markdown_rejects_version_unknown_fields_and_invalid_defaults() ->
 
     with pytest.raises(AIError) as defaults:
         codec.from_payload(
-            {"system_prompt": "", "model": "explicit"},
+            {"system_prompt": "", "model_route": "explicit"},
             logical_id="worker",
             defaults={"future_field": True},
         )
@@ -249,9 +249,9 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
-    defaults = {"model": "configured", "tool_retries": 4}
+    defaults = {"model_route": "configured", "tool_retries": 4}
     loader = AgentDeclarationLoader("worker", defaults)
-    defaults["model"] = "changed"
+    defaults["model_route"] = "changed"
     defaults["tool_retries"] = 40
     await store.put(
         AssetKey("worker", "team/AGENT.md"),
@@ -266,7 +266,7 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     spec = snapshot.contributions[0].value
     assert isinstance(spec, AgentSpec)
     assert spec.id == "team"
-    assert spec.model == "configured"
+    assert spec.model_route == "configured"
     assert spec.tool_retries == 4
     await store.close()
 
@@ -278,7 +278,7 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
     await store.initialize()
     await store.put(
         AssetKey("worker", "security/audit/AGENT.md"),
-        b"---\nmodel: test\nworker-mode: isolated\n---\nworker prompt",
+        b"---\nmodel-route: test\nworker-mode: isolated\n---\nworker prompt",
     )
     codec = AgentMarkdownSpecCodec()
 
@@ -381,14 +381,14 @@ def test_agent_json_and_markdown_and_mcp_json_and_yaml_converge() -> None:
             {
                 "version": 1,
                 "id": "security/audit",
-                "model": "test",
+                "model_route": "test",
                 "system_prompt": "prompt",
                 "allow_tools": ["lookup"],
             }
         ).encode()
     )
     agent_markdown = AgentMarkdownSpecCodec().decode(
-        b"---\nmodel: test\nallow-tools: [lookup]\n---\nprompt",
+        b"---\nmodel-route: test\nallow-tools: [lookup]\n---\nprompt",
         logical_id="security/audit",
     )
     assert agent_json == agent_markdown
@@ -405,7 +405,7 @@ def test_agent_json_and_markdown_and_mcp_json_and_yaml_converge() -> None:
 def _declarations() -> dict[AssetKey, bytes]:
     return {
         AssetKey("agent", "security/audit/AGENT.md"): (
-            b"---\r\nmodel: test\r\n---\r\naudit prompt"
+            b"---\r\nmodel-route: test\r\n---\r\naudit prompt"
         ),
         AssetKey("agent", "security/audit/notes.bin"): b"\x00\xff",
         AssetKey("mcp", "security/audit/mcp.yaml"): (

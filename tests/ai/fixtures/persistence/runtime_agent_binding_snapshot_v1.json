@@ -3,7 +3,6 @@
     "version": 1,
     "id": "runtime-persistence-v1",
     "revision": 1,
-    "model": "default",
     "system_prompt": "",
     "instructions": [],
     "allow_tools": [
@@ -22,7 +21,8 @@
     "planning": false,
     "thinking": false,
     "tool_retries": 10000,
-    "output_retries": 3
+    "output_retries": 3,
+    "model_route": "default"
   },
   "base_model": {
     "route_id": "default",

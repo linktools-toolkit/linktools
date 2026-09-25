@@ -61,7 +61,7 @@ class _JsonIntEnum(IntEnum):
 
 def _binding_snapshot(*, agent_id: str = "default") -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        agent_spec=AgentSpec(agent_id, model="route"),
+        agent_spec=AgentSpec(agent_id, model_route="route"),
         base_model={"version": 1, "id": "route"},
         selected=(),
         subagents=(),
@@ -135,14 +135,14 @@ def test_task_graph_rejects_cycles_and_agent_spec_is_stable() -> None:
         TaskGraph("cycle", (TaskNode("a", ("b",)), TaskNode("b", ("a",))))
     spec = AgentSpec(
         "agent",
-        model="route",
+        model_route="route",
         system_prompt="system",
         instructions=("answer",),
         allow_tools=("bash",),
     )
     assert spec == AgentSpec(
         "agent",
-        model="route",
+        model_route="route",
         system_prompt="system",
         instructions=("answer",),
         allow_tools=("bash",),

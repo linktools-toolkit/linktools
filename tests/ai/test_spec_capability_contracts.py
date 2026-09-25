@@ -479,7 +479,7 @@ def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
                 {
                     "version": 1,
                     "id": "agent",
-                    "model": "model",
+                    "model_route": "model",
                     "planning": "yes",
                 }
             ).encode()

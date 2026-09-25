@@ -202,7 +202,7 @@ async def test_closing_session_can_commit_owned_continuation_then_close() -> Non
 def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        agent_spec=AgentSpec("agent", model="model"),
+        agent_spec=AgentSpec("agent", model_route="model"),
         base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),

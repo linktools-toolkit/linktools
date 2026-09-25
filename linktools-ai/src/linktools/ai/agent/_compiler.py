@@ -83,7 +83,7 @@ class AgentCompiler:
         """Compile one current declaration from the snapshotted candidate universe."""
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
-        model = self._models.resolve(spec.model)
+        model = self._models.resolve(spec.model_route)
         selected_tools, selected_mcp, ordinary_policy, mcp_policy = self._select_tools(spec)
         selected_skills = self._select_exact_kind("skill", spec.allow_skills)
         selected_subagents = self._select_subagents(spec)
@@ -176,7 +176,7 @@ class AgentCompiler:
         try:
             model = self._models.restore(
                 snapshot.base_model,
-                route_id=snapshot.agent_spec.model,
+                route_id=snapshot.agent_spec.model_route,
             )
             selected = self._restore_selected(snapshot.selected)
             ordinary_policy, mcp_policy = self._restore_policies(

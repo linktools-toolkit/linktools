@@ -303,13 +303,13 @@ def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
 
 def test_agent_declaration_identity_uses_explicit_revision() -> None:
     first = CapabilityContribution.from_declaration(
-        AgentSpec("agent", model="first", revision=1)
+        AgentSpec("agent", model_route="first", revision=1)
     )
     changed = CapabilityContribution.from_declaration(
-        AgentSpec("agent", model="second", revision=1)
+        AgentSpec("agent", model_route="second", revision=1)
     )
     revised = CapabilityContribution.from_declaration(
-        AgentSpec("agent", model="second", revision=2)
+        AgentSpec("agent", model_route="second", revision=2)
     )
 
     assert first.contract != changed.contract
@@ -376,10 +376,10 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     compiler = AgentCompiler(
         model_resolver=registry.snapshot(),
         candidates=(),
-        agents={"agent": AgentSpec("agent", model="first")},
+        agents={"agent": AgentSpec("agent", model_route="first")},
     )
-    first = compiler.bind(compiler.compile(AgentSpec("agent", model="first")))
-    second = compiler.bind(compiler.compile(AgentSpec("agent", model="second")))
+    first = compiler.bind(compiler.compile(AgentSpec("agent", model_route="first")))
+    second = compiler.bind(compiler.compile(AgentSpec("agent", model_route="second")))
 
     assert first.definition.spec.id == second.definition.spec.id
     assert first.definition.spec.revision == second.definition.spec.revision

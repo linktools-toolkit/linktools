@@ -196,7 +196,7 @@ class AgentSpec:
     DEFAULT_OUTPUT_RETRIES: ClassVar[int] = 3
 
     id: str
-    model: str = "default"
+    model_route: str = "default"
     system_prompt: str = ""
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
@@ -216,8 +216,8 @@ class AgentSpec:
     def __post_init__(self) -> None:
         validate_logical_id(self.id)
         _validate_semantic_revision(self.revision)
-        if not isinstance(self.model, str) or not self.model.strip():
-            raise ValueError("agent model must be a non-empty string")
+        if not isinstance(self.model_route, str) or not self.model_route.strip():
+            raise ValueError("agent model_route must be a non-empty string")
         if not isinstance(self.system_prompt, str):
             raise TypeError("agent system_prompt must be a string")
         if isinstance(self.instructions, (str, bytes, bytearray)) or not isinstance(self.instructions, Sequence):

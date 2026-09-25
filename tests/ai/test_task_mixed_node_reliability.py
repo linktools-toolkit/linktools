@@ -105,7 +105,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
     application.task_expander(Expand())
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
@@ -357,7 +357,7 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
     failure = group.task(TaskFunction("example.fail", 1, fail), effect="none")
     collector = group.task(TaskFunction("example.collect", 1, collect), effect="none")
     group.agent(
-        "default", model="default", allow_tools=(), allow_skills=(), allow_subagents=()
+        "default", model_route="default", allow_tools=(), allow_skills=(), allow_subagents=()
     )
     async with Runtime.open(
         "terminal-dependencies",
@@ -549,7 +549,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
     application.task(handler, effect="none")
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
@@ -608,14 +608,14 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     application.task_expander(_AgentGraphExpander())
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
     )
     application.agent(
         "worker",
-        model="default",
+        model_route="default",
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
@@ -732,7 +732,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
     )
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
@@ -802,7 +802,7 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
     )
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
@@ -868,7 +868,7 @@ async def test_not_applied_retries_same_execution_once(
     application.task(handler, effect="non_replay_safe")
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
@@ -929,7 +929,7 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
     application = CapabilityGroup[None]("application")
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
@@ -1204,7 +1204,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
     application.task(handler, effect="none")
     application.agent(
         "default",
-        model="default",
+        model_route="default",
         allow_tools=(),
         allow_skills=(),
         allow_subagents=(),
