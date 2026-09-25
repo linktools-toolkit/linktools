@@ -26,6 +26,7 @@ from ..spec import (
     SkillSpecCodec,
     RepositoryInstructionDocument,
 )
+from ._contribution import CapabilityContribution
 from ._resource_path import (
     mcp_resource_path,
     validate_resource_path,
@@ -222,9 +223,7 @@ async def _load_skills(
 
 async def _load_mcp(
     context: CapabilityLoadContext,
-) -> "Sequence[object]":
-    from ._contribution import CapabilityContribution
-
+) -> "Sequence[CapabilityContribution[object] | MCPServerSpec]":
     entries = context.list(kind="mcp")
     roots, declarations = _package_declarations(
         entries,
@@ -233,7 +232,7 @@ async def _load_mcp(
     values = await context.read_many(tuple(entry.key for entry in declarations))
     by_key = dict(zip((entry.key for entry in declarations), values, strict=True))
     codec = MCPServerSpecCodec()
-    result: list[object] = []
+    result: list[CapabilityContribution[object] | MCPServerSpec] = []
     package_main_keys = {entry.key for entry in roots}
     for entry in declarations:
         key = entry.key
@@ -309,6 +308,7 @@ async def _load_rules(
             )
         )
     return result
+
 
 def _validate_resource_arguments(
     args: Sequence[str],
