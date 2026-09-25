@@ -760,6 +760,10 @@ class _EffectOutput(BaseModel):
     value: str
 
 
+class _ChangedEffectOutput(BaseModel):
+    value: int
+
+
 @pytest.mark.asyncio
 async def test_public_graph_start_canonicalizes_registered_task_semantics() -> None:
     async def valid_output(context: TaskNodeContext[None]) -> JsonValue:
@@ -1273,6 +1277,83 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
         if launcher is not None:
             await launcher.shutdown()
         await state.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "semantic-drift-state"
+    entered = asyncio.Event()
+
+    async def blocking_task(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        entered.set()
+        await asyncio.Event().wait()
+        return {"value": "unreachable"}
+
+    first = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.semantic-drift", 1, blocking_task)
+    first.task(
+        handler,
+        effect_policy="none",
+        output_type=_EffectOutput,
+    )
+    state = RuntimeStorage.filesystem(storage_root)
+    graph = TaskGraph("semantic-drift", (handler.node("node"),))
+
+    async with Runtime.open(
+        "semantic-drift",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(first,),
+    ) as runtime:
+        await runtime.start_graph(
+            graph,
+            idempotency_key="semantic-drift-run-0001",
+        )
+        await asyncio.wait_for(entered.wait(), 10)
+
+    async def reconcile(
+        context: TaskNodeContext[None],
+    ) -> TaskEffectResolution:
+        del context
+        return TaskEffectResolution("unknown")
+
+    reconcile_changed = CapabilityGroup[None]("application")
+    reconcile_changed.task(
+        TaskFunction[None]("example.semantic-drift", 1, blocking_task),
+        effect_policy="none",
+        output_type=_EffectOutput,
+        reconcile=reconcile,
+    )
+    with pytest.raises(AIError) as reconcile_error:
+        async with Runtime.open(
+            "semantic-drift",
+            models=_TaskTestModels(),  # type: ignore[arg-type]
+            storage=RuntimeStorage.filesystem(storage_root),
+            capabilities=(reconcile_changed,),
+        ):
+            pass
+    assert reconcile_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert reconcile_error.value.safe_details["reason"] == "task_reconcile_changed"
+
+    output_changed = CapabilityGroup[None]("application")
+    output_changed.task(
+        TaskFunction[None]("example.semantic-drift", 1, blocking_task),
+        effect_policy="none",
+        output_type=_ChangedEffectOutput,
+    )
+    with pytest.raises(AIError) as output_error:
+        async with Runtime.open(
+            "semantic-drift",
+            models=_TaskTestModels(),  # type: ignore[arg-type]
+            storage=RuntimeStorage.filesystem(storage_root),
+            capabilities=(output_changed,),
+        ):
+            pass
+    assert output_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert output_error.value.safe_details["reason"] == "task_output_contract_changed"
 
 
 @pytest.mark.asyncio
