@@ -7,7 +7,7 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Generic, Literal, TypeVar, cast, get_type_hints
+from typing import Generic, Literal, TypeVar, get_type_hints
 
 from linktools.core import environ
 from pydantic_ai import Tool
@@ -155,10 +155,7 @@ class CapabilityGroup(Generic[AppT]):
             )
         if assets is not None:
             for kind in ("agent", "skill", "mcp", "rule"):
-                self._loaders[kind] = cast(
-                    "CapabilityLoader[AppT]",
-                    BuiltinDeclarationLoader(kind),
-                )
+                self._loaders[kind] = BuiltinDeclarationLoader(kind)
 
     @property
     def id(self) -> str:
@@ -229,10 +226,7 @@ class CapabilityGroup(Generic[AppT]):
             output_type,
             reconcile,
         )
-        contribution = cast(
-            "CapabilityContribution[AppT]",
-            CapabilityContribution.from_task(registered),
-        )
+        contribution = CapabilityContribution.from_task(registered)
         if any(
             value.kind == "task"
             and value.id == contribution.id
@@ -245,10 +239,7 @@ class CapabilityGroup(Generic[AppT]):
 
     def task_expander(self, expander: TaskExpander) -> TaskExpanderRef:
         """Register one pure application-owned TaskGraph expander revision."""
-        contribution = cast(
-            "CapabilityContribution[AppT]",
-            CapabilityContribution.from_task_expander(expander),
-        )
+        contribution = CapabilityContribution.from_task_expander(expander)
         if any(
             value.kind == "task_expander"
             and value.id == contribution.id
@@ -361,22 +352,16 @@ class CapabilityGroup(Generic[AppT]):
                         value,
                         (AgentSpec, SkillDefinition, MCPServerSpec),
                     ):
-                        item = cast(
-                            "CapabilityContribution[AppT]",
-                            CapabilityContribution.from_declaration(value),
-                        )
+                        item = CapabilityContribution.from_declaration(value)
                     elif isinstance(value, CapabilityContribution):
-                        item = cast("CapabilityContribution[AppT]", value)
+                        item = value
                     elif isinstance(value, RepositoryInstructionDocument):
                         instruction_documents.append(value)
                         continue
                     else:
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     if item.kind == "mcp":
-                        item = cast(
-                            "CapabilityContribution[AppT]",
-                            _bind_mcp_declaration(item.value, context),
-                        )
+                        item = _bind_mcp_declaration(item.value, context)
                     contributions.append(item)
             await context.verify()
             source_revision = context.source_revision
@@ -459,7 +444,7 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
             *args: object,
             **kwargs: object,
         ) -> object:
-            return await cast(Callable[..., Awaitable[object]], function)(
+            return await function(
                 runtime_context.deps,
                 *args,
                 **kwargs,
