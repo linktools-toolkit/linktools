@@ -5,7 +5,7 @@
 import pytest
 from pydantic_ai import Tool
 
-from linktools.ai.capability import CapabilityContribution, tool_semantic_metadata
+from linktools.ai.capability import CapabilityContribution, tool_metadata
 from linktools.ai.errors import AIError, ErrorCode
 
 
@@ -16,8 +16,8 @@ async def _probe() -> str:
 @pytest.mark.parametrize(
     "metadata",
     (
-        tool_semantic_metadata(effect="none"),
-        tool_semantic_metadata(tool_class="business"),
+        tool_metadata(effect="none"),
+        tool_metadata(tool_class="business"),
     ),
 )
 def test_tool_contribution_rejects_incomplete_runtime_contract(
@@ -36,7 +36,7 @@ def test_tool_revision_defines_named_identity() -> None:
     baseline = Tool(
         sample,
         name="sample",
-        metadata=tool_semantic_metadata(
+        metadata=tool_metadata(
             effect="none", plan_safe=True, tool_class="business"
         ),
     )
@@ -45,7 +45,7 @@ def test_tool_revision_defines_named_identity() -> None:
         name="sample",
         timeout=2.0,
         max_retries=3,
-        metadata=tool_semantic_metadata(
+        metadata=tool_metadata(
             effect="replay_safe", plan_safe=True, tool_class="business"
         ),
     )
@@ -69,7 +69,7 @@ def test_upstream_metadata_is_contract_data_not_identity() -> None:
     def sample(value: str) -> str:
         return value
 
-    metadata = tool_semantic_metadata(
+    metadata = tool_metadata(
         effect="none", plan_safe=True, tool_class="business"
     )
     first = CapabilityContribution.from_opaque(

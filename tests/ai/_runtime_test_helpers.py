@@ -17,7 +17,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import RequestUsage
 
-from linktools.ai.capability import tool_semantic_metadata
+from linktools.ai.capability import tool_metadata
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
@@ -43,7 +43,7 @@ def semantic_tool(
     path_fields = list(descriptor.workspace_path_fields) or None
     return Tool(
         function,
-        metadata=tool_semantic_metadata(
+        metadata=tool_metadata(
             effect=descriptor.effect,
             tool_class=descriptor.tool_class,
             path_fields=path_fields,

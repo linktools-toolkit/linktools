@@ -94,7 +94,7 @@ from ..capability import (
     tool_compaction_keep_result_from_metadata,
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
-    validate_tool_semantic_metadata,
+    validate_tool_metadata,
     workspace_capabilities,
 )
 from ..core import (
@@ -902,7 +902,7 @@ async def _materialize_agent(
             id=(
                 "linktools.plan-mode"
                 if scope.mode == "plan"
-                else "linktools.semantic-capture"
+                else "linktools.tool-control"
             ),
         )
     )
@@ -1053,7 +1053,7 @@ def _bound_tool_metadata(
     metadata = contract.get("metadata")
     if not isinstance(metadata, Mapping):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    validate_tool_semantic_metadata(
+    validate_tool_metadata(
         metadata,
         require_effect=True,
         require_tool_class=True,
@@ -1100,7 +1100,7 @@ def _plan_mode_prepare(
             context_dedupe_by_tool: dict[str, str] = {}
             for tool_def in tool_defs:
                 metadata = tool_def.metadata
-                validate_tool_semantic_metadata(metadata)
+                validate_tool_metadata(metadata)
                 if (
                     tool_def.tool_kind in _PLAN_SAFE_FRAMEWORK_TOOL_KINDS
                     or tool_compaction_keep_result_from_metadata(metadata)

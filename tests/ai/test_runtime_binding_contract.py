@@ -22,7 +22,7 @@ from linktools.ai.capability import (
     SkillDefinition,
     SkillResourceVersion,
     SkillSourceRef,
-    tool_semantic_metadata,
+    tool_metadata,
 )
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -437,7 +437,7 @@ def test_restore_rejects_tool_contract_drift_without_revision_bump() -> None:
         return value
 
     spec = AgentSpec("agent", allow_tools=("sample",))
-    semantic = tool_semantic_metadata(
+    semantic = tool_metadata(
         effect="none",
         plan_safe=True,
         tool_class="business",

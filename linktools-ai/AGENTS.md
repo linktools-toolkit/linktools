@@ -29,6 +29,11 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 
 ### Durable contracts and identity
 
+- Named behavior uses explicit `id + revision`; reserve `version` for wire or schema format versions.
+- `Spec` is an authoring declaration, `Compiled` is Runtime-resolved behavior, `Contract` is durable execution semantics, `Capture` is an immutable view of mutable sources, `Checkpoint` is a recoverable execution point, and `Snapshot` is reserved for portable point-in-time state.
+- Storage layer identity, resource ownership, tenant identity, and caller identity use distinct names. Do not reuse `source`, `owner`, or `state` for unrelated layers.
+- Authoring-only values must not remain as a second source of truth after a durable contract has been produced.
+
 - Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation. A local SQLite state backend is the explicit exception and may initialize its own local schema when that state store is created or opened.
 - Durable wire formats and named behavior identities are explicit LinkTools contracts. Honor published or explicitly committed compatibility obligations. Without such an obligation, remove obsolete pre-release readers, aliases, defaults and migrations while updating current writers, readers and verification together. Do not prebuild compatibility paths for hypothetical versions.
 - Named behavior identity is the explicit `(kind, id, revision)` reference. Do not hash it or maintain a second identity representation. Agent, Tool, Skill, MCP, generic Capability, Task, TaskExpander, and named Metric definitions keep full contracts for restore and validation; any behavior change under the same named contract requires an explicit revision bump.

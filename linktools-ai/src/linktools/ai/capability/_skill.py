@@ -24,7 +24,7 @@ from ._skill_source import (
     require_skill_resource_path,
 )
 from ._tool_signal import ToolCallFailed, ToolCallRetry
-from ._tool_semantic import tool_semantic_metadata
+from ._tool_metadata import tool_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +169,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         toolset = FunctionToolset[AgentContext[object]](id=self.id)
 
         @toolset.tool(
-            metadata=tool_semantic_metadata(
+            metadata=tool_metadata(
                 plan_safe=True,
                 compaction_keep_result=True,
             )
@@ -181,7 +181,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             return await self.list_skills()
 
         @toolset.tool(
-            metadata=tool_semantic_metadata(
+            metadata=tool_metadata(
                 plan_safe=True,
                 compaction_keep_result=True,
             )

@@ -34,9 +34,9 @@ from ._contribution import CapabilityContribution, _freeze_contribution
 from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillDefinition
 from ._task import TaskExpander
-from ._tool_semantic import (
-    tool_semantic_metadata,
-    validate_tool_semantic_metadata,
+from ._tool_metadata import (
+    tool_metadata,
+    validate_tool_metadata,
 )
 from ._workspace import _workspace_tool_definitions
 
@@ -193,7 +193,7 @@ class CapabilityGroup(Generic[AppT]):
         tool_name = name or function.__name__
         _validate_business_tool_name(tool_name)
         adapted = _adapt_tool(function, name=tool_name)
-        adapted.metadata = tool_semantic_metadata(
+        adapted.metadata = tool_metadata(
             effect=effect,
             plan_safe=plan_safe,
             tool_class="business",

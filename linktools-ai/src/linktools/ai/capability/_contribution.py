@@ -26,7 +26,7 @@ from ..task import TaskExpanderRef, TaskNodeHandler
 from ._context import AgentContext
 from ._skill import SkillDefinition
 from ._task import TaskExpander
-from ._tool_semantic import validate_tool_semantic_metadata
+from ._tool_metadata import validate_tool_metadata
 
 AppT = TypeVar("AppT")
 
@@ -251,7 +251,7 @@ def _contribution_contract(
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if kind == "tool" and isinstance(value, Tool):
         definition = value.tool_def
-        validate_tool_semantic_metadata(
+        validate_tool_metadata(
             definition.metadata,
             require_effect=True,
             require_tool_class=True,

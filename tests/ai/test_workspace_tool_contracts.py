@@ -28,7 +28,12 @@ from linktools.ai.workspace._sandbox_protocol import (
 
 
 def _golden_contract() -> dict[str, object]:
-    path = Path(__file__).parent / "fixtures" / "persistence" / "workspace_tool_semantics_v1.json"
+    path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "persistence"
+        / "workspace_tool_semantics_v1.json"
+    )
     return json.loads(path.read_text(encoding="utf-8"))
 
 

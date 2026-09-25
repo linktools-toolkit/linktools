@@ -21,7 +21,7 @@ from mcp.types import Tool as MCPTool
 
 from ..capability import (
     AgentContext,
-    tool_semantic_metadata,
+    tool_metadata,
     validate_resource_path,
     validate_resource_tree,
 )
@@ -50,14 +50,14 @@ from ._tool_metrics import _ToolMetricContext
 from ._mcp_transport import _SandboxMCPTransport
 
 _logger = environ.get_logger("ai.runtime.mcp")
-_MCP_TOOL_METADATA = tool_semantic_metadata(
+_MCP_TOOL_METADATA = tool_metadata(
     effect="non_replay_safe",
     tool_class="mcp",
 )
 
 
 def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
-    metadata = tool_semantic_metadata(base=base)
+    metadata = tool_metadata(base=base)
     metadata.update(_MCP_TOOL_METADATA)
     return metadata
 

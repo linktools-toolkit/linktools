@@ -26,7 +26,7 @@ from ._skill_source import (
 from ._subagent import SubagentCapability, SubagentDelegate
 from ._task import TaskExpander, TaskExpansionContext
 from ._tool_signal import ToolCallFailed, ToolCallRetry
-from ._tool_semantic import (
+from ._tool_metadata import (
     TOOL_CLASS_METADATA_KEY,
     TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY,
     TOOL_CONTEXT_DEDUPE_METADATA_KEY,
@@ -39,8 +39,8 @@ from ._tool_semantic import (
     tool_effect_from_metadata,
     tool_path_fields_from_metadata,
     tool_plan_safe_from_metadata,
-    tool_semantic_metadata,
-    validate_tool_semantic_metadata,
+    tool_metadata,
+    validate_tool_metadata,
 )
 from ._workspace import (
     WorkspaceToolDeclaration,
@@ -94,6 +94,6 @@ __all__ = [
     "tool_effect_from_metadata",
     "tool_path_fields_from_metadata",
     "tool_plan_safe_from_metadata",
-    "tool_semantic_metadata",
-    "validate_tool_semantic_metadata",
+    "tool_metadata",
+    "validate_tool_metadata",
 ]

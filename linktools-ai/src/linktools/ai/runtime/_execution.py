@@ -205,9 +205,6 @@ class _LocalExecutionWaiter(Protocol):
 
 
 class _RepositoryInstructionBundle(Protocol):
-    @property
-    def digest(self) -> str: ...
-
     def to_payload(self) -> JsonValue: ...
 
 

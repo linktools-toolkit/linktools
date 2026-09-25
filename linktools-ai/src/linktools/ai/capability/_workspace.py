@@ -26,7 +26,7 @@ from ..workspace import (
 )
 from ._context import AgentContext
 from ._tool_signal import ToolCallRetry
-from ._tool_semantic import tool_effect_from_metadata, tool_semantic_metadata
+from ._tool_metadata import tool_effect_from_metadata, tool_metadata
 
 _ResultT = TypeVar("_ResultT")
 
@@ -63,72 +63,72 @@ def _runtime_tool_metadata(
 
 
 _WORKSPACE_TOOL_DECLARATIONS = (
-    WorkspaceToolDeclaration("attach_files", tool_semantic_metadata(
+    WorkspaceToolDeclaration("attach_files", tool_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("paths",),
     )),
-    WorkspaceToolDeclaration("create_directory", tool_semantic_metadata(
+    WorkspaceToolDeclaration("create_directory", tool_metadata(
         effect="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("edit_file", tool_semantic_metadata(
+    WorkspaceToolDeclaration("edit_file", tool_metadata(
         effect="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("file_info", tool_semantic_metadata(
+    WorkspaceToolDeclaration("file_info", tool_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("find_files", tool_semantic_metadata(
+    WorkspaceToolDeclaration("find_files", tool_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("list_directory", tool_semantic_metadata(
+    WorkspaceToolDeclaration("list_directory", tool_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("read_file", tool_semantic_metadata(
+    WorkspaceToolDeclaration("read_file", tool_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
         context_dedupe="workspace_file_read_v1",
     )),
-    WorkspaceToolDeclaration("search_files", tool_semantic_metadata(
+    WorkspaceToolDeclaration("search_files", tool_metadata(
         effect="none",
         plan_safe=True,
         tool_class="filesystem.read",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("write_file", tool_semantic_metadata(
+    WorkspaceToolDeclaration("write_file", tool_metadata(
         effect="non_replay_safe",
         tool_class="filesystem.write",
         path_fields=("path",),
     )),
-    WorkspaceToolDeclaration("check_command", tool_semantic_metadata(
+    WorkspaceToolDeclaration("check_command", tool_metadata(
         effect="none",
         plan_safe=True,
         tool_class="shell",
     )),
-    WorkspaceToolDeclaration("run_command", tool_semantic_metadata(
+    WorkspaceToolDeclaration("run_command", tool_metadata(
         effect="non_replay_safe",
         tool_class="shell",
     )),
-    WorkspaceToolDeclaration("start_command", tool_semantic_metadata(
+    WorkspaceToolDeclaration("start_command", tool_metadata(
         effect="non_replay_safe",
         tool_class="shell",
     )),
-    WorkspaceToolDeclaration("stop_command", tool_semantic_metadata(
+    WorkspaceToolDeclaration("stop_command", tool_metadata(
         effect="non_replay_safe",
         tool_class="shell",
     )),

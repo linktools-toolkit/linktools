@@ -29,8 +29,8 @@ from linktools.ai.capability import (
     SkillDefinition,
     SkillSourceRef,
     SkillSourceRegistry,
-    tool_semantic_metadata,
-    validate_tool_semantic_metadata,
+    tool_metadata,
+    validate_tool_metadata,
 )
 from linktools.ai.asset import (
     AssetKey,
@@ -341,8 +341,8 @@ def test_memory_owner_selects_only_its_declared_tools() -> None:
     )
 
 
-def test_tool_semantic_metadata_preserves_upstream_values() -> None:
-    metadata = tool_semantic_metadata(
+def test_tool_metadata_preserves_upstream_values() -> None:
+    metadata = tool_metadata(
         base={"upstream": "retained"},
         effect="replay_safe",
         plan_safe=True,
@@ -365,11 +365,11 @@ def test_tool_semantic_metadata_preserves_upstream_values() -> None:
         {"linktools.ai.context_dedupe": "legacy"},
     ),
 )
-def test_invalid_tool_semantics_fail_without_fallback(
+def test_invalid_tool_metadata_fails_without_fallback(
     metadata: dict[str, object],
 ) -> None:
     with pytest.raises(AIError) as error:
-        validate_tool_semantic_metadata(metadata)
+        validate_tool_metadata(metadata)
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
@@ -384,7 +384,7 @@ def test_business_tool_rejects_reserved_mcp_transport_prefix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_business_tool_semantics_are_captured_in_tool_metadata() -> None:
+async def test_business_tool_metadata_is_captured_in_tool_contract() -> None:
     async def business_tool(
         _ctx: RunContext[None],
         value: str,
@@ -954,7 +954,7 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
                 [
                     Tool(
                         _business,
-                        metadata=tool_semantic_metadata(
+                        metadata=tool_metadata(
                             effect="none",
                             tool_class="business",
                         ),

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shared Tool metadata keys and strict semantic parsing."""
+"""Shared Tool metadata keys and strict metadata parsing."""
 
 from collections.abc import Mapping, Sequence
 from typing import Literal, cast
@@ -37,7 +37,7 @@ _TOOL_CLASSES = {
 _TOOL_CONTEXT_DEDUPE = "workspace_file_read_v1"
 
 
-def tool_semantic_metadata(
+def tool_metadata(
     *,
     effect: ToolEffect | None = None,
     plan_safe: bool | None = None,
@@ -65,11 +65,11 @@ def tool_semantic_metadata(
         )
     if context_dedupe is not None:
         metadata[TOOL_CONTEXT_DEDUPE_METADATA_KEY] = context_dedupe
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     return metadata
 
 
-def validate_tool_semantic_metadata(
+def validate_tool_metadata(
     metadata: Mapping[str, object] | None,
     *,
     require_effect: bool = False,
@@ -127,13 +127,13 @@ def tool_effect_from_metadata(
     *,
     require: bool = False,
 ) -> ToolEffect | None:
-    validate_tool_semantic_metadata(metadata, require_effect=require)
+    validate_tool_metadata(metadata, require_effect=require)
     value = None if metadata is None else metadata.get(TOOL_EFFECT_METADATA_KEY)
     return cast("ToolEffect | None", value)
 
 
 def tool_plan_safe_from_metadata(metadata: Mapping[str, object] | None) -> bool:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = None if metadata is None else metadata.get(TOOL_PLAN_SAFE_METADATA_KEY)
     return False if value is None else cast(bool, value)
 
@@ -141,7 +141,7 @@ def tool_plan_safe_from_metadata(metadata: Mapping[str, object] | None) -> bool:
 def tool_class_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> ToolClass | None:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = None if metadata is None else metadata.get(TOOL_CLASS_METADATA_KEY)
     return cast("ToolClass | None", value)
 
@@ -149,7 +149,7 @@ def tool_class_from_metadata(
 def tool_path_fields_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> tuple[str, ...]:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = None if metadata is None else metadata.get(TOOL_PATH_FIELDS_METADATA_KEY)
     return () if value is None else tuple(cast(Sequence[str], value))
 
@@ -157,7 +157,7 @@ def tool_path_fields_from_metadata(
 def tool_compaction_keep_result_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> bool:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = (
         None
         if metadata is None
@@ -169,7 +169,7 @@ def tool_compaction_keep_result_from_metadata(
 def tool_context_dedupe_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> ToolContextDedupe | None:
-    validate_tool_semantic_metadata(metadata)
+    validate_tool_metadata(metadata)
     value = (
         None
         if metadata is None
@@ -194,6 +194,6 @@ __all__ = [
     "tool_effect_from_metadata",
     "tool_path_fields_from_metadata",
     "tool_plan_safe_from_metadata",
-    "tool_semantic_metadata",
-    "validate_tool_semantic_metadata",
+    "tool_metadata",
+    "validate_tool_metadata",
 ]
