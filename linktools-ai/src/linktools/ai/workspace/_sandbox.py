@@ -117,7 +117,7 @@ class SandboxResource:
         executable_bits: Mapping[str, int] | None = None,
         materialize_root: Path | None = None,
     ) -> "SandboxResource | None":
-        """Expose pinned Asset files, materializing exact bytes only when needed."""
+        """Expose exact Asset versions as a read-only sandbox resource."""
         if not files:
             return None
         ordered = tuple(sorted(files.items()))
@@ -134,62 +134,55 @@ class SandboxResource:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         refs = tuple(ref for _relative, ref in ordered)
+        if materialize_root is not None:
+            values = await reader.read_versions(refs)
+            await asyncio.to_thread(materialize_root.mkdir, parents=True, exist_ok=True)
+            local: dict[str, Path] = {}
+            for (relative, _ref), data in zip(ordered, values, strict=True):
+                target = materialize_root.joinpath(*PurePosixPath(relative).parts)
+                await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(target.write_bytes, data)
+                mode = 0 if executable_bits is None else executable_bits[relative]
+                await asyncio.to_thread(os.chmod, target, 0o444 | mode)
+                local[relative] = target.resolve()
+            return cls(resource_id, materialize_root.resolve(), local)
+
         keys = tuple(ref.key for ref in refs)
         paths = await reader.local_paths(keys)
-        if all(path is not None for path in paths):
-            current = await reader.resolve_versions(keys)
-            if current == refs:
-                local: dict[str, Path] = {}
-                roots: set[Path] = set()
-                usable = True
-                for (relative, _ref), path in zip(ordered, paths, strict=True):
-                    assert path is not None
-                    try:
-                        resolved = path.resolve(strict=True)
-                        if not resolved.is_file():
-                            usable = False
-                            break
-                        if executable_bits is not None:
-                            mode = resolved.stat().st_mode & 0o111
-                            if mode != executable_bits[relative]:
-                                usable = False
-                                break
-                    except (OSError, RuntimeError):
-                        usable = False
-                        break
-                    local[relative] = resolved
-                    root = path
-                    for _part in PurePosixPath(relative).parts:
-                        root = root.parent
-                    try:
-                        roots.add(root.resolve(strict=True))
-                    except (OSError, RuntimeError):
-                        usable = False
-                        break
-                if usable:
-                    await reader.read_versions(refs)
-                    source = next(iter(roots)) if len(roots) == 1 else None
-                    if source is not None and all(
-                        source.joinpath(*PurePosixPath(relative).parts).resolve()
-                        == path
-                        for relative, path in local.items()
-                    ):
-                        return cls(resource_id, source, local)
-                    return cls(resource_id, None, local)
-
-        values = await reader.read_versions(refs)
-        if materialize_root is None:
+        if any(path is None for path in paths):
+            await reader.read_versions(refs)
             return None
-        await asyncio.to_thread(materialize_root.mkdir, parents=True, exist_ok=True)
-        local = {}
-        for (relative, _ref), data in zip(ordered, values, strict=True):
-            target = materialize_root.joinpath(*PurePosixPath(relative).parts)
-            await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
-            await asyncio.to_thread(target.write_bytes, data)
-            mode = 0 if executable_bits is None else executable_bits[relative]
-            await asyncio.to_thread(os.chmod, target, 0o444 | mode)
-            local[relative] = target.resolve()
-        return cls(resource_id, materialize_root.resolve(), local)
+        if await reader.resolve_versions(keys) != refs:
+            await reader.read_versions(refs)
+            return None
+        await reader.read_versions(refs)
+        local = {
+            relative: path.resolve(strict=True)
+            for (relative, _ref), path in zip(ordered, paths, strict=True)
+            if path is not None
+        }
+        if len(local) != len(ordered):
+            return None
+        if executable_bits is not None and any(
+            path.stat().st_mode & 0o111 != executable_bits[relative]
+            for relative, path in local.items()
+        ):
+            return None
+        roots: set[Path] = set()
+        for (relative, _ref), path in zip(ordered, paths, strict=True):
+            assert path is not None
+            root = path
+            for _part in PurePosixPath(relative).parts:
+                root = root.parent
+            roots.add(root.resolve(strict=True))
+        source = next(iter(roots)) if len(roots) == 1 else None
+        if source is not None and all(
+            source.joinpath(*PurePosixPath(relative).parts) == path
+            for relative, path in local.items()
+        ):
+            return cls(resource_id, source, local)
+        return cls(resource_id, None, local)
+
 
 
 @dataclass(frozen=True, slots=True)
