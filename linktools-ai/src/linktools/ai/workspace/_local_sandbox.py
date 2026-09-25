@@ -205,6 +205,12 @@ class _LocalSandboxSession:
             for process, _job in self._pending_processes.values()
             if process.pid is not None
         )
+        values.update(
+            process._process.pid
+            for process in self._stdio_processes
+            if process._process.pid is not None
+            and process._process.returncode is None
+        )
         return frozenset(values)
 
     async def open_stdio_process(
