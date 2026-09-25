@@ -362,6 +362,53 @@ async def test_custom_skill_loader_keeps_captured_resource_versions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_custom_mcp_loader_binds_resource_versions() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    resource = AssetKey("worker", "server/script.py")
+    await store.put(resource, b"original")
+
+    class WorkerLoader:
+        source_kind = "worker"
+
+        async def load(
+            self,
+            _context: CapabilityLoadContext,
+        ) -> "Sequence[MCPServerSpec]":
+            return (
+                MCPServerSpec(
+                    "server",
+                    "python",
+                    ("resource:script.py",),
+                    AssetKey("worker", "server"),
+                ),
+            )
+
+    group = CapabilityGroup("application", assets=store)
+    group.loader("worker", WorkerLoader())
+    try:
+        capture = await group.capture()
+        assert len(capture.contributions) == 1
+        contribution = capture.contributions[0]
+        assert contribution.kind == "mcp"
+        server, versions = MCPServerSpecCodec().from_execution_payload(
+            contribution.contract
+        )
+        assert server.resource_root == AssetKey("worker", "server")
+        assert contribution.contract["asset_source_id"] == "application"
+        assert versions is not None
+        assert len(versions) == 1
+
+        await store.put(resource, b"changed")
+        reader = capture.asset_reader
+        assert reader is not None
+        assert await reader.read_versions(versions) == (b"original",)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_capture_rejects_asset_change_during_loader() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
