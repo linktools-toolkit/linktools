@@ -31,7 +31,7 @@ from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
 from ._contribution import CapabilityContribution, _freeze_contribution
-from ._declaration import BuiltinDeclarationLoader
+from ._declaration import BuiltinDeclarationLoader, _bind_mcp_declaration
 from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillDefinition
 from ._task import TaskExpander
@@ -372,6 +372,11 @@ class CapabilityGroup(Generic[AppT]):
                         continue
                     else:
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                    if item.kind == "mcp":
+                        item = cast(
+                            "CapabilityContribution[AppT]",
+                            _bind_mcp_declaration(item.value, context),
+                        )
                     contributions.append(item)
             await context.verify()
             source_revision = context.source_revision
