@@ -376,10 +376,15 @@ async def _load_rules(
             metadata, separator, content = content[4:].partition("\n---\n")
             if not separator:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-            fields = metadata.splitlines()
-            if len(fields) != 1 or not fields[0].startswith("scope: "):
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-            scope = fields[0][len("scope: ") :]
+            declared_scope: str | None = None
+            for field in metadata.splitlines():
+                if not field.startswith("scope:"):
+                    continue
+                if declared_scope is not None or not field.startswith("scope: "):
+                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+                declared_scope = field[len("scope: ") :]
+            if declared_scope is not None:
+                scope = declared_scope
         result.append(
             RepositoryInstructionDocument(
                 f"rule:{source_id}",
