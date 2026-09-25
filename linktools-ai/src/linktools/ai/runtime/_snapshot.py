@@ -33,7 +33,6 @@ from ..storage import (
     ObjectStore,
     read_object,
 )
-from ._snapshot_contract import RunSnapshot
 from ._runtime_history import RuntimeHistory
 from .state import SnapshotExclusiveGuard, RuntimeState, SnapshotLimits
 
@@ -1393,7 +1392,6 @@ def _restored_runtime(root: Path, value: Mapping[str, object]) -> RestoredRuntim
 
 __all__ = [
     "RestoredRuntime",
-    "RunSnapshot",
     "RuntimeSnapshot",
     "SnapshotExclusiveGuard",
     "SnapshotLimits",

@@ -24,7 +24,6 @@ from ..core import (
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
-from ._snapshot_contract import RunSnapshot
 from .service_api import (
     CompareEvaluationRequest,
     EvaluationComparison,
@@ -296,34 +295,15 @@ class DefaultEvaluationService:
             request.candidate_id,
         )
 
-    async def snapshot(
-        self,
-        evaluation_id: str,
-        *,
-        principal: Principal,
-    ) -> RunSnapshot:
-        record, source = await self._synchronize(
-            await self._authorized(
-                evaluation_id,
-                principal,
-                AuthorizationAction.EVALUATION_READ,
-            )
-        )
-        return RunSnapshot(
-            evaluation_id,
-            record.execution_id,
-            source.binding_digest,
-        )
-
     async def replay(
         self,
         agent_id: str,
-        snapshot_id: str,
+        evaluation_id: str,
         request: ReplayEvaluationRequest,
     ) -> ExecutionHandle:
         record, source = await self._synchronize(
             await self._authorized(
-                snapshot_id,
+                evaluation_id,
                 request.principal,
                 AuthorizationAction.EVALUATION_READ,
             )

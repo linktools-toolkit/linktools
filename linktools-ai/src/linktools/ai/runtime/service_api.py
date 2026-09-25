@@ -33,7 +33,6 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent
 from ._input_contract import UserPromptInput, validate_user_input
-from ._snapshot_contract import RunSnapshot
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -1369,13 +1368,10 @@ class EvaluationService(Protocol):
     async def compare(
         self, request: CompareEvaluationRequest
     ) -> EvaluationComparison: ...
-    async def snapshot(
-        self, evaluation_id: str, *, principal: Principal
-    ) -> RunSnapshot: ...
     async def replay(
         self,
         agent_id: str,
-        snapshot_id: str,
+        evaluation_id: str,
         request: ReplayEvaluationRequest,
     ) -> ExecutionHandle: ...
 

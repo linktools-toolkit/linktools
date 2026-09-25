@@ -759,12 +759,12 @@ class Runtime(Generic[AppT]):
     async def _replay_evaluation_for_agent(
         self,
         agent_id: str,
-        snapshot_id: str,
+        evaluation_id: str,
         request: ReplayEvaluationRequest,
     ) -> "Execution[AppT]":
         handle = await self.evaluation.replay(
             agent_id,
-            snapshot_id,
+            evaluation_id,
             request,
         )
         return Execution(
