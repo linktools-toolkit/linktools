@@ -445,6 +445,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             retry_delay_seconds=node.retry_delay_seconds,
             output_contract=node.output_contract,
             effect_policy=node.effect_policy,
+            reconcile=node.reconcile,
             dependency_policy=node.dependency_policy,
         )
 
@@ -527,6 +528,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             retry_delay_seconds=node.retry_delay_seconds,
             output_contract=node.output_contract,
             effect_policy=node.effect_policy,
+            reconcile=node.reconcile,
             dependency_policy=node.dependency_policy,
         )
 
@@ -784,6 +786,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             retry_delay_seconds=node.retry_delay_seconds,
             output_contract=_output_contract(handler, node.output_type),
             effect_policy=_handler_effect_policy(handler),
+            reconcile=getattr(handler, "reconcile", None) is not None,
             dependency_policy=node.dependency_policy,
         )
 
@@ -877,6 +880,17 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         "graph_id": graph_state.graph_id,
                         "node_id": node.node_id,
                         "reason": "task_output_contract_changed",
+                    },
+                )
+            if node.reconcile != (
+                getattr(handler, "reconcile", None) is not None
+            ):
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    safe_details={
+                        "graph_id": graph_state.graph_id,
+                        "node_id": node.node_id,
+                        "reason": "task_reconcile_changed",
                     },
                 )
             if handler is self._agent:
@@ -2306,7 +2320,7 @@ def _task_binding(
         node.timeout_seconds,
         node.max_attempts,
         node.retry_delay_seconds,
-        getattr(handler, "reconcile", None) is not None,
+        node.reconcile,
     )
 
 
