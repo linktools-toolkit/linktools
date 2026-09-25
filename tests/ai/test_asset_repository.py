@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Store-backed CapabilityGroup discovery and snapshot contract checks."""
+"""Store-backed CapabilityGroup discovery and capture contract checks."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -21,7 +21,6 @@ from linktools.ai.capability import (
     SkillResourceVersion,
     SkillSourceRef,
 )
-from linktools.ai.capability._group import contribution_contract
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec, SkillSpec, SkillSpecCodec
 from linktools.ai.storage import (
@@ -39,7 +38,7 @@ async def _store() -> AssetStore:
 
 
 @pytest.mark.asyncio
-async def test_builtin_loader_snapshots_agent_skill_and_mcp_declarations() -> None:
+async def test_builtin_loader_captures_agent_skill_and_mcp_declarations() -> None:
     store = await _store()
     agent = AgentSpec("agent", model_route="model")
     skill = SkillSpec("skill", "instructions")
@@ -48,44 +47,45 @@ async def test_builtin_loader_snapshots_agent_skill_and_mcp_declarations() -> No
     await store.put(AssetKey("skill", "skill"), SkillSpecCodec().encode(skill))
     await store.put(AssetKey("mcp", "server"), MCPServerSpecCodec().encode(mcp))
 
-    snapshot = await CapabilityGroup("workspace", assets=store).capture()
+    capture = await CapabilityGroup("workspace", assets=store).capture()
 
-    assert [(item.kind, item.id) for item in snapshot.contributions] == [
+    assert [(item.kind, item.id) for item in capture.contributions] == [
         ("agent", "agent"),
         ("mcp", "server"),
         ("skill", "skill"),
     ]
-    assert [item.value for item in snapshot.contributions] == [
+    assert [item.value for item in capture.contributions] == [
         agent,
         mcp,
         SkillDefinition(skill),
     ]
     assert all(
         "revision" in item.contract
-        for item in snapshot.contributions
+        for item in capture.contributions
     )
 
 
 @pytest.mark.asyncio
-async def test_group_snapshot_exposes_only_read_only_asset_access() -> None:
+async def test_group_capture_exposes_only_read_only_asset_access() -> None:
     store = await _store()
     key = AssetKey("custom", "file")
     await store.put(key, b"contents")
 
-    snapshot = await CapabilityGroup("workspace", assets=store).capture()
-    reader = snapshot.asset_reader
+    capture = await CapabilityGroup("workspace", assets=store).capture()
+    reader = capture.asset_reader
 
     assert isinstance(reader, AssetStoreReader)
     assert reader is not None
-    assert not hasattr(snapshot, "asset_store")
+    assert not hasattr(capture, "asset_store")
     assert not hasattr(reader, "put")
     assert await reader.get(key) == b"contents"
     frozen_version = (await reader.resolve_versions((key,)))[0]
 
     await store.put(key, b"changed")
     with pytest.raises(AIError) as error:
-        await reader.get(key)
+        await capture.verify_source_revision()
     assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    assert await reader.get(key) == b"contents"
     assert await reader.read_versions((frozen_version,)) == (b"contents",)
 
 
@@ -173,7 +173,7 @@ class _CapturingLoader:
 
 
 @pytest.mark.asyncio
-async def test_custom_loader_receives_snapshot_metadata_and_reads_explicit_keys_only() -> None:
+async def test_custom_loader_receives_capture_metadata_and_reads_explicit_keys_only() -> None:
     store = await _store()
     await store.put(AssetKey("custom", "a"), b"a")
     await store.put(AssetKey("custom", "b"), b"b")
@@ -244,7 +244,9 @@ class _PinnedSkillVersionLoader:
             CapabilityContribution.from_declaration(
                 SkillDefinition(
                     SkillSpec("review", "review"),
-                    SkillSourceRef(context.group_id, "review").with_asset_versions(
+                    SkillSourceRef(
+                        context.group_id,
+                        "review",
                         (
                             SkillResourceVersion(
                                 "guide.md",
@@ -257,7 +259,6 @@ class _PinnedSkillVersionLoader:
                                 ),
                             ),
                         ),
-                        "1" * 64,
                     ),
                 )
             ),
@@ -313,7 +314,7 @@ class _DuplicateAgentLoader:
     ) -> "Sequence[CapabilityContribution[object]]":
         del context
         spec = AgentSpec("agent", model_route="other-model")
-        contract = contribution_contract("agent", spec.id, spec)
+        contract = CapabilityContribution.from_declaration(spec).contract
         return (
             CapabilityContribution(
                 "agent",
@@ -356,7 +357,7 @@ class _RaceStore(AssetStore):
 
 
 @pytest.mark.asyncio
-async def test_snapshot_rejects_assets_added_during_declaration_loading() -> None:
+async def test_capture_rejects_assets_added_during_declaration_loading() -> None:
     backend = InMemoryAssetBackend()
     store = _RaceStore(backend)
     await store.initialize()
@@ -369,21 +370,21 @@ async def test_snapshot_rejects_assets_added_during_declaration_loading() -> Non
 
 
 @pytest.mark.asyncio
-async def test_group_snapshot_rejects_source_changes_before_admission() -> None:
+async def test_group_capture_rejects_source_changes_before_admission() -> None:
     store = await _store()
     await store.put(
         AssetKey("agent", "agent"),
         AgentSpecCodec().encode(AgentSpec("agent", model_route="model")),
     )
-    snapshot = await CapabilityGroup("workspace", assets=store).capture()
+    capture = await CapabilityGroup("workspace", assets=store).capture()
     await store.put(AssetKey("other", "late"), b"changed")
 
     with pytest.raises(AIError) as error:
-        await snapshot.verify_source_revision()
+        await capture.verify_source_revision()
 
     assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
     updated = await CapabilityGroup("workspace", assets=store).capture()
-    assert updated.source_revision != snapshot.source_revision
+    assert updated.source_revision != capture.source_revision
 
 
 class _BatchReadStore(AssetStore):
@@ -455,9 +456,9 @@ async def test_builtin_loader_batches_declaration_version_reads() -> None:
         SkillSpecCodec().encode(SkillSpec("skill", "instructions")),
     )
 
-    snapshot = await CapabilityGroup("workspace", assets=store).capture()
+    capture = await CapabilityGroup("workspace", assets=store).capture()
 
-    assert [item.id for item in snapshot.contributions] == [
+    assert [item.id for item in capture.contributions] == [
         "agent",
         "server",
         "skill",

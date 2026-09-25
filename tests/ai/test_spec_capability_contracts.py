@@ -21,9 +21,9 @@ import linktools.ai.agent._compiler as agent_compiler
 import linktools.ai.runtime._mcp as mcp_runtime
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
+    AssetSkillResourceSource,
     CapabilityContribution,
     CapabilityGroup,
-    AssetVersionSkillResourceSource,
     SkillCapability,
     SkillResourceVersion,
     SkillDefinition,
@@ -43,7 +43,6 @@ from linktools.ai.asset import (
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime._binding_resolver import _resolve_mcp_resource_versions
 from linktools.ai.runtime._harness_memory import select_harness_memory_tools
 from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
@@ -270,7 +269,9 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
     )
     definition = SkillDefinition(
         SkillSpec("review", "instructions"),
-        SkillSourceRef("application", "review").with_asset_versions(
+        SkillSourceRef(
+            "application",
+            "review",
             (SkillResourceVersion("guide.md", asset, 0o111),),
         ),
     )
@@ -318,16 +319,14 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_asset_version_skill_source_rejects_mismatched_source_ref() -> None:
+@pytest.mark.asyncio
+async def test_asset_skill_source_rejects_mismatched_source_ref() -> None:
     store = AssetStore(StorageOverlay(InMemoryAssetBackend()))
-    ref = SkillSourceRef("other", "review").with_asset_versions(())
+    ref = SkillSourceRef("other", "review")
+    source = AssetSkillResourceSource("application", store)
     with pytest.raises(AIError) as error:
-        AssetVersionSkillResourceSource(
-            "application",
-            {"review": ref},
-            store,
-        )
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        await source.inspect(ref)
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 def test_memory_owner_selects_only_its_declared_tools() -> None:
@@ -613,27 +612,45 @@ def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
     assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
+async def _capture_mcp_resource_versions(
+    store: AssetStore,
+    server: MCPServerSpec,
+) -> tuple[AssetVersionRef, ...]:
+    capture = await CapabilityGroup("application", assets=store).capture()
+    contribution = next(
+        item
+        for item in capture.contributions
+        if item.kind == "mcp" and item.id == server.id
+    )
+    _restored, versions = MCPServerSpecCodec().from_execution_payload(
+        contribution.contract
+    )
+    assert versions is not None
+    return versions
+
+
 @pytest.mark.asyncio
-async def test_mcp_resource_resolution_is_stable_and_includes_binary_files() -> None:
+async def test_mcp_resource_capture_is_stable_and_includes_binary_files() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
     root = AssetKey("mcp", "server")
+    server = MCPServerSpec("server", "python", (), root)
+    codec = MCPServerSpecCodec()
     binary = b"\x00\xffresource"
     try:
+        await store.put(
+            AssetKey("mcp", "server/mcp.json"),
+            codec.encode(server),
+        )
         await store.put(AssetKey("mcp", "server/data.bin"), binary)
         await store.put(AssetKey("mcp", "server/nested/guide.md"), b"guide")
-        first_versions = await _resolve_mcp_resource_versions(
-            store,
-            root,
-            (),
+        first_versions = await _capture_mcp_resource_versions(store, server)
+        await store.put(
+            AssetKey("agent", "unrelated"),
+            AgentSpecCodec().encode(AgentSpec("unrelated")),
         )
-        await store.put(AssetKey("agent", "unrelated"), b"unrelated")
-        second_versions = await _resolve_mcp_resource_versions(
-            store,
-            root,
-            (),
-        )
+        second_versions = await _capture_mcp_resource_versions(store, server)
 
         assert first_versions == second_versions
         assert {
@@ -643,11 +660,17 @@ async def test_mcp_resource_resolution_is_stable_and_includes_binary_files() -> 
             "server/data.bin": hashlib.sha256(binary).hexdigest(),
             "server/nested/guide.md": hashlib.sha256(b"guide").hexdigest(),
         }
-        empty_versions = await _resolve_mcp_resource_versions(
-            store,
-            AssetKey("mcp", "empty"),
+        empty_server = MCPServerSpec(
+            "empty",
+            "python",
             (),
+            AssetKey("mcp", "empty"),
         )
+        await store.put(
+            AssetKey("mcp", "empty/mcp.json"),
+            codec.encode(empty_server),
+        )
+        empty_versions = await _capture_mcp_resource_versions(store, empty_server)
         assert empty_versions == ()
     finally:
         await store.close()
@@ -673,14 +696,15 @@ async def test_mcp_resource_resolution_rejects_selected_asset_version_race() -> 
     backend = InMemoryAssetBackend()
     store = _RacingMCPAssetStore(backend)
     await store.initialize()
+    server = MCPServerSpec("server", "python", (), AssetKey("mcp", "server"))
+    await store.put(
+        AssetKey("mcp", "server/mcp.json"),
+        MCPServerSpecCodec().encode(server),
+    )
     await store.put(AssetKey("mcp", "server/tool.py"), b"original")
     try:
         with pytest.raises(AIError) as error:
-            await _resolve_mcp_resource_versions(
-                store,
-                AssetKey("mcp", "server"),
-                (),
-            )
+            await _capture_mcp_resource_versions(store, server)
         assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
     finally:
         await store.close()
@@ -693,12 +717,13 @@ async def test_mcp_resource_resolution_excludes_declaration_files() -> None:
     await store.initialize()
     try:
         root = AssetKey("mcp", "server")
+        server = MCPServerSpec("server", "python", (), root)
         declaration = AssetKey("mcp", "server/mcp.json")
         resource = AssetKey("mcp", "server/tool.py")
-        await store.put(declaration, b"declaration")
+        await store.put(declaration, MCPServerSpecCodec().encode(server))
         await store.put(resource, b"resource")
 
-        versions = await _resolve_mcp_resource_versions(store, root, ())
+        versions = await _capture_mcp_resource_versions(store, server)
 
         assert tuple(item.key for item in versions) == (resource,)
     finally:
@@ -730,16 +755,21 @@ async def test_mcp_resource_versions_reject_invalid_tree(
     await store.initialize()
     try:
         root = AssetKey("mcp", "server/assets")
+        server = MCPServerSpec("server/assets", "python", (), root)
         keys = tuple(AssetKey("mcp", f"server/assets/{path}") for path in paths)
+        await store.put(
+            AssetKey("mcp", "server/assets/mcp.json"),
+            MCPServerSpecCodec().encode(server),
+        )
         for key in keys:
             await store.put(key, b"data")
         with pytest.raises(AIError) as raised:
             if boundary == "resolution":
-                await _resolve_mcp_resource_versions(store, root, ())
+                await _capture_mcp_resource_versions(store, server)
             else:
                 versions = await store.resolve_versions(keys)
                 _bound_resource_versions(
-                    MCPServerSpec("server", "python", (), root),
+                    server,
                     _MCPResourceBinding(
                         versions,
                         "application",
@@ -784,19 +814,19 @@ async def test_mcp_resource_path_requires_local_asset_files() -> None:
         resource = AssetKey("mcp", "server/assets/script.py")
         helper = AssetKey("mcp", "server/assets/lib/helper.py")
         root = AssetKey("mcp", "server/assets")
-        await store.put(resource, b"print('versioned')\n")
-        await store.put(helper, b"VALUE = 42\n")
-        versions = await _resolve_mcp_resource_versions(
-            store,
-            root,
-            ("resource:script.py",),
-        )
         server = MCPServerSpec(
-            "foo/bar",
+            "server/assets",
             "python",
             ("resource:script.py",),
             root,
         )
+        await store.put(
+            AssetKey("mcp", "server/assets/mcp.json"),
+            MCPServerSpecCodec().encode(server),
+        )
+        await store.put(resource, b"print('versioned')\n")
+        await store.put(helper, b"VALUE = 42\n")
+        versions = await _capture_mcp_resource_versions(store, server)
         with pytest.raises(AIError) as raised:
             await prepare_mcp_resource_projections(
                 (server,),
@@ -825,6 +855,13 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
     script = root / "mcp" / "server" / "assets" / "script.py"
     script.parent.mkdir(parents=True)
     script.write_text("print('ready')\n", encoding="utf-8")
+    resource_root = AssetKey("mcp", "server/assets")
+    server = MCPServerSpec(
+        "server/assets", "python", ("resource:script.py",), resource_root
+    )
+    declaration = root / "mcp" / "server" / "assets" / "mcp.json"
+    declaration.parent.mkdir(parents=True, exist_ok=True)
+    declaration.write_bytes(MCPServerSpecCodec().encode(server))
     store = AssetStore(
         StorageOverlay(
             DirectoryAssetBackend(
@@ -836,13 +873,7 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
     )
     await store.initialize()
     try:
-        resource_root = AssetKey("mcp", "server/assets")
-        server = MCPServerSpec(
-            "server", "python", ("resource:script.py",), resource_root
-        )
-        versions = await _resolve_mcp_resource_versions(
-            store, resource_root, server.args
-        )
+        versions = await _capture_mcp_resource_versions(store, server)
         binding = _MCPResourceBinding(
             versions,
             "application",
@@ -941,7 +972,7 @@ def _context() -> RunContext[None]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
         tool_call_id="call",
     )
 

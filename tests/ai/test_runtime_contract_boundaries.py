@@ -35,9 +35,9 @@ from linktools.ai.runtime._tool_boundary import (
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
-    capability_identity_payload,
+    capability_ref_payload,
 )
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _GeneratedOutputAlpha(BaseModel):
@@ -236,9 +236,10 @@ def test_output_schema_is_independent_of_mapping_insertion_order() -> None:
     assert canonicalize_output_schema_v1(first) == canonicalize_output_schema_v1(second)
 
 
-def test_tool_identity_preserves_absent_return_schema() -> None:
+def test_tool_ref_contains_named_revision_without_contract_payload() -> None:
     base = {
         "version": 1,
+        "revision": 1,
         "description": None,
         "parameters": {"type": "object", "properties": {}},
         "strict": None,
@@ -247,20 +248,22 @@ def test_tool_identity_preserves_absent_return_schema() -> None:
             "linktools.ai.tool_class": "business",
         },
     }
-    without_schema = capability_identity_payload(
+    without_schema = capability_ref_payload(
         "tool",
         "sample",
         {**base, "return_schema": None},
     )
-    unconstrained_schema = capability_identity_payload(
+    unconstrained_schema = capability_ref_payload(
         "tool",
         "sample",
         {**base, "return_schema": {}},
     )
 
-    assert without_schema["semantic"]["return_schema"] is None
-    assert unconstrained_schema["semantic"]["return_schema"] == {}
-    assert without_schema != unconstrained_schema
+    assert without_schema == unconstrained_schema == {
+        "kind": "tool",
+        "id": "sample",
+        "revision": 1,
+    }
 
 
 def test_tool_argument_set_digest_is_stable_across_hash_seeds() -> None:
@@ -305,7 +308,7 @@ def _run_context(model: TestModel) -> RunContext[None]:
         deps=None,
         model=model,
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
     )
 
 
@@ -398,7 +401,7 @@ async def test_tool_operation_records_the_args_that_reach_the_handler() -> None:
         tool_class="business",
     )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(business, descriptor)]),),
+        (FunctionToolset([tool_with_metadata(business, descriptor)]),),
         {"business": descriptor},
         id="business",
         tool_operations=operations,  # type: ignore[arg-type]

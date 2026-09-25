@@ -61,8 +61,8 @@ def _execution(repository_instructions: RuntimePayloadRef | None) -> ExecutionRe
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.PENDING_START,
         revision=0,
@@ -141,9 +141,10 @@ def test_object_ref_traversal_allows_additive_skill_asset_fields() -> None:
     )
     contract = SkillDefinition(
         SkillSpec("review", "review instructions"),
-        SkillSourceRef("application", "review").with_asset_versions(
+        SkillSourceRef(
+            "application",
+            "review",
             (SkillResourceVersion("guide.md", asset),),
-            "d" * 64,
         ),
     ).contract
     source = contract["source"]

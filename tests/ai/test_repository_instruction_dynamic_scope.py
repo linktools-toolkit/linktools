@@ -19,7 +19,7 @@ from linktools.ai.capability import ToolCallRetry
 from linktools.ai.workspace import (
     WorkspaceToolPermissionPolicy,
 )
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _Session:
@@ -71,7 +71,7 @@ def _context(call_id: str = "call") -> RunContext[None]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
         tool_call_id=call_id,
     )
 
@@ -90,7 +90,7 @@ def _boundary(
         tool_class="filesystem.read",
         workspace_path_fields=path_fields,
     )
-    toolset.tools[name].metadata = semantic_tool(
+    toolset.tools[name].metadata = tool_with_metadata(
         toolset.tools[name].function,
         descriptor,
     ).metadata

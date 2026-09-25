@@ -39,7 +39,10 @@ class SkillSourceRef:
     resource_versions: tuple[SkillResourceVersion, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.asset_source_id, str) or not self.asset_source_id.strip():
+        if (
+            not isinstance(self.asset_source_id, str)
+            or not self.asset_source_id.strip()
+        ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         try:
             validate_logical_id(self.root)
@@ -84,7 +87,7 @@ class SkillResourceView:
 @runtime_checkable
 class SkillResourceSource(Protocol):
     @property
-    def id(self) -> str: ...
+    def asset_source_id(self) -> str: ...
 
     async def inspect(self, source: SkillSourceRef) -> SkillResourceView: ...
 
@@ -92,18 +95,21 @@ class SkillResourceSource(Protocol):
 
 
 class LocalSkillResourceSource:
-    def __init__(self, source_id: str, root: "str | Path") -> None:
-        if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("skill source id must be non-empty")
-        self._id = source_id
+    def __init__(self, asset_source_id: str, root: "str | Path") -> None:
+        if not isinstance(asset_source_id, str) or not asset_source_id.strip():
+            raise ValueError("asset source id must be non-empty")
+        self._asset_source_id = asset_source_id
         self._root = Path(root).expanduser().resolve()
 
     @property
-    def id(self) -> str:
-        return self._id
+    def asset_source_id(self) -> str:
+        return self._asset_source_id
 
     def _root_ref(self, source: SkillSourceRef) -> str:
-        if not isinstance(source, SkillSourceRef) or source.asset_source_id != self._id:
+        if (
+            not isinstance(source, SkillSourceRef)
+            or source.asset_source_id != self._asset_source_id
+        ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return source.root
 
@@ -165,41 +171,52 @@ class LocalSkillResourceSource:
 class AssetSkillResourceSource:
     """Read Skill resources through version references captured in SkillSourceRef."""
 
-    def __init__(self, source_id: str, asset_reader: AssetStoreReader) -> None:
-        if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("skill source id must be non-empty")
+    def __init__(self, asset_source_id: str, asset_reader: AssetStoreReader) -> None:
+        if not isinstance(asset_source_id, str) or not asset_source_id.strip():
+            raise ValueError("asset source id must be non-empty")
         if not isinstance(asset_reader, AssetStoreReader):
             raise TypeError("asset_reader must provide AssetStoreReader operations")
-        self._id = source_id
+        self._asset_source_id = asset_source_id
         self._asset_reader = asset_reader
 
     @property
-    def id(self) -> str:
-        return self._id
+    def asset_source_id(self) -> str:
+        return self._asset_source_id
 
     @property
     def asset_reader(self) -> AssetStoreReader:
         return self._asset_reader
 
     def _binding(self, source: SkillSourceRef) -> SkillSourceRef:
-        if not isinstance(source, SkillSourceRef) or source.asset_source_id != self._id:
+        if (
+            not isinstance(source, SkillSourceRef)
+            or source.asset_source_id != self._asset_source_id
+        ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return source
 
     async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
         binding = self._binding(source)
-        resources = tuple(item.path for item in binding.resource_versions)
+        versioned_resources = tuple(
+            item.path for item in binding.resource_versions
+        )
+        resources = tuple(
+            path
+            for path in versioned_resources
+            if not DEFAULT_DISCOVERY_POLICY.ignores(path)
+        )
         location = SkillLocation(
             "virtual",
-            f"{self._id}/resources/{binding.root}",
+            f"{self._asset_source_id}/resources/{binding.root}",
         )
         if binding.resource_versions:
             paths = await self._asset_reader.local_paths(
                 tuple(item.asset.key for item in binding.resource_versions)
             )
             if all(path is not None for path in paths):
-                package = _resolve_local_skill_package(
-                    resources,
+                package = await asyncio.to_thread(
+                    _resolve_local_skill_package,
+                    versioned_resources,
                     tuple(path for path in paths if path is not None),
                 )
                 if package is not None:
@@ -258,18 +275,18 @@ class SkillSourceRegistry:
         for source in sources:
             if not isinstance(source, SkillResourceSource):
                 raise TypeError("sources must implement SkillResourceSource")
-            if source.id in values:
+            if source.asset_source_id in values:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            values[source.id] = source
+            values[source.asset_source_id] = source
         self._sources: Mapping[str, SkillResourceSource] = MappingProxyType(values)
 
-    def resolve(self, source_id: str) -> SkillResourceSource:
+    def resolve(self, asset_source_id: str) -> SkillResourceSource:
         try:
-            return self._sources[source_id]
+            return self._sources[asset_source_id]
         except KeyError as error:
             raise AIError(
                 ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                safe_details={"source_id": source_id},
+                safe_details={"asset_source_id": asset_source_id},
             ) from error
 
 def require_skill_resource_path(path: str) -> str:

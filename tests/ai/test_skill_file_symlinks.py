@@ -16,6 +16,8 @@ from linktools.ai.capability import (
     AssetSkillResourceSource,
     CapabilityGroup,
     LocalSkillResourceSource,
+    SkillDefinition,
+    SkillSourceRef,
 )
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
@@ -48,11 +50,12 @@ async def test_local_skill_resource_file_symlink_is_discovered_and_read(tmp_path
     _symlink(target, package / "guide.md")
 
     source = LocalSkillResourceSource("local", skills_root)
+    source_ref = SkillSourceRef("local", "review")
 
-    view = await source.inspect("review")
+    view = await source.inspect(source_ref)
 
     assert view.resources == ("guide.md", "shared/guide.md")
-    assert await source.read("review", "guide.md") == b"shared guide"
+    assert await source.read(source_ref, "guide.md") == b"shared guide"
 
 
 @pytest.mark.asyncio
@@ -83,18 +86,26 @@ async def test_sandbox_asset_skill_uses_contained_file_symlink(
     )
     await store.initialize()
     try:
-        binding = await AssetSkillResourceSource("application", store).resolve("review")
-        assert {item.path for item in binding.resource_versions} == {
+        capture = await CapabilityGroup("application", assets=store).capture()
+        binding = next(
+            item.value for item in capture.contributions if item.kind == "skill"
+        )
+        assert isinstance(binding, SkillDefinition)
+        assert binding.source_ref is not None
+        assert {item.path for item in binding.source_ref.resource_versions} == {
             "run.sh",
             "shared/run.sh",
         }
         resource = await SandboxResource.from_asset_versions(
             "review",
             store,
-            {item.path: item.asset for item in binding.resource_versions},
+            {
+                item.path: item.asset
+                for item in binding.source_ref.resource_versions
+            },
             executable_bits={
                 item.path: item.executable_bits
-                for item in binding.resource_versions
+                for item in binding.source_ref.resource_versions
             },
         )
         assert resource is not None
@@ -118,10 +129,11 @@ async def test_local_skill_contained_directory_symlink_is_discovered(tmp_path: P
     _symlink(hidden, package / "references", directory=True)
 
     source = LocalSkillResourceSource("local", skills_root)
-    view = await source.inspect("review")
+    source_ref = SkillSourceRef("local", "review")
+    view = await source.inspect(source_ref)
 
     assert view.resources == ("references/guide.md",)
-    assert await source.read("review", "references/guide.md") == b"guide"
+    assert await source.read(source_ref, "references/guide.md") == b"guide"
 
 
 @pytest.mark.asyncio
@@ -144,16 +156,17 @@ async def test_local_skill_package_directory_symlink_can_target_outside_source_r
     _symlink(external_package, skills_root / "review", directory=True)
 
     source = LocalSkillResourceSource("local", skills_root)
-    view = await source.inspect("review")
+    source_ref = SkillSourceRef("local", "review")
+    view = await source.inspect(source_ref)
 
     assert Path(view.location.path) == external_package.resolve()
     assert view.resources == ("guide.md",)
-    assert await source.read("review", "guide.md") == b"guide"
+    assert await source.read(source_ref, "guide.md") == b"guide"
     with pytest.raises(AIError) as file_error:
-        await source.read("review", "outside-link")
+        await source.read(source_ref, "outside-link")
     assert file_error.value.code is ErrorCode.ASSET_PATH_OUTSIDE_ROOT
     with pytest.raises(AIError) as directory_error:
-        await source.read("review", "outside-dir-link/nested.md")
+        await source.read(source_ref, "outside-dir-link/nested.md")
     assert directory_error.value.code is ErrorCode.ASSET_PATH_OUTSIDE_ROOT
 
 
@@ -166,7 +179,7 @@ async def test_local_skill_symlink_loops_use_stable_errors(tmp_path: Path) -> No
 
     source = LocalSkillResourceSource("local", skills_root)
     with pytest.raises(AIError) as package_error:
-        await source.inspect("a")
+        await source.inspect(SkillSourceRef("local", "a"))
     assert package_error.value.code is ErrorCode.ASSET_NOT_FOUND
 
     package = skills_root / "review"
@@ -176,10 +189,11 @@ async def test_local_skill_symlink_loops_use_stable_errors(tmp_path: Path) -> No
     _symlink(Path("loop-a"), package / "loop-b")
     _symlink(package, package / "loop-dir", directory=True)
 
-    view = await source.inspect("review")
+    source_ref = SkillSourceRef("local", "review")
+    view = await source.inspect(source_ref)
     assert view.resources == ()
     with pytest.raises(AIError) as resource_error:
-        await source.read("review", "loop-a")
+        await source.read(source_ref, "loop-a")
     assert resource_error.value.code is ErrorCode.ASSET_NOT_FOUND
 
 
@@ -234,7 +248,7 @@ async def test_asset_skill_file_symlink_does_not_expand_local_package(
     await store.initialize()
     try:
         source = AssetSkillResourceSource("application", store)
-        view = await source.inspect("review")
+        view = await source.inspect(SkillSourceRef("application", "review"))
 
         assert view.location.kind == "virtual"
     finally:
@@ -293,7 +307,12 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
             ("skill", "review"),
         }
         source = AssetSkillResourceSource("workspace", store)
-        view = await source.inspect("review")
+        definition = next(
+            item.value for item in snapshot.contributions if item.kind == "skill"
+        )
+        assert isinstance(definition, SkillDefinition)
+        assert definition.source_ref is not None
+        view = await source.inspect(definition.source_ref)
         assert Path(view.location.path) == external_skill.resolve()
         assert view.resources == ("run.sh",)
         assert await store.get(AssetKey("agent", "review")) == agent.read_bytes()

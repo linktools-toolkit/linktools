@@ -26,9 +26,12 @@ from linktools.ai.runtime._execution import (
 )
 from linktools.ai.runtime._object import RuntimeObjectKeyFactory
 from linktools.ai.runtime.state._contracts import ExecutionRecord, RuntimePayloadRef
-from linktools.ai.spec import AgentSpec
+from linktools.ai.spec import (
+    AgentSpec,
+    RepositoryInstructionDocument,
+    RepositoryInstructions,
+)
 from linktools.ai.storage import PayloadPolicy, StoredPayload
-from linktools.ai.workspace import RepositoryInstructionDocument, RepositoryInstructions
 from ._runtime_test_helpers import execution_owner_fields
 
 
@@ -48,7 +51,10 @@ class _Catalog:
     def binding(self, digest: str) -> object:
         binding = _binding()
         assert digest == binding.binding_digest
-        return SimpleNamespace(digest=binding.binding_digest, binding_contract=binding)
+        return SimpleNamespace(
+            binding_digest=binding.binding_digest,
+            binding_contract=binding,
+        )
 
 
 class _History:
@@ -140,8 +146,8 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
         session_id=None,
         parent_execution_id=None,
         root_execution_id="parent",
-        source_execution_id=None,
-        base_execution_id=None,
+        previous_execution_id=None,
+        fork_base_execution_id=None,
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
@@ -233,7 +239,9 @@ async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -
         )
         child = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
         assert child is not None and child.repository_instructions is not None
-        assert child.repository_instructions.payload.digest == root.digest
+        assert child.repository_instructions.payload.digest == StoredPayload.inline_json(
+            root.to_payload()
+        ).digest
         assert resolver.calls == ["."]
     finally:
         await state.close()

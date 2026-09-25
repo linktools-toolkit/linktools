@@ -220,7 +220,7 @@ async def test_capability_implementation_class_is_not_identity() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "runtime_capability",
+    "capability",
     (
         _ModelCapability(),
         _ToolsetCapability(),

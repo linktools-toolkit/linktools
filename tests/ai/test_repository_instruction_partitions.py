@@ -12,7 +12,7 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpointState,
     RepositoryInstructionBarrier,
 )
-from linktools.ai.workspace import (
+from linktools.ai.spec import (
     RepositoryInstructionDocument,
     RepositoryInstructions,
 )

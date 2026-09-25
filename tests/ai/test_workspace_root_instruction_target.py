@@ -16,7 +16,7 @@ from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
 )
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _Session:
@@ -66,7 +66,7 @@ def _toolset(repository: _RepositoryBoundary) -> RuntimeToolBoundaryToolset:
         workspace_path_fields=("path",),
     )
     return RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(_list_directory, descriptor)]),),
+        (FunctionToolset([tool_with_metadata(_list_directory, descriptor)]),),
         {"_list_directory": descriptor},
         id="workspace",
         sandbox_session=_Session(),  # type: ignore[arg-type]
@@ -79,7 +79,7 @@ def _context() -> RunContext[None]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
         tool_call_id="call",
     )
 

@@ -19,8 +19,8 @@ from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
     AssetSkillResourceSource,
     CapabilityContribution,
-    AssetVersionSkillResourceSource,
     SkillDefinition,
+    SkillResourceVersion,
     SkillSourceRef,
 )
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
@@ -83,10 +83,14 @@ async def _fixture() -> _BindingFixture:
     assets = AssetStore(StorageOverlay(backend, writer=backend))
     await assets.initialize()
     await assets.put(AssetKey("skill", "child-skill/guide.txt"), b"original")
-    child_ref = await AssetSkillResourceSource(
+    child_asset = (
+        await assets.resolve_versions((AssetKey("skill", "child-skill/guide.txt"),))
+    )[0]
+    child_ref = SkillSourceRef(
         "application",
-        assets,
-    ).resolve("child-skill")
+        "child-skill",
+        (SkillResourceVersion("guide.txt", child_asset),),
+    )
 
     candidates = (
         CapabilityContribution.from_declaration(
@@ -120,7 +124,7 @@ async def _fixture() -> _BindingFixture:
         ),
     }
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").binding_contract(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=candidates,
         agents=specs,
     )
@@ -165,12 +169,8 @@ async def _read_skill(
     fixture: _BindingFixture,
     ref: SkillSourceRef,
 ) -> bytes:
-    source = AssetVersionSkillResourceSource(
-        "application",
-        {"child-skill": ref},
-        fixture.assets,
-    )
-    return await source.read("child-skill", "guide.txt")
+    source = AssetSkillResourceSource("application", fixture.assets)
+    return await source.read(ref, "guide.txt")
 
 
 @pytest.mark.asyncio
@@ -306,7 +306,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         allow_runtime_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").binding_contract(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -358,7 +358,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         allow_runtime_capabilities=(),
     )
     compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").binding_contract(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=(CapabilityContribution.from_declaration(server),),
         agents={specification.id: specification},
     )
@@ -397,16 +397,20 @@ async def test_existing_child_mcp_resolves_asset_versions(
         resource = AssetKey("mcp", "server/assets/script.py")
         await store.put(resource, b"print('ok')")
         codec = MCPServerSpecCodec()
+        server = MCPServerSpec(
+            "server",
+            "python",
+            ("resource:script.py",),
+            root,
+        )
+        versions = await store.resolve_versions((resource,))
         pin = CapabilityPin(
             "mcp",
             "server",
-            codec.to_payload(
-                MCPServerSpec(
-                    "server",
-                    "python",
-                    ("resource:script.py",),
-                    root,
-                )
+            codec.to_execution_payload(
+                server,
+                versions,
+                asset_source_id="application",
             ),
         )
         child = replace(
@@ -423,7 +427,6 @@ async def test_existing_child_mcp_resolves_asset_versions(
         resolver = _RuntimeBindingResolver(
             fixture.catalog,
             fixture.compiler,
-            mcp_assets={"server": ("application", store)},
         )
         await store.put(resource, b"print('updated')")
         resolved = await resolver.resolve_contract(binding_contract)
@@ -433,7 +436,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
         assert server.resource_root == root
         assert resolved.subagent_bindings[0].selected[0].contract["asset_source_id"] == "application"
         assert versions is not None
-        assert await store.read_versions(versions) == (b"print('updated')",)
+        assert await store.read_versions(versions) == (b"print('ok')",)
         assert await resolver.resolve_contract(resolved) == resolved
     finally:
         await store.close()
@@ -441,7 +444,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
 
 
 @pytest.mark.asyncio
-async def test_runtime_state_snapshot_preserves_asset_version_refs(
+async def test_runtime_storage_snapshot_preserves_asset_version_refs(
     tmp_path: Path,
 ) -> None:
     fixture = await _fixture()
@@ -457,8 +460,8 @@ async def test_runtime_state_snapshot_preserves_asset_version_refs(
                 session_id=None,
                 parent_execution_id=None,
                 root_execution_id="execution",
-                source_execution_id=None,
-                base_execution_id=None,
+                previous_execution_id=None,
+                fork_base_execution_id=None,
                 lineage_kind=ExecutionLineageKind.RUN,
                 status=ExecutionStatus.PENDING_START,
                 revision=0,
@@ -532,7 +535,7 @@ async def test_runtime_state_snapshot_preserves_asset_version_refs(
 
 
 @pytest.mark.asyncio
-async def test_runtime_state_snapshot_restores_task_capability_manifest(
+async def test_runtime_storage_snapshot_restores_task_capability_manifest(
     tmp_path: Path,
 ) -> None:
     fixture = await _fixture()

@@ -182,10 +182,7 @@ async def _load_skills(
                 if not candidate.key.id.startswith(prefix):
                     continue
                 relative = candidate.key.id[len(prefix) :]
-                if (
-                    relative == "SKILL.md"
-                    or DEFAULT_DISCOVERY_POLICY.ignores(relative)
-                ):
+                if relative == "SKILL.md":
                     continue
                 validate_resource_path(relative)
                 resources.append((relative, candidate))
@@ -281,29 +278,48 @@ async def _load_mcp(
 async def _load_rules(
     context: CapabilityLoadContext,
 ) -> "Sequence[RepositoryInstructionDocument]":
-    entries = tuple(
+    candidates = tuple(
         entry
         for entry in context.list(kind="rule")
         if entry.key.id.endswith(".md")
-        and not DEFAULT_DISCOVERY_POLICY.ignores(entry.key.id)
+    )
+    for entry in candidates:
+        try:
+            validate_logical_id(entry.key.id[:-3])
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+    entries = tuple(
+        entry
+        for entry in candidates
+        if not DEFAULT_DISCOVERY_POLICY.ignores(entry.key.id)
     )
     values = await context.read_many(tuple(entry.key for entry in entries))
     result: list[RepositoryInstructionDocument] = []
     for entry, value in zip(entries, values, strict=True):
+        source_id = entry.key.id[:-3]
         try:
             content = value.decode("utf-8")
         except UnicodeDecodeError as error:
             raise AIError(
-                ErrorCode.ASSET_CODEC_UNKNOWN,
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
                 safe_details={
                     "asset_source_id": context.group_id,
                     "asset_id": entry.key.id,
                 },
             ) from error
+        scope = "."
+        if content.startswith("---\n"):
+            metadata, separator, content = content[4:].partition("\n---\n")
+            if not separator:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            fields = metadata.splitlines()
+            if len(fields) != 1 or not fields[0].startswith("scope: "):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            scope = fields[0][len("scope: ") :]
         result.append(
             RepositoryInstructionDocument(
-                f"rule:{entry.key.id[:-3]}",
-                ".",
+                f"rule:{source_id}",
+                scope,
                 content,
             )
         )

@@ -10,7 +10,6 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
-from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.core import Principal, PromptLimits
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
@@ -29,8 +28,9 @@ from linktools.ai.storage import StoredPayload
 from linktools.ai.workspace import (
     SandboxResource,
     SandboxSession,
+    WorkspaceAccess,
 )
-from ._runtime_test_helpers import semantic_tool
+from ._runtime_test_helpers import tool_with_metadata
 
 
 class _Session:
@@ -268,7 +268,7 @@ def _context() -> RunContext[None]:
         deps=None,
         model=TestModel(),
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
         tool_call_id="call",
     )
 
@@ -281,7 +281,7 @@ def _workspace_boundary(sandbox_session: object) -> RuntimeToolBoundaryToolset:
         workspace_path_fields=("path",),
     )
     return RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(_echo_path, descriptor)]),),
+        (FunctionToolset([tool_with_metadata(_echo_path, descriptor)]),),
         {"_echo_path": descriptor},
         id="workspace",
         sandbox_session=sandbox_session,  # type: ignore[arg-type]

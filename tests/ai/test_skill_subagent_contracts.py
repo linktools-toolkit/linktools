@@ -42,7 +42,7 @@ def _load_json(name: str) -> dict[str, object]:
 
 def _compiler(agents: dict[str, AgentSpec]) -> AgentCompiler:
     return AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").binding_contract(),
+        model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
         candidates=(),
         agents=agents,
     )

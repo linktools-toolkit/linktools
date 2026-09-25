@@ -18,7 +18,11 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import AssetSkillResourceSource
+from linktools.ai.capability import (
+    AssetSkillResourceSource,
+    CapabilityGroup,
+    SkillDefinition,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 
@@ -62,7 +66,10 @@ async def test_asset_skill_package_resolution_runs_off_event_loop(
     root = tmp_path / "assets"
     package = root / "skills" / "review"
     package.mkdir(parents=True)
-    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    (package / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Review files\n---\n\nReview files.\n",
+        encoding="utf-8",
+    )
     (package / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     store = AssetStore(
         StorageOverlay(
@@ -88,8 +95,16 @@ async def test_asset_skill_package_resolution_runs_off_event_loop(
     )
     await store.initialize()
     try:
-        source = AssetSkillResourceSource("application", store)
-        view = await source.inspect("review")
+        capture = await CapabilityGroup("application", assets=store).capture()
+        definition = next(
+            item.value
+            for item in capture.contributions
+            if item.kind == "skill"
+        )
+        assert isinstance(definition, SkillDefinition)
+        assert definition.source_ref is not None
+        source = AssetSkillResourceSource("application", capture.asset_reader)
+        view = await source.inspect(definition.source_ref)
 
         assert view.location.kind == "local"
         assert observed_threads

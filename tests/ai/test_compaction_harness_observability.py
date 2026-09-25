@@ -53,7 +53,7 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
         deps=None,
         model=model,
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
     )
     messages: list[ModelMessage] = []
     for index in range(15):
@@ -217,7 +217,7 @@ async def test_compaction_target_does_not_rewrite_history_below_threshold() -> N
         deps=None,
         model=model,
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
     )
     messages = _duplicate_file_history()
     request_context = ModelRequestContext(
@@ -252,7 +252,7 @@ async def test_compaction_without_target_still_deduplicates_file_reads() -> None
         deps=None,
         model=model,
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
     )
     messages = _duplicate_file_history()
     request_context = ModelRequestContext(
@@ -288,7 +288,7 @@ async def test_compaction_keeps_semantic_control_results() -> None:
         deps=None,
         model=model,
         usage=RunUsage(),
-        agent_run_id="run",
+        run_id="run",
     )
     messages: list[ModelMessage] = []
     for index in range(5):

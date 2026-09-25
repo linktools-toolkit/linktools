@@ -95,7 +95,7 @@ class ManagedToolDescriptor:
 def managed_tool_descriptor_from_metadata(
     metadata: Mapping[str, object] | None,
 ) -> ManagedToolDescriptor:
-    """Build a leaf descriptor from one validated Tool semantic declaration."""
+    """Build a leaf descriptor from one validated Tool metadata declaration."""
     effect_policy = tool_effect_policy_from_metadata(metadata, require=True)
     tool_class = tool_class_from_metadata(metadata)
     path_fields = tool_path_fields_from_metadata(metadata)

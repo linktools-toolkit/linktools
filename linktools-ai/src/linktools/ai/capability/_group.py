@@ -31,6 +31,7 @@ from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
 from ._contribution import CapabilityContribution, _freeze_contribution
+from ._declaration import BuiltinDeclarationLoader
 from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillDefinition
 from ._task import TaskExpander
@@ -153,8 +154,6 @@ class CapabilityGroup(Generic[AppT]):
                 for tool in _workspace_tool_definitions(workspace)
             )
         if assets is not None:
-            from ._declaration import BuiltinDeclarationLoader
-
             for kind in ("agent", "skill", "mcp", "rule"):
                 self._loaders[kind] = cast(
                     "CapabilityLoader[AppT]",
@@ -359,6 +358,8 @@ class CapabilityGroup(Generic[AppT]):
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 loaded = await loader.load(context)
                 for value in loaded:
+                    if not isinstance(loader, BuiltinDeclarationLoader):
+                        _validate_custom_skill_source(value, context.group_id)
                     if isinstance(
                         value,
                         (AgentSpec, SkillDefinition, MCPServerSpec),
@@ -408,6 +409,22 @@ class CapabilityGroup(Generic[AppT]):
             None if source_revision is None else source_revision.value,
         )
         return capture
+
+
+def _validate_custom_skill_source(value: object, group_id: str) -> None:
+    if isinstance(value, CapabilityContribution):
+        if value.kind != "skill" or not isinstance(value.value, SkillDefinition):
+            return
+        definition = value.value
+    elif isinstance(value, SkillDefinition):
+        definition = value
+    else:
+        return
+    source_ref = definition.source_ref
+    if source_ref is not None and (
+        source_ref.asset_source_id != group_id or source_ref.resource_versions
+    ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
 def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:

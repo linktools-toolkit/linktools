@@ -93,7 +93,7 @@ class EffectiveMetadataState(Generic[KeyT, InfoT]):
 
 
 @dataclass(frozen=True, slots=True)
-class _OverlaySnapshot(Generic[KeyT, InfoT]):
+class _OverlayMetadataCapture(Generic[KeyT, InfoT]):
     effective: EffectiveMetadataState[KeyT, InfoT]
     writer_state: "MetadataState[KeyT, InfoT] | None"
 
@@ -291,12 +291,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         _logger.debug("storage overlay closed")
 
     async def refresh(self) -> StorageRevision:
-        return (await self._snapshot()).effective.revision
+        return (await self._capture_metadata()).effective.revision
 
     async def _state(self) -> 'EffectiveMetadataState[KeyT, InfoT]':
-        return (await self._snapshot()).effective
+        return (await self._capture_metadata()).effective
 
-    async def _snapshot(self) -> "_OverlaySnapshot[KeyT, InfoT]":
+    async def _capture_metadata(self) -> "_OverlayMetadataCapture[KeyT, InfoT]":
         states = await asyncio.gather(*(view.refresh() for view in self._views))
         entries: dict[KeyT, InfoT] = {}
         layer_indexes: dict[KeyT, int] = {}
@@ -311,7 +311,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     layer_indexes[key] = index
         revision = self._effective_revision(revisions, states[0].revision)
         writer_state = None if self._writer_index is None else states[self._writer_index]
-        return _OverlaySnapshot(
+        return _OverlayMetadataCapture(
             EffectiveMetadataState(revision, entries, layer_indexes),
             writer_state,
         )
@@ -371,7 +371,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self,
         keys: 'Sequence[KeyT]',
     ) -> 'tuple[StorageLocation[KeyT, ValueT, InfoT] | None, ...]':
-        """Return effective layers for keys from one metadata snapshot."""
+        """Return effective layers for keys from one metadata capture."""
         state = await self._state()
         result: list[StorageLocation[KeyT, ValueT, InfoT] | None] = []
         for key in keys:
@@ -629,13 +629,13 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         keys: "Sequence[KeyT]",
     ) -> "Mapping[KeyT, StorageWriteState[InfoT]]":
         self._require_writer()
-        snapshot = await self._snapshot()
-        if snapshot.writer_state is None or self._writer_index is None:
+        capture = await self._capture_metadata()
+        if capture.writer_state is None or self._writer_index is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result: dict[KeyT, StorageWriteState[InfoT]] = {}
         for key in dict.fromkeys(keys):
-            layer_index = snapshot.effective.layer_indexes.get(key)
-            effective_info = snapshot.effective.entries.get(key)
+            layer_index = capture.effective.layer_indexes.get(key)
+            effective_info = capture.effective.entries.get(key)
             effective = None
             if effective_info is not None and layer_index is not None:
                 effective = StorageLocatedInfo(
@@ -645,7 +645,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 )
             result[key] = StorageWriteState(
                 effective,
-                snapshot.writer_state.entries.get(key),
+                capture.writer_state.entries.get(key),
                 layer_index is None or self._writer_index <= layer_index,
             )
         return result
@@ -800,12 +800,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if isinstance(writer, BatchStorageWriter):
             writer_expected_revision = None
             if expected_revision is not None:
-                snapshot = await self._snapshot()
-                if snapshot.effective.revision != expected_revision:
+                capture = await self._capture_metadata()
+                if capture.effective.revision != expected_revision:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if snapshot.writer_state is None:
+                if capture.writer_state is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                writer_expected_revision = snapshot.writer_state.revision
+                writer_expected_revision = capture.writer_state.revision
             result = await writer.apply_batch(
                 changes,
                 expected_revision=writer_expected_revision,
