@@ -42,7 +42,7 @@
     "resource_ref",
     "result_record",
     "session_record",
-    "stored_step_snapshot",
+    "stored_agent_run_checkpoint",
     "object_ref",
     "stored_payload",
     "history_quality",

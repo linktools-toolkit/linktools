@@ -53,7 +53,7 @@ class _AgentRunLifecycle(Protocol):
         agent_run_id: str,
         execution_id: "str | None" = None,
     ) -> None: ...
-    async def materialize_recovery_snapshot(
+    async def materialize_recovery_checkpoint(
         self, *, agent_run_id: str, require_complete: bool
     ) -> None: ...
     async def verify_terminal_attempts(
@@ -208,14 +208,14 @@ async def _agent_run_messages(
     *,
     include_interrupted: bool = False,
 ) -> list[ModelMessage]:
-    snapshot = await store.latest_snapshot(
+    checkpoint = await store.latest_checkpoint(
         agent_run_id=agent_run_id,
         include_interrupted=include_interrupted,
     )
-    if snapshot is None:
+    if checkpoint is None:
         raise LookupError(agent_run_id)
     return list(
-        snapshot.messages
-        if snapshot.context_messages is None
-        else snapshot.context_messages
+        checkpoint.messages
+        if checkpoint.context_messages is None
+        else checkpoint.context_messages
     )

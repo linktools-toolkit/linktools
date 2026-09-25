@@ -515,7 +515,7 @@ class ModelInteractionRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class StoredStepSnapshot:
+class StoredAgentRunCheckpoint:
     agent_run_id: str
     step_index: int
     timestamp: datetime
@@ -530,7 +530,7 @@ class StoredStepSnapshot:
             or not isinstance(self.pending_request_index, int)
             or self.pending_request_index < 0
         ):
-            raise ValueError("stored snapshot pending request index is invalid")
+            raise ValueError("stored checkpoint pending request index is invalid")
 
 
 class HistoryQuality(str, Enum):
@@ -782,7 +782,7 @@ class ExecutionCandidatePage:
 class ExecutionRunSealHead:
     agent_run_id: str
     event_count: int
-    snapshot_count: int
+    checkpoint_count: int
     transcript_message_count: int
     projection_digest: str
     interaction_count: int = 0
@@ -792,7 +792,7 @@ class ExecutionRunSealHead:
             value < 0
             for value in (
                 self.event_count,
-                self.snapshot_count,
+                self.checkpoint_count,
                 self.transcript_message_count,
                 self.interaction_count,
             )
@@ -826,7 +826,7 @@ class ExecutionHistorySealRecord:
                     {
                         "agent_run_id": head.agent_run_id,
                         "event_count": head.event_count,
-                        "snapshot_count": head.snapshot_count,
+                        "checkpoint_count": head.checkpoint_count,
                         "transcript_message_count": head.transcript_message_count,
                         "interaction_count": head.interaction_count,
                         "projection_digest": head.projection_digest,
@@ -2402,7 +2402,7 @@ __all__ = [
     "RuntimeRepository",
     "SessionRecord",
     "SessionRepository",
-    "StoredStepSnapshot",
+    "StoredAgentRunCheckpoint",
     "TaskAdmissionRepository",
     "TaskRepository",
     "TaskState",

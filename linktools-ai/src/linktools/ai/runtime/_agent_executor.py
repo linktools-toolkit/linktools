@@ -612,7 +612,7 @@ class AgentExecutor:
                 _validate_deferred_requests(output)
                 return output
             run = await scope.run_store.get_agent_run(agent_run_id=scope.agent_run_id)
-            snapshot = await scope.run_store.latest_snapshot(agent_run_id=scope.agent_run_id)
+            checkpoint = await scope.run_store.latest_checkpoint(agent_run_id=scope.agent_run_id)
             operations = (
                 ()
                 if scope.tool_operations is None
@@ -626,7 +626,7 @@ class AgentExecutor:
             )
             if (
                 run is None
-                or snapshot is None
+                or checkpoint is None
                 or unresolved
                 or run.agent_conversation_id != scope.agent_conversation_id
             ):

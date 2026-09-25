@@ -51,7 +51,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from linktools.ai.runtime.state._step_contracts import (
-    ContinuableSnapshot,
+    AgentRunCheckpoint,
     AgentRunRecord,
     StepEvent,
 )
@@ -211,7 +211,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                         agent_name=run.agent_name,
                     ),
                 ),
-                snapshots=(),
+                checkpoints=(),
                 execution_id="execution",
             )
         assert sync_error.value.code is ErrorCode.STORAGE_CONFLICT
@@ -220,15 +220,15 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
             await archive.sync_projection(
                 run,
                 events=(),
-                snapshots=(),
+                checkpoints=(),
                 execution_id="execution",
             )
         assert empty_sync_error.value.code is ErrorCode.STORAGE_CONFLICT
 
-        with pytest.raises(AIError) as snapshot_error:
-            await archive.materialize_snapshot(
+        with pytest.raises(AIError) as checkpoint_error:
+            await archive.materialize_checkpoint(
                 run,
-                ContinuableSnapshot(
+                AgentRunCheckpoint(
                     agent_run_id=agent_run_id,
                     step_index=4,
                     messages=[
@@ -242,7 +242,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                 ),
                 execution_id="execution",
             )
-        assert snapshot_error.value.code is ErrorCode.STORAGE_CONFLICT
+        assert checkpoint_error.value.code is ErrorCode.STORAGE_CONFLICT
         assert await archive.list_events(agent_run_id=agent_run_id) == before_events
         assert (
             await repository.get_history_head("execution", tenant_id="tenant")
@@ -294,9 +294,9 @@ async def test_terminal_prepare_accepts_an_unprojected_execution_run(
 
         projection = terminal_plan.projections[0]
         assert projection.events == ()
-        assert projection.snapshots == ()
+        assert projection.checkpoints == ()
         assert projection.target_event_offset == 0
-        assert projection.target_snapshot_offset == 0
+        assert projection.target_checkpoint_offset == 0
         assert projection.target_transcript_message_count == 0
         assert projection.projection_digest == "empty"
     finally:
@@ -337,9 +337,9 @@ async def test_conversation_head_replacement_preserves_physical_identity(
             metadata={"history_id": "history"},
             started_at=now,
         )
-        await state.run_store.read_store(RuntimeDomain.CONVERSATION).materialize_snapshot(
+        await state.run_store.read_store(RuntimeDomain.CONVERSATION).materialize_checkpoint(
             run,
-            ContinuableSnapshot(
+            AgentRunCheckpoint(
                 agent_run_id="run",
                 step_index=1,
                 messages=[ModelRequest(parts=[UserPromptPart(content="hello")])],
@@ -557,8 +557,8 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
             },
         )
     )
-    await state.run_store.save_snapshot(
-        ContinuableSnapshot(
+    await state.run_store.save_checkpoint(
+        AgentRunCheckpoint(
             agent_run_id=agent_run_id,
             step_index=2,
             messages=[
@@ -675,7 +675,7 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
         projection = terminal_plan.projections[0]
         assert head == (
             projection.target_event_offset,
-            projection.target_snapshot_offset,
+            projection.target_checkpoint_offset,
             projection.target_transcript_message_count,
             projection.projection_digest,
         ), (head, projection)

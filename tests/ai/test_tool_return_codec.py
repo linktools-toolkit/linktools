@@ -155,7 +155,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
                 return None
             return SimpleNamespace(conversation_id="conversation")
 
-        async def latest_snapshot(self, *, agent_run_id: str) -> object:
+        async def latest_checkpoint(self, *, agent_run_id: str) -> object:
             assert agent_run_id == "agent-run"
             return object()
 

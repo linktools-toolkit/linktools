@@ -170,7 +170,7 @@ async def test_runtime_run_store_continues_recovery_interaction_high_water() -> 
         await recovery.sync_projection(
             run,
             events=(),
-            snapshots=(),
+            checkpoints=(),
             interactions=durable,
         )
 

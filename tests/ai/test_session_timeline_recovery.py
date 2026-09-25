@@ -24,7 +24,7 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryTerminalOutcome,
     SessionRecord,
 )
-from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, AgentRunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 
@@ -69,7 +69,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             metadata={"history_id": session.history_id},
             started_at=now,
         )
-        snapshot = ContinuableSnapshot(
+        checkpoint = AgentRunCheckpoint(
             agent_run_id="run",
             step_index=1,
             messages=[
@@ -90,7 +90,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
                     "target": RuntimeDomain.CONVERSATION,
                     "agent_run_id": "run",
                 }
-                await archive.materialize_snapshot(run, snapshot)
+                await archive.materialize_checkpoint(run, checkpoint)
 
         backend = object.__new__(LocalExecutionBackend)
         backend._tenant_id = "tenant"

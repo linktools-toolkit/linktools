@@ -87,7 +87,7 @@ async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
         await state.close()
 
 
-def test_timeline_range_uses_committed_cursor_when_snapshot_is_already_materialized() -> None:
+def test_timeline_range_uses_committed_cursor_when_checkpoint_is_already_materialized() -> None:
     history = ConversationHistoryRecord(
         history_id="history",
         session_id="session",
@@ -96,7 +96,7 @@ def test_timeline_range_uses_committed_cursor_when_snapshot_is_already_materiali
         inherited_message_count=3,
     )
     prepared = SimpleNamespace(
-        snapshots=(SimpleNamespace(chunks=()),),
+        checkpoints=(SimpleNamespace(chunks=()),),
         target_transcript_message_count=5,
     )
     expected = ConversationCursor(
@@ -117,7 +117,7 @@ def test_timeline_range_allows_root_recovery_after_transcript_materialization() 
         inherited_message_count=0,
     )
     prepared = SimpleNamespace(
-        snapshots=(SimpleNamespace(chunks=()),),
+        checkpoints=(SimpleNamespace(chunks=()),),
         target_transcript_message_count=2,
     )
 

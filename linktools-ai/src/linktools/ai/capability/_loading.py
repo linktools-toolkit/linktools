@@ -85,7 +85,7 @@ class _CapabilityAssetReader:
             for key in keys
         )
 
-    async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
+    async def capture_metadata(self) -> "tuple[AssetInfo, ...]":
         return self._metadata
 
     async def resolve_versions(
@@ -109,7 +109,7 @@ class _CapabilityAssetReader:
 
 @dataclass(frozen=True, slots=True)
 class CapabilityLoadEntry:
-    """Asset metadata captured at the start of one group snapshot."""
+    """Asset metadata captured at the start of one group capture."""
 
     key: AssetKey
     etag: str
@@ -179,7 +179,7 @@ class CapabilityLoadContext:
         source_revision = await store.current_revision()
         if not isinstance(source_revision, StorageRevision):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        metadata = await store.metadata_snapshot()
+        metadata = await store.capture_metadata()
         versions = await store.resolve_versions(
             tuple(info.key for info in metadata)
         )

@@ -32,7 +32,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from linktools.ai.runtime.state._step_contracts import (
-    ContinuableSnapshot,
+    AgentRunCheckpoint,
     AgentRunRecord,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -145,10 +145,10 @@ async def _materialize(
             started_at=now,
         )
     )
-    snapshot_messages = messages or []
-    if not snapshot_messages:
+    checkpoint_messages = messages or []
+    if not checkpoint_messages:
         for prompt in prompts:
-            snapshot_messages.extend(
+            checkpoint_messages.extend(
                 (
                     ModelRequest(
                         parts=[UserPromptPart(content=prompt)],
@@ -160,11 +160,11 @@ async def _materialize(
                     ),
                 )
             )
-    await state.run_store.save_snapshot(
-        ContinuableSnapshot(
+    await state.run_store.save_checkpoint(
+        AgentRunCheckpoint(
             agent_run_id=agent_run_id,
-            step_index=len(snapshot_messages),
-            messages=snapshot_messages,
+            step_index=len(checkpoint_messages),
+            messages=checkpoint_messages,
             agent_conversation_id=agent_conversation_id,
             parent_agent_run_id=None,
             agent_name="default",
@@ -398,7 +398,7 @@ async def test_session_history_fork_copies_continuation_without_execution_lookup
 
 
 @pytest.mark.asyncio
-async def test_session_history_reports_missing_committed_snapshot() -> None:
+async def test_session_history_reports_missing_committed_checkpoint() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="session-history-missing", tenant_id="tenant")
     try:

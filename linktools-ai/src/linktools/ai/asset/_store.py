@@ -49,7 +49,7 @@ class _LocalPathAssetBackend(Protocol):
 
 @runtime_checkable
 class AssetStoreReader(Protocol):
-    """Read-only AssetStore operations used by declaration snapshots."""
+    """Read-only AssetStore operations used by declaration captures."""
 
     async def current_revision(self) -> StorageRevision: ...
 
@@ -65,7 +65,7 @@ class AssetStoreReader(Protocol):
         keys: Sequence[AssetKey],
     ) -> "tuple[Path | None, ...]": ...
 
-    async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]": ...
+    async def capture_metadata(self) -> "tuple[AssetInfo, ...]": ...
 
     async def resolve_versions(
         self,
@@ -179,7 +179,7 @@ class AssetStore:
         self,
         keys: "Sequence[AssetKey]",
     ) -> "tuple[Path | None, ...]":
-        """Return effective native file paths from one storage metadata snapshot."""
+        """Return effective native file paths from one storage metadata read."""
         self._ensure_ready()
         locations = await self._storage.locate_many(keys)
         result: list[Path | None] = []
@@ -337,8 +337,8 @@ class AssetStore:
         )
         return Page(selected, _make_cursor(revision, kind, prefix, next_key))
 
-    async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
-        """Return one stable, active metadata snapshot for a freeze operation."""
+    async def capture_metadata(self) -> "tuple[AssetInfo, ...]":
+        """Capture one stable set of active metadata for a freeze operation."""
         self._ensure_ready()
         values = await self._storage.list_info()
         return tuple(
@@ -476,7 +476,7 @@ class AssetStore:
         selected = tuple(keys)
         if len(set(selected)) != len(selected):
             raise ValueError("asset snapshot keys must be unique")
-        infos = {info.key: info for info in await self.metadata_snapshot()}
+        infos = {info.key: info for info in await self.capture_metadata()}
         ordered = tuple(sorted(selected, key=lambda item: (item.kind, item.id)))
         if any(key not in infos for key in ordered):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -742,7 +742,7 @@ class _SnapshotAssetStore(AssetStore):
         )
         return Page(selected, next_cursor)
 
-    async def metadata_snapshot(self) -> tuple[AssetInfo, ...]:
+    async def capture_metadata(self) -> tuple[AssetInfo, ...]:
         self._ensure_ready()
         return tuple(
             sorted(

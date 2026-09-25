@@ -47,7 +47,7 @@ from linktools.ai.runtime._model_interaction import (
 from linktools.ai.runtime.state._model_interaction_store import (
     ModelInteractionStagingAgentRunStore,
 )
-from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, AgentRunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
 class _TextModelBinding:
@@ -618,8 +618,8 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             usage=None,
         )
         capture.append_transcript_message(second_response)
-        await capture.save_snapshot(
-            ContinuableSnapshot(
+        await capture.save_checkpoint(
+            AgentRunCheckpoint(
                 agent_run_id="run",
                 step_index=2,
                 messages=list(capture.transcript_messages()),
@@ -630,7 +630,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             )
         )
 
-        await state.run_store.materialize_recovery_snapshot(
+        await state.run_store.materialize_recovery_checkpoint(
             agent_run_id="run",
             require_complete=True,
         )

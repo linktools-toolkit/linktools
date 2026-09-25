@@ -26,7 +26,7 @@ _ALIAS_COMMENT = (
     "Secondary unique lookup identities that resolve to canonical runtime records."
 )
 _FACT_COMMENT = (
-    "Immutable ordered runtime facts including events, snapshots, and effects."
+    "Immutable ordered runtime facts including events, checkpoints, and effects."
 )
 _SEQUENCE_COMMENT = (
     "Durable monotonic counters used to allocate ordered runtime sequence numbers."
@@ -214,7 +214,7 @@ def build_runtime_sql_metadata(
             "kind",
             String(32),
             nullable=False,
-            comment="Fact kind such as execution_event, step_event, step_snapshot, or step_effect.",
+            comment="Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.",
         ),
         Column(
             "subject_digest",
@@ -226,7 +226,7 @@ def build_runtime_sql_metadata(
             "state",
             sql_state(),
             nullable=True,
-            comment="Queryable fact state such as snapshot completeness or tool-effect lifecycle state.",
+            comment="Queryable fact state such as checkpoint completeness or tool-effect lifecycle state.",
         ),
         Column(
             "payload_json",

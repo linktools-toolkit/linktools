@@ -18,7 +18,7 @@ from linktools.ai.runtime._message import (
     project_transient_binary_content,
 )
 from linktools.ai.runtime.state._step_contracts import (
-    ContinuableSnapshot,
+    AgentRunCheckpoint,
     AgentRunRecord,
 )
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
@@ -81,7 +81,7 @@ def test_only_binary_after_latest_complete_response_remains_pending() -> None:
     assert binary_content_usage((first, response, second)) == (2, 6)
 
 
-def test_snapshot_context_projects_consumed_binary_even_without_compaction() -> None:
+def test_checkpoint_context_projects_consumed_binary_even_without_compaction() -> None:
     capture = RuntimeCaptureStore(
         object(),  # type: ignore[arg-type]
         execution_id="execution",
@@ -91,14 +91,14 @@ def test_snapshot_context_projects_consumed_binary_even_without_compaction() -> 
     response = ModelResponse(parts=[TextPart("done")])
     raw = [request, response]
 
-    context = capture.snapshot_context(raw)[0]
+    context = capture.checkpoint_context(raw)[0]
 
     assert context is not None
     assert binary_content_usage(context) == (0, 0)
     assert binary_content_usage(raw) == (1, 5)
 
 
-def test_snapshot_context_composes_compaction_with_pending_binary() -> None:
+def test_checkpoint_context_composes_compaction_with_pending_binary() -> None:
     capture = RuntimeCaptureStore(
         object(),  # type: ignore[arg-type]
         execution_id="execution",
@@ -111,7 +111,7 @@ def test_snapshot_context_composes_compaction_with_pending_binary() -> None:
     capture.remember_context_projection(source, (summary,))
     pending = _request("new.png", b"new")
 
-    context = capture.snapshot_context((*source, pending))[0]
+    context = capture.checkpoint_context((*source, pending))[0]
 
     assert context is not None
     assert context[0] == summary
@@ -121,7 +121,7 @@ def test_snapshot_context_composes_compaction_with_pending_binary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> None:
+async def test_checkpoint_recovery_keeps_pending_and_drops_consumed_binary() -> None:
     store = StagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("pending"))
@@ -140,22 +140,22 @@ async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> No
     consumed_request = _request("consumed.png", b"consumed")
     consumed_response = ModelResponse(parts=[TextPart("done")])
 
-    await store.save_snapshot(
-        ContinuableSnapshot(
+    await store.save_checkpoint(
+        AgentRunCheckpoint(
             agent_run_id="pending",
             step_index=1,
             messages=[pending_request],
-            context_messages=pending_capture.snapshot_context([pending_request])[0],
+            context_messages=pending_capture.checkpoint_context([pending_request])[0],
             transcript_message_count_before=0,
         )
     )
     consumed_raw = [consumed_request, consumed_response]
-    await store.save_snapshot(
-        ContinuableSnapshot(
+    await store.save_checkpoint(
+        AgentRunCheckpoint(
             agent_run_id="consumed",
             step_index=1,
             messages=consumed_raw,
-            context_messages=consumed_capture.snapshot_context(consumed_raw)[0],
+            context_messages=consumed_capture.checkpoint_context(consumed_raw)[0],
             transcript_message_count_before=0,
         )
     )

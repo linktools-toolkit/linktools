@@ -14,7 +14,7 @@ from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from linktools.ai.runtime.state._step_contracts import (
-    ContinuableSnapshot,
+    AgentRunCheckpoint,
     AgentRunRecord,
     StepEvent,
 )
@@ -70,7 +70,7 @@ def _execution() -> ExecutionRecord:
 
 
 @pytest.mark.asyncio
-async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
+async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
     state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="step-io", tenant_id="tenant")
     try:
@@ -98,7 +98,7 @@ async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
         assert await execution.list_events(agent_run_id=run.agent_run_id) == []
         assert await recovery.get_agent_run(agent_run_id=run.agent_run_id) is None
 
-        snapshot = ContinuableSnapshot(
+        checkpoint = AgentRunCheckpoint(
             agent_run_id=run.agent_run_id,
             step_index=3,
             messages=[
@@ -113,7 +113,7 @@ async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
             timestamp=now,
             transcript_message_count_before=0,
         )
-        await state.run_store.save_snapshot(snapshot)
+        await state.run_store.save_checkpoint(checkpoint)
         assert await execution.list_events(agent_run_id=run.agent_run_id) == []
 
         await state.run_store.flush_execution_projection(
@@ -122,15 +122,15 @@ async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
         )
 
         assert len(await execution.list_events(agent_run_id=run.agent_run_id)) == 3
-        latest = await execution.latest_snapshot(agent_run_id=run.agent_run_id)
+        latest = await execution.latest_checkpoint(agent_run_id=run.agent_run_id)
         assert latest is not None
         assert latest.transcript_message_count_before is None
-        assert latest.messages == snapshot.messages
+        assert latest.messages == checkpoint.messages
         assert await recovery.get_agent_run(agent_run_id=run.agent_run_id) == run
-        recovery_latest = await recovery.latest_snapshot(agent_run_id=run.agent_run_id)
+        recovery_latest = await recovery.latest_checkpoint(agent_run_id=run.agent_run_id)
         assert recovery_latest is not None
         assert recovery_latest.transcript_message_count_before is None
-        assert recovery_latest.messages == snapshot.messages
+        assert recovery_latest.messages == checkpoint.messages
     finally:
         await state.close()
 

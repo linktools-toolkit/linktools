@@ -43,9 +43,9 @@ from ._journal import DURATION_NS_METADATA_KEY, REQUEST_SEQUENCE_METADATA_KEY
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
-    ContinuableSnapshot,
+    AgentRunCheckpoint,
     AgentRunRecord,
-    SnapshotState,
+    CheckpointState,
     AgentRunStore,
 )
 
@@ -58,7 +58,7 @@ _logger = environ.get_logger("ai.runtime.capabilities")
 
 @dataclass(kw_only=True, eq=False)
 class _RuntimeAgentRunPersistence(AbstractCapability[None]):
-    """Persist Runtime-owned step events, raw occurrences, and recovery snapshots."""
+    """Persist Runtime-owned step events, raw occurrences, and recovery checkpoints."""
 
     capture: RuntimeCaptureStore = field(repr=False, compare=False)
     agent_name: str
@@ -82,25 +82,25 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
         repr=False,
         compare=False,
     )
-    _last_snapshot_transcript_count: int = field(
+    _last_checkpoint_transcript_count: int = field(
         default=0,
         init=False,
         repr=False,
         compare=False,
     )
-    _last_snapshot_context: tuple[ModelMessage, ...] | None = field(
+    _last_checkpoint_context: tuple[ModelMessage, ...] | None = field(
         default=None,
         init=False,
         repr=False,
         compare=False,
     )
-    _last_snapshot_state: SnapshotState | None = field(
+    _last_checkpoint_state: CheckpointState | None = field(
         default=None,
         init=False,
         repr=False,
         compare=False,
     )
-    _last_snapshot_pending_index: int | None = field(
+    _last_checkpoint_pending_index: int | None = field(
         default=None,
         init=False,
         repr=False,
@@ -142,7 +142,7 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
             )
         )
         transcript = self.capture.transcript_messages()
-        self._last_snapshot_transcript_count = len(transcript)
+        self._last_checkpoint_transcript_count = len(transcript)
         self._replay_request_captured = bool(transcript and isinstance(transcript[-1], ModelRequest))
         await self.capture.record_event("run_started", ctx.run_step)
 
@@ -158,7 +158,7 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
                 self._replay_request_captured = False
             else:
                 self.capture.append_transcript_message(ctx.messages[-1])
-        await self._save_snapshot(ctx, messages=ctx.messages, state="complete")
+        await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
         return request_context
 
     async def after_node_run(
@@ -179,10 +179,10 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
             if response is not None:
                 self.capture.append_transcript_message(response)
                 # The exact response must be recoverable before any tool effect.
-                await self._save_snapshot(ctx, messages=ctx.messages, state="complete")
+                await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
         if isinstance(node, CallToolsNode):
             pending = result.request if isinstance(result, ModelRequestNode) else None
-            await self._save_snapshot(
+            await self._save_checkpoint(
                 ctx,
                 messages=ctx.messages,
                 pending=pending,
@@ -204,7 +204,7 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
             if self.deferred_pause_sink is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             self.deferred_pause_sink(self._last_observed_step_index)
-        await self._save_snapshot(
+        await self._save_checkpoint(
             ctx,
             messages=result.all_messages(),
             state="interrupted" if interrupted else "complete",
@@ -222,7 +222,7 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
         error: BaseException,
     ) -> AgentRunResult[Any]:
         messages = self._live_messages or ctx.messages
-        await self._save_snapshot(
+        await self._save_checkpoint(
             ctx,
             messages=messages,
             state="interrupted",
@@ -318,29 +318,29 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
     ) -> None:
         self.capture.remember_context_projection(source, projected)
 
-    async def _save_snapshot(
+    async def _save_checkpoint(
         self,
         ctx: PydanticRunContext[None],
         *,
         messages: Sequence[ModelMessage],
         pending: ModelMessage | None = None,
-        state: SnapshotState,
+        state: CheckpointState,
     ) -> None:
-        context_messages, pending_index = self.capture.snapshot_context(
+        context_messages, pending_index = self.capture.checkpoint_context(
             messages,
             pending=pending,
         )
         frozen_context = tuple(context_messages)
         raw = self.capture.transcript_messages()
         if (
-            self._last_snapshot_context == frozen_context
-            and self._last_snapshot_transcript_count == len(raw)
-            and self._last_snapshot_state == state
-            and self._last_snapshot_pending_index == pending_index
+            self._last_checkpoint_context == frozen_context
+            and self._last_checkpoint_transcript_count == len(raw)
+            and self._last_checkpoint_state == state
+            and self._last_checkpoint_pending_index == pending_index
         ):
             return
-        await self.capture.save_snapshot(
-            ContinuableSnapshot(
+        await self.capture.save_checkpoint(
+            AgentRunCheckpoint(
                 agent_run_id=self.agent_run_id,
                 step_index=ctx.run_step,
                 messages=list(raw),
@@ -349,14 +349,14 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
                 agent_name=self.agent_name,
                 state=state,
                 context_messages=context_messages,
-                transcript_message_count_before=self._last_snapshot_transcript_count,
+                transcript_message_count_before=self._last_checkpoint_transcript_count,
                 pending_request_index=pending_index,
             )
         )
-        self._last_snapshot_transcript_count = len(raw)
-        self._last_snapshot_context = frozen_context
-        self._last_snapshot_state = state
-        self._last_snapshot_pending_index = pending_index
+        self._last_checkpoint_transcript_count = len(raw)
+        self._last_checkpoint_context = frozen_context
+        self._last_checkpoint_state = state
+        self._last_checkpoint_pending_index = pending_index
 
 
 async def compose_platform_capabilities(

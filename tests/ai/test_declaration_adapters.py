@@ -337,7 +337,7 @@ async def test_snapshot_ignores_unrelated_asset_added_during_loader() -> None:
         assert reader is not None
         assert late not in {
             info.key
-            for info in await reader.metadata_snapshot()
+            for info in await reader.capture_metadata()
         }
         assert snapshot.source_revision == await store.current_revision()
         await snapshot.verify_source_revision()

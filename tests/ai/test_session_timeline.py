@@ -39,7 +39,7 @@ from linktools.ai.runtime.state._contracts import (
     SessionRecord,
     StoredUserInput,
 )
-from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, AgentRunRecord
+from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 from linktools.ai.storage import StoredPayload
 
 
@@ -184,8 +184,8 @@ async def _materialize_conversation(
             conversation_id=agent_conversation_id,
         ),
     ]
-    await state.run_store.save_snapshot(
-        ContinuableSnapshot(
+    await state.run_store.save_checkpoint(
+        AgentRunCheckpoint(
             agent_run_id=agent_run_id,
             step_index=1,
             messages=messages,
@@ -280,8 +280,8 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             )
             for index in range(3)
         ]
-        await state.run_store.save_snapshot(
-            ContinuableSnapshot(
+        await state.run_store.save_checkpoint(
+            AgentRunCheckpoint(
                 agent_run_id=stale_agent_run_id,
                 step_index=1,
                 messages=stale_messages,

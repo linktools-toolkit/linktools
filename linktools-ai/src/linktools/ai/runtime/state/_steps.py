@@ -29,8 +29,8 @@ from ._step_archive import (
     InMemoryStepArchive,
     LockOrderError,
     PreparedExecutionProjection,
-    PreparedStepSnapshot,
-    PreparedStepSnapshotBatch,
+    PreparedAgentRunCheckpoint,
+    PreparedAgentRunCheckpointBatch,
     StagingAgentRunStore,
     StateStepArchive,
     _LocalExecutionTerminalSeal,
@@ -40,11 +40,11 @@ from ._step_archive import (
     _AgentRunHistoryLock,
     _AgentRunProjectionFlight,
     _StepArchiveBatch,
-    _conversation_relocated_snapshot_matches,
-    _materialize_snapshot,
+    _conversation_relocated_checkpoint_matches,
+    _materialize_checkpoint,
     _sync_projection,
 )
-from ._step_contracts import ContinuableSnapshot, AgentRunRecord, StepEvent, AgentRunStore
+from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
 
 _logger = environ.get_logger("ai.runtime.state.run_store")
 
@@ -115,7 +115,7 @@ class RuntimeAgentRunStore(AgentRunStore):
     ) -> None:
         await self._ensure_business()
         recovery = self._archives.get(RuntimeDomain.RECOVERY)
-        restored: ContinuableSnapshot | None = None
+        restored: AgentRunCheckpoint | None = None
         events: Sequence[StepEvent] = ()
         offset: _ProjectionOffset | None = None
         if recovery is not None:
@@ -124,7 +124,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 if _agent_run_registration_identity(durable) != _agent_run_registration_identity(record):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 record = durable
-                restored = await recovery.latest_snapshot(
+                restored = await recovery.latest_checkpoint(
                     agent_run_id=record.agent_run_id,
                     include_interrupted=True,
                 )
@@ -138,7 +138,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     events = await execution.list_events(agent_run_id=record.agent_run_id)
                     offset = _ProjectionOffset(
                         events=len(events),
-                        snapshots=1,
+                        checkpoints=1,
                         transcript_messages=len(restored.messages),
                         interactions=await execution.model_interaction_count(
                             agent_run_id=record.agent_run_id
@@ -149,7 +149,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             new_registration = self._staging.get_agent_run_local(record.agent_run_id) is None
             self._staging.register_agent_run_local(record)
             if new_registration and restored is not None:
-                self._staging.save_snapshot_local(
+                self._staging.save_checkpoint_local(
                     replace(restored, transcript_message_count_before=0)
                 )
                 for event in events:
@@ -184,9 +184,9 @@ class RuntimeAgentRunStore(AgentRunStore):
         await self._ensure_business()
         return await self._staging.list_events(agent_run_id=agent_run_id)
 
-    async def save_snapshot(
+    async def save_checkpoint(
         self,
-        snapshot: ContinuableSnapshot,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
     ) -> None:
@@ -197,20 +197,20 @@ class RuntimeAgentRunStore(AgentRunStore):
             recovery: AgentRunStore | None = None
             recovery_run: AgentRunRecord | None = None
             flight: _AgentRunDurabilityFlight | None = None
-            async with self._history_lock.hold(snapshot.agent_run_id):
-                existing = self._durability_flights.get(snapshot.agent_run_id)
+            async with self._history_lock.hold(checkpoint.agent_run_id):
+                existing = self._durability_flights.get(checkpoint.agent_run_id)
                 if existing is not None:
                     completion = existing.completion
                 else:
-                    self._ensure_run_mutable(snapshot.agent_run_id)
-                    self._staging.save_snapshot_local(snapshot)
-                    self._projection_dirty.add(snapshot.agent_run_id)
+                    self._ensure_run_mutable(checkpoint.agent_run_id)
+                    self._staging.save_checkpoint_local(checkpoint)
+                    self._projection_dirty.add(checkpoint.agent_run_id)
                     recovery = self._archives.get(RuntimeDomain.RECOVERY)
-                    recovery_run = self._staging.get_agent_run_local(snapshot.agent_run_id)
+                    recovery_run = self._staging.get_agent_run_local(checkpoint.agent_run_id)
                     if recovery is not None:
                         flight = self._install_durability_flight_locked(
-                            snapshot.agent_run_id,
-                            _AgentRunDurabilityKind.SNAPSHOT,
+                            checkpoint.agent_run_id,
+                            _AgentRunDurabilityKind.CHECKPOINT,
                         )
             if completion is not None:
                 await asyncio.shield(completion)
@@ -225,13 +225,13 @@ class RuntimeAgentRunStore(AgentRunStore):
             async def operation(
                 target_recovery: AgentRunStore = recovery,
                 target_agent_run: AgentRunRecord = recovery_run,
-                target_snapshot: ContinuableSnapshot = snapshot,
+                target_checkpoint: AgentRunCheckpoint = checkpoint,
             ) -> None:
                 nonlocal prepared_interactions
                 if isinstance(target_recovery, StateStepArchive):
-                    target_snapshot = await target_recovery.relocate_run_snapshot(
+                    target_checkpoint = await target_recovery.relocate_run_checkpoint(
                         target_agent_run,
-                        target_snapshot,
+                        target_checkpoint,
                     )
                     high_water = await target_recovery.model_interaction_count(
                         agent_run_id=target_agent_run.agent_run_id
@@ -244,65 +244,65 @@ class RuntimeAgentRunStore(AgentRunStore):
                         target_agent_run,
                         staged,
                         lambda digest: self._staging.staged_payload(target_agent_run.agent_run_id, digest),
-                        local_message_count=len(target_snapshot.messages),
+                        local_message_count=len(target_checkpoint.messages),
                     )
-                    await target_recovery.materialize_snapshot(
+                    await target_recovery.materialize_checkpoint(
                         target_agent_run,
-                        target_snapshot,
+                        target_checkpoint,
                         interactions=prepared_interactions,
                     )
                     return
-                await _materialize_snapshot(
+                await _materialize_checkpoint(
                     target_recovery,
                     target_agent_run,
-                    target_snapshot,
+                    target_checkpoint,
                 )
 
             async def readback(
                 target_recovery: AgentRunStore = recovery,
                 target_agent_run: AgentRunRecord = recovery_run,
-                target_snapshot: ContinuableSnapshot = snapshot,
+                target_checkpoint: AgentRunCheckpoint = checkpoint,
             ) -> CommitObservation[None]:
                 try:
                     observed_run = await target_recovery.get_agent_run(
-                        agent_run_id=target_snapshot.agent_run_id
+                        agent_run_id=target_checkpoint.agent_run_id
                     )
                     if isinstance(target_recovery, StateStepArchive):
-                        snapshot_visible = (
-                            await target_recovery.verify_snapshot_projection(
-                                agent_run_id=target_snapshot.agent_run_id,
-                                snapshot=target_snapshot,
+                        checkpoint_visible = (
+                            await target_recovery.verify_checkpoint_projection(
+                                agent_run_id=target_checkpoint.agent_run_id,
+                                checkpoint=target_checkpoint,
                             )
                         )
-                        if snapshot_visible and prepared_interactions:
+                        if checkpoint_visible and prepared_interactions:
                             observed_interactions = await target_recovery.list_model_interactions(
                                 agent_run_id=target_agent_run.agent_run_id,
                                 after_request_sequence=prepared_interactions[0].request_sequence - 1,
                                 limit=len(prepared_interactions),
                             )
-                            snapshot_visible = tuple(observed_interactions) == prepared_interactions
+                            checkpoint_visible = tuple(observed_interactions) == prepared_interactions
                     else:
-                        observed_snapshot = await target_recovery.latest_snapshot(
-                            agent_run_id=target_snapshot.agent_run_id,
+                        observed_checkpoint = await target_recovery.latest_checkpoint(
+                            agent_run_id=target_checkpoint.agent_run_id,
                             include_interrupted=True,
                         )
-                        snapshot_visible = _relocated_snapshot_matches(
+                        checkpoint_visible = _relocated_checkpoint_matches(
                             RuntimeDomain.RECOVERY,
-                            target_snapshot,
-                            observed_snapshot,
+                            target_checkpoint,
+                            observed_checkpoint,
                         )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if observed_run == target_agent_run and snapshot_visible:
+                if observed_run == target_agent_run and checkpoint_visible:
                     return CommitObservation(DurableCommitState.COMMITTED)
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
 
             await self._settle_durability_flight(flight, operation, readback)
             return
 
-    async def latest_snapshot(self, *, agent_run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
+    async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
         await self._ensure_business()
-        return await self._staging.latest_snapshot(agent_run_id=agent_run_id, include_interrupted=include_interrupted)
+        return await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=include_interrupted)
 
     def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]:
         return self._staging.intern_payload(agent_run_id, payload)
@@ -564,20 +564,20 @@ class RuntimeAgentRunStore(AgentRunStore):
         )
         return context.model_messages()
 
-    async def materialize_recovery_snapshot(self, *, agent_run_id: str, require_complete: bool) -> None:
-        snapshot = await self._staging.latest_snapshot(agent_run_id=agent_run_id, include_interrupted=True)
+    async def materialize_recovery_checkpoint(self, *, agent_run_id: str, require_complete: bool) -> None:
+        checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
         run = await self._staging.get_agent_run(agent_run_id=agent_run_id)
         archive = self._archives.get(RuntimeDomain.RECOVERY)
-        if snapshot is None or run is None:
+        if checkpoint is None or run is None:
             if require_complete:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
-        if require_complete and snapshot.state != "complete":
+        if require_complete and checkpoint.state != "complete":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if archive is not None:
             if isinstance(archive, StateStepArchive):
-                snapshot = await archive.relocate_run_snapshot(run, snapshot)
-            await _materialize_snapshot(archive, run, snapshot)
+                checkpoint = await archive.relocate_run_checkpoint(run, checkpoint)
+            await _materialize_checkpoint(archive, run, checkpoint)
             interactions = await self._staging.list_model_interactions(
                 agent_run_id=agent_run_id
             )
@@ -586,7 +586,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 if head is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 local_base, local_count = _interaction_local_range(
-                    (snapshot,),
+                    (checkpoint,),
                     head.message_count,
                 )
                 prepared = await archive.prepare_interactions(
@@ -602,22 +602,22 @@ class RuntimeAgentRunStore(AgentRunStore):
                 await archive.sync_projection(
                     run,
                     events=(),
-                    snapshots=(),
+                    checkpoints=(),
                     interactions=prepared,
                 )
 
     async def materialize_conversation(self, *, agent_run_id: str) -> None:
         run = await self._staging.get_agent_run(agent_run_id=agent_run_id)
-        snapshot = await self._staging.latest_snapshot(agent_run_id=agent_run_id)
+        checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id)
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
-        if run is None or snapshot is None or archive is None:
+        if run is None or checkpoint is None or archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(archive, StateStepArchive):
-            snapshot = await archive.relocate_conversation_snapshot(
+            checkpoint = await archive.relocate_conversation_checkpoint(
                 run,
-                snapshot,
+                checkpoint,
             )
-        await _materialize_snapshot(archive, run, snapshot)
+        await _materialize_checkpoint(archive, run, checkpoint)
 
     async def materialize_from_recovery(
         self,
@@ -631,11 +631,11 @@ class RuntimeAgentRunStore(AgentRunStore):
         if recovery is None or destination is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         run = await recovery.get_agent_run(agent_run_id=agent_run_id)
-        snapshot = await recovery.latest_snapshot(
+        checkpoint = await recovery.latest_checkpoint(
             agent_run_id=agent_run_id,
             include_interrupted=target is RuntimeDomain.EXECUTION,
         )
-        if run is None or snapshot is None:
+        if run is None or checkpoint is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if target is RuntimeDomain.EXECUTION and execution_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -677,21 +677,21 @@ class RuntimeAgentRunStore(AgentRunStore):
                     raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
                 if isinstance(destination, StateStepArchive):
                     if target is RuntimeDomain.CONVERSATION:
-                        target_snapshot = await destination.relocate_conversation_snapshot(
-                            run, snapshot
+                        target_checkpoint = await destination.relocate_conversation_checkpoint(
+                            run, checkpoint
                         )
                     else:
-                        target_snapshot = await destination.relocate_run_snapshot(
-                            run, snapshot
+                        target_checkpoint = await destination.relocate_run_checkpoint(
+                            run, checkpoint
                         )
                 else:
                     local_message_count = await destination.transcript_message_count(
                         agent_run_id
                     )
-                    if local_message_count > len(snapshot.messages):
+                    if local_message_count > len(checkpoint.messages):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    target_snapshot = replace(
-                        snapshot,
+                    target_checkpoint = replace(
+                        checkpoint,
                         transcript_message_count_before=local_message_count,
                     )
                 relocated = await destination.prepare_relocated_interactions(
@@ -706,7 +706,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 await destination.sync_projection(
                     run,
                     events=(),
-                    snapshots=(target_snapshot,),
+                    checkpoints=(target_checkpoint,),
                     interactions=relocated,
                     execution_id=execution_id,
                 )
@@ -714,7 +714,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             async def readback() -> CommitObservation[None]:
                 try:
                     observed_run = await destination.get_agent_run(agent_run_id=run.agent_run_id)
-                    observed_snapshot = await destination.latest_snapshot(
+                    observed_checkpoint = await destination.latest_checkpoint(
                         agent_run_id=run.agent_run_id,
                         include_interrupted=True,
                     )
@@ -738,14 +738,14 @@ class RuntimeAgentRunStore(AgentRunStore):
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                snapshot_matches = _relocated_snapshot_matches(
+                checkpoint_matches = _relocated_checkpoint_matches(
                     target,
-                    snapshot,
-                    observed_snapshot,
+                    checkpoint,
+                    observed_checkpoint,
                 )
                 if (
                     observed_run == run
-                    and snapshot_matches
+                    and checkpoint_matches
                     and tuple(
                         _interaction_semantic_header(value)
                         for value in observed_interactions
@@ -819,7 +819,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                             if run is None:
                                 needs_archive_run = True
                             else:
-                                projection = self._capture_projection_snapshot_locked(agent_run_id)
+                                projection = self._capture_projection_checkpoint_locked(agent_run_id)
                                 captured.append((seal, projection))
                                 break
                     if needs_archive_run:
@@ -857,43 +857,43 @@ class RuntimeAgentRunStore(AgentRunStore):
                 durable_head = durable_heads.get(projection.run.agent_run_id)
                 if durable_head is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                batch = await archive.prepare_snapshots_after_seal(
+                batch = await archive.prepare_checkpoints_after_seal(
                     projection.run,
-                    projection.snapshots,
+                    projection.checkpoints,
                 )
-                latest_staged_snapshot = await self._staging.latest_snapshot(
+                latest_staged_checkpoint = await self._staging.latest_checkpoint(
                     agent_run_id=projection.run.agent_run_id,
                     include_interrupted=True,
                 )
                 local_base, local_count = _interaction_local_range(
-                    projection.snapshots,
+                    projection.checkpoints,
                     batch.target_transcript_message_count,
                     fallback_local_count=(
                         0
-                        if latest_staged_snapshot is None
-                        else len(latest_staged_snapshot.messages)
+                        if latest_staged_checkpoint is None
+                        else len(latest_staged_checkpoint.messages)
                     ),
                 )
                 prepared.append(
                     PreparedExecutionProjection(
                         projection.run,
                         projection.events,
-                        batch.snapshots,
+                        batch.checkpoints,
                         projection.base_event_offset,
-                        projection.base_snapshot_offset,
+                        projection.base_checkpoint_offset,
                         durable_head.event_count
                         + projection.target_event_offset
                         - projection.base_event_offset,
-                        durable_head.snapshot_count
-                        + projection.target_snapshot_offset
-                        - projection.base_snapshot_offset,
+                        durable_head.checkpoint_count
+                        + projection.target_checkpoint_offset
+                        - projection.base_checkpoint_offset,
                         batch.target_transcript_message_count,
                         "empty"
-                        if not batch.snapshots
+                        if not batch.checkpoints
                         and durable_head.projection_digest == "empty"
                         else (
-                            batch.snapshots[-1].projection.digest
-                            if batch.snapshots
+                            batch.checkpoints[-1].projection.digest
+                            if batch.checkpoints
                             else durable_head.projection_digest
                         ),
                         tuple(
@@ -1014,7 +1014,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 _ProjectionOffset(),
             )
             offset.events = max(offset.events, projection.target_event_offset)
-            offset.snapshots = max(offset.snapshots, projection.target_snapshot_offset)
+            offset.checkpoints = max(offset.checkpoints, projection.target_checkpoint_offset)
             offset.transcript_messages = max(
                 offset.transcript_messages,
                 projection.target_transcript_message_count,
@@ -1068,7 +1068,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         if completion is not None and not completion.done():
             completion.set_result(None)
 
-    def _capture_projection_snapshot_locked(
+    def _capture_projection_checkpoint_locked(
         self,
         agent_run_id: str,
     ) -> ExecutionProjectionBatch:
@@ -1086,7 +1086,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self,
         agent_run_id: str,
     ) -> "tuple[CapturedExecutionProjection, _AgentRunProjectionFlight] | None":
-        """CAPTURE: snapshot staged state under the run lock with no durable I/O."""
+        """CAPTURE: checkpoint staged state under the run lock with no durable I/O."""
         await self._ensure_business()
         while True:
             completion: asyncio.Future[None] | None = None
@@ -1113,22 +1113,22 @@ class RuntimeAgentRunStore(AgentRunStore):
                     captured = CapturedExecutionProjection(
                         projection.run,
                         projection.events,
-                        projection.snapshots,
+                        projection.checkpoints,
                         projection.base_event_offset,
-                        projection.base_snapshot_offset,
+                        projection.base_checkpoint_offset,
                         projection.target_event_offset,
-                        projection.target_snapshot_offset,
+                        projection.target_checkpoint_offset,
                         projection.interactions,
                         projection.base_interaction_offset,
                         projection.target_interaction_offset,
                     )
                     _logger.debug(
                         "projection flight captured: agent_run=%s token=%s "
-                        "events=%s snapshots=%s",
+                        "events=%s checkpoints=%s",
                         agent_run_id,
                         flight.token,
                         len(captured.events),
-                        len(captured.snapshots),
+                        len(captured.checkpoints),
                     )
                     return captured, flight
             await asyncio.shield(completion)
@@ -1178,7 +1178,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 _ProjectionOffset(),
             )
             offset.events = max(offset.events, captured.target_event_offset)
-            offset.snapshots = max(offset.snapshots, captured.target_snapshot_offset)
+            offset.checkpoints = max(offset.checkpoints, captured.target_checkpoint_offset)
             offset.interactions = max(
                 offset.interactions,
                 captured.target_interaction_offset,
@@ -1192,11 +1192,11 @@ class RuntimeAgentRunStore(AgentRunStore):
         if not flight.completion.done():
             flight.completion.set_result(None)
         _logger.debug(
-            "projection flight finalized: agent_run=%s token=%s events=%s snapshots=%s",
+            "projection flight finalized: agent_run=%s token=%s events=%s checkpoints=%s",
             flight.agent_run_id,
             flight.token,
             captured.target_event_offset,
-            captured.target_snapshot_offset,
+            captured.target_checkpoint_offset,
         )
 
     async def commit_captured_execution_projection(
@@ -1218,7 +1218,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     archive,
                     captured.run,
                     captured.events,
-                    captured.snapshots,
+                    captured.checkpoints,
                     captured.interactions,
                     execution_id=execution_id,
                 )
@@ -1229,7 +1229,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     stored_events = await archive.list_events(
                         agent_run_id=captured.run.agent_run_id
                     )
-                    stored_snapshot = await archive.latest_snapshot(
+                    stored_checkpoint = await archive.latest_checkpoint(
                         agent_run_id=captured.run.agent_run_id,
                         include_interrupted=True,
                     )
@@ -1242,7 +1242,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 if captured.events and tuple(stored_events[-len(captured.events) :]) != captured.events:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                if captured.snapshots and stored_snapshot != captured.snapshots[-1]:
+                if captured.checkpoints and stored_checkpoint != captured.checkpoints[-1]:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 if captured.interactions and tuple(
                     stored_interactions[-len(captured.interactions) :]
@@ -1288,26 +1288,26 @@ class RuntimeAgentRunStore(AgentRunStore):
             )
             await self._fence_durability_flight(flight, unknown)
             raise unknown from result.error
-        if not captured.events and not captured.snapshots and not captured.interactions:
+        if not captured.events and not captured.checkpoints and not captured.interactions:
             await self.finalize_execution_projection(flight, captured)
             return
         started = monotonic()
         try:
-            prepared = await archive.prepare_snapshots(
+            prepared = await archive.prepare_checkpoints(
                 captured.run,
-                captured.snapshots,
+                captured.checkpoints,
             )
-            latest_staged_snapshot = await self._staging.latest_snapshot(
+            latest_staged_checkpoint = await self._staging.latest_checkpoint(
                 agent_run_id=captured.run.agent_run_id,
                 include_interrupted=True,
             )
             local_base, local_count = _interaction_local_range(
-                captured.snapshots,
+                captured.checkpoints,
                 prepared.target_transcript_message_count,
                 fallback_local_count=(
                     0
-                    if latest_staged_snapshot is None
-                    else len(latest_staged_snapshot.messages)
+                    if latest_staged_checkpoint is None
+                    else len(latest_staged_checkpoint.messages)
                 ),
             )
             interactions = await archive.prepare_interactions(
@@ -1329,10 +1329,10 @@ class RuntimeAgentRunStore(AgentRunStore):
         expected_head = ExecutionRunSealHead(
             captured.run.agent_run_id,
             durable_head.event_count + len(captured.events),
-            durable_head.snapshot_count + len(prepared.snapshots),
+            durable_head.checkpoint_count + len(prepared.checkpoints),
             prepared.target_transcript_message_count,
-            prepared.snapshots[-1].projection.digest
-            if prepared.snapshots
+            prepared.checkpoints[-1].projection.digest
+            if prepared.checkpoints
             else "empty",
             durable_head.interaction_count + len(interactions),
         )
@@ -1341,19 +1341,19 @@ class RuntimeAgentRunStore(AgentRunStore):
             await archive.sync_prepared_projection(
                 captured.run,
                 events=captured.events,
-                snapshots=prepared.snapshots,
+                checkpoints=prepared.checkpoints,
                 interactions=interactions,
                 execution_id=execution_id,
             )
             head = await archive.execution_history_head_record(captured.run.agent_run_id)
             if (
                 head.event_count != expected_head.event_count
-                or head.snapshot_count != expected_head.snapshot_count
+                or head.checkpoint_count != expected_head.checkpoint_count
                 or head.transcript_message_count
                 != expected_head.transcript_message_count
                 or head.interaction_count != expected_head.interaction_count
                 or (
-                    prepared.snapshots
+                    prepared.checkpoints
                     and head.projection_digest != expected_head.projection_digest
                 )
             ):
@@ -1361,7 +1361,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             return ExecutionRunSealHead(
                 captured.run.agent_run_id,
                 head.event_count,
-                head.snapshot_count,
+                head.checkpoint_count,
                 head.transcript_message_count,
                 head.projection_digest,
                 head.interaction_count,
@@ -1381,13 +1381,13 @@ class RuntimeAgentRunStore(AgentRunStore):
                 return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
             if head.event_count != expected_head.event_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if head.snapshot_count != expected_head.snapshot_count:
+            if head.checkpoint_count != expected_head.checkpoint_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             if head.transcript_message_count != expected_head.transcript_message_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             if head.interaction_count != expected_head.interaction_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if prepared.snapshots and head.projection_digest != expected_head.projection_digest:
+            if prepared.checkpoints and head.projection_digest != expected_head.projection_digest:
                 return CommitObservation(
                     DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                     error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
@@ -1397,7 +1397,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 value=ExecutionRunSealHead(
                     captured.run.agent_run_id,
                     head.event_count,
-                    head.snapshot_count,
+                    head.checkpoint_count,
                     head.transcript_message_count,
                     head.projection_digest,
                     head.interaction_count,
@@ -1445,12 +1445,12 @@ class RuntimeAgentRunStore(AgentRunStore):
             raise unknown from result.error
         _logger.debug(
             "step projection flushed: domain=%s backend=%s agent_run=%s "
-            "events=%s snapshots=%s duration_ms=%.3f",
+            "events=%s checkpoints=%s duration_ms=%.3f",
             RuntimeDomain.EXECUTION.value,
             type(archive).__name__,
             flight.agent_run_id,
             len(captured.events),
-            len(captured.snapshots),
+            len(captured.checkpoints),
             (monotonic() - started) * 1000,
         )
 
@@ -1481,16 +1481,16 @@ class RuntimeAgentRunStore(AgentRunStore):
         for agent_run_id in dict.fromkeys(candidate_agent_run_ids):
             if required_agent_run_id != agent_run_id:
                 continue
-            snapshot = await self._staging.latest_snapshot(agent_run_id=agent_run_id, include_interrupted=True)
-            if snapshot is None:
+            checkpoint = await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=True)
+            if checkpoint is None:
                 for archive in self._archives.values():
-                    snapshot = await archive.latest_snapshot(
+                    checkpoint = await archive.latest_checkpoint(
                         agent_run_id=agent_run_id,
                         include_interrupted=True,
                     )
-                    if snapshot is not None:
+                    if checkpoint is not None:
                         break
-            if snapshot is None or snapshot.state != "complete":
+            if checkpoint is None or checkpoint.state != "complete":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def release_staging_many(
@@ -1743,15 +1743,15 @@ class RuntimeAgentRunStore(AgentRunStore):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
-def _relocated_snapshot_matches(
+def _relocated_checkpoint_matches(
     target: RuntimeDomain,
-    source: ContinuableSnapshot,
-    observed: ContinuableSnapshot | None,
+    source: AgentRunCheckpoint,
+    observed: AgentRunCheckpoint | None,
 ) -> bool:
     if observed is None:
         return False
     if target is RuntimeDomain.CONVERSATION:
-        return _conversation_relocated_snapshot_matches(source, observed)
+        return _conversation_relocated_checkpoint_matches(source, observed)
     return replace(
         observed,
         transcript_message_count_before=None,
@@ -1791,7 +1791,7 @@ def _interaction_semantic_header(
 
 
 def _interaction_local_range(
-    snapshots: Sequence[ContinuableSnapshot],
+    checkpoints: Sequence[AgentRunCheckpoint],
     target_transcript_message_count: int,
     *,
     fallback_local_count: int = 0,
@@ -1802,8 +1802,8 @@ def _interaction_local_range(
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     local_count = (
-        len(snapshots[-1].messages)
-        if snapshots
+        len(checkpoints[-1].messages)
+        if checkpoints
         else fallback_local_count
     )
     local_base = target_transcript_message_count - local_count
@@ -1818,8 +1818,8 @@ __all__ = [
     "InMemoryStepArchive",
     "LockOrderError",
     "PreparedExecutionProjection",
-    "PreparedStepSnapshot",
-    "PreparedStepSnapshotBatch",
+    "PreparedAgentRunCheckpoint",
+    "PreparedAgentRunCheckpointBatch",
     "RuntimeAgentRunStore",
     "StagingAgentRunStore",
     "StateStepArchive",

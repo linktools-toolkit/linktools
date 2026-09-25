@@ -27,7 +27,7 @@ from linktools.ai.runtime.state._codec import (
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
     ExecutionHistoryState,
-    StoredStepSnapshot,
+    StoredAgentRunCheckpoint,
     TranscriptMessageRef,
 )
 
@@ -101,8 +101,8 @@ def test_future_envelope_version_is_parseable_but_not_decoded_without_registry()
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_snapshot_frontier_always_writes_pending_request_index() -> None:
-    snapshot = StoredStepSnapshot(
+def test_checkpoint_frontier_always_writes_pending_request_index() -> None:
+    checkpoint = StoredAgentRunCheckpoint(
         "run",
         1,
         datetime(2026, 9, 20, tzinfo=timezone.utc),
@@ -111,15 +111,15 @@ def test_snapshot_frontier_always_writes_pending_request_index() -> None:
         True,
     )
 
-    encoded = _encode_step_envelope(snapshot)
+    encoded = _encode_step_envelope(checkpoint)
     fields = encoded["value"]["payload"]["fields"]  # type: ignore[index]
 
     assert fields["pending_request_index"] is None
-    assert _decode_step_envelope(encoded) == snapshot
+    assert _decode_step_envelope(encoded) == checkpoint
 
 
-def test_snapshot_frontier_preserves_pending_request_index() -> None:
-    snapshot = StoredStepSnapshot(
+def test_checkpoint_frontier_preserves_pending_request_index() -> None:
+    checkpoint = StoredAgentRunCheckpoint(
         "run",
         1,
         datetime(2026, 9, 20, tzinfo=timezone.utc),
@@ -129,8 +129,8 @@ def test_snapshot_frontier_preserves_pending_request_index() -> None:
         3,
     )
 
-    encoded = _encode_step_envelope(snapshot)
+    encoded = _encode_step_envelope(checkpoint)
     fields = encoded["value"]["payload"]["fields"]  # type: ignore[index]
 
     assert fields["pending_request_index"] == 3
-    assert _decode_step_envelope(encoded) == snapshot
+    assert _decode_step_envelope(encoded) == checkpoint

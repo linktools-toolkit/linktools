@@ -22,11 +22,11 @@ from ._contracts import (
     RuntimePayloadRef,
     TranscriptSpanRef,
 )
-from ._step_contracts import ContinuableSnapshot, AgentRunRecord, StepEvent
+from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
 from ._step_archive import (
     ExecutionProjectionBatch,
     InMemoryStepArchive,
-    PreparedStepSnapshot,
+    PreparedAgentRunCheckpoint,
     StagingAgentRunStore,
     StateStepArchive,
     _ProjectionOffset,
@@ -50,8 +50,8 @@ class ModelInteractionStagingAgentRunStore(StagingAgentRunStore):
         agent_run_id: str,
         offset: _ProjectionOffset,
     ) -> ExecutionProjectionBatch | None:
-        # Base staging owns runs/events/snapshots/interactions. Ask it for a
-        # complete local interaction snapshot, then translate the durable
+        # Base staging owns runs/events/checkpoints/interactions. Ask it for a
+        # complete local interaction checkpoint, then translate the durable
         # request-sequence high-water without reaching into its other state.
         base = super().capture_projection_local(
             agent_run_id,
@@ -125,7 +125,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
-        snapshots: Sequence[ContinuableSnapshot],
+        checkpoints: Sequence[AgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None:
@@ -148,7 +148,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         await super().sync_projection(
             run,
             events=events,
-            snapshots=snapshots,
+            checkpoints=checkpoints,
             interactions=fresh,
             execution_id=execution_id,
         )
@@ -242,7 +242,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         run: AgentRunRecord,
         *,
         events: Sequence[StepEvent],
-        snapshots: Sequence[PreparedStepSnapshot],
+        checkpoints: Sequence[PreparedAgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
@@ -259,7 +259,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             transaction,
             run,
             events=events,
-            snapshots=snapshots,
+            checkpoints=checkpoints,
             interactions=(),
             execution_id=execution_id,
             history_head_guard=guard,
@@ -268,10 +268,10 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             transaction,
             run,
             interactions,
-            owner_already_guarded=bool(events or snapshots),
+            owner_already_guarded=bool(events or checkpoints),
         )
         if guard is not None and not supplied_guard and (
-            not run_existed or events or snapshots or inserted
+            not run_existed or events or checkpoints or inserted
         ):
             await self._advance_execution_history_head_in_transaction(
                 transaction,

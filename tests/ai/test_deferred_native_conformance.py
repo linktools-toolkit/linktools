@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Deferred approval and ordinary snapshot contracts."""
+"""Deferred approval and ordinary checkpoint contracts."""
 
 from pathlib import Path
 
@@ -12,7 +12,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 from linktools.ai.runtime.state._step_contracts import (
-    ContinuableSnapshot,
+    AgentRunCheckpoint,
 )
 from linktools.ai.runtime.state._steps import (
     StagingAgentRunStore,
@@ -61,16 +61,16 @@ class _Bridge:
 class _RecordingAgentRunStore(StagingAgentRunStore):
     def __init__(self) -> None:
         super().__init__()
-        self.saved_snapshots: list[ContinuableSnapshot] = []
+        self.saved_checkpoints: list[AgentRunCheckpoint] = []
 
-    async def save_snapshot(
+    async def save_checkpoint(
         self,
-        snapshot: ContinuableSnapshot,
+        checkpoint: AgentRunCheckpoint,
         *,
         execution_id: str | None = None,
     ) -> None:
-        self.saved_snapshots.append(snapshot)
-        await super().save_snapshot(snapshot, execution_id=execution_id)
+        self.saved_checkpoints.append(checkpoint)
+        await super().save_checkpoint(checkpoint, execution_id=execution_id)
 
 
 async def _read_file(path: str) -> str:
@@ -117,11 +117,11 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
 
     assert bridge.calls == 0
     assert not captured
-    assert not store.saved_snapshots
+    assert not store.saved_checkpoints
 
 
 @pytest.mark.asyncio
-async def test_ordinary_completed_snapshot_behavior_is_unchanged() -> None:
+async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
     agent_run_id = "completed-run"
     store = _RecordingAgentRunStore()
     persistence = _RuntimeAgentRunPersistence(
@@ -142,8 +142,8 @@ async def test_ordinary_completed_snapshot_behavior_is_unchanged() -> None:
     )
 
     assert result.output == "ok"
-    assert store.saved_snapshots
-    latest = await store.latest_snapshot(agent_run_id=agent_run_id)
+    assert store.saved_checkpoints
+    latest = await store.latest_checkpoint(agent_run_id=agent_run_id)
     assert latest is not None
     assert latest.state == "complete"
-    assert latest == store.saved_snapshots[-1]
+    assert latest == store.saved_checkpoints[-1]

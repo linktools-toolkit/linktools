@@ -73,7 +73,7 @@ from .state._contracts import (
     RuntimePayloadRef,
     ToolOperationRecord,
 )
-from .state._step_contracts import ContinuableSnapshot, AgentRunRecord
+from .state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 _logger = environ.get_logger("ai.runtime.local")
 
@@ -260,7 +260,7 @@ class _RecoveryCoordinatorPort(Protocol):
         error_diagnostics: ErrorDiagnostics | None = None,
         expected_cursor: ConversationCursor | None = None,
         conversation_agent_run: AgentRunRecord | None = None,
-        conversation_snapshot: ContinuableSnapshot | None = None,
+        conversation_checkpoint: AgentRunCheckpoint | None = None,
         recovery_checkpoint: RecoveryCheckpoint | None = None,
     ) -> ExecutionRecord: ...
 

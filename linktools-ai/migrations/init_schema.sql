@@ -41,7 +41,7 @@ CREATE TABLE ai_state_facts (
     stream_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the append-only fact stream.',
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the fact within its stream.',
     owner_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the runtime record that owns this fact.',
-    kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Fact kind such as execution_event, step_event, step_snapshot, or step_effect.',
+    kind VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Fact kind such as execution_event, step_event, step_checkpoint, or step_effect.',
     subject_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping identity for multiple facts of one logical subject such as a tool call.',
     state VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Queryable fact state such as snapshot completeness or tool-effect lifecycle state.',
     payload_json JSON NOT NULL COMMENT 'Versioned canonical immutable fact payload.',

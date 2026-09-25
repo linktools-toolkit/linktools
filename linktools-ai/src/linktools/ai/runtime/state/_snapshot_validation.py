@@ -756,7 +756,7 @@ def _fact_storage_identity(
     if isinstance(owner, AgentRunRecord):
         relation = {
             "step_event": "event",
-            "step_snapshot": "snapshot",
+            "step_checkpoint": "checkpoint",
             "model_interaction": "interaction",
         }.get(fact.kind)
         if relation is None:

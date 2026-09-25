@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime-owned step, event, and snapshot contracts."""
+"""Runtime-owned step, event, and checkpoint contracts."""
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
@@ -22,7 +22,7 @@ EventKind = Literal[
     "tool_call_completed",
     "tool_call_failed",
 ]
-SnapshotState = Literal["complete", "interrupted"]
+CheckpointState = Literal["complete", "interrupted"]
 
 
 @dataclass(slots=True)
@@ -54,7 +54,7 @@ class StepEvent:
 
 
 @dataclass(slots=True)
-class ContinuableSnapshot:
+class AgentRunCheckpoint:
     agent_run_id: str
     step_index: int
     messages: list[ModelMessage]
@@ -62,7 +62,7 @@ class ContinuableSnapshot:
     parent_agent_run_id: str | None = None
     agent_name: str | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    state: SnapshotState = "complete"
+    state: CheckpointState = "complete"
     idempotency_key: str | None = None
     context_messages: list[ModelMessage] | None = None
     transcript_message_count_before: int | None = None
@@ -78,7 +78,7 @@ class ContinuableSnapshot:
                 or self.transcript_message_count_before > len(self.messages)
             )
         ):
-            raise ValueError("snapshot transcript boundary is invalid")
+            raise ValueError("checkpoint transcript boundary is invalid")
         if self.pending_request_index is None:
             return
         if (
@@ -86,13 +86,13 @@ class ContinuableSnapshot:
             or not isinstance(self.pending_request_index, int)
             or self.pending_request_index < 0
         ):
-            raise ValueError("snapshot pending request index is invalid")
+            raise ValueError("checkpoint pending request index is invalid")
         context = self.messages if self.context_messages is None else self.context_messages
         if (
             self.pending_request_index >= len(context)
             or not isinstance(context[self.pending_request_index], ModelRequest)
         ):
-            raise ValueError("snapshot pending request must identify a model request")
+            raise ValueError("checkpoint pending request must identify a model request")
 
 
 class AgentRunStore(Protocol):
@@ -121,15 +121,15 @@ class AgentRunStore(Protocol):
 
     async def iter_messages(self, *, agent_run_id: str) -> AsyncIterator[object]: ...
 
-    async def list_snapshots(self, *, agent_run_id: str) -> list[ContinuableSnapshot]: ...
+    async def list_checkpoints(self, *, agent_run_id: str) -> list[AgentRunCheckpoint]: ...
 
-    async def save_snapshot(
-        self, snapshot: ContinuableSnapshot, *, execution_id: str | None = None
+    async def save_checkpoint(
+        self, checkpoint: AgentRunCheckpoint, *, execution_id: str | None = None
     ) -> None: ...
 
-    async def latest_snapshot(
+    async def latest_checkpoint(
         self, *, agent_run_id: str, include_interrupted: bool = False
-    ) -> ContinuableSnapshot | None: ...
+    ) -> AgentRunCheckpoint | None: ...
 
     async def list_model_interactions(
         self,
@@ -157,10 +157,10 @@ class AgentRunStore(Protocol):
 
 
 __all__ = [
-    "ContinuableSnapshot",
+    "AgentRunCheckpoint",
     "EventKind",
     "AgentRunRecord",
-    "SnapshotState",
+    "CheckpointState",
     "StepEvent",
     "AgentRunStore",
 ]

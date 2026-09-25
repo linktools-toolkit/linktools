@@ -15,7 +15,7 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Keep authoring adapters separate from durable codecs. Fill defaults before
   canonical decoding; explicit values always win, and persistence stores
   resolved execution meaning.
-- Capture a CapabilityGroup declaration snapshot once and reuse it for host
+- Capture a CapabilityGroup declaration once and reuse it for host
   inspection and Runtime composition. Bind cross-source reads to the captured
   revision or an immutable reference.
 - Resource immutability belongs to AssetStore/AssetVersionRef. Skill and MCP contracts may carry Asset version references plus their own execution semantics, but must not define a separate frozen lifecycle or duplicate Asset ownership.

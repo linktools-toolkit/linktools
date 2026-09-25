@@ -48,8 +48,8 @@ class ModelInteractionRuntimeAgentRunStore(RuntimeAgentRunStore):
             and captured.interactions
         ):
             local_count = (
-                len(captured.snapshots[-1].messages)
-                if captured.snapshots
+                len(captured.checkpoints[-1].messages)
+                if captured.checkpoints
                 else 0
             )
             prepared = await archive.prepare_interactions(

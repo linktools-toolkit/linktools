@@ -34,7 +34,7 @@ from ._model_interaction import (
 from .state._contracts import LoadedModelContext, TranscriptMessageRef
 from .state._plan import RuntimeDomain
 from .state._step_contracts import (
-    ContinuableSnapshot,
+    AgentRunCheckpoint,
     EventKind,
     AgentRunRecord,
     StepEvent,
@@ -132,7 +132,7 @@ class RuntimeCaptureStore:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._run = record
         await self._store.register_agent_run(record, execution_id=self._execution_id)
-        previous = await self.latest_snapshot(include_interrupted=True)
+        previous = await self.latest_checkpoint(include_interrupted=True)
         if previous is not None:
             self._transcript_messages = list(freeze_model_messages(previous.messages))
         events = await self._store.list_events(agent_run_id=record.agent_run_id)
@@ -177,17 +177,17 @@ class RuntimeCaptureStore:
             )
         )
 
-    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
-        if snapshot.agent_run_id != self._agent_run_id:
+    async def save_checkpoint(self, checkpoint: AgentRunCheckpoint) -> None:
+        if checkpoint.agent_run_id != self._agent_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._store.save_snapshot(snapshot, execution_id=self._execution_id)
+        await self._store.save_checkpoint(checkpoint, execution_id=self._execution_id)
 
-    async def latest_snapshot(
+    async def latest_checkpoint(
         self,
         *,
         include_interrupted: bool = False,
-    ) -> ContinuableSnapshot | None:
-        return await self._store.latest_snapshot(
+    ) -> AgentRunCheckpoint | None:
+        return await self._store.latest_checkpoint(
             agent_run_id=self._agent_run_id,
             include_interrupted=include_interrupted,
         )
@@ -215,7 +215,7 @@ class RuntimeCaptureStore:
         self._projection_source_count = len(tuple(source))
         self._projection_messages = freeze_model_messages(projected)
 
-    def snapshot_context(
+    def checkpoint_context(
         self,
         messages: Sequence[ModelMessage],
         *,

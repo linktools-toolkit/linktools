@@ -59,25 +59,25 @@ class _Bridge:
 
 class _Store:
     def __init__(self) -> None:
-        self.snapshots: list[object] = []
+        self.checkpoints: list[object] = []
 
     async def register_agent_run(self, record: object, *, execution_id: str | None = None) -> None:
         del record, execution_id
 
-    async def save_snapshot(
+    async def save_checkpoint(
         self,
-        snapshot: object,
+        checkpoint: object,
         *,
         execution_id: str | None = None,
     ) -> None:
         del execution_id
-        self.snapshots.append(snapshot)
+        self.checkpoints.append(checkpoint)
 
-    async def latest_snapshot(
+    async def latest_checkpoint(
         self, *, agent_run_id: str, include_interrupted: bool = False
     ) -> object | None:
         del agent_run_id, include_interrupted
-        return self.snapshots[-1] if self.snapshots else None
+        return self.checkpoints[-1] if self.checkpoints else None
 
     async def list_events(self, *, agent_run_id: str) -> list[object]:
         del agent_run_id
@@ -141,10 +141,10 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
     assert await persistence.after_run(ctx, result=result) is result  # type: ignore[arg-type]
 
     assert captured == [7]
-    assert len(store.snapshots) == 1
-    snapshot = store.snapshots[0]
-    assert getattr(snapshot, "state") == "interrupted"
-    assert getattr(snapshot, "step_index") == 7
+    assert len(store.checkpoints) == 1
+    checkpoint = store.checkpoints[0]
+    assert getattr(checkpoint, "state") == "interrupted"
+    assert getattr(checkpoint, "step_index") == 7
 
 
 @pytest.mark.asyncio

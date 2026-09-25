@@ -1506,7 +1506,7 @@ class StepExecutionHistoryReader:
 
 
 class StepSessionHistoryReader:
-    """Project one committed Conversation snapshot into Session history."""
+    """Project one committed Conversation checkpoint into Session history."""
 
     def __init__(
         self,
@@ -1584,15 +1584,15 @@ class StepSessionHistoryReader:
                 run = await self._store.get_agent_run(
                     agent_run_id=continuation_agent_run_id
                 )
-                snapshot = await self._store.latest_snapshot(
+                checkpoint = await self._store.latest_checkpoint(
                     agent_run_id=continuation_agent_run_id,
                     include_interrupted=True,
                 )
                 if (
                     run is None
-                    or snapshot is None
-                    or snapshot.agent_run_id != continuation_agent_run_id
-                    or snapshot.state != "complete"
+                    or checkpoint is None
+                    or checkpoint.agent_run_id != continuation_agent_run_id
+                    or checkpoint.state != "complete"
                 ):
                     raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
                 if (
@@ -1624,25 +1624,25 @@ class StepSessionHistoryReader:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             if run.agent_run_id != continuation_agent_run_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            snapshot = await self._store.latest_snapshot(
+            checkpoint = await self._store.latest_checkpoint(
                 agent_run_id=continuation_agent_run_id,
                 include_interrupted=True,
             )
-            if snapshot is None:
+            if checkpoint is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             if (
-                snapshot.agent_run_id != continuation_agent_run_id
-                or snapshot.agent_conversation_id != run.agent_conversation_id
+                checkpoint.agent_run_id != continuation_agent_run_id
+                or checkpoint.agent_conversation_id != run.agent_conversation_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if snapshot.state != "complete":
+            if checkpoint.state != "complete":
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            total_messages = len(snapshot.messages)
+            total_messages = len(checkpoint.messages)
             if cursor_high_water is not None and cursor_high_water != total_messages:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             if message_index > total_messages:
                 raise AIError(ErrorCode.CURSOR_INVALID)
-            messages = _iter_sequence(snapshot.messages, start=message_index)
+            messages = _iter_sequence(checkpoint.messages, start=message_index)
         projected, next_coordinate = await _read_projected_page(
             messages,
             start_message_index=message_index,
