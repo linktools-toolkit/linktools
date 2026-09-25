@@ -124,7 +124,7 @@ def _application(
     application.tool(lookup, name="lookup", effect_policy=effect_policy)
     application.agent(
         "default",
-        model_route="default",
+        model="default",
         allow_tools=("lookup",),
         allow_skills=(),
         allow_subagents=(),

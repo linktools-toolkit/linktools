@@ -478,7 +478,7 @@ def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
                 {
                     "version": 1,
                     "id": "agent",
-                    "model_route": "model",
+                    "model": "model",
                     "planning": "yes",
                 }
             ).encode()
@@ -798,7 +798,7 @@ async def test_mcp_resource_versions_reject_invalid_tree(
 
 
 @pytest.mark.asyncio
-async def test_mcp_resource_prefix_is_literal_without_resource_root() -> None:
+async def test_mcp_resource_prefix_is_literal_without_resource() -> None:
     server = MCPServerSpec(
         "server",
         "python",
@@ -871,9 +871,9 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
     script = root / "mcp" / "server" / "assets" / "script.py"
     script.parent.mkdir(parents=True)
     script.write_text("print('ready')\n", encoding="utf-8")
-    resource_root = AssetKey("mcp", "server/assets")
+    resource = AssetKey("mcp", "server/assets")
     server = MCPServerSpec(
-        "server/assets", "python", ("resource:script.py",), resource_root
+        "server/assets", "python", ("resource:script.py",), resource
     )
     declaration = root / "mcp" / "server" / "assets" / "mcp.json"
     declaration.parent.mkdir(parents=True, exist_ok=True)
