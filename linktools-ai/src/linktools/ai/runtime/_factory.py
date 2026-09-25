@@ -33,16 +33,16 @@ from ..model import ModelRegistry
 from ..observe import Metrics
 from ..spec import (
     AgentSpec,
+    AssetRuleInstructionResolver,
     MCPServerSpec,
+    RepositoryInstructionResolver,
     RepositoryInstructions,
 )
 from ..storage import ObjectStore, PayloadPolicy
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
-    AssetRuleInstructionResolver,
     LocalRepositoryInstructionResolver,
     LocalSandbox,
-    RepositoryInstructionResolver,
     Sandbox,
     Workspace,
     WorkspaceAccess,
