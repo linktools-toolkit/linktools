@@ -703,7 +703,7 @@ class TaskNodeInfo:
     retry_delay_seconds: float
     output_contract: "Mapping[str, JsonValue] | None"
     effect_policy: str
-    reconcile: bool
+    reconcile: bool = False
     dependency_policy: str = "all_succeeded"
 
     @classmethod
