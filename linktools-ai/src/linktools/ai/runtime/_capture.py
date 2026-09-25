@@ -105,6 +105,10 @@ class RuntimeCaptureStore:
         else:
             baseline_refs = (None,) * len(frozen_initial)
         self._source_messages: list[ModelMessage] = list(frozen_initial)
+        self._source_keys: list[bytes] = [
+            encode_model_messages((message,))
+            for message in frozen_initial
+        ]
         self._source_refs: list[TranscriptMessageRef | int | None] = list(
             baseline_refs
         )
@@ -197,6 +201,7 @@ class RuntimeCaptureStore:
         local_index = len(self._transcript_messages)
         self._transcript_messages.append(frozen)
         self._source_messages.append(frozen)
+        self._source_keys.append(encode_model_messages((frozen,)))
         self._source_refs.append(local_index)
         return frozen
 
@@ -242,27 +247,27 @@ class RuntimeCaptureStore:
     def _source_refs_for(
         self,
         messages: Sequence[ModelMessage],
-    ) -> tuple[TranscriptMessageRef | int | None, ...]:
+    ) -> tuple[
+        tuple[TranscriptMessageRef | int | None, ...],
+        tuple[bytes, ...],
+    ]:
         values = freeze_model_messages(messages)
-        known_keys = tuple(
-            encode_model_messages((message,))
-            for message in self._source_messages
-        )
         requested_keys = tuple(
             encode_model_messages((message,))
             for message in values
         )
         by_key: dict[bytes, list[int]] = {}
-        for index, key in enumerate(known_keys):
+        for index, key in enumerate(self._source_keys):
             by_key.setdefault(key, []).append(index)
         refs: list[TranscriptMessageRef | int | None] = []
         for key in requested_keys:
             candidates = by_key.get(key, ())
-            if len(candidates) != 1:
-                refs.append(None)
-                continue
-            refs.append(self._source_refs[candidates[0]])
-        return tuple(refs)
+            refs.append(
+                None
+                if len(candidates) != 1
+                else self._source_refs[candidates[0]]
+            )
+        return tuple(refs), requested_keys
 
     def begin_model_interaction(
         self,
@@ -279,9 +284,10 @@ class RuntimeCaptureStore:
         if source_messages is None:
             source = tuple(self._source_messages)
             source_refs = tuple(self._source_refs)
+            source_keys = tuple(self._source_keys)
         else:
             source = freeze_model_messages(source_messages)
-            source_refs = self._source_refs_for(source)
+            source_refs, source_keys = self._source_refs_for(source)
         projection = build_context_projection(
             source,
             frozen,
@@ -290,6 +296,7 @@ class RuntimeCaptureStore:
                 payload,
             ),
             source_refs=source_refs,
+            source_keys=source_keys,
         )
         _envelope, envelope_bytes = request_envelope(
             model_settings=model_settings,
