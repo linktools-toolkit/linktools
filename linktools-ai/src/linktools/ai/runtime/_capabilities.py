@@ -27,11 +27,11 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ._compaction import (
-    ExternalModelRequestCapture,
-    RuntimeCompaction,
-    RuntimeCompactionPolicy,
+    ExternalModelRequestRecorder,
+    CompactionCapability,
+    CompactionPolicy,
 )
-from ._capture import RuntimeCaptureStore
+from ._agent_run_recorder import AgentRunRecorder
 from ._harness import HarnessPlanStoreAdapter
 from ._harness_memory import (
     build_harness_memory,
@@ -40,7 +40,7 @@ from ._harness_memory import (
 from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
 from ._journal import DURATION_NS_METADATA_KEY, REQUEST_SEQUENCE_METADATA_KEY
-from ._metric_capability import RuntimeModelObservationCapability
+from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
     AgentRunCheckpoint,
@@ -57,10 +57,10 @@ _logger = environ.get_logger("ai.runtime.capabilities")
 
 
 @dataclass(kw_only=True, eq=False)
-class _RuntimeAgentRunPersistence(AbstractCapability[None]):
+class _AgentRunPersistenceCapability(AbstractCapability[None]):
     """Persist Runtime-owned step events, raw occurrences, and recovery checkpoints."""
 
-    capture: RuntimeCaptureStore = field(repr=False, compare=False)
+    capture: AgentRunRecorder = field(repr=False, compare=False)
     agent_id: str
     agent_run_id: str
     parent_agent_run_id: str | None = None
@@ -121,8 +121,8 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
     )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.capture, RuntimeCaptureStore):
-            raise TypeError("capture must be RuntimeCaptureStore")
+        if not isinstance(self.capture, AgentRunRecorder):
+            raise TypeError("capture must be AgentRunRecorder")
         if not self.agent_run_id or self.capture.agent_run_id != self.agent_run_id:
             raise ValueError("Runtime AgentRun identity is invalid")
 
@@ -370,7 +370,7 @@ async def compose_platform_capabilities(
     run_store: AgentRunStore,
     memory_store: MemoryStore | None,
     tool_policy: tuple[str, ...],
-    compaction_policy: RuntimeCompactionPolicy,
+    compaction_policy: CompactionPolicy,
     limits: PromptLimits,
     planning: bool,
     context_target_tokens: int | None,
@@ -378,16 +378,16 @@ async def compose_platform_capabilities(
     plan_store_resolver: Callable[[PydanticRunContext[None]], RuntimePlanStore] | None,
     deferred_pause_sink: Callable[[int], None] | None = None,
     model_journal: "ModelRequestJournal | None" = None,
-    model_request_observer: "ExternalModelRequestCapture | None" = None,
-    capture_store: RuntimeCaptureStore | None = None,
+    model_request_recorder: "ExternalModelRequestRecorder | None" = None,
+    capture_store: AgentRunRecorder | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
-    capture = capture_store or RuntimeCaptureStore(
+    capture = capture_store or AgentRunRecorder(
         run_store,
         execution_id=execution_id,
         agent_run_id=agent_run_id,
     )
-    persistence = _RuntimeAgentRunPersistence(
+    persistence = _AgentRunPersistenceCapability(
         capture=capture,
         agent_id=agent_id,
         agent_run_id=agent_run_id,
@@ -429,12 +429,12 @@ async def compose_platform_capabilities(
         planning_capability = build_harness_planning(resolve_plan_store)
         capabilities.append(planning_capability)
     capabilities.append(
-        RuntimeCompaction(
+        CompactionCapability(
             context_target_tokens,
             limits=limits,
             policy=compaction_policy,
             journal=model_journal,
-            request_observer=model_request_observer,
+            request_recorder=model_request_recorder,
             projection_sink=persistence.remember_context_projection,
         )
     )

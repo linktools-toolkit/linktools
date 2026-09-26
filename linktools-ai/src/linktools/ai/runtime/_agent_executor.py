@@ -120,8 +120,8 @@ from ..workspace import (
 )
 
 from ._capabilities import compose_platform_capabilities
-from ._capture import RuntimeCaptureStore
-from ._compaction import RuntimeCompactionPolicy
+from ._agent_run_recorder import AgentRunRecorder
+from ._compaction import CompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._mcp import (
@@ -132,7 +132,7 @@ from ._mcp import (
     prepare_mcp_projections,
 )
 from ._memory import MemoryStore
-from ._metric_capability import RuntimeModelObservationCapability
+from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from ._pydantic_tool_control import PydanticToolControlCapability
 from ._repository_instructions import _RepositoryInstructionCapability
@@ -144,7 +144,7 @@ from ._tool_boundary import (
     managed_tool_descriptor_from_metadata,
 )
 from ._tool_metrics import (
-    RuntimeToolMetricsCapability,
+    ToolMetricsCapability,
     _ToolMetricContext,
 )
 from ._tool_return_codec import (
@@ -813,7 +813,7 @@ async def _materialize_agent(
     workspace_names: list[str] = []
     business_descriptors: dict[str, ManagedToolDescriptor] = {}
     workspace_descriptors: dict[str, ManagedToolDescriptor] = {}
-    compaction_policy = RuntimeCompactionPolicy()
+    compaction_policy = CompactionPolicy()
     for candidate in compiled_agent.selected_tools:
         source_tool = candidate.value
         metadata = _bound_tool_metadata(candidate)
@@ -919,7 +919,7 @@ async def _materialize_agent(
             agent_id=compiled_agent.spec.id,
         )
     )
-    capture_store = RuntimeCaptureStore(
+    capture_store = AgentRunRecorder(
         scope.run_store,
         execution_id=scope.context.execution_id,
         agent_run_id=scope.agent_run_id,
@@ -928,7 +928,7 @@ async def _materialize_agent(
         initial_attachments=scope.initial_attachments,
     )
     if tool_metrics is not None:
-        capabilities.append(RuntimeToolMetricsCapability(tool_metrics))
+        capabilities.append(ToolMetricsCapability(tool_metrics))
 
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
     workspace_toolset_values = tuple(
@@ -979,7 +979,7 @@ async def _materialize_agent(
                 tool_metrics=tool_metrics,
             ),
         )
-    model_observation = RuntimeModelObservationCapability(
+    model_observation = ModelObservationCapability(
         metrics,
         source_namespace=scope.context.namespace,
         tenant_id=scope.context.principal.tenant_id,
@@ -1009,7 +1009,7 @@ async def _materialize_agent(
         plan_store_resolver=scope.plan_store_resolver,
         deferred_pause_sink=deferred_pause_sink,
         model_journal=model_journal,
-        model_request_observer=model_observation.record_external_model_request,
+        model_request_recorder=model_observation.record_external_model_request,
         capture_store=capture_store,
     )
     capabilities.extend(platform)
@@ -1083,7 +1083,7 @@ def _tool_with_metadata(
 def _plan_mode_prepare(
     *,
     plan_mode: bool,
-    compaction_policy: RuntimeCompactionPolicy | None = None,
+    compaction_policy: CompactionPolicy | None = None,
 ) -> Callable[[PydanticRunContext[AgentContext[object]], list[ToolDefinition]], Any]:
     async def prepare(
         _ctx: PydanticRunContext[AgentContext[object]],

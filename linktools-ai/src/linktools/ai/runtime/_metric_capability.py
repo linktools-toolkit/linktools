@@ -86,7 +86,7 @@ class ModelInteractionRecorder(Protocol):
     ) -> None: ...
 
 
-class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]):
+class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
     """Observe actual logical model handler invocations without changing them."""
 
     def __init__(

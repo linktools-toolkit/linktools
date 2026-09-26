@@ -179,7 +179,7 @@ class _ToolMetricContext:
             _logger.exception("tool metric observation rejected")
 
 
-class RuntimeToolMetricsCapability(
+class ToolMetricsCapability(
     AbstractCapability[AgentContext[object]]
 ):
     """Observe capability tools before the outer Pydantic control boundary."""
@@ -226,6 +226,6 @@ def _tool_error_code(error: Exception) -> str:
 
 
 __all__ = [
-    "RuntimeToolMetricsCapability",
+    "ToolMetricsCapability",
     "TOOL_METRICS_MANAGED_METADATA_KEY",
 ]
