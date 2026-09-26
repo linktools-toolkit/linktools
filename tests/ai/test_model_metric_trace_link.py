@@ -41,11 +41,11 @@ async def _text_model(
 
 
 def _persistence(
-    capture: AgentRunRecorder,
+    run_recorder: AgentRunRecorder,
     agent_run_id: str,
 ) -> _AgentRunPersistenceCapability:
     return _AgentRunPersistenceCapability(
-        capture=capture,
+        recorder=run_recorder,
         agent_id="agent",
         agent_run_id=agent_run_id,
     )
@@ -55,7 +55,7 @@ def _model_metrics(
     recorder: _Recorder | None,
     agent_run_id: str,
     journal: ModelRequestJournal,
-    capture: AgentRunRecorder,
+    run_recorder: AgentRunRecorder,
 ) -> ModelObservationCapability:
     return ModelObservationCapability(
         recorder,
@@ -66,7 +66,7 @@ def _model_metrics(
         agent_run_id=agent_run_id,
         agent_id="agent",
         journal=journal,
-        interaction_recorder=capture,
+        interaction_recorder=run_recorder,
     )
 
 
@@ -93,13 +93,13 @@ async def test_model_metric_and_trace_share_observation_id_and_duration() -> Non
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
+    run_recorder = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         TestModel(custom_output_text="done"),
         deps_type=object,
         capabilities=[
-            _model_metrics(recorder, agent_run_id, journal, capture),
-            _persistence(capture, agent_run_id),
+            _model_metrics(recorder, agent_run_id, journal, run_recorder),
+            _persistence(run_recorder, agent_run_id),
         ],
     )
 
@@ -155,13 +155,13 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
+    run_recorder = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         FunctionModel(fail_model),
         deps_type=object,
         capabilities=[
-            _model_metrics(recorder, agent_run_id, journal, capture),
-            _persistence(capture, agent_run_id),
+            _model_metrics(recorder, agent_run_id, journal, run_recorder),
+            _persistence(run_recorder, agent_run_id),
         ],
     )
 
@@ -210,13 +210,13 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
+    run_recorder = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         FunctionModel(_text_model),
         deps_type=object,
         capabilities=[
-            _model_metrics(recorder, agent_run_id, journal, capture),
-            _persistence(capture, agent_run_id),
+            _model_metrics(recorder, agent_run_id, journal, run_recorder),
+            _persistence(run_recorder, agent_run_id),
         ],
         retries={"output": 2},
     )
@@ -269,12 +269,12 @@ async def test_output_retry_trace_lineage_does_not_require_metrics() -> None:
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
+    run_recorder = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         FunctionModel(_text_model),
         capabilities=[
-            _model_metrics(None, agent_run_id, journal, capture),
-            _persistence(capture, agent_run_id),
+            _model_metrics(None, agent_run_id, journal, run_recorder),
+            _persistence(run_recorder, agent_run_id),
         ],
         retries={"output": 1},
     )
@@ -309,12 +309,12 @@ async def test_model_trace_omits_metric_metadata_when_metrics_disabled() -> None
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
+    run_recorder = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         TestModel(custom_output_text="done"),
         capabilities=[
-            _model_metrics(None, agent_run_id, journal, capture),
-            _persistence(capture, agent_run_id),
+            _model_metrics(None, agent_run_id, journal, run_recorder),
+            _persistence(run_recorder, agent_run_id),
         ],
     )
 

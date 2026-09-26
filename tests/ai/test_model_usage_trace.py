@@ -115,13 +115,13 @@ def _persistence(
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = AgentRunRecorder(
+    run_recorder = AgentRunRecorder(
         store,
         execution_id=None,
         agent_run_id=agent_run_id,
     )
     persistence = _AgentRunPersistenceCapability(
-        capture=capture,
+        recorder=run_recorder,
         agent_id="usage-test",
         agent_run_id=agent_run_id,
     )
@@ -134,7 +134,7 @@ def _persistence(
         agent_run_id=agent_run_id,
         agent_id="usage-test",
         journal=journal,
-        interaction_recorder=capture,
+        interaction_recorder=run_recorder,
     )
     capabilities = [observation, persistence]
     if reverse_registration:
