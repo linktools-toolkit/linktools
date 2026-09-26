@@ -33,7 +33,7 @@ from ..model import ModelRegistry
 from ..observe import Metrics
 from ..spec import (
     AgentSpec,
-    AssetRuleInstructionResolver,
+    RuleInstructionResolver,
     MCPServerSpec,
     RepositoryInstructionResolver,
     RepositoryInstructions,
@@ -41,7 +41,7 @@ from ..spec import (
 from ..storage import ObjectStore, PayloadPolicy
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
-    LocalRepositoryInstructionResolver,
+    WorkspaceInstructionResolver,
     LocalSandbox,
     Sandbox,
     Workspace,
@@ -229,14 +229,14 @@ async def compose_runtime_components(
             await group.verify_source_revision()
         if workspace is None:
             instruction_resolver: RepositoryInstructionResolver | None = (
-                AssetRuleInstructionResolver(rules)
+                RuleInstructionResolver(rules)
                 if rules.documents
                 else None
             )
             workspace_access = None
             execution_cwd = _capture_host_cwd()
         else:
-            instruction_resolver = LocalRepositoryInstructionResolver(
+            instruction_resolver = WorkspaceInstructionResolver(
                 workspace.root,
                 workspace.policy,
                 rules,

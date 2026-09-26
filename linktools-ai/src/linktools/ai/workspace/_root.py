@@ -83,7 +83,7 @@ class ToolPermissionRule:
 
 
 @dataclass(frozen=True, slots=True)
-class WorkspaceToolPermissionPolicy:
+class ToolPermissionPolicy:
     rules: tuple[ToolPermissionRule, ...] = ()
     default: PermissionDecision = "allow"
 
@@ -138,15 +138,15 @@ class WorkspaceToolPermissionPolicy:
 
 @dataclass(frozen=True, slots=True)
 class WorkspacePolicy:
-    tool_permissions: WorkspaceToolPermissionPolicy = field(
-        default_factory=WorkspaceToolPermissionPolicy
+    tool_permissions: ToolPermissionPolicy = field(
+        default_factory=ToolPermissionPolicy
     )
     max_repository_instruction_documents: int = DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS
     max_repository_instruction_bytes: int = DEFAULT_REPOSITORY_INSTRUCTION_BYTES
 
     def validate(self) -> None:
-        if not isinstance(self.tool_permissions, WorkspaceToolPermissionPolicy):
-            raise TypeError("workspace tool_permissions must be WorkspaceToolPermissionPolicy")
+        if not isinstance(self.tool_permissions, ToolPermissionPolicy):
+            raise TypeError("workspace tool_permissions must be ToolPermissionPolicy")
         limits = (
             self.max_repository_instruction_documents,
             self.max_repository_instruction_bytes,
@@ -301,7 +301,7 @@ __all__ = [
     "ToolPermissionRule",
     "Workspace",
     "WorkspacePolicy",
-    "WorkspaceToolPermissionPolicy",
+    "ToolPermissionPolicy",
     "load_config",
     "validate_workspace_path",
 ]

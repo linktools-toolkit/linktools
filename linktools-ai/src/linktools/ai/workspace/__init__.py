@@ -3,13 +3,13 @@
 """Workspace identity, discovery, policy, instructions, and sandbox contracts."""
 
 from ._access import WorkspaceAccess
-from ._instructions import LocalRepositoryInstructionResolver
+from ._instructions import WorkspaceInstructionResolver
 from ._root import (
     PermissionDecision,
     ToolPermissionRule,
     Workspace,
     WorkspacePolicy,
-    WorkspaceToolPermissionPolicy,
+    ToolPermissionPolicy,
     validate_workspace_path,
 )
 from ._local_sandbox import LocalSandbox
@@ -32,7 +32,7 @@ __all__ = [
     "DisabledSandbox",
     "ReadOnlySandboxPolicy",
     "BubblewrapSandbox",
-    "LocalRepositoryInstructionResolver",
+    "WorkspaceInstructionResolver",
     "PermissionDecision",
     "Sandbox",
     "SandboxOperationRejected",
@@ -47,7 +47,7 @@ __all__ = [
     "Workspace",
     "WorkspaceAccess",
     "WorkspacePolicy",
-    "WorkspaceToolPermissionPolicy",
+    "ToolPermissionPolicy",
     "normalize_workspace_input_path",
     "validate_workspace_path",
 ]

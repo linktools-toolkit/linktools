@@ -27,7 +27,7 @@ from ._contract import (
 )
 from ..core import validate_logical_id
 from ._instructions import (
-    AssetRuleInstructionResolver,
+    RuleInstructionResolver,
     DEFAULT_REPOSITORY_INSTRUCTION_BYTES,
     DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS,
     RepositoryInstructionDocument,
@@ -46,7 +46,7 @@ __all__ = [
     "AgentSpecCodec",
     "AgentMarkdownSpecCodec",
     "AgentUsageLimits",
-    "AssetRuleInstructionResolver",
+    "RuleInstructionResolver",
     "DEFAULT_REPOSITORY_INSTRUCTION_BYTES",
     "DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS",
     "agent_ref_payload",

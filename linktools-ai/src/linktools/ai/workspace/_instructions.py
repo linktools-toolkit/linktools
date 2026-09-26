@@ -14,7 +14,7 @@ from ..spec import RepositoryInstructionDocument, RepositoryInstructions
 from ._root import WorkspacePolicy
 
 
-class LocalRepositoryInstructionResolver:
+class WorkspaceInstructionResolver:
     def __init__(
         self,
         root: Path,
@@ -232,4 +232,4 @@ def _require_contained(path: Path, roots: tuple[Path, ...]) -> None:
     raise AIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT)
 
 
-__all__ = ["LocalRepositoryInstructionResolver"]
+__all__ = ["WorkspaceInstructionResolver"]
