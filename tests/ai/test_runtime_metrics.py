@@ -260,7 +260,7 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
 ) -> None:
     monkeypatch.setattr(runtime_metrics, "_QUEUE_CAPACITY", 1)
     store = _BlockingMetricStore()
-    buffer = runtime_metrics._RuntimeMetricBuffer(
+    buffer = runtime_metrics._MetricBuffer(
         Metrics.from_store(store, namespace="buffer")  # type: ignore[arg-type]
     )
 
@@ -278,7 +278,7 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
 @pytest.mark.asyncio
 async def test_runtime_metric_buffer_commit_unknown_uses_facade_exact_replay() -> None:
     store = _CommitUnknownOnceMetricStore()
-    buffer = runtime_metrics._RuntimeMetricBuffer(
+    buffer = runtime_metrics._MetricBuffer(
         Metrics.from_store(store, namespace="buffer-retry")  # type: ignore[arg-type]
     )
     observation = _observation("retry-stable")
