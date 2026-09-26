@@ -226,7 +226,7 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
         logical_id="team/review",
     ) == content.encode("utf-8")
     wire_codec = SkillSpecCodec()
-    assert wire_adapter.decode_markdown(wire_adapter.encode_markdown(spec)) == spec
+    assert wire_codec.decode(wire_codec.encode(spec)) == spec
     definition = SkillDefinition(spec)
     assert SkillDefinition.from_contract(definition.contract) == definition
 
@@ -244,15 +244,15 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
     )
     without_metadata = SkillDefinition(
         adapter.decode_markdown(
-                b"---\nname: review\ndescription: Review changes\n---\n\nDo the review.\n"
-            ),
+            b"---\nname: review\ndescription: Review changes\n---\n\nDo the review.\n",
+            logical_id="team/review",
         )
     )
     assert definition.model_content == changed_metadata.model_content
     assert definition.model_content == without_metadata.model_content
     assert "metadata:" not in definition.model_content
     assert "author: Mei" not in definition.model_content
-    assert wire_codec.to_payload(spec)["content"] == definition.model_content
+    assert wire_codec.to_contract_payload(spec)["content"] == definition.model_content
     assert (
         CapabilityPin("skill", definition.id, definition.contract).revision
         == CapabilityPin("skill", changed_metadata.id, changed_metadata.contract).revision
@@ -343,7 +343,7 @@ def test_skill_flow_frontmatter_metadata_does_not_change_identity() -> None:
 
 def test_markdown_metadata_rejects_non_json_values() -> None:
     with pytest.raises(AIError) as error:
-        SkillMarkdownSpecCodec().decode(
+        SkillSpecAdapter().decode_markdown(
             b"---\nname: review\ndescription: Review changes\n"
             b"metadata: {published: 2026-01-02}\n---\nReview.\n"
         )

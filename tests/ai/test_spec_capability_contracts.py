@@ -698,19 +698,19 @@ def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> Non
 def test_durable_spec_readers_ignore_additive_fields() -> None:
     agent_codec = AgentSpecCodec()
     agent = AgentSpec("agent")
-    agent_payload = agent_codec.to_payload(agent)
+    agent_payload = agent_codec.to_wire_payload(agent)
     agent_payload["future_note"] = {"category": "display"}
     assert agent_codec.from_payload(agent_payload) == agent
 
     skill_codec = SkillSpecCodec()
     skill = SkillSpec("skill", "instructions")
-    skill_payload = skill_codec.to_payload(skill)
+    skill_payload = skill_codec.to_wire_payload(skill)
     skill_payload["future_note"] = {"category": "display"}
     assert skill_codec.from_payload(skill_payload) == skill
 
     mcp_codec = MCPServerSpecCodec()
     server = MCPServerSpec("server", "command")
-    mcp_payload = mcp_codec.to_payload(server)
+    mcp_payload = mcp_codec.to_wire_payload(server)
     mcp_payload["future_note"] = {"category": "display"}
     assert mcp_codec.from_payload(mcp_payload) == server
 
