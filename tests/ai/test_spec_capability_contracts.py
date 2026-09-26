@@ -48,6 +48,8 @@ from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
     _MCPResourceBinding,
     _bound_resource_versions,
+    close_mcp_resources,
+    materialize_mcp_capabilities,
     prepare_mcp_resource_projections,
 )
 from linktools.ai.runtime._tool_boundary import (
@@ -199,6 +201,78 @@ def test_mcp_durable_contract_excludes_connection_values() -> None:
     assert "first.example" not in encoded
     assert "secret-a" not in encoded
     assert codec.decode_execution_payload(payload, declaration=second) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport", "server_transport", "transport_class"),
+    (
+        ("streamable-http", "streamable-http", "StreamableHttpTransport"),
+        ("sse", "sse", "SSETransport"),
+    ),
+)
+async def test_remote_mcp_transport_discovers_tools_through_runtime_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    transport: str,
+    server_transport: str,
+    transport_class: str,
+) -> None:
+    import fastmcp.client.transports as fastmcp_transports
+    from fastmcp import FastMCP
+    from fastmcp.utilities.tests import asgi_server
+
+    remote = FastMCP("runtime-transport-test")
+
+    @remote.tool
+    def echo(value: str) -> str:
+        return value
+
+    async with asgi_server(remote, transport=server_transport) as running:
+        def create_transport(
+            url: str,
+            headers: dict[str, str] | None = None,
+        ) -> object:
+            assert url == running.url
+            return running.transport(headers=headers)
+
+        monkeypatch.setattr(
+            fastmcp_transports,
+            transport_class,
+            create_transport,
+        )
+        server = MCPServerSpec(
+            "remote",
+            transport=transport,
+            url=running.url,
+            headers={"X-Test": "value"},
+        )
+        binding = _MCPResourceBinding(
+            None,
+            None,
+            {"version": 1, "boundary": "host-network"},
+        )
+        projections = await prepare_mcp_resource_projections(
+            (server,),
+            {server.id: binding},
+            asset_readers={},
+            sandboxed=False,
+        )
+        capabilities = await materialize_mcp_capabilities(
+            (server,),
+            (mcp_server_selector(server.id),),
+            sandbox=None,
+            sandbox_session=None,
+            host_cwd=None,
+            resource_bindings={server.id: binding},
+            projections=projections,
+            tool_operations=None,
+            tool_metrics=None,
+        )
+        try:
+            tools = await capabilities[0].get_toolset().get_tools(_context())
+            assert _expected_mcp_tool_name("remote", "echo") in tools
+        finally:
+            await close_mcp_resources(capabilities)
 
 
 def test_mcp_selectors_round_trip_logical_names() -> None:
