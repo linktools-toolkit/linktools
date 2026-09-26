@@ -58,7 +58,7 @@ from ..task import (
     TaskExpanderRef,
 )
 from ._agent import Agent, Execution, Session
-from ._binding_resolver import _RuntimeBindingResolver
+from ._agent_binding_resolver import _AgentBindingResolver
 from ._task import TaskGraphRun
 from ._context import RuntimeContext
 from ._input import CanonicalUserInput
@@ -214,7 +214,7 @@ class Runtime(Generic[AppT]):
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
         tree_streamer: "_ExecutionTreeStreamer | None" = None,
         metric_control: "_MetricControl | None" = None,
-        _binding_resolver: "_RuntimeBindingResolver | None" = None,
+        _binding_resolver: "_AgentBindingResolver | None" = None,
     ) -> None:
         if any(
             value is None

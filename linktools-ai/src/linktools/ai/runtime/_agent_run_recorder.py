@@ -49,7 +49,7 @@ class _InteractionStagingPort(Protocol):
 
 
 class AgentRunRecorder:
-    """Own one agent attempt's stable capture inputs and staged persistence facts."""
+    """Own one agent attempt's stable inputs and staged persistence facts."""
 
     def __init__(
         self,

@@ -532,7 +532,7 @@ class AgentExecutor:
         model = compiled_agent.model.materialize()
         deferred_step_index: int | None = None
 
-        def capture_deferred_step(step_index: int) -> None:
+        def record_deferred_step(step_index: int) -> None:
             nonlocal deferred_step_index
             if deferred_step_index is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -552,7 +552,7 @@ class AgentExecutor:
             scope,
             model=model,
             skill_sources=skill_sources,
-            deferred_pause_sink=capture_deferred_step,
+            deferred_pause_sink=record_deferred_step,
             metrics=self._metrics,
             model_journal=model_journal,
             sandbox=self._sandbox,
@@ -919,7 +919,7 @@ async def _materialize_agent(
             agent_id=compiled_agent.spec.id,
         )
     )
-    capture_store = AgentRunRecorder(
+    run_recorder = AgentRunRecorder(
         scope.run_store,
         execution_id=scope.context.execution_id,
         agent_run_id=scope.agent_run_id,
@@ -988,7 +988,7 @@ async def _materialize_agent(
         agent_run_id=scope.agent_run_id,
         agent_id=compiled_agent.spec.id,
         journal=model_journal,
-        interaction_recorder=capture_store,
+        interaction_recorder=run_recorder,
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
@@ -1010,7 +1010,7 @@ async def _materialize_agent(
         deferred_pause_sink=deferred_pause_sink,
         model_journal=model_journal,
         model_request_recorder=model_observation.record_external_model_request,
-        capture_store=capture_store,
+        recorder=run_recorder,
     )
     capabilities.extend(platform)
 

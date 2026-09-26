@@ -60,7 +60,7 @@ _logger = environ.get_logger("ai.runtime.capabilities")
 class _AgentRunPersistenceCapability(AbstractCapability[None]):
     """Persist Runtime-owned step events, raw occurrences, and recovery checkpoints."""
 
-    capture: AgentRunRecorder = field(repr=False, compare=False)
+    recorder: AgentRunRecorder = field(repr=False, compare=False)
     agent_id: str
     agent_run_id: str
     parent_agent_run_id: str | None = None
@@ -121,9 +121,9 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
     )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.capture, AgentRunRecorder):
-            raise TypeError("capture must be AgentRunRecorder")
-        if not self.agent_run_id or self.capture.agent_run_id != self.agent_run_id:
+        if not isinstance(self.recorder, AgentRunRecorder):
+            raise TypeError("recorder must be AgentRunRecorder")
+        if not self.agent_run_id or self.recorder.agent_run_id != self.agent_run_id:
             raise ValueError("Runtime AgentRun identity is invalid")
 
     def get_ordering(self) -> CapabilityOrdering:
@@ -131,7 +131,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
 
     async def before_run(self, ctx: PydanticRunContext[None]) -> None:
         self._live_messages = ctx.messages
-        await self.capture.register_agent_run(
+        await self.recorder.register_agent_run(
             AgentRunRecord(
                 agent_run_id=self.agent_run_id,
                 agent_conversation_id=ctx.conversation_id,
@@ -141,10 +141,10 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
                 started_at=datetime.now(timezone.utc),
             )
         )
-        transcript = self.capture.transcript_messages()
+        transcript = self.recorder.transcript_messages()
         self._last_checkpoint_transcript_count = len(transcript)
         self._replay_request_captured = bool(transcript and isinstance(transcript[-1], ModelRequest))
-        await self.capture.record_event("run_started", ctx.run_step)
+        await self.recorder.record_event("run_started", ctx.run_step)
 
     async def before_model_request(
         self,
@@ -157,7 +157,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
                 # A resumed outstanding request already has its raw occurrence.
                 self._replay_request_captured = False
             else:
-                self.capture.append_transcript_message(ctx.messages[-1])
+                self.recorder.append_transcript_message(ctx.messages[-1])
         await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
         return request_context
 
@@ -177,7 +177,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             elif ctx.messages and isinstance(ctx.messages[-1], ModelResponse):
                 response = ctx.messages[-1]
             if response is not None:
-                self.capture.append_transcript_message(response)
+                self.recorder.append_transcript_message(response)
                 # The exact response must be recoverable before any tool effect.
                 await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
         if isinstance(node, CallToolsNode):
@@ -209,7 +209,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             messages=result.all_messages(),
             state="interrupted" if interrupted else "complete",
         )
-        await self.capture.record_event(
+        await self.recorder.record_event(
             "run_interrupted" if interrupted else "run_completed",
             ctx.run_step,
         )
@@ -227,7 +227,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             messages=messages,
             state="interrupted",
         )
-        await self.capture.record_event(
+        await self.recorder.record_event(
             "run_failed",
             ctx.run_step,
             error=repr(error),
@@ -235,7 +235,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         raise error
 
     def _tool_request_metadata(self, tool_call_id: str) -> dict[str, str]:
-        sequence = self.capture.request_sequence_for_tool_call(tool_call_id)
+        sequence = self.recorder.request_sequence_for_tool_call(tool_call_id)
         return (
             {}
             if sequence is None
@@ -253,7 +253,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         if call.tool_call_id in self._tool_started_ns:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._tool_started_ns[call.tool_call_id] = monotonic_ns()
-        await self.capture.record_event(
+        await self.recorder.record_event(
             "tool_call_started",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
@@ -277,7 +277,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
-        await self.capture.record_event(
+        await self.recorder.record_event(
             "tool_call_completed",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
@@ -301,7 +301,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
-        await self.capture.record_event(
+        await self.recorder.record_event(
             "tool_call_failed",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
@@ -316,7 +316,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         source: Sequence[ModelMessage],
         projected: Sequence[ModelMessage] | None,
     ) -> None:
-        self.capture.remember_context_projection(source, projected)
+        self.recorder.remember_context_projection(source, projected)
 
     async def _save_checkpoint(
         self,
@@ -326,12 +326,12 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         pending: ModelMessage | None = None,
         state: CheckpointState,
     ) -> None:
-        context_messages, pending_index = self.capture.checkpoint_context(
+        context_messages, pending_index = self.recorder.checkpoint_context(
             messages,
             pending=pending,
         )
         frozen_context = tuple(context_messages)
-        raw = self.capture.transcript_messages()
+        raw = self.recorder.transcript_messages()
         if (
             self._last_checkpoint_context == frozen_context
             and self._last_checkpoint_transcript_count == len(raw)
@@ -339,7 +339,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             and self._last_checkpoint_pending_index == pending_index
         ):
             return
-        await self.capture.save_checkpoint(
+        await self.recorder.save_checkpoint(
             AgentRunCheckpoint(
                 agent_run_id=self.agent_run_id,
                 step_index=ctx.run_step,
@@ -379,16 +379,16 @@ async def compose_platform_capabilities(
     deferred_pause_sink: Callable[[int], None] | None = None,
     model_journal: "ModelRequestJournal | None" = None,
     model_request_recorder: "ExternalModelRequestRecorder | None" = None,
-    capture_store: AgentRunRecorder | None = None,
+    recorder: AgentRunRecorder | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
-    capture = capture_store or AgentRunRecorder(
+    run_recorder = recorder or AgentRunRecorder(
         run_store,
         execution_id=execution_id,
         agent_run_id=agent_run_id,
     )
     persistence = _AgentRunPersistenceCapability(
-        capture=capture,
+        recorder=run_recorder,
         agent_id=agent_id,
         agent_run_id=agent_run_id,
         parent_agent_run_id=parent_agent_run_id,

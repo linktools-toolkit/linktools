@@ -12,7 +12,7 @@ from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
-from ._binding_resolver import _RuntimeBindingResolver
+from ._agent_binding_resolver import _AgentBindingResolver
 from ._runtime_identity import task_capability_capture_key
 
 _KIND = "task-capability-capture"
@@ -53,7 +53,7 @@ class TaskCapabilityCaptureStore:
         self,
         namespace: str,
         compiler: AgentCompiler,
-        binding_resolver: _RuntimeBindingResolver,
+        binding_resolver: _AgentBindingResolver,
         object_store: ObjectStore,
         *,
         agent_task_id: str,
@@ -62,8 +62,8 @@ class TaskCapabilityCaptureStore:
             raise ValueError("namespace is required")
         if not isinstance(compiler, AgentCompiler):
             raise TypeError("compiler must be AgentCompiler")
-        if not isinstance(binding_resolver, _RuntimeBindingResolver):
-            raise TypeError("binding_resolver must be _RuntimeBindingResolver")
+        if not isinstance(binding_resolver, _AgentBindingResolver):
+            raise TypeError("binding_resolver must be _AgentBindingResolver")
         if not isinstance(agent_task_id, str) or not agent_task_id:
             raise ValueError("agent_task_id is required")
         self._namespace = namespace

@@ -49,7 +49,7 @@ from ..workspace import (
 )
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
-from ._binding_resolver import _RuntimeBindingResolver
+from ._agent_binding_resolver import _AgentBindingResolver
 from ._artifact import DefaultArtifactService
 from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
@@ -94,7 +94,7 @@ class _RuntimeComponents:
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
     metric_control: _MetricBuffer | None
-    binding_resolver: _RuntimeBindingResolver
+    binding_resolver: _AgentBindingResolver
     history: object
 
 
@@ -528,7 +528,7 @@ async def _build_local_components(
             history_reader,
             HmacCursorSigner("execution", runtime_token_seed),
         )
-        binding_resolver = _RuntimeBindingResolver(
+        binding_resolver = _AgentBindingResolver(
             catalog,
             compiler,
             sandbox=sandbox,
