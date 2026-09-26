@@ -85,7 +85,7 @@ class AgentCompiler:
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
         model = self._models.resolve(spec.model)
-        selected_tools, selected_mcp, ordinary_policy, mcp_policy = self._select_tools(spec)
+        selected_tools, selected_mcp, tool_policy, mcp_policy = self._select_tools(spec)
         selected_skills = self._select_exact_kind("skill", spec.allow_skills)
         selected_subagents = self._select_subagents(spec)
         selected_runtime_capabilities = self._select_exact_kind(
@@ -100,7 +100,7 @@ class AgentCompiler:
             selected_mcp=selected_mcp,
             selected_runtime_capabilities=selected_runtime_capabilities,
             selected_subagents=selected_subagents,
-            ordinary_policy=ordinary_policy,
+            tool_policy=tool_policy,
             mcp_policy=mcp_policy,
         )
 
@@ -141,8 +141,8 @@ class AgentCompiler:
             selected_mcp=compiled_agent.selected_mcp,
             selected_runtime_capabilities=compiled_agent.selected_runtime_capabilities,
             selected_subagents=(),
-            ordinary_policy=compiled_agent.ordinary_tool_policy,
-            mcp_policy=compiled_agent.mcp_selector_policy,
+            tool_policy=compiled_agent.tool_policy,
+            mcp_policy=compiled_agent.mcp_policy,
         )
         return self._bind(child_compiled_agent, output=output, subagents=())
 
@@ -180,7 +180,7 @@ class AgentCompiler:
                 route_id=binding_contract.agent_spec.model,
             )
             selected = self._restore_selected(binding_contract.selected)
-            ordinary_policy, mcp_policy = self._restore_policies(
+            tool_policy, mcp_policy = self._restore_policies(
                 binding_contract.agent_spec,
                 selected["tool"],
                 selected["mcp"],
@@ -193,7 +193,7 @@ class AgentCompiler:
                 selected_mcp=selected["mcp"],
                 selected_runtime_capabilities=selected["runtime_capability"],
                 selected_subagents=binding_contract.subagent_ids,
-                ordinary_policy=ordinary_policy,
+                tool_policy=tool_policy,
                 mcp_policy=mcp_policy,
             )
             output_binding = restore_output(
@@ -280,7 +280,7 @@ class AgentCompiler:
         selected_mcp_by_id: dict[str, CapabilityContribution[object]] = (
             dict(self._mcp_by_id) if select_all else {}
         )
-        ordinary_policy: list[str] = ["*"] if select_all else []
+        tool_policy: list[str] = ["*"] if select_all else []
         mcp_policy: list[str] = (
             [
                 mcp_server_selector(item.id)
@@ -304,11 +304,11 @@ class AgentCompiler:
                     if workspace_tool_classes.get(name) in workspace_classes
                 }
                 selected_tool_ids.update(selected_workspace_tools)
-                ordinary_policy.extend(selected_workspace_tools)
+                tool_policy.extend(selected_workspace_tools)
                 continue
             parsed = parse_mcp_tool_selector(selector)
             if parsed is None:
-                ordinary_policy.append(selector)
+                tool_policy.append(selector)
                 if selector not in tools:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 selected_tool_ids.add(selector)
@@ -322,7 +322,7 @@ class AgentCompiler:
         return (
             tuple(tools[name] for name in sorted(selected_tool_ids)),
             tuple(selected_mcp_by_id[name] for name in sorted(selected_mcp_by_id)),
-            tuple(sorted(set(ordinary_policy))),
+            tuple(sorted(set(tool_policy))),
             tuple(sorted(set(mcp_policy))),
         )
 
@@ -424,7 +424,7 @@ class AgentCompiler:
         selected_mcp: Sequence[CapabilityContribution[object]],
         selected_runtime_capabilities: Sequence[CapabilityContribution[object]],
         selected_subagents: Sequence[str],
-        ordinary_policy: Sequence[str],
+        tool_policy: Sequence[str],
         mcp_policy: Sequence[str],
     ) -> CompiledAgent:
         selected_skill_ids = {candidate.id for candidate in selected_skills}
@@ -438,8 +438,8 @@ class AgentCompiler:
             selected_mcp=tuple(sorted(selected_mcp, key=lambda item: item.id)),
             selected_runtime_capabilities=tuple(selected_runtime_capabilities),
             selected_subagents=tuple(sorted(set(selected_subagents))),
-            ordinary_tool_policy=tuple(ordinary_policy),
-            mcp_selector_policy=tuple(mcp_policy),
+            tool_policy=tuple(tool_policy),
+            mcp_policy=tuple(mcp_policy),
         )
 
 

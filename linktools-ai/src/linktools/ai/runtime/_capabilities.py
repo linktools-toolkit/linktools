@@ -369,7 +369,7 @@ async def compose_platform_capabilities(
     memory_scope: str | None,
     run_store: AgentRunStore,
     memory_store: MemoryStore | None,
-    ordinary_tool_policy: tuple[str, ...],
+    tool_policy: tuple[str, ...],
     compaction_policy: RuntimeCompactionPolicy,
     limits: PromptLimits,
     planning: bool,
@@ -405,13 +405,13 @@ async def compose_platform_capabilities(
         deferred_pause_sink=deferred_pause_sink,
     )
     capabilities.append(persistence)
-    selected_memory = select_harness_memory_tools(ordinary_tool_policy)
+    selected_memory = select_harness_memory_tools(tool_policy)
     if memory_scope is not None and selected_memory:
         if memory_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         memory_capability = build_harness_memory(
             memory_store,
-            allow_tools=ordinary_tool_policy,
+            allow_tools=tool_policy,
             capability_id=_MEMORY_CAPABILITY_ID,
         )
         capabilities.append(memory_capability)
