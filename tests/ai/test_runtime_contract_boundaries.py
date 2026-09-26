@@ -30,7 +30,7 @@ from linktools.ai.runtime._agent_executor import _thinking_capability
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.spec import (
     AgentSpec,
@@ -400,7 +400,7 @@ async def test_tool_operation_records_the_args_that_reach_the_handler() -> None:
         effect_policy="replay_safe",
         tool_class="business",
     )
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (FunctionToolset([tool_with_metadata(business, descriptor)]),),
         {"business": descriptor},
         id="business",

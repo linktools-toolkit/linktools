@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from linktools.ai.agent import AgentBindingContract, CapabilityPin
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetKey, AssetVersionRef
-from linktools.ai.capability import SkillDefinition, SkillResourceVersion, SkillSourceRef
+from linktools.ai.capability import SkillDefinition, SkillResource, SkillSourceRef
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._codec import (
@@ -144,7 +144,7 @@ def test_object_ref_traversal_allows_additive_skill_asset_fields() -> None:
         SkillSourceRef(
             "application",
             "review",
-            (SkillResourceVersion("guide.md", asset),),
+            (SkillResource("guide.md", asset),),
         ),
     ).contract
     source = contract["source"]

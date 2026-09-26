@@ -23,19 +23,20 @@ from linktools.ai.capability import (
     CapabilityGroup,
     CapabilityLoadContext,
     SkillDefinition,
-    SkillResourceVersion,
+    SkillResource,
     SkillSourceRef,
 )
 from linktools.ai.core import validate_logical_id as validate_core_logical_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_asset_database
 from linktools.ai.spec import (
-    AgentMarkdownSpecCodec,
+    AgentSpecAdapter,
     AgentSpec,
     AgentSpecCodec,
     MCPServerSpec,
+    MCPServerSpecAdapter,
     MCPServerSpecCodec,
-    SkillMarkdownSpecCodec,
+    SkillSpecAdapter,
     SkillSpec,
     SkillSpecCodec,
     SubagentRef,
@@ -101,16 +102,16 @@ def test_logical_id_grammar_rejects_invalid_values_consistently(
 
 
 def test_agent_markdown_preserves_plain_prompt_bom_and_crlf_body() -> None:
-    codec = AgentMarkdownSpecCodec()
+    adapter = AgentSpecAdapter()
 
-    assert codec.parse(b"") == {"system_prompt": ""}
+    assert adapter.parse_markdown(b"") == {"system_prompt": ""}
     plain = b"\xef\xbb\xbf---\nnot frontmatter\n"
-    assert codec.parse(plain) == {"system_prompt": plain.decode("utf-8")}
-    assert codec.parse(b"prompt\n---\n") == {
+    assert adapter.parse_markdown(plain) == {"system_prompt": plain.decode("utf-8")}
+    assert adapter.parse_markdown(b"prompt\n---\n") == {
         "system_prompt": "prompt\n---\n"
     }
 
-    payload = codec.parse(
+    payload = adapter.parse_markdown(
         b"---\r\nmodel: test\r\nplanning: false\r\n---\r\n\r\nbody \r\n"
     )
     assert payload == {
@@ -134,12 +135,12 @@ def test_agent_markdown_preserves_plain_prompt_bom_and_crlf_body() -> None:
 )
 def test_agent_markdown_rejects_invalid_frontmatter(document: bytes) -> None:
     with pytest.raises(AIError) as error:
-        AgentMarkdownSpecCodec().parse(document)
+        AgentSpecAdapter().parse_markdown(document)
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
 def test_agent_markdown_resolves_only_stable_author_defaults() -> None:
-    codec = AgentMarkdownSpecCodec()
+    adapter = AgentSpecAdapter()
     defaults = {
         "model": "worker-model",
         "allow_tools": ["tool"],
@@ -147,7 +148,7 @@ def test_agent_markdown_resolves_only_stable_author_defaults() -> None:
         "tool_retries": 7,
         "usage_limits": {"model_requests": 100},
     }
-    spec = codec.decode(
+    spec = adapter.decode_markdown(
         b"---\nallow-tools: []\nplanning: true\n"
         b"tool-retries: 1\nusage-limits: {model-requests: 2}\n---\nbody",
         logical_id="team/worker",
@@ -163,7 +164,7 @@ def test_agent_markdown_resolves_only_stable_author_defaults() -> None:
 
 
 def test_skill_markdown_ignores_unrelated_frontmatter_fields() -> None:
-    spec = SkillMarkdownSpecCodec().decode(
+    spec = SkillSpecAdapter().decode_markdown(
         b"---\nname: review\ndescription: Review changes.\n"
         b"compatibility: [future]\nlicense: {future: true}\n"
         b"allowed-tools: [future]\ncustom-field: {nested: true}\n"
@@ -180,8 +181,8 @@ def test_agent_markdown_metadata_round_trips_without_changing_identity() -> None
         b"  flags: [true, null, 1.5]\n  options: {enabled: false}\n"
         b"---\nReview requests.\n"
     )
-    codec = AgentMarkdownSpecCodec()
-    spec = codec.decode(document, logical_id="worker")
+    adapter = AgentSpecAdapter()
+    spec = adapter.decode_markdown(document, logical_id="worker")
     expected = {
         "author": "Mei",
         "version": 2,
@@ -197,11 +198,11 @@ def test_agent_markdown_metadata_round_trips_without_changing_identity() -> None
     wire = AgentSpecCodec().encode(spec)
     assert AgentSpecCodec().decode(wire) == spec
     assert json.loads(wire)["metadata"] == expected
-    changed_metadata = codec.decode(
+    changed_metadata = adapter.decode_markdown(
         document.replace(b"version: 2", b"version: 3"),
         logical_id="worker",
     )
-    changed_prompt = codec.decode(
+    changed_prompt = adapter.decode_markdown(
         document.replace(b"Review requests.", b"Review carefully."),
         logical_id="worker",
     )
@@ -222,7 +223,7 @@ def test_agent_markdown_metadata_round_trips_without_changing_identity() -> None
 
 def test_agent_markdown_rejects_metadata_that_is_not_a_json_map() -> None:
     with pytest.raises(AIError) as error:
-        AgentMarkdownSpecCodec().decode(
+        AgentSpecAdapter().decode_markdown(
             b"---\nmetadata: [author, Mei]\n---\nPrompt.\n",
             logical_id="worker",
         )
@@ -230,15 +231,15 @@ def test_agent_markdown_rejects_metadata_that_is_not_a_json_map() -> None:
 
 
 def test_agent_markdown_ignores_unrelated_author_fields() -> None:
-    codec = AgentMarkdownSpecCodec()
+    adapter = AgentSpecAdapter()
 
-    versioned = codec.from_payload(
+    versioned = adapter.from_mapping(
         {"system_prompt": "", "version": 1, "future_field": True},
         logical_id="worker",
     )
     assert versioned == AgentSpec("worker")
 
-    explicit = codec.from_payload(
+    explicit = adapter.from_mapping(
         {
             "system_prompt": "",
             "model": "explicit",
@@ -293,7 +294,7 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
         AssetKey("worker", "security/audit/AGENT.md"),
         b"---\nmodel: test\nworker-mode: isolated\n---\nworker prompt",
     )
-    codec = AgentMarkdownSpecCodec()
+    adapter = AgentSpecAdapter()
 
     class WorkerLoader:
         source_kind = "worker"
@@ -303,10 +304,10 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
             context: CapabilityLoadContext,
         ) -> "Sequence[AgentSpec]":
             entry = context.list(kind=self.source_kind)[0]
-            payload = codec.parse(await context.read(entry.key))
+            payload = adapter.parse_markdown(await context.read(entry.key))
             assert payload.pop("worker-mode") == "isolated"
             return (
-                codec.from_payload(
+                adapter.from_mapping(
                     payload,
                     logical_id="security/audit",
                 ),
@@ -344,7 +345,7 @@ async def test_custom_skill_loader_keeps_captured_resource_versions() -> None:
                     SkillSourceRef(
                         context.group_id,
                         "audit",
-                        (SkillResourceVersion("helper.py", ref),),
+                        (SkillResource("helper.py", ref),),
                     ),
                 ),
             )
@@ -357,10 +358,10 @@ async def test_custom_skill_loader_keeps_captured_resource_versions() -> None:
         skill = capture.contributions[0].value
         assert isinstance(skill, SkillDefinition)
         assert skill.source_ref is not None
-        assert len(skill.source_ref.resource_versions) == 1
+        assert len(skill.source_ref.resources) == 1
         reader = capture.asset_reader
         assert reader is not None
-        ref = skill.source_ref.resource_versions[0].asset
+        ref = skill.source_ref.resources[0].asset
         assert await reader.read_versions((ref,)) == (b"print('audit')\n",)
     finally:
         await store.close()
@@ -510,7 +511,7 @@ def test_agent_json_and_markdown_and_mcp_json_and_yaml_converge() -> None:
             }
         ).encode()
     )
-    agent_markdown = AgentMarkdownSpecCodec().decode(
+    agent_markdown = AgentSpecAdapter().decode_markdown(
         b"---\nmodel: test\nallow-tools: [lookup]\n---\nprompt",
         logical_id="security/audit",
     )
@@ -518,11 +519,8 @@ def test_agent_json_and_markdown_and_mcp_json_and_yaml_converge() -> None:
 
     mcp_json = b'{"version":1,"id":"server","command":"python",' b'"args":["-m","server"]}'
     mcp_yaml = b"version: 1\nid: server\ncommand: python\nargs: [-m, server]\n"
-    codec = MCPServerSpecCodec()
-    assert codec.decode_author(mcp_json, format="json") == codec.decode_author(
-        mcp_yaml,
-        format="yaml",
-    )
+    adapter = MCPServerSpecAdapter()
+    assert adapter.decode_json(mcp_json) == adapter.decode_yaml(mcp_yaml)
 
 
 def _declarations() -> dict[AssetKey, bytes]:

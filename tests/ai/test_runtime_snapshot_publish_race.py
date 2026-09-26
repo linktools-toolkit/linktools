@@ -12,7 +12,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     RuntimeSnapshot,
     SnapshotLimits,
-    SnapshotTargetInspection,
+    SnapshotTargetInfo,
 )
 from linktools.ai.runtime import _snapshot as snapshot_module
 from linktools.ai.runtime.state import RuntimeStorage
@@ -76,9 +76,9 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
         *,
         object_store,
         limits: SnapshotLimits,
-    ) -> SnapshotTargetInspection:
+    ) -> SnapshotTargetInfo:
         del cls, target, object_store, limits
-        return SnapshotTargetInspection("matching", None, ref.digest)
+        return SnapshotTargetInfo("matching", None, ref.digest)
 
     monkeypatch.setattr(
         RuntimeSnapshot,

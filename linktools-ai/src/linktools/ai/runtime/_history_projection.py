@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Project Runtime step facts into Runtime trace and transcript views."""
+"""Project Runtime step facts into trace, transcript, and history views."""
 
 import heapq
 import json
@@ -63,7 +63,7 @@ from .state._views import (
     project_session_history_message,
 )
 
-_logger = environ.get_logger("ai.runtime.history")
+_logger = environ.get_logger("ai.runtime.history_projection")
 _EXECUTION_HISTORY_PROJECTION_VERSION = 1
 _EXECUTION_TRACE_PROJECTION_VERSION = 1
 _EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 1

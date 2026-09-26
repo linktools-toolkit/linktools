@@ -11,7 +11,7 @@ from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import tool_metadata
 from linktools.ai.runtime._agent_executor import _plan_mode_prepare
-from linktools.ai.runtime._compaction import RuntimeCompactionPolicy
+from linktools.ai.runtime._compaction import CompactionPolicy
 
 
 @pytest.mark.asyncio
@@ -55,7 +55,7 @@ async def test_plan_mode_keeps_workspace_file_reads_only() -> None:
 
 @pytest.mark.asyncio
 async def test_plan_mode_keeps_pydantic_framework_control_kinds() -> None:
-    compaction_policy = RuntimeCompactionPolicy()
+    compaction_policy = CompactionPolicy()
     prepare = _plan_mode_prepare(
         plan_mode=True,
         compaction_policy=compaction_policy,
@@ -142,7 +142,7 @@ async def test_plan_mode_prepare_captures_wrapped_per_run_tool_metadata() -> Non
         usage=RunUsage(),
         run_id="run",
     )
-    compaction_policy = RuntimeCompactionPolicy()
+    compaction_policy = CompactionPolicy()
     prepare = _plan_mode_prepare(
         plan_mode=True,
         compaction_policy=compaction_policy,

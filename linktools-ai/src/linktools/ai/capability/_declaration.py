@@ -16,12 +16,12 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..spec import (
-    AgentMarkdownSpecCodec,
+    AgentSpecAdapter,
     AgentSpec,
     MCPServerSpec,
+    MCPServerSpecAdapter,
     MCPServerSpecCodec,
-    SkillMarkdownSpecAdapter,
-    SkillMarkdownSpecCodec,
+    SkillSpecAdapter,
     RepositoryInstructionDocument,
 )
 from ._contribution import CapabilityContribution
@@ -31,7 +31,7 @@ from ._resource_path import (
     validate_resource_tree,
 )
 from ._skill import SkillDefinition
-from ._skill_source import SkillResourceVersion, SkillSourceRef
+from ._skill_source import SkillResource, SkillSourceRef
 
 if TYPE_CHECKING:
     from ._loading import CapabilityLoadContext, CapabilityLoadEntry
@@ -64,7 +64,7 @@ class AgentDeclarationLoader:
                 self._defaults = ImmutableJsonMapping(defaults)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-            AgentMarkdownSpecCodec().from_payload(
+            AgentSpecAdapter().from_mapping(
                 {"system_prompt": ""},
                 logical_id="defaults-validation",
                 defaults=self._defaults,
@@ -114,7 +114,7 @@ async def _load_agents(
 ) -> "Sequence[AgentSpec]":
     declarations = _package_declarations(context.list(kind=source_kind), ("/AGENT.md",))
     values = await context.read_many(tuple(entry.key for entry in declarations))
-    markdown = AgentMarkdownSpecCodec()
+    adapter = AgentSpecAdapter()
     result: list[AgentSpec] = []
     for entry, data in zip(declarations, values, strict=True):
         logical_id = entry.key.id[: -len("/AGENT.md")]
@@ -122,7 +122,7 @@ async def _load_agents(
             validate_logical_id(logical_id)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        result.append(markdown.decode(data, logical_id=logical_id, defaults=defaults))
+        result.append(adapter.decode_markdown(data, logical_id=logical_id, defaults=defaults))
     return result
 
 
@@ -133,17 +133,16 @@ async def _load_skills(
     declarations = _package_declarations(entries, ("/SKILL.md",))
     values = await context.read_many(tuple(entry.key for entry in declarations))
     result: list[SkillDefinition] = []
-    markdown = SkillMarkdownSpecCodec()
-    adapter = SkillMarkdownSpecAdapter()
+    adapter = SkillSpecAdapter()
     for entry, data in zip(declarations, values, strict=True):
         logical_id = entry.key.id[: -len("/SKILL.md")]
         try:
             validate_logical_id(logical_id)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        value = adapter.to_logical(logical_id, markdown.decode(data))
+        value = adapter.decode_markdown(data, logical_id=logical_id)
         prefix = f"{logical_id}/"
-        resources: list[tuple[str, CapabilityLoadEntry]] = []
+        resource_entries: list[tuple[str, CapabilityLoadEntry]] = []
         for candidate in entries:
             if not candidate.key.id.startswith(prefix):
                 continue
@@ -151,24 +150,29 @@ async def _load_skills(
             if relative == "SKILL.md":
                 continue
             validate_resource_path(relative)
-            resources.append((relative, candidate))
-        resources.sort(key=lambda item: item[0])
-        resource_keys = tuple(candidate.key for _relative, candidate in resources)
+            resource_entries.append((relative, candidate))
+        resource_entries.sort(key=lambda item: item[0])
+        resource_keys = tuple(candidate.key for _relative, candidate in resource_entries)
         refs = context.bind_versions(resource_keys)
         paths = await context.asset_reader.local_paths(resource_keys)
-        versions: list[SkillResourceVersion] = []
-        for (relative, _candidate), ref, path in zip(resources, refs, paths, strict=True):
+        resources: list[SkillResource] = []
+        for (relative, _candidate), ref, path in zip(
+            resource_entries,
+            refs,
+            paths,
+            strict=True,
+        ):
             mode = 0
             if path is not None:
                 try:
                     mode = (await asyncio.to_thread(path.stat)).st_mode & 0o111
                 except OSError as error:
                     raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            versions.append(SkillResourceVersion(relative, ref, mode))
+            resources.append(SkillResource(relative, ref, mode))
         result.append(
             SkillDefinition(
                 value,
-                SkillSourceRef(context.group_id, logical_id, tuple(versions)),
+                SkillSourceRef(context.group_id, logical_id, tuple(resources)),
             )
         )
     return result
@@ -180,15 +184,21 @@ async def _load_mcp(
     entries = context.list(kind="mcp")
     declarations = _package_declarations(entries, ("/mcp.json", "/mcp.yaml"))
     values = await context.read_many(tuple(entry.key for entry in declarations))
-    codec = MCPServerSpecCodec()
+    adapter = MCPServerSpecAdapter()
     result: list[MCPServerSpec] = []
     for entry, data in zip(declarations, values, strict=True):
         suffix = "/mcp.json" if entry.key.id.endswith("/mcp.json") else "/mcp.yaml"
         result.append(
-            codec.decode_author(
-                data,
-                format="json" if suffix.endswith(".json") else "yaml",
-                package_id=entry.key.id[: -len(suffix)],
+            (
+                adapter.decode_json(
+                    data,
+                    package_id=entry.key.id[: -len(suffix)],
+                )
+                if suffix.endswith(".json")
+                else adapter.decode_yaml(
+                    data,
+                    package_id=entry.key.id[: -len(suffix)],
+                )
             )
         )
     return result

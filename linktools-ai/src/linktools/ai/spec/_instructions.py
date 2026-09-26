@@ -156,7 +156,7 @@ class RepositoryInstructionResolver(Protocol):
     ) -> RepositoryInstructions: ...
 
 
-class AssetRuleInstructionResolver:
+class RuleInstructionResolver:
     """Resolve captured Rule documents without Workspace dependencies."""
 
     def __init__(
@@ -339,7 +339,7 @@ def _normalize_rule_target(value: str | Path) -> str:
 
 
 __all__ = [
-    "AssetRuleInstructionResolver",
+    "RuleInstructionResolver",
     "DEFAULT_REPOSITORY_INSTRUCTION_BYTES",
     "DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS",
     "RepositoryInstructionDocument",

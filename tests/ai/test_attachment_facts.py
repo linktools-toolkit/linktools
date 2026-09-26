@@ -12,7 +12,7 @@ from linktools.ai.core import (
     agent_conversation_id as make_agent_conversation_id,
     agent_run_id as make_agent_run_id,
 )
-from linktools.ai.runtime._history import StepExecutionHistoryReader
+from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import (
     ContextProjection,

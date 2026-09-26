@@ -2,15 +2,8 @@
 # -*- coding: utf-8 -*-
 """Durable Agent, Skill, and MCP declaration contracts."""
 
-from ._codec import (
-    AgentSpecCodec,
-    MCPServerSpecCodec,
-    SkillMarkdownSpecAdapter,
-    SkillMarkdownSpecCodec,
-    SkillSpecCodec,
-    SpecCodec,
-)
-from ._agent_markdown import AgentMarkdownSpecCodec
+from ._adapter import AgentSpecAdapter, MCPServerSpecAdapter, SkillSpecAdapter
+from ._codec import AgentSpecCodec, MCPServerSpecCodec, SkillSpecCodec, SpecCodec
 from ._contract import (
     AgentSpec,
     AgentUsageLimits,
@@ -27,7 +20,7 @@ from ._contract import (
 )
 from ..core import validate_logical_id
 from ._instructions import (
-    AssetRuleInstructionResolver,
+    RuleInstructionResolver,
     DEFAULT_REPOSITORY_INSTRUCTION_BYTES,
     DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS,
     RepositoryInstructionDocument,
@@ -44,9 +37,9 @@ from ._schema import canonicalize_json_schema, canonicalize_pydantic_model_schem
 __all__ = [
     "AgentSpec",
     "AgentSpecCodec",
-    "AgentMarkdownSpecCodec",
+    "AgentSpecAdapter",
     "AgentUsageLimits",
-    "AssetRuleInstructionResolver",
+    "RuleInstructionResolver",
     "DEFAULT_REPOSITORY_INSTRUCTION_BYTES",
     "DEFAULT_REPOSITORY_INSTRUCTION_DOCUMENTS",
     "agent_ref_payload",
@@ -56,12 +49,12 @@ __all__ = [
     "validate_logical_id",
     "capability_ref_payload",
     "MCPServerSpec",
+    "MCPServerSpecAdapter",
     "MCPServerSpecCodec",
     "RepositoryInstructionDocument",
     "RepositoryInstructionResolver",
     "RepositoryInstructions",
-    "SkillMarkdownSpecAdapter",
-    "SkillMarkdownSpecCodec",
+    "SkillSpecAdapter",
     "SkillSpec",
     "SkillSpecCodec",
     "SubagentRef",

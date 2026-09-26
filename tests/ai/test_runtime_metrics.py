@@ -17,7 +17,7 @@ from linktools.ai.observe import MetricQuery, MetricWindow, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime import _metrics as runtime_metrics
-from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
+from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
     TaskEvent,
@@ -260,7 +260,7 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
 ) -> None:
     monkeypatch.setattr(runtime_metrics, "_QUEUE_CAPACITY", 1)
     store = _BlockingMetricStore()
-    buffer = runtime_metrics._RuntimeMetricBuffer(
+    buffer = runtime_metrics._MetricBuffer(
         Metrics.from_store(store, namespace="buffer")  # type: ignore[arg-type]
     )
 
@@ -278,7 +278,7 @@ async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
 @pytest.mark.asyncio
 async def test_runtime_metric_buffer_commit_unknown_uses_facade_exact_replay() -> None:
     store = _CommitUnknownOnceMetricStore()
-    buffer = runtime_metrics._RuntimeMetricBuffer(
+    buffer = runtime_metrics._MetricBuffer(
         Metrics.from_store(store, namespace="buffer-retry")  # type: ignore[arg-type]
     )
     observation = _observation("retry-stable")
@@ -294,7 +294,7 @@ async def test_runtime_metric_buffer_commit_unknown_uses_facade_exact_replay() -
 @pytest.mark.asyncio
 async def test_model_metric_does_not_capture_prompt_or_exception_text() -> None:
     recorder = _CaptureRecorder()
-    capability = RuntimeModelObservationCapability(
+    capability = ModelObservationCapability(
         recorder,
         source_namespace="workspace",
         tenant_id="tenant",

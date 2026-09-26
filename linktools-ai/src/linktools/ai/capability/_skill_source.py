@@ -20,7 +20,7 @@ from ._resource_path import require_resource_path
 
 
 @dataclass(frozen=True, slots=True)
-class SkillResourceVersion:
+class SkillResource:
     path: str
     asset: AssetVersionRef
     executable_bits: int = 0
@@ -34,25 +34,25 @@ class SkillResourceVersion:
 
 @dataclass(frozen=True, slots=True)
 class SkillSourceRef:
-    asset_source_id: str
+    source_id: str
     root: str
-    resource_versions: tuple[SkillResourceVersion, ...] = ()
+    resources: tuple[SkillResource, ...] = ()
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.asset_source_id, str)
-            or not self.asset_source_id.strip()
+            not isinstance(self.source_id, str)
+            or not self.source_id.strip()
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         try:
             validate_logical_id(self.root)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        versions = tuple(self.resource_versions)
-        if any(not isinstance(item, SkillResourceVersion) for item in versions):
+        resources = tuple(self.resources)
+        if any(not isinstance(item, SkillResource) for item in resources):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        ordered = tuple(sorted(versions, key=lambda item: item.path))
-        if ordered != versions or len({item.path for item in versions}) != len(versions):
+        ordered = tuple(sorted(resources, key=lambda item: item.path))
+        if ordered != resources or len({item.path for item in resources}) != len(resources):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 @dataclass(frozen=True, slots=True)
 class SkillLocation:
@@ -72,7 +72,7 @@ class SkillLocation:
 
 
 @dataclass(frozen=True, slots=True)
-class SkillResourceView:
+class SkillSourceView:
     location: SkillLocation
     resources: tuple[str, ...]
 
@@ -85,35 +85,35 @@ class SkillResourceView:
 
 
 @runtime_checkable
-class SkillResourceSource(Protocol):
+class SkillSource(Protocol):
     @property
-    def asset_source_id(self) -> str: ...
+    def source_id(self) -> str: ...
 
-    async def inspect(self, source: SkillSourceRef) -> SkillResourceView: ...
+    async def inspect(self, source: SkillSourceRef) -> SkillSourceView: ...
 
     async def read(self, source: SkillSourceRef, path: str) -> bytes: ...
 
 
-class LocalSkillResourceSource:
-    def __init__(self, asset_source_id: str, root: "str | Path") -> None:
-        if not isinstance(asset_source_id, str) or not asset_source_id.strip():
-            raise ValueError("asset source id must be non-empty")
-        self._asset_source_id = asset_source_id
+class LocalSkillSource:
+    def __init__(self, source_id: str, root: "str | Path") -> None:
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("skill source id must be non-empty")
+        self._source_id = source_id
         self._root = Path(root).expanduser().resolve()
 
     @property
-    def asset_source_id(self) -> str:
-        return self._asset_source_id
+    def source_id(self) -> str:
+        return self._source_id
 
     def _root_ref(self, source: SkillSourceRef) -> str:
         if (
             not isinstance(source, SkillSourceRef)
-            or source.asset_source_id != self._asset_source_id
+            or source.source_id != self._source_id
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return source.root
 
-    async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
+    async def inspect(self, source: SkillSourceRef) -> SkillSourceView:
         logical_root = self._root_ref(source)
         return await asyncio.to_thread(self._inspect_sync, logical_root)
 
@@ -122,7 +122,7 @@ class LocalSkillResourceSource:
         relative = _require_resource_path(path)
         return await asyncio.to_thread(self._read_sync, logical_root, relative)
 
-    def _inspect_sync(self, root: str) -> SkillResourceView:
+    def _inspect_sync(self, root: str) -> SkillSourceView:
         package = self._package_path(root)
         resources: list[str] = []
         for directory, directory_names, file_names in os.walk(package, followlinks=True):
@@ -147,7 +147,7 @@ class LocalSkillResourceSource:
                         continue
                     raise
                 resources.append(_require_resource_path(relative))
-        return SkillResourceView(
+        return SkillSourceView(
             SkillLocation("local", str(package)),
             tuple(sorted(resources)),
         )
@@ -168,20 +168,20 @@ class LocalSkillResourceSource:
         return resolved
 
 
-class AssetSkillResourceSource:
+class AssetSkillSource:
     """Read Skill resources through version references captured in SkillSourceRef."""
 
-    def __init__(self, asset_source_id: str, asset_reader: AssetStoreReader) -> None:
-        if not isinstance(asset_source_id, str) or not asset_source_id.strip():
-            raise ValueError("asset source id must be non-empty")
+    def __init__(self, source_id: str, asset_reader: AssetStoreReader) -> None:
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("skill source id must be non-empty")
         if not isinstance(asset_reader, AssetStoreReader):
             raise TypeError("asset_reader must provide AssetStoreReader operations")
-        self._asset_source_id = asset_source_id
+        self._source_id = source_id
         self._asset_reader = asset_reader
 
     @property
-    def asset_source_id(self) -> str:
-        return self._asset_source_id
+    def source_id(self) -> str:
+        return self._source_id
 
     @property
     def asset_reader(self) -> AssetStoreReader:
@@ -190,15 +190,15 @@ class AssetSkillResourceSource:
     def _binding(self, source: SkillSourceRef) -> SkillSourceRef:
         if (
             not isinstance(source, SkillSourceRef)
-            or source.asset_source_id != self._asset_source_id
+            or source.source_id != self._source_id
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return source
 
-    async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
+    async def inspect(self, source: SkillSourceRef) -> SkillSourceView:
         binding = self._binding(source)
         versioned_resources = tuple(
-            item.path for item in binding.resource_versions
+            item.path for item in binding.resources
         )
         resources = tuple(
             path
@@ -207,11 +207,11 @@ class AssetSkillResourceSource:
         )
         location = SkillLocation(
             "virtual",
-            f"{self._asset_source_id}/resources/{binding.root}",
+            f"{self._source_id}/resources/{binding.root}",
         )
-        if binding.resource_versions:
+        if binding.resources:
             paths = await self._asset_reader.local_paths(
-                tuple(item.asset.key for item in binding.resource_versions)
+                tuple(item.asset.key for item in binding.resources)
             )
             if all(path is not None for path in paths):
                 package = await asyncio.to_thread(
@@ -221,12 +221,12 @@ class AssetSkillResourceSource:
                 )
                 if package is not None:
                     location = SkillLocation("local", str(package))
-        return SkillResourceView(location, resources)
+        return SkillSourceView(location, resources)
 
     async def read(self, source: SkillSourceRef, path: str) -> bytes:
         binding = self._binding(source)
         relative = _require_resource_path(path)
-        for item in binding.resource_versions:
+        for item in binding.resources:
             if item.path == relative:
                 return (await self._asset_reader.read_versions((item.asset,)))[0]
         raise AIError(ErrorCode.ASSET_NOT_FOUND)
@@ -270,23 +270,23 @@ def _validate_resource_mode(mode: object) -> None:
 
 
 class SkillSourceRegistry:
-    def __init__(self, sources: Sequence[SkillResourceSource] = ()) -> None:
-        values: dict[str, SkillResourceSource] = {}
+    def __init__(self, sources: Sequence[SkillSource] = ()) -> None:
+        values: dict[str, SkillSource] = {}
         for source in sources:
-            if not isinstance(source, SkillResourceSource):
-                raise TypeError("sources must implement SkillResourceSource")
-            if source.asset_source_id in values:
+            if not isinstance(source, SkillSource):
+                raise TypeError("sources must implement SkillSource")
+            if source.source_id in values:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            values[source.asset_source_id] = source
-        self._sources: Mapping[str, SkillResourceSource] = MappingProxyType(values)
+            values[source.source_id] = source
+        self._sources: Mapping[str, SkillSource] = MappingProxyType(values)
 
-    def resolve(self, asset_source_id: str) -> SkillResourceSource:
+    def resolve(self, source_id: str) -> SkillSource:
         try:
-            return self._sources[asset_source_id]
+            return self._sources[source_id]
         except KeyError as error:
             raise AIError(
                 ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                safe_details={"asset_source_id": asset_source_id},
+                safe_details={"source_id": source_id},
             ) from error
 
 def require_skill_resource_path(path: str) -> str:
@@ -342,12 +342,12 @@ def _resolve_contained_file(root: Path, candidate: Path) -> Path:
 
 
 __all__ = [
-    "AssetSkillResourceSource",
-    "LocalSkillResourceSource",
+    "AssetSkillSource",
+    "LocalSkillSource",
     "SkillLocation",
-    "SkillResourceSource",
-    "SkillResourceVersion",
-    "SkillResourceView",
+    "SkillSource",
+    "SkillResource",
+    "SkillSourceView",
     "SkillSourceRef",
     "SkillSourceRegistry",
     "require_skill_resource_path",

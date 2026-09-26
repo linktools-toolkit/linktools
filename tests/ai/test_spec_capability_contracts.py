@@ -21,11 +21,11 @@ import linktools.ai.agent._compiler as agent_compiler
 import linktools.ai.runtime._mcp as mcp_runtime
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
-    AssetSkillResourceSource,
+    AssetSkillSource,
     CapabilityContribution,
     CapabilityGroup,
     SkillCapability,
-    SkillResourceVersion,
+    SkillResource,
     SkillDefinition,
     SkillSourceRef,
     SkillSourceRegistry,
@@ -52,7 +52,7 @@ from linktools.ai.runtime._mcp import (
 )
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.runtime.state import (
     RuntimeDomain,
@@ -60,12 +60,14 @@ from linktools.ai.runtime.state import (
 )
 from linktools.ai.spec import (
     AgentSpec,
+    AgentSpecAdapter,
     AgentSpecCodec,
     AgentUsageLimits,
     MCPServerSpec,
+    MCPServerSpecAdapter,
     MCPServerSpecCodec,
-    SkillMarkdownSpecCodec,
     SkillSpec,
+    SkillSpecAdapter,
     SkillSpecCodec,
     canonical_selectors,
     capability_ref_payload,
@@ -110,7 +112,7 @@ def test_skill_wildcard_allows_preload_outside_explicit_requirements() -> None:
 
 
 def test_skill_markdown_accepts_string_revision_without_exposing_new_fields() -> None:
-    codec = SkillMarkdownSpecCodec()
+    adapter = SkillSpecAdapter()
     content = (
         "---\n"
         "name: review\n"
@@ -120,14 +122,14 @@ def test_skill_markdown_accepts_string_revision_without_exposing_new_fields() ->
         "---\n"
         "Review changes.\n"
     )
-    spec = codec.decode(content.encode())
+    spec = adapter.decode_markdown(content.encode())
     assert spec.revision == 2
     assert "linktools-revision" not in spec.metadata
-    assert codec.encode(spec) == content.encode()
+    assert adapter.encode_markdown(spec) == content.encode()
 
 
 def test_mcp_shared_config_normalizes_supported_transports() -> None:
-    servers = MCPServerSpecCodec().decode_config(
+    servers = MCPServerSpecAdapter().decode_config(
         json.dumps(
             {
                 "mcpServers": {
@@ -169,7 +171,7 @@ def test_mcp_shared_config_rejects_transport_conflicts(
     payload: dict[str, object],
 ) -> None:
     with pytest.raises(AIError) as error:
-        MCPServerSpecCodec().decode_config(
+        MCPServerSpecAdapter().decode_config(
             json.dumps({"mcpServers": {"server": payload}}).encode()
         )
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
@@ -199,7 +201,7 @@ def test_mcp_wire_round_trips_resource_backed_stdio() -> None:
 
 def test_mcp_wire_rejects_resource_on_remote_transport() -> None:
     codec = MCPServerSpecCodec()
-    payload = codec.to_payload(
+    payload = codec.to_wire_payload(
         MCPServerSpec(
             "remote",
             transport="streamable-http",
@@ -404,17 +406,17 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
         SkillSourceRef(
             "application",
             "review",
-            (SkillResourceVersion("guide.md", asset, 0o111),),
+            (SkillResource("guide.md", asset, 0o111),),
         ),
     )
 
     contract = definition.contract
     source = contract["source"]
     assert isinstance(source, dict)
-    versions = source["resource_versions"]
-    assert isinstance(versions, list)
-    assert versions[0]["asset"] == asset.to_payload()
-    assert versions[0]["executable_bits"] == 0o111
+    resources = source["resources"]
+    assert isinstance(resources, list)
+    assert resources[0]["asset"] == asset.to_payload()
+    assert resources[0]["executable_bits"] == 0o111
 
     restored = SkillDefinition.from_contract(contract)
     assert restored == definition
@@ -428,9 +430,9 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
                 "id": "review",
                 "content": "instructions",
                 "source": {
-                    "asset_source_id": "application",
+                    "source_id": "application",
                     "root": "review",
-                    "resource_versions": [
+                    "resources": [
                         {
                             "path": "guide.md",
                             "asset": {
@@ -455,7 +457,7 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
 async def test_asset_skill_source_rejects_mismatched_source_ref() -> None:
     store = AssetStore(StorageOverlay(InMemoryAssetBackend()))
     ref = SkillSourceRef("other", "review")
-    source = AssetSkillResourceSource("application", store)
+    source = AssetSkillSource("application", store)
     with pytest.raises(AIError) as error:
         await source.inspect(ref)
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -619,19 +621,20 @@ def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
 
 
 def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
-    agent = AgentSpecCodec().from_author_payload(
+    agent = AgentSpecAdapter().from_mapping(
         {
             "version": 1,
             "id": "agent",
             "model": "route",
             "planning": True,
             "future_metadata": {"future": True},
-        }
+        },
+        logical_id="agent",
     )
     assert agent.model == "route"
     assert agent.planning is False
 
-    skill = SkillSpecCodec().from_author_payload(
+    skill = SkillSpecAdapter().from_mapping(
         {
             "version": 1,
             "id": "skill",
@@ -641,7 +644,7 @@ def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
     )
     assert skill == SkillSpec("skill", "skill content")
 
-    server = MCPServerSpecCodec().decode_author(
+    server = MCPServerSpecAdapter().decode_json(
         json.dumps(
             {
                 "version": 1,
@@ -650,13 +653,12 @@ def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
                 "future_metadata": {"future": True},
             }
         ).encode(),
-        format="json",
     )
     assert server == MCPServerSpec("mcp", "echo")
 
 
 def test_mcp_package_resource_ignores_unrelated_fields() -> None:
-    server = MCPServerSpecCodec().decode_author(
+    server = MCPServerSpecAdapter().decode_json(
         json.dumps(
             {
                 "version": 1,
@@ -668,7 +670,6 @@ def test_mcp_package_resource_ignores_unrelated_fields() -> None:
                 },
             }
         ).encode(),
-        format="json",
         package_id="server",
     )
 
@@ -676,7 +677,7 @@ def test_mcp_package_resource_ignores_unrelated_fields() -> None:
 
 
 def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> None:
-    server = MCPServerSpecCodec().decode_author(
+    server = MCPServerSpecAdapter().decode_json(
         json.dumps(
             {
                 "version": 1,
@@ -689,7 +690,6 @@ def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> Non
                 },
             }
         ).encode(),
-        format="json",
     )
 
     assert server.resource is None
@@ -698,19 +698,19 @@ def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> Non
 def test_durable_spec_readers_ignore_additive_fields() -> None:
     agent_codec = AgentSpecCodec()
     agent = AgentSpec("agent")
-    agent_payload = agent_codec.to_payload(agent)
+    agent_payload = agent_codec.to_wire_payload(agent)
     agent_payload["future_note"] = {"category": "display"}
     assert agent_codec.from_payload(agent_payload) == agent
 
     skill_codec = SkillSpecCodec()
     skill = SkillSpec("skill", "instructions")
-    skill_payload = skill_codec.to_payload(skill)
+    skill_payload = skill_codec.to_wire_payload(skill)
     skill_payload["future_note"] = {"category": "display"}
     assert skill_codec.from_payload(skill_payload) == skill
 
     mcp_codec = MCPServerSpecCodec()
     server = MCPServerSpec("server", "command")
-    mcp_payload = mcp_codec.to_payload(server)
+    mcp_payload = mcp_codec.to_wire_payload(server)
     mcp_payload["future_note"] = {"category": "display"}
     assert mcp_codec.from_payload(mcp_payload) == server
 
@@ -1111,7 +1111,7 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
 
 
 def test_agent_authoring_ignores_runtime_only_usage_limits() -> None:
-    spec = AgentSpecCodec().from_author_payload(
+    spec = AgentSpecAdapter().from_mapping(
         {
             "version": 1,
             "id": "agent",
@@ -1119,7 +1119,8 @@ def test_agent_authoring_ignores_runtime_only_usage_limits() -> None:
                 "model_requests": 1,
                 "future_limit": {"unit": "request"},
             },
-        }
+        },
+        logical_id="agent",
     )
     assert spec.usage_limits is None
 
@@ -1199,7 +1200,7 @@ def _context() -> RunContext[None]:
 
 @pytest.mark.asyncio
 async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> None:
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (
             FunctionToolset(
                 [
@@ -1227,7 +1228,7 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
     assert await boundary.call_tool(
         "_business", {"value": "ok"}, context, tools["_business"]
     ) == "ok"
-    unknown = RuntimeToolBoundaryToolset(
+    unknown = BoundaryToolset(
         (FunctionToolset([_business]),),
         {},
         id="invalid",
@@ -1239,7 +1240,7 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
 
 @pytest.mark.asyncio
 async def test_runtime_tool_boundary_does_not_rewrite_explicit_descriptor() -> None:
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (
             FunctionToolset(
                 [

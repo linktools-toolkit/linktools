@@ -21,7 +21,7 @@ from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._mcp import (
     _MCPBinding,
-    _MCPRuntimeCapability,
+    _MCPCapability,
     _raise_primary_after_cleanup,
     close_mcp_resources,
     materialize_mcp_capabilities,
@@ -172,7 +172,7 @@ async def test_remote_mcp_materialization_does_not_require_sandbox_or_cwd(
     )
     try:
         assert len(capabilities) == 1
-        assert isinstance(capabilities[0], _MCPRuntimeCapability)
+        assert isinstance(capabilities[0], _MCPCapability)
     finally:
         await close_mcp_resources(capabilities)
 
@@ -183,7 +183,7 @@ async def test_mcp_cleanup_failure_keeps_the_execution_error() -> None:
         async def close(self) -> None:
             raise RuntimeError("process cleanup failed")
 
-    capability = _MCPRuntimeCapability("mcp", object(), FailedClient())
+    capability = _MCPCapability("mcp", object(), FailedClient())
     execution_error = ValueError("execution failed")
 
     with pytest.raises(ValueError) as error:
@@ -200,7 +200,7 @@ async def test_mcp_cleanup_failure_is_typed_without_an_execution_error() -> None
         async def close(self) -> None:
             raise RuntimeError("process cleanup failed")
 
-    capability = _MCPRuntimeCapability("mcp", object(), FailedClient())
+    capability = _MCPCapability("mcp", object(), FailedClient())
 
     with pytest.raises(AIError) as error:
         await close_mcp_resources((capability,))

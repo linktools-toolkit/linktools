@@ -20,7 +20,7 @@ from linktools.ai.observe import (
 )
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime._context import RuntimeContext
-from linktools.ai.runtime._metrics import _RuntimeMetricBuffer
+from linktools.ai.runtime._metrics import _MetricBuffer
 from linktools.ai.workspace import Workspace
 
 
@@ -92,7 +92,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
         metrics=metrics,
     ) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]
-        assert isinstance(control, _RuntimeMetricBuffer)
+        assert isinstance(control, _MetricBuffer)
         assert control.try_record(observation) is True
         flushed = await runtime.flush_metrics()
         assert flushed.completed is True

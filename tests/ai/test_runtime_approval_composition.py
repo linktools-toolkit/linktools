@@ -15,7 +15,7 @@ from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
-    WorkspaceToolPermissionPolicy,
+    ToolPermissionPolicy,
 )
 from pydantic_ai.models.test import TestModel
 
@@ -61,7 +61,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
         tmp_path,
 
         policy=WorkspacePolicy(
-            tool_permissions=WorkspaceToolPermissionPolicy(default="ask")
+            tool_permissions=ToolPermissionPolicy(default="ask")
         ),
     )
     state = (

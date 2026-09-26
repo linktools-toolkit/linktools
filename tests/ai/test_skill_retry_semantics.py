@@ -6,7 +6,7 @@ import pytest
 from linktools.ai.capability import (
     SkillCapability,
     SkillDefinition,
-    SkillResourceView,
+    SkillSourceView,
     SkillSourceRef,
     SkillSourceRegistry,
     ToolCallFailed,
@@ -23,10 +23,10 @@ pytestmark = pytest.mark.asyncio
 
 class _OutsideRootSource:
     @property
-    def asset_source_id(self) -> str:
+    def source_id(self) -> str:
         return "source"
 
-    async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
+    async def inspect(self, source: SkillSourceRef) -> SkillSourceView:
         del source
         raise AssertionError("inspect should not be called")
 
@@ -37,10 +37,10 @@ class _OutsideRootSource:
 
 class _MissingRootSource:
     @property
-    def asset_source_id(self) -> str:
+    def source_id(self) -> str:
         return "source"
 
-    async def inspect(self, source: SkillSourceRef) -> SkillResourceView:
+    async def inspect(self, source: SkillSourceRef) -> SkillSourceView:
         del source
         raise AIError(ErrorCode.ASSET_NOT_FOUND)
 

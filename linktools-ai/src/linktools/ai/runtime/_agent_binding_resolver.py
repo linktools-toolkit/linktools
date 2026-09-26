@@ -17,7 +17,7 @@ from ..workspace import Sandbox
 from ._mcp import _mcp_execution_policy
 
 
-class _RuntimeBindingResolver:
+class _AgentBindingResolver:
     """Resolve execution-owned MCP resources and direct child bindings."""
 
     def __init__(
@@ -130,4 +130,4 @@ class _RuntimeBindingResolver:
         return replace(binding_contract, selected=tuple(selected))
 
 
-__all__ = ["_RuntimeBindingResolver"]
+__all__ = ["_AgentBindingResolver"]

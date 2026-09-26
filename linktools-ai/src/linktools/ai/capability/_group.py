@@ -217,7 +217,7 @@ class CapabilityGroup(Generic[AppT]):
         return TaskExpanderRef(contribution.id, contribution.revision)
 
 
-    def runtime_capability(
+    def capability(
         self,
         capability: "AbstractCapability[AgentContext[AppT]]",
         *,
@@ -225,13 +225,13 @@ class CapabilityGroup(Generic[AppT]):
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
     ) -> "AbstractCapability[AgentContext[AppT]]":
-        """Register one always-selected Pydantic runtime behavior capability."""
+        """Register one Agent-selectable Pydantic runtime behavior capability."""
         _validate_revision(revision)
         capability_id = _capability_registration_id(capability, id)
         _validate_external_capability_id(capability_id)
         self._contributions.append(
             CapabilityContribution.from_opaque(
-                "runtime_capability",
+                "capability",
                 capability_id,
                 capability,
                 revision=revision,
@@ -251,7 +251,7 @@ class CapabilityGroup(Generic[AppT]):
         allow_tools: Sequence[str] = ("*",),
         allow_skills: Sequence[str] = ("*",),
         allow_subagents: Sequence[str] = ("*",),
-        allow_runtime_capabilities: Sequence[str] = ("*",),
+        allow_capabilities: Sequence[str] = ("*",),
         usage_limits: "AgentUsageLimits | None" = None,
         planning: bool = False,
         thinking: ThinkingValue = False,
@@ -271,7 +271,7 @@ class CapabilityGroup(Generic[AppT]):
             allow_tools=tuple(allow_tools),
             allow_skills=tuple(allow_skills),
             allow_subagents=tuple(allow_subagents),
-            allow_runtime_capabilities=tuple(allow_runtime_capabilities),
+            allow_capabilities=tuple(allow_capabilities),
             usage_limits=usage_limits,
             planning=planning,
             thinking=thinking,
@@ -339,9 +339,9 @@ class CapabilityGroup(Generic[AppT]):
             _freeze_contribution(item) for item in contributions
         )
         _validate_unique(captured_items)
-        generic = [item for item in captured_items if item.kind == "runtime_capability"]
+        generic = [item for item in captured_items if item.kind == "capability"]
         declarations = sorted(
-            (item for item in captured_items if item.kind != "runtime_capability"),
+            (item for item in captured_items if item.kind != "capability"),
             key=lambda item: (item.kind, item.id, item.revision),
         )
         capture_contributions = tuple((*declarations, *generic))
@@ -380,9 +380,9 @@ def _validate_skill_source(
     source_ref = definition.source_ref
     if source_ref is None:
         return
-    if source_ref.asset_source_id != context.group_id:
+    if source_ref.source_id != context.group_id:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    versions = tuple(item.asset for item in source_ref.resource_versions)
+    versions = tuple(item.asset for item in source_ref.resources)
     try:
         captured = context.bind_versions(tuple(ref.key for ref in versions))
     except AIError as error:

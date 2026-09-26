@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime-owned capture for step persistence and model interactions."""
+"""Agent-run recording for step persistence and model interactions."""
 
 from __future__ import annotations
 
@@ -48,8 +48,8 @@ class _InteractionStagingPort(Protocol):
     def stage_model_interaction(self, interaction: object) -> None: ...
 
 
-class RuntimeCaptureStore:
-    """Own one agent attempt's stable capture inputs and staged persistence facts."""
+class AgentRunRecorder:
+    """Own one agent attempt's stable inputs and staged persistence facts."""
 
     def __init__(
         self,
@@ -444,4 +444,4 @@ def _usage_metrics(value: object | None) -> UsageMetrics | None:
     )
 
 
-__all__ = ["RuntimeCaptureStore"]
+__all__ = ["AgentRunRecorder"]

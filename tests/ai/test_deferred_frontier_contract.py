@@ -7,15 +7,15 @@ from typing import Any
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capabilities import _RuntimeAgentRunPersistence
-from linktools.ai.runtime._capture import RuntimeCaptureStore
+from linktools.ai.runtime._capabilities import _AgentRunPersistenceCapability
+from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.workspace import (
     ToolPermissionRule,
-    WorkspaceToolPermissionPolicy,
+    ToolPermissionPolicy,
 )
 from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.models.test import TestModel
@@ -106,8 +106,8 @@ def _context() -> RunContext[None]:
 async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() -> None:
     store = _Store()
     captured: list[int] = []
-    persistence = _RuntimeAgentRunPersistence(
-        capture=RuntimeCaptureStore(
+    persistence = _AgentRunPersistenceCapability(
+        recorder=AgentRunRecorder(
             store,  # type: ignore[arg-type]
             execution_id=None,
             agent_run_id="run",
@@ -149,8 +149,8 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
 
 @pytest.mark.asyncio
 async def test_runtime_step_persistence_requires_pause_sink_for_native_deferred() -> None:
-    persistence = _RuntimeAgentRunPersistence(
-        capture=RuntimeCaptureStore(
+    persistence = _AgentRunPersistenceCapability(
+        recorder=AgentRunRecorder(
             _Store(),  # type: ignore[arg-type]
             execution_id=None,
             agent_run_id="run",
@@ -183,13 +183,13 @@ async def test_ask_boundary_defers_before_runtime_operation() -> None:
         effect_policy="none",
         tool_class="filesystem.read",
     )
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (FunctionToolset([tool_with_metadata(read_file, descriptor)]),),
         {
             "read_file": descriptor
         },
         id="workspace",
-        workspace_policy=WorkspaceToolPermissionPolicy(
+        permission_policy=ToolPermissionPolicy(
             (ToolPermissionRule("ask", tool_name="read_file"),)
         ),
         tool_operations=bridge,  # type: ignore[arg-type]

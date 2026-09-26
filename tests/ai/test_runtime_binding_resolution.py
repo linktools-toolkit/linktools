@@ -17,15 +17,15 @@ from linktools.ai.agent import (
 )
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
-    AssetSkillResourceSource,
+    AssetSkillSource,
     CapabilityContribution,
     SkillDefinition,
-    SkillResourceVersion,
+    SkillResource,
     SkillSourceRef,
 )
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime._binding_resolver import _RuntimeBindingResolver
+from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_capture import TaskCapabilityCaptureStore
@@ -54,7 +54,7 @@ from linktools.ai.workspace import BubblewrapSandbox
 class _BindingFixture:
     compiler: AgentCompiler
     catalog: AgentCatalog
-    resolver: _RuntimeBindingResolver
+    resolver: _AgentBindingResolver
     assets: AssetStore
     binding: AgentBinding
 
@@ -89,7 +89,7 @@ async def _fixture() -> _BindingFixture:
     child_ref = SkillSourceRef(
         "application",
         "child-skill",
-        (SkillResourceVersion("guide.txt", child_asset),),
+        (SkillResource("guide.txt", child_asset),),
     )
 
     candidates = (
@@ -134,7 +134,7 @@ async def _fixture() -> _BindingFixture:
             for agent_id, spec in specs.items()
         }
     )
-    resolver = _RuntimeBindingResolver(
+    resolver = _AgentBindingResolver(
         catalog,
         compiler,
     )
@@ -161,7 +161,7 @@ def _skill_ref(child: AgentBindingContract) -> SkillSourceRef:
     pin = next(item for item in child.selected if item.kind == "skill")
     skill = SkillDefinition.from_contract(pin.contract)
     assert skill.source_ref is not None
-    assert skill.source_ref.resource_versions
+    assert skill.source_ref.resources
     return skill.source_ref
 
 
@@ -169,7 +169,7 @@ async def _read_skill(
     fixture: _BindingFixture,
     ref: SkillSourceRef,
 ) -> bytes:
-    source = AssetSkillResourceSource("application", fixture.assets)
+    source = AssetSkillSource("application", fixture.assets)
     return await source.read(ref, "guide.txt")
 
 
@@ -180,7 +180,7 @@ async def test_binding_resolution_preserves_direct_child_asset_versions() -> Non
         resolved = await fixture.resolver.resolve(fixture.binding)
         ref = _skill_ref(_resolved_child(resolved.binding_contract))
 
-        assert [item.path for item in ref.resource_versions] == ["guide.txt"]
+        assert [item.path for item in ref.resources] == ["guide.txt"]
         await fixture.assets.put(
             AssetKey("skill", "child-skill/guide.txt"),
             b"changed",
@@ -228,7 +228,7 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
         assert capability_capture.roots == {}
         resolved_binding = capability_capture.bindings[fixture.binding.binding_digest]
         assert resolved_binding.binding_digest != fixture.binding.binding_digest
-        assert _skill_ref(_resolved_child(resolved_binding)).resource_versions
+        assert _skill_ref(_resolved_child(resolved_binding)).resources
     finally:
         await fixture.assets.close()
 
@@ -274,7 +274,7 @@ async def test_runtime_start_admits_resolved_binding() -> None:
         assert started.execution_id == "execution"
         assert execution.binding_contract is not None
         assert execution.binding_digest == execution.binding_contract.binding_digest
-        assert _skill_ref(_resolved_child(execution.binding_contract)).resource_versions
+        assert _skill_ref(_resolved_child(execution.binding_contract)).resources
     finally:
         await fixture.assets.close()
 
@@ -286,7 +286,7 @@ async def test_execution_binding_uses_selected_child_asset_versions() -> None:
         resolved = await fixture.resolver.resolve(fixture.binding)
 
         assert resolved.binding_contract != fixture.binding.binding_contract
-        assert _skill_ref(_resolved_child(resolved.binding_contract)).resource_versions
+        assert _skill_ref(_resolved_child(resolved.binding_contract)).resources
     finally:
         await fixture.assets.close()
 
@@ -303,7 +303,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         allow_tools=(mcp_server_selector(server.id),),
         allow_skills=(),
         allow_subagents=(),
-        allow_runtime_capabilities=(),
+        allow_capabilities=(),
     )
     compiler = AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
@@ -313,7 +313,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
     catalog = AgentCatalog(
         {specification.id: compiler.compile(specification)}
     )
-    resolver = _RuntimeBindingResolver(
+    resolver = _AgentBindingResolver(
         catalog,
         compiler,
     )
@@ -356,7 +356,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         allow_tools=(mcp_server_selector(server.id),),
         allow_skills=(),
         allow_subagents=(),
-        allow_runtime_capabilities=(),
+        allow_capabilities=(),
     )
     compiler = AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
@@ -370,7 +370,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         runtime_root=tmp_path,
         bwrap_executable=tmp_path / "bwrap",
     )
-    resolver = _RuntimeBindingResolver(
+    resolver = _AgentBindingResolver(
         catalog,
         compiler,
         sandbox=sandbox,
@@ -422,14 +422,14 @@ async def test_existing_child_mcp_resolves_asset_versions(
                 ),
                 allow_skills=(),
                 allow_subagents=("child",),
-                allow_runtime_capabilities=(),
+                allow_capabilities=(),
             ),
             "child": AgentSpec(
                 "child",
                 allow_tools=(mcp_server_selector(server.id),),
                 allow_skills=(),
                 allow_subagents=(),
-                allow_runtime_capabilities=(),
+                allow_capabilities=(),
             ),
         }
         compiler = AgentCompiler(
@@ -443,7 +443,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
                 for agent_id, spec in specs.items()
             }
         )
-        resolver = _RuntimeBindingResolver(catalog, compiler)
+        resolver = _AgentBindingResolver(catalog, compiler)
         binding = compiler.bind(catalog.root_agent("parent")).binding_contract
 
         await store.put(resource, b"print('updated')")

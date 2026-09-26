@@ -29,7 +29,7 @@ from ..capability import (
 )
 from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ..workspace import SandboxSession, WorkspaceToolPermissionPolicy
+from ..workspace import SandboxSession, ToolPermissionPolicy
 from ._attachment import bind_tool_return_attachments
 from ._tool import ToolOperationBridge
 from ._tool_metrics import (
@@ -111,7 +111,7 @@ def managed_tool_descriptor_from_metadata(
     )
 
 
-class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
+class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     """Apply workspace policy and effect durability at the final leaf call."""
 
     def __init__(
@@ -121,7 +121,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         *,
         id: str,
         descriptor: ManagedToolDescriptor | None = None,
-        workspace_policy: WorkspaceToolPermissionPolicy | None = None,
+        permission_policy: ToolPermissionPolicy | None = None,
         sandbox_session: SandboxSession | None = None,
         tool_operations: ToolOperationBridge | None = None,
         tool_metrics: _ToolMetricContext | None = None,
@@ -133,7 +133,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._descriptors = dict(descriptors)
         self._descriptor = descriptor
         self._id = id
-        self._workspace_policy = workspace_policy
+        self._permission_policy = permission_policy
         self._sandbox_session = sandbox_session
         self._tool_operations = tool_operations
         self._tool_metrics = tool_metrics
@@ -151,7 +151,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
     def id(self) -> str:
         return self._id
 
-    async def __aenter__(self) -> "RuntimeToolBoundaryToolset":
+    async def __aenter__(self) -> "BoundaryToolset":
         async with AsyncExitStack() as stack:
             for toolset in self._toolsets:
                 await stack.enter_async_context(toolset)
@@ -414,7 +414,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         *,
         approved: bool,
     ) -> None:
-        policy = self._workspace_policy
+        policy = self._permission_policy
         if policy is None or (
             not descriptor.tool_class.startswith("filesystem")
             and descriptor.tool_class != "shell"
@@ -479,5 +479,5 @@ __all__ = [
     "ManagedToolDescriptor",
     "managed_tool_descriptor_from_metadata",
     "RepositoryInstructionBoundary",
-    "RuntimeToolBoundaryToolset",
+    "BoundaryToolset",
 ]

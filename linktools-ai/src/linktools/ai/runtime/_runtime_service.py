@@ -58,13 +58,13 @@ from ..task import (
     TaskExpanderRef,
 )
 from ._agent import Agent, Execution, Session
-from ._binding_resolver import _RuntimeBindingResolver
+from ._agent_binding_resolver import _AgentBindingResolver
 from ._task import TaskGraphRun
 from ._context import RuntimeContext
 from ._input import CanonicalUserInput
 from ._metrics import (
-    RuntimeMetricFlushResult,
-    RuntimeMetricStatus,
+    MetricFlushResult,
+    MetricBufferStatus,
     _disabled_metric_status,
 )
 from .service_api import (
@@ -141,14 +141,14 @@ class _TaskNodeRuntimePort(Protocol):
     ) -> JsonValue: ...
 
 
-class _RuntimeMetricControl(Protocol):
-    def status(self) -> RuntimeMetricStatus: ...
+class _MetricControl(Protocol):
+    def status(self) -> MetricBufferStatus: ...
 
     async def flush(
         self,
         *,
         timeout_seconds: float = 5.0,
-    ) -> RuntimeMetricFlushResult: ...
+    ) -> MetricFlushResult: ...
 
 
 class _ExecutionTreeStreamer(Protocol):
@@ -213,8 +213,8 @@ class Runtime(Generic[AppT]):
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
         tree_streamer: "_ExecutionTreeStreamer | None" = None,
-        metric_control: "_RuntimeMetricControl | None" = None,
-        _binding_resolver: "_RuntimeBindingResolver | None" = None,
+        metric_control: "_MetricControl | None" = None,
+        _binding_resolver: "_AgentBindingResolver | None" = None,
     ) -> None:
         if any(
             value is None
@@ -358,7 +358,7 @@ class Runtime(Generic[AppT]):
     def correlation(self) -> CorrelationData:
         return self._context.correlation
 
-    def metric_status(self) -> RuntimeMetricStatus:
+    def metric_status(self) -> MetricBufferStatus:
         control = self._metric_control
         return _disabled_metric_status() if control is None else control.status()
 
@@ -366,7 +366,7 @@ class Runtime(Generic[AppT]):
         self,
         *,
         timeout_seconds: float = 5.0,
-    ) -> RuntimeMetricFlushResult:
+    ) -> MetricFlushResult:
         self._ensure_open()
         if (
             isinstance(timeout_seconds, bool)
@@ -376,7 +376,7 @@ class Runtime(Generic[AppT]):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         control = self._metric_control
         if control is None:
-            return RuntimeMetricFlushResult(True, _disabled_metric_status())
+            return MetricFlushResult(True, _disabled_metric_status())
         return await control.flush(timeout_seconds=timeout_seconds)
 
     def agent(

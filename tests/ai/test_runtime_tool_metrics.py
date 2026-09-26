@@ -13,10 +13,10 @@ from linktools.ai.observe import Observation
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.runtime._tool_metrics import (
-    RuntimeToolMetricsCapability,
+    ToolMetricsCapability,
     _ToolMetricContext,
 )
 from ._runtime_test_helpers import tool_with_metadata
@@ -102,7 +102,7 @@ async def _boundary(
     decision: ToolOperationDecision,
     recorder: _Recorder,
     handler: Any,
-) -> tuple[RuntimeToolBoundaryToolset, _Bridge, RunContext[None], Any]:
+) -> tuple[BoundaryToolset, _Bridge, RunContext[None], Any]:
     async def tool() -> object:
         return await handler()
 
@@ -113,7 +113,7 @@ async def _boundary(
         tool_class="business",
     )
     raw = FunctionToolset([tool_with_metadata(tool, descriptor)])
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (raw,),
         {"tool": descriptor},
         id="boundary",
@@ -253,7 +253,7 @@ async def test_capability_tool_signal_is_observed_before_control_conversion(
     expected_code: str,
 ) -> None:
     recorder = _Recorder()
-    capability = RuntimeToolMetricsCapability(_metric_context(recorder))
+    capability = ToolMetricsCapability(_metric_context(recorder))
     call = ToolCallPart("capability_tool", args={}, tool_call_id="call")
     tool_def = ToolDefinition(name="capability_tool")
 

@@ -15,7 +15,7 @@ from pydantic_ai_harness.compaction import TieredCompaction
 from linktools.ai.capability import AgentContext
 from linktools.ai.core import Principal, PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._compaction import RuntimeCompaction
+from linktools.ai.runtime._compaction import CompactionCapability
 
 
 def _contexts() -> tuple[RunContext[AgentContext[None]], ModelRequestContext]:
@@ -63,7 +63,7 @@ async def test_pending_binary_limit_applies_to_combined_model_context() -> None:
     context, request_context = _contexts()
 
     with pytest.raises(AIError) as raised:
-        await RuntimeCompaction(None, limits=PromptLimits(max_binary_input_parts=1)).wrap_model_request(
+        await CompactionCapability(None, limits=PromptLimits(max_binary_input_parts=1)).wrap_model_request(
             context,
             request_context=request_context,
             handler=_unexpected_handler,
@@ -84,7 +84,7 @@ async def test_pending_binary_limit_fails_before_compaction(
     monkeypatch.setattr(TieredCompaction, "before_model_request", unexpected_compaction)
 
     with pytest.raises(AIError) as raised:
-        await RuntimeCompaction(1, limits=PromptLimits(max_binary_input_parts=1)).wrap_model_request(
+        await CompactionCapability(1, limits=PromptLimits(max_binary_input_parts=1)).wrap_model_request(
             context,
             request_context=request_context,
             handler=_unexpected_handler,

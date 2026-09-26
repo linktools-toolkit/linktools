@@ -7,13 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capture import RuntimeCaptureStore
+from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._capabilities import (
-    _RuntimeAgentRunPersistence,
+    _AgentRunPersistenceCapability,
 )
-from linktools.ai.runtime._history import _trace_item
+from linktools.ai.runtime._history_projection import _trace_item
 from linktools.ai.runtime._journal import ModelRequestJournal
-from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
+from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from pydantic_ai import Agent, ModelRetry
 from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
@@ -115,17 +115,17 @@ def _persistence(
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = RuntimeCaptureStore(
+    run_recorder = AgentRunRecorder(
         store,
         execution_id=None,
         agent_run_id=agent_run_id,
     )
-    persistence = _RuntimeAgentRunPersistence(
-        capture=capture,
+    persistence = _AgentRunPersistenceCapability(
+        recorder=run_recorder,
         agent_id="usage-test",
         agent_run_id=agent_run_id,
     )
-    observation = RuntimeModelObservationCapability(
+    observation = ModelObservationCapability(
         None,
         source_namespace="workspace",
         tenant_id="tenant",
@@ -134,7 +134,7 @@ def _persistence(
         agent_run_id=agent_run_id,
         agent_id="usage-test",
         journal=journal,
-        interaction_recorder=capture,
+        interaction_recorder=run_recorder,
     )
     capabilities = [observation, persistence]
     if reverse_registration:

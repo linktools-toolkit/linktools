@@ -14,7 +14,7 @@ from linktools.core import environ
 from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
-    AssetSkillResourceSource,
+    AssetSkillSource,
     CapabilityContribution,
     CapabilityGroup,
     CapabilityGroupCapture,
@@ -33,7 +33,7 @@ from ..model import ModelRegistry
 from ..observe import Metrics
 from ..spec import (
     AgentSpec,
-    AssetRuleInstructionResolver,
+    RuleInstructionResolver,
     MCPServerSpec,
     RepositoryInstructionResolver,
     RepositoryInstructions,
@@ -41,7 +41,7 @@ from ..spec import (
 from ..storage import ObjectStore, PayloadPolicy
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
-    LocalRepositoryInstructionResolver,
+    WorkspaceInstructionResolver,
     LocalSandbox,
     Sandbox,
     Workspace,
@@ -49,7 +49,7 @@ from ..workspace import (
 )
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
-from ._binding_resolver import _RuntimeBindingResolver
+from ._agent_binding_resolver import _AgentBindingResolver
 from ._artifact import DefaultArtifactService
 from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
@@ -57,12 +57,12 @@ from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._external import DefaultExternalService
 from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
 from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
-from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
+from ._history_projection import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._input import ExecutionInputMaterializer
 from ._local import LocalExecutionBackend
 from ._memory import MemoryStore, RuntimeMemoryStore
-from ._metrics import _RuntimeMetricBuffer
+from ._metrics import _MetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
@@ -93,8 +93,8 @@ class _RuntimeComponents:
     close_callback: Callable[[], Awaitable[None]]
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
-    metric_control: _RuntimeMetricBuffer | None
-    binding_resolver: _RuntimeBindingResolver
+    metric_control: _MetricBuffer | None
+    binding_resolver: _AgentBindingResolver
     history: object
 
 
@@ -165,7 +165,7 @@ async def compose_runtime_components(
         _validate_candidate_uniqueness(candidates)
         skill_sources = SkillSourceRegistry(
             tuple(
-                AssetSkillResourceSource(group.group_id, reader)
+                AssetSkillSource(group.group_id, reader)
                 for group in groups
                 if (reader := group.asset_reader) is not None
             )
@@ -229,14 +229,14 @@ async def compose_runtime_components(
             await group.verify_source_revision()
         if workspace is None:
             instruction_resolver: RepositoryInstructionResolver | None = (
-                AssetRuleInstructionResolver(rules)
+                RuleInstructionResolver(rules)
                 if rules.documents
                 else None
             )
             workspace_access = None
             execution_cwd = _capture_host_cwd()
         else:
-            instruction_resolver = LocalRepositoryInstructionResolver(
+            instruction_resolver = WorkspaceInstructionResolver(
                 workspace.root,
                 workspace.policy,
                 rules,
@@ -328,7 +328,7 @@ def _runtime_close_actions(
     execution: DefaultExecutionService,
     backend: LocalExecutionBackend | None,
     input_materializer: ExecutionInputMaterializer,
-    metric_buffer: _RuntimeMetricBuffer | None,
+    metric_buffer: _MetricBuffer | None,
     storage: RuntimeStorage,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
@@ -494,7 +494,7 @@ async def _build_local_components(
     session_execution_ready: bool,
     metrics: "Metrics | None",
 ) -> _RuntimeComponents:
-    metric_buffer: _RuntimeMetricBuffer | None = None
+    metric_buffer: _MetricBuffer | None = None
     metric_source_namespace: str | None = None
     backend: LocalExecutionBackend | None = None
 
@@ -518,7 +518,7 @@ async def _build_local_components(
         if not storage.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         _require_storage_identity(storage, namespace=namespace, tenant_id=tenant_id)
-        metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
+        metric_buffer = None if metrics is None else _MetricBuffer(metrics)
         metric_source_namespace = None if metric_buffer is None else namespace
         runtime_bridge = _ExecutionRuntimeBridge()
         live_broker = LiveExecutionEventBroker()
@@ -528,7 +528,7 @@ async def _build_local_components(
             history_reader,
             HmacCursorSigner("execution", runtime_token_seed),
         )
-        binding_resolver = _RuntimeBindingResolver(
+        binding_resolver = _AgentBindingResolver(
             catalog,
             compiler,
             sandbox=sandbox,

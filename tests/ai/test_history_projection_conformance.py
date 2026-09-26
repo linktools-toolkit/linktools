@@ -21,7 +21,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime._history import StepExecutionHistoryReader
+from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import (

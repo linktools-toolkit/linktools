@@ -11,7 +11,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.capability import AgentContext, workspace_capabilities
 from linktools.ai.core import Principal, PromptLimits
-from linktools.ai.runtime._compaction import RuntimeCompaction
+from linktools.ai.runtime._compaction import CompactionCapability
 from linktools.ai.runtime._message import binary_content_usage
 from linktools.ai.workspace import Workspace
 
@@ -98,7 +98,7 @@ async def test_attach_files_is_visible_for_one_model_request_only(tmp_path: Path
     result = await agent.run(
         "inspect evidence",
         deps=deps,
-        capabilities=(RuntimeCompaction(None, limits=PromptLimits()),),
+        capabilities=(CompactionCapability(None, limits=PromptLimits()),),
     )
 
     assert result.output == "done"
@@ -163,7 +163,7 @@ async def test_sequential_attach_files_do_not_accumulate_binary_context(
     result = await agent.run(
         "inspect both files",
         deps=deps,
-        capabilities=(RuntimeCompaction(None, limits=PromptLimits()),),
+        capabilities=(CompactionCapability(None, limits=PromptLimits()),),
     )
 
     assert result.output == "done"

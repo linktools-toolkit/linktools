@@ -11,12 +11,12 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..core import JsonValue
 from ..asset import AssetVersionRef
 from ..errors import AIError, ErrorCode
-from ..spec import SkillMarkdownSpecCodec, SkillSpec, SkillSpecCodec
+from ..spec import SkillSpec, SkillSpecCodec
 from ._context import AgentContext
 from ._skill_source import (
     SkillLocation,
-    SkillResourceVersion,
-    SkillResourceView,
+    SkillResource,
+    SkillSourceView,
     SkillSourceRef,
     SkillSourceRegistry,
     require_skill_resource_path,
@@ -42,24 +42,24 @@ class SkillDefinition:
 
     @property
     def model_content(self) -> str:
-        return SkillMarkdownSpecCodec().model_content(self.spec.content)
+        return SkillSpecCodec().model_content(self.spec)
 
     @property
     def contract(self) -> "dict[str, JsonValue]":
         contract = SkillSpecCodec().to_wire_payload(self.spec)
         if self.source_ref is not None:
             source: dict[str, JsonValue] = {
-                "asset_source_id": self.source_ref.asset_source_id,
+                "source_id": self.source_ref.source_id,
                 "root": self.source_ref.root,
             }
-            if self.source_ref.resource_versions:
-                source["resource_versions"] = [
+            if self.source_ref.resources:
+                source["resources"] = [
                     {
                         "path": item.path,
                         "asset": item.asset.to_payload(),
                         "executable_bits": item.executable_bits,
                     }
-                    for item in self.source_ref.resource_versions
+                    for item in self.source_ref.resources
                 ]
             contract["source"] = source
         return contract
@@ -79,16 +79,16 @@ class SkillDefinition:
         if source is None:
             source_ref = None
         elif isinstance(source, Mapping):
-            asset_source_id = source.get("asset_source_id")
+            source_id = source.get("source_id")
             root = source.get("root")
-            raw_versions = source.get("resource_versions")
-            versions: tuple[SkillResourceVersion, ...] = ()
-            if raw_versions is not None:
-                if not isinstance(raw_versions, list):
+            raw_resources = source.get("resources")
+            resources: tuple[SkillResource, ...] = ()
+            if raw_resources is not None:
+                if not isinstance(raw_resources, list):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                parsed: list[SkillResourceVersion] = []
+                parsed_resources: list[SkillResource] = []
                 try:
-                    for raw in raw_versions:
+                    for raw in raw_resources:
                         if not isinstance(raw, Mapping):
                             raise ValueError
                         path = raw.get("path")
@@ -100,8 +100,8 @@ class SkillDefinition:
                             or not isinstance(mode, int)
                         ):
                             raise ValueError
-                        parsed.append(
-                            SkillResourceVersion(
+                        parsed_resources.append(
+                            SkillResource(
                                 path,
                                 AssetVersionRef.from_payload(asset),
                                 mode,
@@ -109,12 +109,12 @@ class SkillDefinition:
                         )
                 except (TypeError, ValueError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                versions = tuple(sorted(parsed, key=lambda item: item.path))
+                resources = tuple(sorted(parsed_resources, key=lambda item: item.path))
             try:
                 source_ref = SkillSourceRef(
-                    asset_source_id,
+                    source_id,
                     root,
-                    versions,
+                    resources,
                 )
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -292,7 +292,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         source_ref = definition.source_ref
         if source_ref is None:
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
-        source = self._sources.resolve(source_ref.asset_source_id)
+        source = self._sources.resolve(source_ref.source_id)
         data = await source.read(source_ref, relative)
         try:
             content = data.decode("utf-8")
@@ -320,7 +320,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         source_ref = definition.source_ref
         if source_ref is None:
             return result
-        source = self._sources.resolve(source_ref.asset_source_id)
+        source = self._sources.resolve(source_ref.source_id)
         view = await source.inspect(source_ref)
         _validate_view(view)
         if definition.id in self._resource_paths:
@@ -328,12 +328,12 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
             location = (
                 SkillLocation(
                     "virtual",
-                    f"{source_ref.asset_source_id}/resources/{source_ref.root}",
+                    f"{source_ref.source_id}/resources/{source_ref.root}",
                 )
                 if native_path is None
                 else SkillLocation("local", native_path)
             )
-            view = SkillResourceView(location, view.resources)
+            view = SkillSourceView(location, view.resources)
         result["location"] = view.location.display()
         result["resources"] = list(view.resources)
         if view.resources:
@@ -345,12 +345,12 @@ def _skill_description(specification: SkillSpec) -> str:
     return specification.description or f"Available skill {specification.id}"
 
 
-def _validate_view(view: SkillResourceView) -> None:
-    if not isinstance(view, SkillResourceView):
+def _validate_view(view: SkillSourceView) -> None:
+    if not isinstance(view, SkillSourceView):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _usage_hint(view: SkillResourceView) -> str:
+def _usage_hint(view: SkillSourceView) -> str:
     if view.location.kind == "local":
         return (
             "Resources are relative to the skill location. Resolve resource paths against `location`. "

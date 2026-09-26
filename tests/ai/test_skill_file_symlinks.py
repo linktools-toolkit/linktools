@@ -13,9 +13,9 @@ from linktools.ai.asset import (
     PrefixAssetPathAdapter,
 )
 from linktools.ai.capability import (
-    AssetSkillResourceSource,
+    AssetSkillSource,
     CapabilityGroup,
-    LocalSkillResourceSource,
+    LocalSkillSource,
     SkillDefinition,
     SkillSourceRef,
 )
@@ -49,7 +49,7 @@ async def test_local_skill_resource_file_symlink_is_discovered_and_read(tmp_path
     target.write_text("shared guide", encoding="utf-8")
     _symlink(target, package / "guide.md")
 
-    source = LocalSkillResourceSource("local", skills_root)
+    source = LocalSkillSource("local", skills_root)
     source_ref = SkillSourceRef("local", "review")
 
     view = await source.inspect(source_ref)
@@ -92,7 +92,7 @@ async def test_sandbox_asset_skill_uses_contained_file_symlink(
         )
         assert isinstance(binding, SkillDefinition)
         assert binding.source_ref is not None
-        assert {item.path for item in binding.source_ref.resource_versions} == {
+        assert {item.path for item in binding.source_ref.resources} == {
             "run.sh",
             "shared/run.sh",
         }
@@ -101,11 +101,11 @@ async def test_sandbox_asset_skill_uses_contained_file_symlink(
             store,
             {
                 item.path: item.asset
-                for item in binding.source_ref.resource_versions
+                for item in binding.source_ref.resources
             },
             executable_bits={
                 item.path: item.executable_bits
-                for item in binding.source_ref.resource_versions
+                for item in binding.source_ref.resources
             },
         )
         assert resource is not None
@@ -128,7 +128,7 @@ async def test_local_skill_contained_directory_symlink_is_discovered(tmp_path: P
     (hidden / "guide.md").write_text("guide", encoding="utf-8")
     _symlink(hidden, package / "references", directory=True)
 
-    source = LocalSkillResourceSource("local", skills_root)
+    source = LocalSkillSource("local", skills_root)
     source_ref = SkillSourceRef("local", "review")
     view = await source.inspect(source_ref)
 
@@ -155,7 +155,7 @@ async def test_local_skill_package_directory_symlink_can_target_outside_source_r
     _symlink(outside_dir, external_package / "outside-dir-link", directory=True)
     _symlink(external_package, skills_root / "review", directory=True)
 
-    source = LocalSkillResourceSource("local", skills_root)
+    source = LocalSkillSource("local", skills_root)
     source_ref = SkillSourceRef("local", "review")
     view = await source.inspect(source_ref)
 
@@ -177,7 +177,7 @@ async def test_local_skill_symlink_loops_use_stable_errors(tmp_path: Path) -> No
     _symlink(Path("b"), skills_root / "a", directory=True)
     _symlink(Path("a"), skills_root / "b", directory=True)
 
-    source = LocalSkillResourceSource("local", skills_root)
+    source = LocalSkillSource("local", skills_root)
     with pytest.raises(AIError) as package_error:
         await source.inspect(SkillSourceRef("local", "a"))
     assert package_error.value.code is ErrorCode.ASSET_NOT_FOUND
@@ -247,7 +247,7 @@ async def test_asset_skill_file_symlink_does_not_expand_local_package(
     )
     await store.initialize()
     try:
-        source = AssetSkillResourceSource("application", store)
+        source = AssetSkillSource("application", store)
         view = await source.inspect(SkillSourceRef("application", "review"))
 
         assert view.location.kind == "virtual"
@@ -308,7 +308,7 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
             ("mcp", "server"),
             ("skill", "review"),
         }
-        source = AssetSkillResourceSource("workspace", store)
+        source = AssetSkillSource("workspace", store)
         definition = next(
             item.value for item in snapshot.contributions if item.kind == "skill"
         )

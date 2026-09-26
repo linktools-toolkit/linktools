@@ -26,7 +26,7 @@ from linktools.ai.spec import (
 )
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import (
-    LocalRepositoryInstructionResolver,
+    WorkspaceInstructionResolver,
     Workspace,
     WorkspacePolicy,
 )
@@ -50,10 +50,10 @@ async def _capture_rules(root: Path) -> RepositoryInstructions:
         await store.close()
 
 
-def _resolver(root: Path, *, policy: WorkspacePolicy | None = None) -> LocalRepositoryInstructionResolver:
+def _resolver(root: Path, *, policy: WorkspacePolicy | None = None) -> WorkspaceInstructionResolver:
     selected = WorkspacePolicy() if policy is None else policy
     rules = asyncio.run(_capture_rules(root))
-    return LocalRepositoryInstructionResolver(root, selected, rules)
+    return WorkspaceInstructionResolver(root, selected, rules)
 
 
 def test_repository_instruction_bundle_is_canonical_and_strict() -> None:
@@ -225,7 +225,7 @@ def test_rule_capture_is_recursive_scoped_and_frozen(tmp_path: Path) -> None:
         ("rule:base", "."),
         ("rule:nested/strict", "src"),
     ]
-    resolver = LocalRepositoryInstructionResolver(tmp_path, policy, rules)
+    resolver = WorkspaceInstructionResolver(tmp_path, policy, rules)
     root = asyncio.run(resolver.resolve("."))
     nested = asyncio.run(resolver.resolve("src/pkg"))
     assert [item.source for item in root.documents] == ["rule:base"]

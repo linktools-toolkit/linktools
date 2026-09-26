@@ -77,7 +77,7 @@ async def test_metric_buffer_reports_backpressure_without_raising(
 ) -> None:
     monkeypatch.setattr(runtime_metrics, "_QUEUE_CAPACITY", 1)
     store = _BlockingStore()
-    buffer = runtime_metrics._RuntimeMetricBuffer(
+    buffer = runtime_metrics._MetricBuffer(
         Metrics.from_store(store, namespace="backpressure")  # type: ignore[arg-type]
     )
 
@@ -99,7 +99,7 @@ async def test_metric_buffer_reports_backpressure_without_raising(
 @pytest.mark.asyncio
 async def test_metric_buffer_flush_waits_for_accepted_observations() -> None:
     store = _BlockingStore()
-    buffer = runtime_metrics._RuntimeMetricBuffer(
+    buffer = runtime_metrics._MetricBuffer(
         Metrics.from_store(store, namespace="flush")  # type: ignore[arg-type]
     )
     assert buffer.try_record(_observation("accepted")) is True
@@ -126,7 +126,7 @@ async def test_metric_buffer_close_has_a_bounded_deadline(
     monkeypatch.setattr(runtime_metrics, "_WRITE_TIMEOUT_SECONDS", 10.0)
     monkeypatch.setattr(runtime_metrics, "_CLOSE_DEADLINE_SECONDS", 0.05)
     store = _BlockingStore()
-    buffer = runtime_metrics._RuntimeMetricBuffer(
+    buffer = runtime_metrics._MetricBuffer(
         Metrics.from_store(store, namespace="close")  # type: ignore[arg-type]
     )
     assert buffer.try_record(_observation("blocked")) is True

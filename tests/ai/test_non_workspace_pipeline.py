@@ -19,7 +19,7 @@ from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import (
     DisabledSandbox,
     ToolPermissionRule,
-    WorkspaceToolPermissionPolicy,
+    ToolPermissionPolicy,
 )
 
 
@@ -32,13 +32,13 @@ async def test_disabled_sandbox_is_fail_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_workspace_permission_policy_is_explicit_and_deterministic() -> None:
-    policy = WorkspaceToolPermissionPolicy(
+    policy = ToolPermissionPolicy(
         (ToolPermissionRule("deny", tool_class="shell"),),
         default="allow",
     )
     assert policy.decide(tool_name="read_file", tool_class="filesystem.read") == "allow"
     assert policy.decide(tool_name="run_command", tool_class="shell") == "deny"
-    assert policy == WorkspaceToolPermissionPolicy(
+    assert policy == ToolPermissionPolicy(
         (ToolPermissionRule("deny", tool_class="shell"),),
         default="allow",
     )

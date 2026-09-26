@@ -13,11 +13,11 @@ from pydantic_ai.usage import RunUsage
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.workspace import (
-    WorkspaceToolPermissionPolicy,
+    ToolPermissionPolicy,
 )
 from ._runtime_test_helpers import tool_with_metadata
 
@@ -81,9 +81,9 @@ def _boundary(
     name: str,
     repository: RepositoryInstructionBoundary,
     *,
-    policy: WorkspaceToolPermissionPolicy | None = None,
+    policy: ToolPermissionPolicy | None = None,
     path_fields: tuple[str, ...] = ("path",),
-) -> RuntimeToolBoundaryToolset:
+) -> BoundaryToolset:
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
         effect_policy="none",
@@ -94,12 +94,12 @@ def _boundary(
         toolset.tools[name].function,
         descriptor,
     ).metadata
-    return RuntimeToolBoundaryToolset(
+    return BoundaryToolset(
         (toolset,),
         {name: descriptor},
         id="workspace",
         sandbox_session=_Session(),  # type: ignore[arg-type]
-        workspace_policy=(None if policy is None else policy),
+        permission_policy=(None if policy is None else policy),
         repository_boundary=repository,
     )
 
@@ -111,7 +111,7 @@ async def test_repository_instruction_check_precedes_ask_permission() -> None:
         FunctionToolset([_read_file]),
         "_read_file",
         repository,
-        policy=WorkspaceToolPermissionPolicy(default="ask"),
+        policy=ToolPermissionPolicy(default="ask"),
     )
     context = _context()
     tools = await toolset.get_tools(context)
@@ -174,7 +174,7 @@ async def test_approved_call_reaches_tool_after_instruction_check() -> None:
         FunctionToolset([_read_file]),
         "_read_file",
         repository,
-        policy=WorkspaceToolPermissionPolicy(default="ask"),
+        policy=ToolPermissionPolicy(default="ask"),
     )
     context = _context()
     context.tool_call_approved = True

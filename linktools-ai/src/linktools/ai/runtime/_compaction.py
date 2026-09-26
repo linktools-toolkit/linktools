@@ -36,7 +36,7 @@ _logger = environ.get_logger("ai.runtime.compaction")
 
 
 @dataclass(slots=True)
-class RuntimeCompactionPolicy:
+class CompactionPolicy:
     """Ephemeral compaction rules derived for one agent run."""
 
     keep_result_tools: frozenset[str] = field(default_factory=frozenset)
@@ -55,7 +55,7 @@ class ExternalModelRequestObserver(Protocol):
     ) -> None: ...
 
 
-class ExternalModelRequestCapture(Protocol):
+class ExternalModelRequestRecorder(Protocol):
     async def __call__(
         self,
         ctx: PydanticRunContext[Any],
@@ -90,14 +90,14 @@ class _ObservedCompactionModel(WrapperModel):
         ctx: PydanticRunContext[Any],
         journal: ModelRequestJournal,
         observer: ExternalModelRequestObserver | None,
-        capture: ExternalModelRequestCapture | None,
+        recorder: ExternalModelRequestRecorder | None,
         source_messages: Sequence[ModelMessage],
     ) -> None:
         super().__init__(wrapped)
         self._ctx = ctx
         self._journal = journal
         self._observer = observer
-        self._capture = capture
+        self._recorder = recorder
         self._source_messages = tuple(source_messages)
 
     async def request(
@@ -117,8 +117,8 @@ class _ObservedCompactionModel(WrapperModel):
                 None,
                 None,
             )
-        if self._capture is not None:
-            await self._capture(
+        if self._recorder is not None:
+            await self._recorder(
                 self._ctx,
                 fact,
                 "started",
@@ -149,8 +149,8 @@ class _ObservedCompactionModel(WrapperModel):
                     None,
                     error,
                 )
-            if self._capture is not None:
-                await self._capture(
+            if self._recorder is not None:
+                await self._recorder(
                     self._ctx,
                     fact,
                     "cancelled",
@@ -176,8 +176,8 @@ class _ObservedCompactionModel(WrapperModel):
                     None,
                     error,
                 )
-            if self._capture is not None:
-                await self._capture(
+            if self._recorder is not None:
+                await self._recorder(
                     self._ctx,
                     fact,
                     "failed",
@@ -202,8 +202,8 @@ class _ObservedCompactionModel(WrapperModel):
                 response,
                 None,
             )
-        if self._capture is not None:
-            await self._capture(
+        if self._recorder is not None:
+            await self._recorder(
                 self._ctx,
                 fact,
                 "completed",
@@ -219,7 +219,7 @@ class _ObservedCompactionModel(WrapperModel):
         return response
 
 
-class RuntimeCompaction(AbstractCapability[None]):
+class CompactionCapability(AbstractCapability[None]):
     """Project the provider context without rewriting the raw run transcript."""
 
     def __init__(
@@ -229,9 +229,9 @@ class RuntimeCompaction(AbstractCapability[None]):
         limits: PromptLimits,
         journal: ModelRequestJournal | None = None,
         observer: ExternalModelRequestObserver | None = None,
-        request_observer: ExternalModelRequestCapture | None = None,
+        request_recorder: ExternalModelRequestRecorder | None = None,
         projection_sink: _ContextProjectionSink | None = None,
-        policy: RuntimeCompactionPolicy | None = None,
+        policy: CompactionPolicy | None = None,
     ) -> None:
         self.id = "linktools.ai.compaction"
         if target_tokens is not None and (
@@ -246,7 +246,7 @@ class RuntimeCompaction(AbstractCapability[None]):
         self._limits = limits
         self._journal = journal
         self._observer = observer
-        self._request_observer = request_observer
+        self._request_recorder = request_recorder
         self._projection_sink = projection_sink
         self._policy = policy
         self._keep_result_tools: frozenset[str] = frozenset()
@@ -285,14 +285,14 @@ class RuntimeCompaction(AbstractCapability[None]):
         else:
             summary_model: Model | None = None
             if self._journal is not None and (
-                self._observer is not None or self._request_observer is not None
+                self._observer is not None or self._request_recorder is not None
             ):
                 summary_model = _ObservedCompactionModel(
                     projected_context.model,
                     ctx=ctx,
                     journal=self._journal,
                     observer=self._observer,
-                    capture=self._request_observer,
+                    recorder=self._request_recorder,
                     source_messages=source,
                 )
             tiered = TieredCompaction(
@@ -400,6 +400,8 @@ def _workspace_file_key(call: ToolCallPart) -> str | None:
 
 
 __all__ = [
+    "CompactionCapability",
+    "CompactionPolicy",
     "ExternalModelRequestObserver",
-    "RuntimeCompaction",
+    "ExternalModelRequestRecorder",
 ]

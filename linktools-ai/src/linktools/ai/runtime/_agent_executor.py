@@ -120,8 +120,8 @@ from ..workspace import (
 )
 
 from ._capabilities import compose_platform_capabilities
-from ._capture import RuntimeCaptureStore
-from ._compaction import RuntimeCompactionPolicy
+from ._agent_run_recorder import AgentRunRecorder
+from ._compaction import CompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._mcp import (
@@ -132,7 +132,7 @@ from ._mcp import (
     prepare_mcp_projections,
 )
 from ._memory import MemoryStore
-from ._metric_capability import RuntimeModelObservationCapability
+from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from ._pydantic_tool_control import PydanticToolControlCapability
 from ._repository_instructions import _RepositoryInstructionCapability
@@ -140,11 +140,11 @@ from ._tool import ToolOperationBridge
 from ._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
     managed_tool_descriptor_from_metadata,
 )
 from ._tool_metrics import (
-    RuntimeToolMetricsCapability,
+    ToolMetricsCapability,
     _ToolMetricContext,
 )
 from ._tool_return_codec import (
@@ -532,7 +532,7 @@ class AgentExecutor:
         model = compiled_agent.model.materialize()
         deferred_step_index: int | None = None
 
-        def capture_deferred_step(step_index: int) -> None:
+        def record_deferred_step(step_index: int) -> None:
             nonlocal deferred_step_index
             if deferred_step_index is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -552,7 +552,7 @@ class AgentExecutor:
             scope,
             model=model,
             skill_sources=skill_sources,
-            deferred_pause_sink=capture_deferred_step,
+            deferred_pause_sink=record_deferred_step,
             metrics=self._metrics,
             model_journal=model_journal,
             sandbox=self._sandbox,
@@ -734,22 +734,22 @@ async def _skill_sandbox_resources(
         if source_ref is None:
             continue
         resource_keys[skill.id] = None
-        reader = asset_readers.get(source_ref.asset_source_id)
+        reader = asset_readers.get(source_ref.source_id)
         if reader is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
                 safe_details={
                     "kind": "skill_asset_source",
-                    "asset_source_id": source_ref.asset_source_id,
+                    "source_id": source_ref.source_id,
                 },
             )
         resource = await SandboxResource.from_asset_versions(
             skill.id,
             reader,
-            {item.path: item.asset for item in source_ref.resource_versions},
+            {item.path: item.asset for item in source_ref.resources},
             executable_bits={
                 item.path: item.executable_bits
-                for item in source_ref.resource_versions
+                for item in source_ref.resources
             },
         )
         if resource is None:
@@ -813,7 +813,7 @@ async def _materialize_agent(
     workspace_names: list[str] = []
     business_descriptors: dict[str, ManagedToolDescriptor] = {}
     workspace_descriptors: dict[str, ManagedToolDescriptor] = {}
-    compaction_policy = RuntimeCompactionPolicy()
+    compaction_policy = CompactionPolicy()
     for candidate in compiled_agent.selected_tools:
         source_tool = candidate.value
         metadata = _bound_tool_metadata(candidate)
@@ -838,7 +838,7 @@ async def _materialize_agent(
     capabilities: list[AbstractCapability[AgentContext[object]]] = [
         PydanticToolControlCapability()
     ]
-    for candidate in compiled_agent.selected_runtime_capabilities:
+    for candidate in compiled_agent.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         capabilities.append(candidate.value)
@@ -919,7 +919,7 @@ async def _materialize_agent(
             agent_id=compiled_agent.spec.id,
         )
     )
-    capture_store = RuntimeCaptureStore(
+    run_recorder = AgentRunRecorder(
         scope.run_store,
         execution_id=scope.context.execution_id,
         agent_run_id=scope.agent_run_id,
@@ -928,7 +928,7 @@ async def _materialize_agent(
         initial_attachments=scope.initial_attachments,
     )
     if tool_metrics is not None:
-        capabilities.append(RuntimeToolMetricsCapability(tool_metrics))
+        capabilities.append(ToolMetricsCapability(tool_metrics))
 
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
     workspace_toolset_values = tuple(
@@ -938,11 +938,11 @@ async def _materialize_agent(
     )
     if workspace_toolset_values:
         raw_toolsets.append(
-            RuntimeToolBoundaryToolset(
+            BoundaryToolset(
                 workspace_toolset_values,
                 workspace_descriptors,
                 id="linktools.workspace",
-                workspace_policy=(
+                permission_policy=(
                     None
                     if scope.workspace is None
                     else scope.workspace.policy.tool_permissions
@@ -971,7 +971,7 @@ async def _materialize_agent(
         raw_business = FunctionToolset(business_tools, id="linktools.business")
         raw_toolsets.insert(
             0,
-            RuntimeToolBoundaryToolset(
+            BoundaryToolset(
                 (raw_business,),
                 business_descriptors,
                 id="linktools.business",
@@ -979,7 +979,7 @@ async def _materialize_agent(
                 tool_metrics=tool_metrics,
             ),
         )
-    model_observation = RuntimeModelObservationCapability(
+    model_observation = ModelObservationCapability(
         metrics,
         source_namespace=scope.context.namespace,
         tenant_id=scope.context.principal.tenant_id,
@@ -988,7 +988,7 @@ async def _materialize_agent(
         agent_run_id=scope.agent_run_id,
         agent_id=compiled_agent.spec.id,
         journal=model_journal,
-        interaction_recorder=capture_store,
+        interaction_recorder=run_recorder,
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
@@ -1009,8 +1009,8 @@ async def _materialize_agent(
         plan_store_resolver=scope.plan_store_resolver,
         deferred_pause_sink=deferred_pause_sink,
         model_journal=model_journal,
-        model_request_observer=model_observation.record_external_model_request,
-        capture_store=capture_store,
+        model_request_recorder=model_observation.record_external_model_request,
+        recorder=run_recorder,
     )
     capabilities.extend(platform)
 
@@ -1083,7 +1083,7 @@ def _tool_with_metadata(
 def _plan_mode_prepare(
     *,
     plan_mode: bool,
-    compaction_policy: RuntimeCompactionPolicy | None = None,
+    compaction_policy: CompactionPolicy | None = None,
 ) -> Callable[[PydanticRunContext[AgentContext[object]], list[ToolDefinition]], Any]:
     async def prepare(
         _ctx: PydanticRunContext[AgentContext[object]],

@@ -25,8 +25,7 @@ from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
-    SkillMarkdownSpecAdapter,
-    SkillMarkdownSpecCodec,
+    SkillSpecAdapter,
     SkillSpec,
     SkillSpecCodec,
 )
@@ -152,7 +151,7 @@ def test_future_binding_contract_version_is_rejected() -> None:
 
 def test_skill_and_agent_use_v1_declaration_contracts() -> None:
     skill = SkillSpec("review", "instructions", "Review changes")
-    assert SkillSpecCodec().to_payload(skill) == {
+    assert SkillSpecCodec().to_contract_payload(skill) == {
         "version": 1,
         "id": "review",
         "revision": 1,
@@ -163,7 +162,7 @@ def test_skill_and_agent_use_v1_declaration_contracts() -> None:
 
     plain = AgentSpec("agent")
     described = AgentSpec("agent", description="Worker")
-    assert AgentSpecCodec().to_payload(plain) == AgentSpecCodec().to_payload(described)
+    assert AgentSpecCodec().to_contract_payload(plain) == AgentSpecCodec().to_contract_payload(described)
     assert AgentSpecCodec().to_wire_payload(described)["description"] == "Worker"
 
 
@@ -183,13 +182,13 @@ def test_future_capability_pin_contract_version_is_unsupported() -> None:
 
 def test_skill_markdown_preserves_description_and_rejects_mismatch() -> None:
     content = "---\nname: review\ndescription: Review changes\n---\n\nDo the review.\n"
-    codec = SkillMarkdownSpecCodec()
-    decoded = codec.decode(content.encode("utf-8"))
+    adapter = SkillSpecAdapter()
+    decoded = adapter.decode_markdown(content.encode("utf-8"))
     assert decoded.description == "Review changes"
-    assert codec.encode(decoded) == content.encode("utf-8")
+    assert adapter.encode_markdown(decoded) == content.encode("utf-8")
 
     with pytest.raises(AIError) as error:
-        codec.encode(SkillSpec("review", content, "Different description"))
+        adapter.encode_markdown(SkillSpec("review", content, "Different description"))
     assert error.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
 
 
@@ -202,8 +201,8 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
         "  options: {enabled: false, '': retained}\n"
         "description: Review changes\n---\n\nDo the review.\n"
     )
-    codec = SkillMarkdownSpecCodec()
-    local = codec.decode(content.encode("utf-8"))
+    adapter = SkillSpecAdapter()
+    local = adapter.decode_markdown(content.encode("utf-8"))
     expected = {
         "author": "Mei",
         "version": 2,
@@ -212,45 +211,48 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
         "options": {"enabled": False, "": "retained"},
     }
     assert dict(local.metadata) == expected
-    assert codec.encode(local) == content.encode("utf-8")
+    assert adapter.encode_markdown(local) == content.encode("utf-8")
     with pytest.raises(AIError) as mismatch:
-        codec.encode(SkillSpec("review", content, "Review changes", {"author": "Other"}))
+        adapter.encode_markdown(SkillSpec("review", content, "Review changes", {"author": "Other"}))
     assert mismatch.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
 
-    adapter = SkillMarkdownSpecAdapter()
-    spec = adapter.to_logical("team/review", local)
+    spec = adapter.decode_markdown(
+        content.encode("utf-8"),
+        logical_id="team/review",
+    )
     assert dict(spec.metadata) == expected
-    assert adapter.to_storage("team/review", spec) == local
+    assert adapter.encode_markdown(
+        spec,
+        logical_id="team/review",
+    ) == content.encode("utf-8")
     wire_codec = SkillSpecCodec()
     assert wire_codec.decode(wire_codec.encode(spec)) == spec
     definition = SkillDefinition(spec)
     assert SkillDefinition.from_contract(definition.contract) == definition
 
     changed_metadata = SkillDefinition(
-        adapter.to_logical(
-            "team/review",
-            codec.decode(content.replace("version: 2", "version: 3").encode()),
+        adapter.decode_markdown(
+            content.replace("version: 2", "version: 3").encode(),
+            logical_id="team/review",
         )
     )
     changed_body = SkillDefinition(
-        adapter.to_logical(
-            "team/review",
-            codec.decode(content.replace("Do the review.", "Review carefully.").encode()),
+        adapter.decode_markdown(
+            content.replace("Do the review.", "Review carefully.").encode(),
+            logical_id="team/review",
         )
     )
     without_metadata = SkillDefinition(
-        adapter.to_logical(
-            "team/review",
-            codec.decode(
-                b"---\nname: review\ndescription: Review changes\n---\n\nDo the review.\n"
-            ),
+        adapter.decode_markdown(
+            b"---\nname: review\ndescription: Review changes\n---\n\nDo the review.\n",
+            logical_id="team/review",
         )
     )
     assert definition.model_content == changed_metadata.model_content
     assert definition.model_content == without_metadata.model_content
     assert "metadata:" not in definition.model_content
     assert "author: Mei" not in definition.model_content
-    assert wire_codec.to_payload(spec)["content"] == definition.model_content
+    assert wire_codec.to_contract_payload(spec)["content"] == definition.model_content
     assert (
         CapabilityPin("skill", definition.id, definition.contract).revision
         == CapabilityPin("skill", changed_metadata.id, changed_metadata.contract).revision
@@ -297,12 +299,12 @@ def test_skill_markdown_maps_reserved_revision_metadata() -> None:
         "  author: Mei\n"
         "description: Review changes\n---\n\nReview.\n"
     )
-    codec = SkillMarkdownSpecCodec()
-    skill = codec.decode(content.encode("utf-8"))
+    adapter = SkillSpecAdapter()
+    skill = adapter.decode_markdown(content.encode("utf-8"))
 
     assert skill.revision == 3
     assert dict(skill.metadata) == {"author": "Mei"}
-    assert codec.encode(skill) == content.encode("utf-8")
+    assert adapter.encode_markdown(skill) == content.encode("utf-8")
     definition = SkillDefinition(skill)
     baseline = SkillDefinition(
         SkillSpec(
@@ -320,14 +322,14 @@ def test_skill_markdown_maps_reserved_revision_metadata() -> None:
 
 
 def test_skill_flow_frontmatter_metadata_does_not_change_identity() -> None:
-    codec = SkillMarkdownSpecCodec()
+    adapter = SkillSpecAdapter()
     plain = SkillDefinition(
-        codec.decode(
+        adapter.decode_markdown(
             b"---\n{name: review, description: Review changes}\n---\nReview.\n"
         )
     )
     annotated = SkillDefinition(
-        codec.decode(
+        adapter.decode_markdown(
             b"---\n{name: review, description: Review changes, "
             b"metadata: {author: Mei}}\n---\nReview.\n"
         )
@@ -341,7 +343,7 @@ def test_skill_flow_frontmatter_metadata_does_not_change_identity() -> None:
 
 def test_markdown_metadata_rejects_non_json_values() -> None:
     with pytest.raises(AIError) as error:
-        SkillMarkdownSpecCodec().decode(
+        SkillSpecAdapter().decode_markdown(
             b"---\nname: review\ndescription: Review changes\n"
             b"metadata: {published: 2026-01-02}\n---\nReview.\n"
         )

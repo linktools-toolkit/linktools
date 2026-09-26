@@ -26,7 +26,7 @@ from linktools.ai.runtime.state._filesystem import (
     FilesystemStateStorageGroup,
     FilesystemStateStore,
 )
-from linktools.ai.runtime.state._memory import MemoryStateStore
+from linktools.ai.runtime.state._memory import InMemoryStateStore
 from linktools.ai.runtime.state._sql import SqlStateStore
 from linktools.ai.runtime.state._store import (
     FactQuery,
@@ -78,7 +78,7 @@ def _tool_run(agent_run_id: str) -> AgentRunRecord:
 
 
 async def test_memory_state_store_detaches_nested_record_data() -> None:
-    store = MemoryStateStore()
+    store = InMemoryStateStore()
     await store.initialize()
     source = {"nested": {"value": "original"}}
     record = StoredRecord(
