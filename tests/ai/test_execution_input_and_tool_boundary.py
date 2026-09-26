@@ -22,7 +22,7 @@ from linktools.ai.runtime._input import (
 )
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.storage import StoredPayload
 from linktools.ai.workspace import (
@@ -273,14 +273,14 @@ def _context() -> RunContext[None]:
     )
 
 
-def _workspace_boundary(sandbox_session: object) -> RuntimeToolBoundaryToolset:
+def _workspace_boundary(sandbox_session: object) -> BoundaryToolset:
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
         effect_policy="none",
         tool_class="filesystem.read",
         workspace_path_fields=("path",),
     )
-    return RuntimeToolBoundaryToolset(
+    return BoundaryToolset(
         (FunctionToolset([tool_with_metadata(_echo_path, descriptor)]),),
         {"_echo_path": descriptor},
         id="workspace",

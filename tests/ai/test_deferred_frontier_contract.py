@@ -11,7 +11,7 @@ from linktools.ai.runtime._capabilities import _RuntimeAgentRunPersistence
 from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.workspace import (
     ToolPermissionRule,
@@ -183,7 +183,7 @@ async def test_ask_boundary_defers_before_runtime_operation() -> None:
         effect_policy="none",
         tool_class="filesystem.read",
     )
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (FunctionToolset([tool_with_metadata(read_file, descriptor)]),),
         {
             "read_file": descriptor

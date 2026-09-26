@@ -12,7 +12,7 @@ from linktools.ai.capability import ToolCallFailed, ToolCallRetry
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.runtime.state._contracts import ToolOperationRecord
 from pydantic_ai.exceptions import (
@@ -102,7 +102,7 @@ async def _call(
     permission_policy: Any = None,
 ) -> tuple[Any, _Bridge | None]:
     selected_bridge = bridge
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (FunctionToolset([tool_with_metadata(handler, descriptor)]),),
         {handler.__name__: descriptor},
         id="test.boundary",

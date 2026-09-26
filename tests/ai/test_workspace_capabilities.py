@@ -30,7 +30,7 @@ from linktools.ai.spec import (
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.workspace import (
     DisabledSandbox,
@@ -536,7 +536,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
         session=session,
     )[0]
     run_toolset = capability.get_toolset()
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (run_toolset,),
         {
             "read_file": ManagedToolDescriptor(

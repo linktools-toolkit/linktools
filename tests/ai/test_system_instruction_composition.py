@@ -12,7 +12,7 @@ from linktools.ai.capability import ToolCallRetry, workspace_capabilities
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.capabilities import AbstractCapability, Capability
 from linktools.ai.runtime._repository_instructions import _RepositoryInstructionBoundary
-from linktools.ai.runtime._tool_boundary import RuntimeToolBoundaryToolset
+from linktools.ai.runtime._tool_boundary import BoundaryToolset
 from linktools.ai.spec import RepositoryInstructionDocument, RepositoryInstructions
 from linktools.ai.workspace import (
     LocalSandbox,
@@ -88,7 +88,7 @@ async def test_runtime_tool_boundary_flattens_one_instruction_sequence() -> None
             "second",
         ),
     )
-    boundary = RuntimeToolBoundaryToolset((toolset,), {}, id="boundary")
+    boundary = BoundaryToolset((toolset,), {}, id="boundary")
 
     instructions = await boundary.get_instructions(_context())
 
