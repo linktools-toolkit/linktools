@@ -142,7 +142,7 @@ async def _load_skills(
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
         value = adapter.decode_markdown(data, logical_id=logical_id)
         prefix = f"{logical_id}/"
-        resources: list[tuple[str, CapabilityLoadEntry]] = []
+        resource_entries: list[tuple[str, CapabilityLoadEntry]] = []
         for candidate in entries:
             if not candidate.key.id.startswith(prefix):
                 continue
@@ -150,13 +150,18 @@ async def _load_skills(
             if relative == "SKILL.md":
                 continue
             validate_resource_path(relative)
-            resources.append((relative, candidate))
-        resources.sort(key=lambda item: item[0])
-        resource_keys = tuple(candidate.key for _relative, candidate in resources)
+            resource_entries.append((relative, candidate))
+        resource_entries.sort(key=lambda item: item[0])
+        resource_keys = tuple(candidate.key for _relative, candidate in resource_entries)
         refs = context.bind_versions(resource_keys)
         paths = await context.asset_reader.local_paths(resource_keys)
         resources: list[SkillResource] = []
-        for (relative, _candidate), ref, path in zip(resources, refs, paths, strict=True):
+        for (relative, _candidate), ref, path in zip(
+            resource_entries,
+            refs,
+            paths,
+            strict=True,
+        ):
             mode = 0
             if path is not None:
                 try:
