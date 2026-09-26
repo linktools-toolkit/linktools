@@ -303,7 +303,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         allow_tools=(mcp_server_selector(server.id),),
         allow_skills=(),
         allow_subagents=(),
-        allow_runtime_capabilities=(),
+        allow_capabilities=(),
     )
     compiler = AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
@@ -356,7 +356,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         allow_tools=(mcp_server_selector(server.id),),
         allow_skills=(),
         allow_subagents=(),
-        allow_runtime_capabilities=(),
+        allow_capabilities=(),
     )
     compiler = AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
@@ -422,14 +422,14 @@ async def test_existing_child_mcp_resolves_asset_versions(
                 ),
                 allow_skills=(),
                 allow_subagents=("child",),
-                allow_runtime_capabilities=(),
+                allow_capabilities=(),
             ),
             "child": AgentSpec(
                 "child",
                 allow_tools=(mcp_server_selector(server.id),),
                 allow_skills=(),
                 allow_subagents=(),
-                allow_runtime_capabilities=(),
+                allow_capabilities=(),
             ),
         }
         compiler = AgentCompiler(
