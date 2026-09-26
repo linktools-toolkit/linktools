@@ -111,7 +111,7 @@ def managed_tool_descriptor_from_metadata(
     )
 
 
-class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
+class BoundaryToolset(AbstractToolset[AgentContext[object]]):
     """Apply workspace policy and effect durability at the final leaf call."""
 
     def __init__(
@@ -151,7 +151,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
     def id(self) -> str:
         return self._id
 
-    async def __aenter__(self) -> "RuntimeToolBoundaryToolset":
+    async def __aenter__(self) -> "BoundaryToolset":
         async with AsyncExitStack() as stack:
             for toolset in self._toolsets:
                 await stack.enter_async_context(toolset)
@@ -479,5 +479,5 @@ __all__ = [
     "ManagedToolDescriptor",
     "managed_tool_descriptor_from_metadata",
     "RepositoryInstructionBoundary",
-    "RuntimeToolBoundaryToolset",
+    "BoundaryToolset",
 ]

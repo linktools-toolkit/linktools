@@ -140,7 +140,7 @@ from ._tool import ToolOperationBridge
 from ._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
     managed_tool_descriptor_from_metadata,
 )
 from ._tool_metrics import (
@@ -938,7 +938,7 @@ async def _materialize_agent(
     )
     if workspace_toolset_values:
         raw_toolsets.append(
-            RuntimeToolBoundaryToolset(
+            BoundaryToolset(
                 workspace_toolset_values,
                 workspace_descriptors,
                 id="linktools.workspace",
@@ -971,7 +971,7 @@ async def _materialize_agent(
         raw_business = FunctionToolset(business_tools, id="linktools.business")
         raw_toolsets.insert(
             0,
-            RuntimeToolBoundaryToolset(
+            BoundaryToolset(
                 (raw_business,),
                 business_descriptors,
                 id="linktools.business",

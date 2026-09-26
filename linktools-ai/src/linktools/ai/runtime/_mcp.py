@@ -44,7 +44,7 @@ from ..workspace import (
 )
 from ._tool import ToolOperationBridge
 from ._tool_boundary import (
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
     managed_tool_descriptor_from_metadata,
 )
 from ._tool_metrics import _ToolMetricContext
@@ -384,7 +384,7 @@ async def materialize_mcp_capabilities(
                 allowed,
                 required.get(server.id, frozenset()),
             )
-            boundary = RuntimeToolBoundaryToolset(
+            boundary = BoundaryToolset(
                 (mapped,),
                 {},
                 id=f"linktools.mcp.{server.id}",
