@@ -389,7 +389,6 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
 async def test_existing_child_mcp_resolves_asset_versions(
     parent_resources: bool,
 ) -> None:
-    fixture = await _fixture()
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -405,43 +404,64 @@ async def test_existing_child_mcp_resolves_asset_versions(
             root,
         )
         versions = await store.resolve_versions((resource,))
-        pin = CapabilityPin(
-            "mcp",
-            "server",
+        contribution = CapabilityContribution.from_mcp_contract(
             codec.to_execution_payload(
                 server,
                 versions,
                 asset_source_id="application",
             ),
+            server,
         )
-        child = replace(
-            fixture.compiler.bind_subagent(
-                fixture.catalog.root_agent("child")
-            ).binding_contract,
-            selected=(pin,),
+        specs = {
+            "parent": AgentSpec(
+                "parent",
+                allow_tools=(
+                    (mcp_server_selector(server.id),)
+                    if parent_resources
+                    else ()
+                ),
+                allow_skills=(),
+                allow_subagents=("child",),
+                allow_runtime_capabilities=(),
+            ),
+            "child": AgentSpec(
+                "child",
+                allow_tools=(mcp_server_selector(server.id),),
+                allow_skills=(),
+                allow_subagents=(),
+                allow_runtime_capabilities=(),
+            ),
+        }
+        compiler = AgentCompiler(
+            model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
+            candidates=(contribution,),
+            agents=specs,
         )
-        binding_contract = replace(
-            fixture.binding.binding_contract,
-            selected=(pin,) if parent_resources else (),
-            subagent_bindings=(child,),
+        catalog = AgentCatalog(
+            {
+                agent_id: compiler.compile(spec)
+                for agent_id, spec in specs.items()
+            }
         )
-        resolver = _RuntimeBindingResolver(
-            fixture.catalog,
-            fixture.compiler,
-        )
+        resolver = _RuntimeBindingResolver(catalog, compiler)
+        binding = compiler.bind(catalog.root_agent("parent")).binding_contract
+
         await store.put(resource, b"print('updated')")
-        resolved = await resolver.resolve_contract(binding_contract)
-        server, versions = codec.from_execution_payload(
-            resolved.subagent_bindings[0].selected[0].contract
+        resolved = await resolver.resolve_contract(binding)
+        child = resolved.subagent_bindings[0]
+        pin = next(item for item in child.selected if item.kind == "mcp")
+        current = child.agent_spec
+        assert current.id == "child"
+        resolved_versions = codec.decode_execution_payload(
+            pin.contract,
+            declaration=server,
         )
-        assert server.resource == root
-        assert resolved.subagent_bindings[0].selected[0].contract["asset_source_id"] == "application"
-        assert versions is not None
-        assert await store.read_versions(versions) == (b"print('ok')",)
+        assert pin.contract["asset_source_id"] == "application"
+        assert resolved_versions is not None
+        assert await store.read_versions(resolved_versions) == (b"print('ok')",)
         assert await resolver.resolve_contract(resolved) == resolved
     finally:
         await store.close()
-        await fixture.assets.close()
 
 
 @pytest.mark.asyncio

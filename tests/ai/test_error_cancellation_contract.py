@@ -20,10 +20,12 @@ from linktools.ai.runtime._agent_executor import (
 from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._mcp import (
+    _MCPResourceBinding,
     _MCPRuntimeCapability,
     _raise_primary_after_cleanup,
     close_mcp_resources,
     materialize_mcp_capabilities,
+    prepare_mcp_resource_projections,
 )
 from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -107,6 +109,46 @@ async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> Non
         )
 
     assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ("streamable-http", "sse"))
+async def test_remote_mcp_materialization_does_not_require_sandbox_or_cwd(
+    transport: str,
+) -> None:
+    server = MCPServerSpec(
+        "remote",
+        transport=transport,
+        url="https://example.test/mcp",
+        headers={"X-Test": "value"},
+    )
+    binding = _MCPResourceBinding(
+        None,
+        None,
+        {"version": 1, "boundary": "host-network"},
+    )
+    projections = await prepare_mcp_resource_projections(
+        (server,),
+        {server.id: binding},
+        asset_readers={},
+        sandboxed=False,
+    )
+    capabilities = await materialize_mcp_capabilities(
+        (server,),
+        (mcp_server_selector(server.id),),
+        sandbox=None,
+        sandbox_session=None,
+        host_cwd=None,
+        resource_bindings={server.id: binding},
+        projections=projections,
+        tool_operations=None,
+        tool_metrics=None,
+    )
+    try:
+        assert len(capabilities) == 1
+        assert isinstance(capabilities[0], _MCPRuntimeCapability)
+    finally:
+        await close_mcp_resources(capabilities)
 
 
 @pytest.mark.asyncio
