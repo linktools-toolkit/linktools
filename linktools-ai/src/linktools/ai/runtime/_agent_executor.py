@@ -942,7 +942,7 @@ async def _materialize_agent(
                 workspace_toolset_values,
                 workspace_descriptors,
                 id="linktools.workspace",
-                workspace_policy=(
+                permission_policy=(
                     None
                     if scope.workspace is None
                     else scope.workspace.policy.tool_permissions
