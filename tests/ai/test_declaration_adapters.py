@@ -399,7 +399,7 @@ async def test_custom_mcp_loader_binds_resource_versions() -> None:
         assert contribution.kind == "mcp"
         server = contribution.value
         assert isinstance(server, MCPServerSpec)
-        versions = MCPServerSpecCodec().decode_execution_payload(
+        versions = MCPServerSpecCodec().decode_binding_payload(
             contribution.contract,
             declaration=server,
         )

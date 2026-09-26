@@ -328,7 +328,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         "version": 1,
         "boundary": "host-stdio",
     }
-    resource_versions = MCPServerSpecCodec().decode_execution_payload(
+    resource_versions = MCPServerSpecCodec().decode_binding_payload(
         pin.contract,
         declaration=server,
     )
@@ -405,7 +405,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
         )
         versions = await store.resolve_versions((resource,))
         contribution = CapabilityContribution.from_mcp_contract(
-            codec.to_execution_payload(
+            codec.to_binding_payload(
                 server,
                 versions,
                 asset_source_id="application",
@@ -452,7 +452,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
         pin = next(item for item in child.selected if item.kind == "mcp")
         current = child.agent_spec
         assert current.id == "child"
-        resolved_versions = codec.decode_execution_payload(
+        resolved_versions = codec.decode_binding_payload(
             pin.contract,
             declaration=server,
         )

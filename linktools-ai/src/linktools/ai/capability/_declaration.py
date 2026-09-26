@@ -212,7 +212,7 @@ def _bind_mcp_declaration(
     _validate_resource_arguments(value.args, available)
     refs = context.bind_versions(tuple(key for _relative, key in resources))
     return CapabilityContribution.from_mcp_contract(
-        MCPServerSpecCodec().to_execution_payload(
+        MCPServerSpecCodec().to_binding_payload(
             value,
             refs,
             asset_source_id=context.group_id,

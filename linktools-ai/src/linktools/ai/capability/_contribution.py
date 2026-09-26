@@ -208,7 +208,7 @@ class CapabilityContribution(Generic[AppT]):
     ) -> "CapabilityContribution[object]":
         if not isinstance(contract, Mapping) or not isinstance(value, MCPServerSpec):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        MCPServerSpecCodec().decode_execution_payload(contract, declaration=value)
+        MCPServerSpecCodec().decode_binding_payload(contract, declaration=value)
         return _ContractContribution("mcp", value.id, value, contract)
 
     @classmethod
