@@ -22,7 +22,6 @@ from ..spec import (
     MCPServerSpecAdapter,
     MCPServerSpecCodec,
     SkillSpecAdapter,
-    SkillSpecAdapter,
     RepositoryInstructionDocument,
 )
 from ._contribution import CapabilityContribution

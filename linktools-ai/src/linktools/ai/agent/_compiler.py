@@ -156,7 +156,7 @@ class AgentCompiler:
         output_binding = bind_output(output)
         binding_contract = AgentBindingContract(
             agent_spec=AgentSpecCodec().from_payload(
-                AgentSpecCodec().to_payload(compiled_agent.spec)
+                AgentSpecCodec().to_contract_payload(compiled_agent.spec)
             ),
             model_contract=dict(compiled_agent.model.contract),
             selected=tuple(_pin(candidate) for candidate in _selected_candidates(compiled_agent)),

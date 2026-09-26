@@ -330,7 +330,7 @@ def _contribution_contract(
         contract["revision"] = revision or 1
         return contract
     if kind == "agent" and isinstance(value, AgentSpec):
-        return AgentSpecCodec().to_payload(value)
+        return AgentSpecCodec().to_contract_payload(value)
     if kind == "skill" and isinstance(value, SkillDefinition):
         return value.contract
     if kind == "mcp" and isinstance(value, MCPServerSpec):

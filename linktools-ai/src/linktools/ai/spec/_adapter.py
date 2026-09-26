@@ -4,11 +4,10 @@
 
 from collections.abc import Mapping
 
-from ..core import JsonValue, normalize_json_value, validate_logical_id
+from ..core import normalize_json_value, validate_logical_id
 from ..errors import AIError, ErrorCode
 from ._codec import (
     AgentSpecCodec,
-    MCPServerSpecCodec,
     SkillSpecCodec,
     _decode_author_revision,
     _decode_mcp_author_server,

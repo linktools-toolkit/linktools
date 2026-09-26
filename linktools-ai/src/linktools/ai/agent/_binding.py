@@ -297,8 +297,8 @@ class AgentBinding:
             not isinstance(self.compiled_agent, CompiledAgent)
             or not isinstance(self.output_binding, OutputBinding)
             or not isinstance(self.binding_contract, AgentBindingContract)
-            or AgentSpecCodec().to_payload(self.compiled_agent.spec)
-            != AgentSpecCodec().to_payload(self.binding_contract.agent_spec)
+            or AgentSpecCodec().to_contract_payload(self.compiled_agent.spec)
+            != AgentSpecCodec().to_contract_payload(self.binding_contract.agent_spec)
             or dict(self.compiled_agent.model.contract)
             != dict(self.binding_contract.model_contract)
             or _compiled_agent_selected_pins(self.compiled_agent) != self.binding_contract.selected

@@ -5,7 +5,7 @@
 import json
 import re
 from collections.abc import Mapping, Sequence
-from typing import Literal, Protocol, TypeVar
+from typing import Protocol, TypeVar
 
 import yaml
 
@@ -15,7 +15,6 @@ from ..asset import AssetKey, AssetVersionRef
 from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec, normalize_thinking
 
 SpecT = TypeVar("SpecT")
-_VERSION = 1
 _USAGE_LIMIT_FIELDS = (
     "model_requests",
     "tool_calls",
@@ -801,9 +800,6 @@ def _parse_skill_markdown(content: str) -> dict[str, object]:
 __all__ = [
     "AgentSpecCodec",
     "MCPServerSpecCodec",
-    "SkillMarkdownSpecAdapter",
-    "SkillMarkdownSpecCodec",
     "SkillSpecCodec",
     "SpecCodec",
-    "retarget_skill_markdown",
 ]
