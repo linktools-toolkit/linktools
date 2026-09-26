@@ -25,42 +25,6 @@ __all__ = ["SUPPORTED_SHELLS", "ShellScript", "get_default_shell", "get_shell"]
 
 SUPPORTED_SHELLS = ("bash", "zsh", "fish", "tcsh", "powershell")
 
-# A value placed in an env-var / argv / PATH position must never carry a
-# raw newline/CR -- it would silently split a generated statement across
-# lines. Reject up front rather than emit a semantically broken script.
-_BAD_CHARS_IN_VALUE = re.compile(r"[\r\n\x00]")
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_COMMAND_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
-
-
-def _check_env_name(name: str) -> None:
-    if not isinstance(name, str) or not _ENV_NAME.match(name):
-        raise ValueError("Invalid environment variable name: %r" % (name,))
-
-
-def _check_command_name(name: str) -> None:
-    if not isinstance(name, str) or not _COMMAND_NAME.match(name):
-        raise ValueError("Invalid command name: %r" % (name,))
-
-
-def _check_value(value: "Any") -> str:
-    """Coerce a value to a string and reject control characters that would
-    break a generated statement. ``$HOME`` / ``$(...)`` stay literal text --
-    they are quoted, never executed."""
-    text = value if isinstance(value, str) else str(value)
-    if _BAD_CHARS_IN_VALUE.search(text):
-        raise ValueError("Value contains a newline/NUL and cannot be rendered: %r" % (value,))
-    return text
-
-
-def _check_argv(argv: "Any") -> "list[str]":
-    """argv must be a sequence of arguments, never a pre-joined command
-    string -- a string would let an unquoted space/quote slip through."""
-    if isinstance(argv, (str, bytes)):
-        raise TypeError("argv must be a sequence of arguments, not a command string")
-    return [_check_value(a) for a in argv]
-
-
 class _Renderer(object):
     """Per-shell text generation. Each method returns one rendered statement
     (possibly multi-line); ``ShellScript`` accumulates and joins them."""
@@ -255,6 +219,39 @@ class ShellScript(object):
     syntax are this class's job, never the caller's.
     """
 
+    # Newlines and NULs would split a generated statement or make it invalid.
+    _BAD_CHARS_IN_VALUE = re.compile(r"[\r\n\x00]")
+    _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    _COMMAND_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+
+    @classmethod
+    def _check_env_name(cls, name: str) -> None:
+        if not isinstance(name, str) or not cls._ENV_NAME.match(name):
+            raise ValueError("Invalid environment variable name: %r" % (name,))
+
+    @classmethod
+    def _check_command_name(cls, name: str) -> None:
+        if not isinstance(name, str) or not cls._COMMAND_NAME.match(name):
+            raise ValueError("Invalid command name: %r" % (name,))
+
+    @classmethod
+    def _check_value(cls, value: "Any") -> str:
+        """Coerce a value to a string and reject control characters that would
+        break a generated statement. ``$HOME`` / ``$(...)`` stay literal text --
+        they are quoted, never executed."""
+        text = value if isinstance(value, str) else str(value)
+        if cls._BAD_CHARS_IN_VALUE.search(text):
+            raise ValueError("Value contains a newline/NUL and cannot be rendered: %r" % (value,))
+        return text
+
+    @classmethod
+    def _check_argv(cls, argv: "Any") -> "list[str]":
+        """argv must be a sequence of arguments, never a pre-joined command
+        string -- a string would let an unquoted space/quote slip through."""
+        if isinstance(argv, (str, bytes)):
+            raise TypeError("argv must be a sequence of arguments, not a command string")
+        return [cls._check_value(arg) for arg in argv]
+
     def __init__(self, shell: "str | None" = None):
         name = shell or get_default_shell()
         if name not in _RENDERERS:
@@ -274,28 +271,28 @@ class ShellScript(object):
         return self
 
     def set_env(self, name: str, value: "Any") -> "ShellScript":
-        _check_env_name(name)
-        return self._append(self._renderer.set_env(name, _check_value(value)))
+        self._check_env_name(name)
+        return self._append(self._renderer.set_env(name, self._check_value(value)))
 
     def unset_env(self, name: str) -> "ShellScript":
-        _check_env_name(name)
+        self._check_env_name(name)
         return self._append(self._renderer.unset_env(name))
 
     def prepend_path(self, paths: "Iterable[str]") -> "ShellScript":
-        paths = [_check_value(p) for p in paths]
+        paths = [self._check_value(p) for p in paths]
         if not paths:
             return self
         return self._append(self._renderer.prepend_path(paths))
 
     def append_path(self, paths: "Iterable[str]") -> "ShellScript":
-        paths = [_check_value(p) for p in paths]
+        paths = [self._check_value(p) for p in paths]
         if not paths:
             return self
         return self._append(self._renderer.append_path(paths))
 
     def define_command(self, name: str, argv: "Any") -> "ShellScript":
-        _check_command_name(name)
-        args = _check_argv(argv)
+        self._check_command_name(name)
+        args = self._check_argv(argv)
         if not args:
             raise ValueError("define_command requires at least one argv element")
         return self._append(self._renderer.define_command(name, args))
