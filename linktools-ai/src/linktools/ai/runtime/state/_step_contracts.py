@@ -30,10 +30,9 @@ class AgentRunRecord:
     agent_run_id: str
     agent_conversation_id: str | None = None
     parent_agent_run_id: str | None = None
-    agent_name: str | None = None
+    agent_id: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    registration_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -44,7 +43,7 @@ class StepEvent:
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     agent_conversation_id: str | None = None
     parent_agent_run_id: str | None = None
-    agent_name: str | None = None
+    agent_id: str | None = None
     tool_call_id: str | None = None
     tool_name: str | None = None
     error: str | None = None
@@ -60,7 +59,7 @@ class AgentRunCheckpoint:
     messages: list[ModelMessage]
     agent_conversation_id: str | None = None
     parent_agent_run_id: str | None = None
-    agent_name: str | None = None
+    agent_id: str | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     state: CheckpointState = "complete"
     idempotency_key: str | None = None

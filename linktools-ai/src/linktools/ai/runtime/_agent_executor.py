@@ -992,7 +992,7 @@ async def _materialize_agent(
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
-        agent_name=compiled_agent.spec.id,
+        agent_id=compiled_agent.spec.id,
         agent_run_id=scope.agent_run_id,
         execution_id=scope.context.execution_id,
         agent_run_sequence=scope.agent_run_sequence,
