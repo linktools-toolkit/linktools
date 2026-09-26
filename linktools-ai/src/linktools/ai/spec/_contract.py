@@ -366,16 +366,31 @@ class SubagentRef:
 @dataclass(frozen=True, slots=True)
 class MCPServerSpec:
     id: str
-    command: "str | None" = field(default=None, repr=False)
+    command: "str | None" = field(default=None, repr=False, compare=False)
     args: "tuple[str, ...]" = ()
     resource: "AssetKey | None" = None
     transport: "Literal[\"stdio\", \"streamable-http\", \"sse\"]" = field(
         default="stdio",
         kw_only=True,
     )
-    url: "str | None" = field(default=None, kw_only=True, repr=False)
-    env: "Mapping[str, str]" = field(default_factory=dict, kw_only=True, repr=False)
-    headers: "Mapping[str, str]" = field(default_factory=dict, kw_only=True, repr=False)
+    url: "str | None" = field(
+        default=None,
+        kw_only=True,
+        repr=False,
+        compare=False,
+    )
+    env: "Mapping[str, str]" = field(
+        default_factory=dict,
+        kw_only=True,
+        repr=False,
+        compare=False,
+    )
+    headers: "Mapping[str, str]" = field(
+        default_factory=dict,
+        kw_only=True,
+        repr=False,
+        compare=False,
+    )
     revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:

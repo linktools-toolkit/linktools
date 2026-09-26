@@ -178,42 +178,19 @@ async def _load_mcp(
     context: CapabilityLoadContext,
 ) -> "Sequence[MCPServerSpec]":
     entries = context.list(kind="mcp")
-    package_entries = tuple(
-        entry for entry in entries if entry.key.id.endswith(("/mcp.json", "/mcp.yaml"))
-    )
-    package_ids: list[str] = []
-    for entry in package_entries:
-        suffix = "/mcp.json" if entry.key.id.endswith("/mcp.json") else "/mcp.yaml"
-        package_id = entry.key.id[: -len(suffix)]
-        if not package_id or package_id in package_ids:
-            raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
-        package_ids.append(package_id)
-    ordered_packages = tuple(sorted(package_ids))
-    _validate_package_roots(ordered_packages)
-    manifests = tuple(
-        entry
-        for entry in entries
-        if entry not in package_entries
-        and not _inside_package(entry.key.id, ordered_packages)
-        and entry.key.id.endswith(".json")
-    )
-    selected = tuple(sorted((*package_entries, *manifests), key=lambda entry: entry.key.id))
-    values = await context.read_many(tuple(entry.key for entry in selected))
+    declarations = _package_declarations(entries, ("/mcp.json", "/mcp.yaml"))
+    values = await context.read_many(tuple(entry.key for entry in declarations))
     codec = MCPServerSpecCodec()
     result: list[MCPServerSpec] = []
-    package_keys = {entry.key for entry in package_entries}
-    for entry, data in zip(selected, values, strict=True):
-        if entry.key in package_keys:
-            suffix = "/mcp.json" if entry.key.id.endswith("/mcp.json") else "/mcp.yaml"
-            result.append(
-                codec.decode_author(
-                    data,
-                    format="json" if suffix.endswith(".json") else "yaml",
-                    package_id=entry.key.id[: -len(suffix)],
-                )
+    for entry, data in zip(declarations, values, strict=True):
+        suffix = "/mcp.json" if entry.key.id.endswith("/mcp.json") else "/mcp.yaml"
+        result.append(
+            codec.decode_author(
+                data,
+                format="json" if suffix.endswith(".json") else "yaml",
+                package_id=entry.key.id[: -len(suffix)],
             )
-        else:
-            result.extend(codec.decode_config(data))
+        )
     return result
 
 

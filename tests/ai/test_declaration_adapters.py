@@ -603,40 +603,6 @@ async def test_declaration_loaders_are_backend_agnostic(
 
 
 @pytest.mark.asyncio
-async def test_shared_mcp_manifest_loads_multiple_servers() -> None:
-    backend = InMemoryAssetBackend()
-    store = AssetStore(StorageOverlay(backend, writer=backend))
-    await store.initialize()
-    try:
-        await store.put(
-            AssetKey("mcp", "shared.json"),
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "local": {"command": "python"},
-                        "remote": {
-                            "type": "http",
-                            "url": "https://example.test/mcp",
-                        },
-                    }
-                }
-            ).encode(),
-        )
-
-        capture = await CapabilityGroup("application", assets=store).capture()
-        servers = {
-            item.id: item.value
-            for item in capture.contributions
-            if item.kind == "mcp"
-        }
-
-        assert tuple(sorted(servers)) == ("local", "remote")
-        assert isinstance(servers["local"], MCPServerSpec)
-        assert isinstance(servers["remote"], MCPServerSpec)
-        assert servers["local"].transport == "stdio"
-        assert servers["remote"].transport == "streamable-http"
-    finally:
-        await store.close()
 
 
 @pytest.mark.asyncio
