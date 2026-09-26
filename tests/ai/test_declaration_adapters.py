@@ -23,7 +23,7 @@ from linktools.ai.capability import (
     CapabilityGroup,
     CapabilityLoadContext,
     SkillDefinition,
-    SkillResourceVersion,
+    SkillResource,
     SkillSourceRef,
 )
 from linktools.ai.core import validate_logical_id as validate_core_logical_id
@@ -344,7 +344,7 @@ async def test_custom_skill_loader_keeps_captured_resource_versions() -> None:
                     SkillSourceRef(
                         context.group_id,
                         "audit",
-                        (SkillResourceVersion("helper.py", ref),),
+                        (SkillResource("helper.py", ref),),
                     ),
                 ),
             )
@@ -357,10 +357,10 @@ async def test_custom_skill_loader_keeps_captured_resource_versions() -> None:
         skill = capture.contributions[0].value
         assert isinstance(skill, SkillDefinition)
         assert skill.source_ref is not None
-        assert len(skill.source_ref.resource_versions) == 1
+        assert len(skill.source_ref.resources) == 1
         reader = capture.asset_reader
         assert reader is not None
-        ref = skill.source_ref.resource_versions[0].asset
+        ref = skill.source_ref.resources[0].asset
         assert await reader.read_versions((ref,)) == (b"print('audit')\n",)
     finally:
         await store.close()

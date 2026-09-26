@@ -18,7 +18,7 @@ from linktools.ai.capability import (
     CapabilityGroup,
     CapabilityLoadContext,
     SkillDefinition,
-    SkillResourceVersion,
+    SkillResource,
     SkillSourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
@@ -253,7 +253,7 @@ class _PinnedSkillVersionLoader:
                         context.group_id,
                         "review",
                         (
-                            SkillResourceVersion(
+                            SkillResource(
                                 "guide.md",
                                 AssetVersionRef(
                                     AssetKey("skill", "review/guide.md"),

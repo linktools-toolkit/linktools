@@ -21,11 +21,11 @@ import linktools.ai.agent._compiler as agent_compiler
 import linktools.ai.runtime._mcp as mcp_runtime
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
-    AssetSkillResourceSource,
+    AssetSkillSource,
     CapabilityContribution,
     CapabilityGroup,
     SkillCapability,
-    SkillResourceVersion,
+    SkillResource,
     SkillDefinition,
     SkillSourceRef,
     SkillSourceRegistry,
@@ -404,14 +404,14 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
         SkillSourceRef(
             "application",
             "review",
-            (SkillResourceVersion("guide.md", asset, 0o111),),
+            (SkillResource("guide.md", asset, 0o111),),
         ),
     )
 
     contract = definition.contract
     source = contract["source"]
     assert isinstance(source, dict)
-    versions = source["resource_versions"]
+    versions = source["resources"]
     assert isinstance(versions, list)
     assert versions[0]["asset"] == asset.to_payload()
     assert versions[0]["executable_bits"] == 0o111
@@ -428,9 +428,9 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
                 "id": "review",
                 "content": "instructions",
                 "source": {
-                    "asset_source_id": "application",
+                    "source_id": "application",
                     "root": "review",
-                    "resource_versions": [
+                    "resources": [
                         {
                             "path": "guide.md",
                             "asset": {
@@ -455,7 +455,7 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
 async def test_asset_skill_source_rejects_mismatched_source_ref() -> None:
     store = AssetStore(StorageOverlay(InMemoryAssetBackend()))
     ref = SkillSourceRef("other", "review")
-    source = AssetSkillResourceSource("application", store)
+    source = AssetSkillSource("application", store)
     with pytest.raises(AIError) as error:
         await source.inspect(ref)
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -804,7 +804,7 @@ def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
     )
 
     assert first["args"] == ["resource:script.py"]
-    assert first["asset_source_id"] == "group-a"
+    assert first["source_id"] == "group-a"
     versions = codec.decode_binding_payload(first, declaration=server)
     assert versions == (first_ref,)
     assert capability_ref_payload("mcp", server.id, first) == (

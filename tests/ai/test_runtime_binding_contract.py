@@ -20,7 +20,7 @@ from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.capability import (
     CapabilityContribution,
     SkillDefinition,
-    SkillResourceVersion,
+    SkillResource,
     SkillSourceRef,
     tool_metadata,
 )
@@ -177,7 +177,7 @@ def _versioned_skill(
         SkillSourceRef(
             "application",
             "review",
-            (SkillResourceVersion("guide.md", asset),),
+            (SkillResource("guide.md", asset),),
         ),
     )
 
@@ -202,8 +202,8 @@ def test_skill_asset_content_change_requires_revision_bump() -> None:
         first.spec,
         replace(
             first.source_ref,
-            resource_versions=(
-                SkillResourceVersion(
+            resources=(
+                SkillResource(
                     "guide.md",
                     AssetVersionRef(
                         AssetKey("skill", "review/guide.md"),
@@ -268,9 +268,9 @@ def test_skill_asset_version_reference_rejects_malformed_fields(
                 "id": "review",
                 "content": "instructions",
                 "source": {
-                    "asset_source_id": "application",
+                    "source_id": "application",
                     "root": "review",
-                    "resource_versions": [
+                    "resources": [
                         {
                             "path": "guide.md",
                             "asset": asset,

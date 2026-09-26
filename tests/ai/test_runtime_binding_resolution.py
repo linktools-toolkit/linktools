@@ -17,10 +17,10 @@ from linktools.ai.agent import (
 )
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
-    AssetSkillResourceSource,
+    AssetSkillSource,
     CapabilityContribution,
     SkillDefinition,
-    SkillResourceVersion,
+    SkillResource,
     SkillSourceRef,
 )
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
@@ -89,7 +89,7 @@ async def _fixture() -> _BindingFixture:
     child_ref = SkillSourceRef(
         "application",
         "child-skill",
-        (SkillResourceVersion("guide.txt", child_asset),),
+        (SkillResource("guide.txt", child_asset),),
     )
 
     candidates = (
@@ -161,7 +161,7 @@ def _skill_ref(child: AgentBindingContract) -> SkillSourceRef:
     pin = next(item for item in child.selected if item.kind == "skill")
     skill = SkillDefinition.from_contract(pin.contract)
     assert skill.source_ref is not None
-    assert skill.source_ref.resource_versions
+    assert skill.source_ref.resources
     return skill.source_ref
 
 
@@ -169,7 +169,7 @@ async def _read_skill(
     fixture: _BindingFixture,
     ref: SkillSourceRef,
 ) -> bytes:
-    source = AssetSkillResourceSource("application", fixture.assets)
+    source = AssetSkillSource("application", fixture.assets)
     return await source.read(ref, "guide.txt")
 
 
@@ -180,7 +180,7 @@ async def test_binding_resolution_preserves_direct_child_asset_versions() -> Non
         resolved = await fixture.resolver.resolve(fixture.binding)
         ref = _skill_ref(_resolved_child(resolved.binding_contract))
 
-        assert [item.path for item in ref.resource_versions] == ["guide.txt"]
+        assert [item.path for item in ref.resources] == ["guide.txt"]
         await fixture.assets.put(
             AssetKey("skill", "child-skill/guide.txt"),
             b"changed",
@@ -228,7 +228,7 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
         assert capability_capture.roots == {}
         resolved_binding = capability_capture.bindings[fixture.binding.binding_digest]
         assert resolved_binding.binding_digest != fixture.binding.binding_digest
-        assert _skill_ref(_resolved_child(resolved_binding)).resource_versions
+        assert _skill_ref(_resolved_child(resolved_binding)).resources
     finally:
         await fixture.assets.close()
 
@@ -274,7 +274,7 @@ async def test_runtime_start_admits_resolved_binding() -> None:
         assert started.execution_id == "execution"
         assert execution.binding_contract is not None
         assert execution.binding_digest == execution.binding_contract.binding_digest
-        assert _skill_ref(_resolved_child(execution.binding_contract)).resource_versions
+        assert _skill_ref(_resolved_child(execution.binding_contract)).resources
     finally:
         await fixture.assets.close()
 
@@ -286,7 +286,7 @@ async def test_execution_binding_uses_selected_child_asset_versions() -> None:
         resolved = await fixture.resolver.resolve(fixture.binding)
 
         assert resolved.binding_contract != fixture.binding.binding_contract
-        assert _skill_ref(_resolved_child(resolved.binding_contract)).resource_versions
+        assert _skill_ref(_resolved_child(resolved.binding_contract)).resources
     finally:
         await fixture.assets.close()
 
