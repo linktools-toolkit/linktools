@@ -96,7 +96,7 @@ class _RuntimeBindingResolver:
             server = current_servers.get(pin.id)
             if server is None:
                 raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
-            resource_versions = codec.decode_execution_payload(
+            resource_versions = codec.decode_binding_payload(
                 pin.contract,
                 declaration=server,
             )
@@ -119,7 +119,7 @@ class _RuntimeBindingResolver:
                 CapabilityPin(
                     "mcp",
                     pin.id,
-                    codec.to_execution_payload(
+                    codec.to_binding_payload(
                         server,
                         resource_versions,
                         asset_source_id=asset_source_id,

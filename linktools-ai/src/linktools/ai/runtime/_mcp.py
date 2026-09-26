@@ -64,14 +64,14 @@ def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
 
 
 @dataclass(frozen=True, slots=True)
-class _MCPResourceBinding:
+class _MCPBinding:
     versions: "tuple[AssetVersionRef, ...] | None"
     asset_source_id: "str | None"
     execution_policy: Mapping[str, JsonValue]
 
 
 @dataclass(frozen=True, slots=True)
-class _MCPResourceProjection:
+class _MCPProjection:
     server_id: str
     args: tuple[str | SandboxResourcePath, ...]
     resources: tuple[SandboxResource, ...]
@@ -227,23 +227,23 @@ def _raise_primary_after_cleanup(
         raise primary_error from typed_cleanup_error
 
 
-async def prepare_mcp_resource_projections(
+async def prepare_mcp_projections(
     servers: Sequence[MCPServerSpec],
-    resources: Mapping[str, _MCPResourceBinding],
+    bindings: Mapping[str, _MCPBinding],
     *,
     asset_readers: Mapping[str, AssetStoreReader],
     sandboxed: bool,
-) -> dict[str, _MCPResourceProjection]:
+) -> dict[str, _MCPProjection]:
     """Verify selected Asset versions and expose existing local resource files."""
-    projections: dict[str, _MCPResourceProjection] = {}
+    projections: dict[str, _MCPProjection] = {}
     for server in servers:
-        binding = resources.get(server.id)
+        binding = bindings.get(server.id)
         if binding is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if server.resource is None:
             if binding.versions is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            projections[server.id] = _MCPResourceProjection(
+            projections[server.id] = _MCPProjection(
                 server.id,
                 tuple(server.args),
                 (),
@@ -284,7 +284,7 @@ async def prepare_mcp_resource_projections(
                 if sandboxed
                 else str(local_files[relative])
             )
-        projections[server.id] = _MCPResourceProjection(
+        projections[server.id] = _MCPProjection(
             server.id,
             tuple(arguments),
             (resource,) if sandboxed and resource is not None else (),
@@ -299,8 +299,8 @@ async def materialize_mcp_capabilities(
     sandbox: Sandbox | None,
     sandbox_session: object | None,
     host_cwd: "str | None",
-    resource_bindings: Mapping[str, _MCPResourceBinding],
-    projections: Mapping[str, _MCPResourceProjection],
+    bindings: Mapping[str, _MCPBinding],
+    projections: Mapping[str, _MCPProjection],
     tool_operations: "ToolOperationBridge | None",
     tool_metrics: "_ToolMetricContext | None",
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
@@ -318,7 +318,7 @@ async def materialize_mcp_capabilities(
         for server in servers:
             if server.id not in policy:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            binding = resource_bindings.get(server.id)
+            binding = bindings.get(server.id)
             projection = projections.get(server.id)
             if binding is None or projection is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -416,7 +416,7 @@ async def materialize_mcp_capabilities(
 
 def _bound_resource_versions(
     server: MCPServerSpec,
-    binding: _MCPResourceBinding,
+    binding: _MCPBinding,
 ) -> "dict[str, AssetVersionRef]":
     if binding.versions is None:
         raise AIError(

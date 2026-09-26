@@ -182,7 +182,7 @@ class AgentSpecCodec:
         return decode_author_json_mapping(data)
 
     def encode(self, value: AgentSpec) -> bytes:
-        return _encode(self.to_wire_payload(value))
+        return _encode(self.to_payload(value))
 
     def decode(self, data: bytes) -> AgentSpec:
         return self.from_payload(_decode(data))
@@ -437,7 +437,7 @@ class MCPServerSpecCodec:
             payload["resource"] = {"kind": value.resource.kind, "id": value.resource.id}
         return payload
 
-    def to_execution_payload(
+    def to_binding_payload(
         self,
         value: MCPServerSpec,
         resource_versions: "Sequence[AssetVersionRef] | None",
@@ -465,15 +465,12 @@ class MCPServerSpecCodec:
         payload["asset_source_id"] = asset_source_id
         return payload
 
-    def to_wire_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
-        return self.to_payload(value)
-
     def from_payload(self, raw: Mapping[str, object]) -> MCPServerSpec:
         _require_v1(raw)
         if any(key in raw for key in ("resource_versions", "asset_source_id", "execution_policy")):
             raise AIError(
                 ErrorCode.OUTPUT_CONTRACT_INVALID,
-                "MCP execution fields are Runtime-owned",
+                "MCP binding fields are Runtime-owned",
             )
         return _decode_mcp_wire_server(raw)
 
@@ -537,13 +534,13 @@ class MCPServerSpecCodec:
             )
         return tuple(result)
 
-    def decode_execution_payload(
+    def decode_binding_payload(
         self,
         raw: Mapping[str, object],
         *,
         declaration: MCPServerSpec,
     ) -> "tuple[AssetVersionRef, ...] | None":
-        semantic, resource_versions = _decode_mcp_execution_contract(raw)
+        semantic, resource_versions = _decode_mcp_binding_contract(raw)
         if semantic != self.to_contract_payload(declaration):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return resource_versions
@@ -650,7 +647,7 @@ def _decode_mcp_author_server(
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
 
 
-def _decode_mcp_execution_contract(
+def _decode_mcp_binding_contract(
     raw: Mapping[str, object],
 ) -> "tuple[dict[str, JsonValue], tuple[AssetVersionRef, ...] | None]":
     _require_v1(raw)
