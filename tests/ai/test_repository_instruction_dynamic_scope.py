@@ -13,7 +13,7 @@ from pydantic_ai.usage import RunUsage
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.workspace import (
@@ -83,7 +83,7 @@ def _boundary(
     *,
     policy: ToolPermissionPolicy | None = None,
     path_fields: tuple[str, ...] = ("path",),
-) -> RuntimeToolBoundaryToolset:
+) -> BoundaryToolset:
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
         effect_policy="none",
@@ -94,7 +94,7 @@ def _boundary(
         toolset.tools[name].function,
         descriptor,
     ).metadata
-    return RuntimeToolBoundaryToolset(
+    return BoundaryToolset(
         (toolset,),
         {name: descriptor},
         id="workspace",

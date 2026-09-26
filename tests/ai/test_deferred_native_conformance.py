@@ -22,7 +22,7 @@ from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._capabilities import _RuntimeAgentRunPersistence
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.workspace import (
     ToolPermissionPolicy,
@@ -89,7 +89,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
         effect_policy="non_replay_safe",
         tool_class="filesystem.read",
     )
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (FunctionToolset([tool_with_metadata(_read_file, descriptor)]),),
         {
             "_read_file": descriptor

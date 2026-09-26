@@ -14,7 +14,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from ._runtime_test_helpers import tool_with_metadata
 
@@ -58,14 +58,14 @@ async def _list_directory(path: str = ".") -> str:
     return path
 
 
-def _toolset(repository: _RepositoryBoundary) -> RuntimeToolBoundaryToolset:
+def _toolset(repository: _RepositoryBoundary) -> BoundaryToolset:
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
         effect_policy="none",
         tool_class="filesystem.read",
         workspace_path_fields=("path",),
     )
-    return RuntimeToolBoundaryToolset(
+    return BoundaryToolset(
         (FunctionToolset([tool_with_metadata(_list_directory, descriptor)]),),
         {"_list_directory": descriptor},
         id="workspace",

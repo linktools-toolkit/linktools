@@ -11,7 +11,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.workspace import LocalSandbox, Workspace
 from pydantic_ai.messages import ToolCallPart
@@ -117,7 +117,7 @@ async def test_missing_write_parent_is_known_failure_not_effect_unknown(
             session=session,
         )[0]
         bridge = _Bridge()
-        boundary = RuntimeToolBoundaryToolset(
+        boundary = BoundaryToolset(
             (workspace_capability.get_toolset(),),
             {
                 "write_file": ManagedToolDescriptor(
@@ -155,7 +155,7 @@ async def test_effectful_plain_ai_error_after_partial_effect_becomes_unknown(
         session=session,  # type: ignore[arg-type]
     )[0]
     bridge = _Bridge()
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (workspace_capability.get_toolset(),),
         {
             "create_directory": ManagedToolDescriptor(

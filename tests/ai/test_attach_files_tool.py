@@ -18,7 +18,7 @@ from linktools.ai.capability import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.workspace import Workspace
 
@@ -89,14 +89,14 @@ async def _boundary(
     repository: _RepositoryBoundary | None = None,
     *,
     vision: bool = True,
-) -> tuple[RuntimeToolBoundaryToolset, object]:
+) -> tuple[BoundaryToolset, object]:
     capability = workspace_capabilities(
         workspace,
         ("attach_files",),
         session=session,  # type: ignore[arg-type]
         vision=vision,
     )[0]
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (capability.get_toolset(),),
         {
             "attach_files": ManagedToolDescriptor(
