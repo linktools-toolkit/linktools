@@ -16,10 +16,10 @@ from linktools.ai.asset import (
     PrefixAssetPathAdapter,
 )
 from linktools.ai.capability import (
-    AssetSkillResourceSource,
+    AssetSkillSource,
     CapabilityGroup,
-    LocalSkillResourceSource,
-    SkillResourceVersion,
+    LocalSkillSource,
+    SkillResource,
     SkillCapability,
     SkillDefinition,
     SkillSourceRef,
@@ -55,7 +55,7 @@ class _SuffixSkillPathAdapter:
 
 async def _capture_skill_source_ref(
     store: AssetStore,
-    asset_source_id: str,
+    source_id: str,
     root: str,
 ) -> SkillSourceRef:
     prefix = f"{root}/"
@@ -71,7 +71,7 @@ async def _capture_skill_source_ref(
     refs = await store.resolve_versions(keys)
     paths = await store.local_paths(keys)
     versions = tuple(
-        SkillResourceVersion(
+        SkillResource(
             relative,
             ref,
             0 if path is None else path.stat().st_mode & 0o111,
@@ -83,7 +83,7 @@ async def _capture_skill_source_ref(
             strict=True,
         )
     )
-    return SkillSourceRef(asset_source_id, root, versions)
+    return SkillSourceRef(source_id, root, versions)
 
 
 @pytest.mark.asyncio
@@ -191,7 +191,7 @@ async def test_local_skill_resource_discovery_ignores_noise_but_explicit_read_wo
     (package / "__MACOSX").mkdir()
     (package / "__MACOSX" / "metadata").write_bytes(b"noise")
 
-    source = LocalSkillResourceSource("local", skills_root)
+    source = LocalSkillSource("local", skills_root)
     capability = SkillCapability(
         (
             SkillDefinition(
@@ -229,7 +229,7 @@ async def test_virtual_skill_resource_discovery_applies_the_same_noise_policy() 
         await store.put(AssetKey("skill", "review/Desktop.INI"), b"noise")
         await store.put(AssetKey("skill", "review/__MACOSX/metadata"), b"noise")
 
-        source = AssetSkillResourceSource("virtual", store)
+        source = AssetSkillSource("virtual", store)
         source_ref = await _capture_skill_source_ref(store, "virtual", "review")
         view = await source.inspect(source_ref)
 
@@ -264,7 +264,7 @@ async def test_directory_asset_skill_preserves_local_path_and_executable_mode(
     await store.initialize()
     try:
         source_ref = await _capture_skill_source_ref(store, "application", "review")
-        source = AssetSkillResourceSource("application", store)
+        source = AssetSkillSource("application", store)
         view = await source.inspect(source_ref)
 
         assert view.location.kind == "local"
@@ -295,9 +295,9 @@ async def test_sandbox_uses_original_pinned_asset_files(tmp_path: Path) -> None:
     await store.initialize()
     try:
         source_ref = await _capture_skill_source_ref(store, "application", "review")
-        files = {item.path: item.asset for item in source_ref.resource_versions}
+        files = {item.path: item.asset for item in source_ref.resources}
         modes = {
-            item.path: item.executable_bits for item in source_ref.resource_versions
+            item.path: item.executable_bits for item in source_ref.resources
         }
         resource = await SandboxResource.from_asset_versions(
             "review", store, files, executable_bits=modes
@@ -357,7 +357,7 @@ async def test_directory_asset_skill_local_path_does_not_require_skill_markdown(
     await store.initialize()
     try:
         source_ref = await _capture_skill_source_ref(store, "application", "review")
-        source = AssetSkillResourceSource("application", store)
+        source = AssetSkillSource("application", store)
         view = await source.inspect(source_ref)
 
         assert view.location.kind == "local"
@@ -388,7 +388,7 @@ async def test_directory_asset_skill_with_remapped_paths_is_virtual(
     await store.initialize()
     try:
         source_ref = await _capture_skill_source_ref(store, "application", "review")
-        source = AssetSkillResourceSource("application", store)
+        source = AssetSkillSource("application", store)
         view = await source.inspect(source_ref)
 
         assert view.location.kind == "virtual"
@@ -422,7 +422,7 @@ async def test_asset_skill_uses_virtual_location_when_overlay_mixes_origins(
     await store.initialize()
     try:
         source_ref = await _capture_skill_source_ref(store, "application", "review")
-        source = AssetSkillResourceSource("application", store)
+        source = AssetSkillSource("application", store)
         view = await source.inspect(source_ref)
 
         assert view.location.kind == "virtual"
@@ -474,11 +474,11 @@ async def test_asset_skill_source_captures_executable_mode(tmp_path: Path) -> No
     await store.initialize()
     try:
         first = await _capture_skill_source_ref(store, "application", "review")
-        assert first.resource_versions[0].executable_bits == 0
+        assert first.resources[0].executable_bits == 0
 
         os.chmod(script, 0o755)
         second = await _capture_skill_source_ref(store, "application", "review")
-        assert second.resource_versions[0].executable_bits == 0o111
+        assert second.resources[0].executable_bits == 0o111
     finally:
         await store.close()
 

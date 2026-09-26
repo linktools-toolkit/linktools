@@ -19,7 +19,7 @@ from linktools.ai.asset import (
     PrefixAssetPathAdapter,
 )
 from linktools.ai.capability import (
-    AssetSkillResourceSource,
+    AssetSkillSource,
     CapabilityGroup,
     SkillDefinition,
 )
@@ -103,7 +103,7 @@ async def test_asset_skill_package_resolution_runs_off_event_loop(
         )
         assert isinstance(definition, SkillDefinition)
         assert definition.source_ref is not None
-        source = AssetSkillResourceSource("application", capture.asset_reader)
+        source = AssetSkillSource("application", capture.asset_reader)
         view = await source.inspect(definition.source_ref)
 
         assert view.location.kind == "local"
