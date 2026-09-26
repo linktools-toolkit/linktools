@@ -270,14 +270,16 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
     (external_skill / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     agent = external / "agent"
     mcp = external / "mcp"
-    agent.write_bytes(AgentSpecCodec().encode(AgentSpec("review")))
-    mcp.write_bytes(MCPServerSpecCodec().encode(MCPServerSpec("server", "python")))
+    agent.mkdir(parents=True)
+    mcp.mkdir(parents=True)
+    (agent / "AGENT.md").write_text("Review carefully.", encoding="utf-8")
+    (mcp / "mcp.json").write_text('{"command":"python"}', encoding="utf-8")
 
     (storage_root / "agents").mkdir(parents=True)
     (storage_root / "mcp").mkdir()
     (storage_root / "skills").mkdir()
-    _symlink(agent, storage_root / "agents" / "review")
-    _symlink(mcp, storage_root / "mcp" / "server")
+    _symlink(agent, storage_root / "agents" / "review", directory=True)
+    _symlink(mcp, storage_root / "mcp" / "server", directory=True)
     _symlink(external_skill, storage_root / "skills" / "review", directory=True)
     _symlink(storage_root / "skills", storage_root / "skills" / "loop", directory=True)
 
@@ -315,7 +317,11 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
         view = await source.inspect(definition.source_ref)
         assert Path(view.location.path) == external_skill.resolve()
         assert view.resources == ("run.sh",)
-        assert await store.get(AssetKey("agent", "review")) == agent.read_bytes()
-        assert await store.get(AssetKey("mcp", "server")) == mcp.read_bytes()
+        assert await store.get(AssetKey("agent", "review/AGENT.md")) == (
+            agent / "AGENT.md"
+        ).read_bytes()
+        assert await store.get(AssetKey("mcp", "server/mcp.json")) == (
+            mcp / "mcp.json"
+        ).read_bytes()
     finally:
         await store.close()

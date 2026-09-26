@@ -40,12 +40,18 @@ async def _store() -> AssetStore:
 @pytest.mark.asyncio
 async def test_builtin_loader_captures_agent_skill_and_mcp_declarations() -> None:
     store = await _store()
-    agent = AgentSpec("agent", model="model")
-    skill = SkillSpec("skill", "instructions")
-    mcp = MCPServerSpec("server", "python", ("-m", "server"))
-    await store.put(AssetKey("agent", "agent"), AgentSpecCodec().encode(agent))
-    await store.put(AssetKey("skill", "skill"), SkillSpecCodec().encode(skill))
-    await store.put(AssetKey("mcp", "server"), MCPServerSpecCodec().encode(mcp))
+    await store.put(
+        AssetKey("agent", "agent/AGENT.md"),
+        b"---\nmodel: model\n---\n",
+    )
+    await store.put(
+        AssetKey("skill", "skill/SKILL.md"),
+        b"---\nname: skill\ndescription: Test skill.\n---\ninstructions",
+    )
+    await store.put(
+        AssetKey("mcp", "server/mcp.json"),
+        b'{"command":"python","args":["-m","server"]}',
+    )
 
     capture = await CapabilityGroup("workspace", assets=store).capture()
 
@@ -54,16 +60,15 @@ async def test_builtin_loader_captures_agent_skill_and_mcp_declarations() -> Non
         ("mcp", "server"),
         ("skill", "skill"),
     ]
-    assert [item.value for item in capture.contributions] == [
-        agent,
-        mcp,
-        SkillDefinition(skill),
-    ]
-    assert all(
-        "revision" in item.contract
-        for item in capture.contributions
-    )
-
+    agent, mcp, skill = (item.value for item in capture.contributions)
+    assert isinstance(agent, AgentSpec)
+    assert agent.model == "model"
+    assert isinstance(mcp, MCPServerSpec)
+    assert mcp.command == "python"
+    assert mcp.args == ("-m", "server")
+    assert isinstance(skill, SkillDefinition)
+    assert skill.spec.description == "Test skill."
+    assert all("revision" in item.contract for item in capture.contributions)
 
 @pytest.mark.asyncio
 async def test_group_capture_exposes_only_read_only_asset_access() -> None:
@@ -444,16 +449,16 @@ async def test_builtin_loader_batches_declaration_version_reads() -> None:
     store = _BatchReadStore(backend)
     await store.initialize()
     await store.put(
-        AssetKey("agent", "agent"),
-        AgentSpecCodec().encode(AgentSpec("agent", model="model")),
+        AssetKey("agent", "agent/AGENT.md"),
+        b"---\nmodel: model\n---\n",
     )
     await store.put(
-        AssetKey("mcp", "server"),
-        MCPServerSpecCodec().encode(MCPServerSpec("server", "python", ("-m", "server"))),
+        AssetKey("mcp", "server/mcp.json"),
+        b'{"command":"python","args":["-m","server"]}',
     )
     await store.put(
-        AssetKey("skill", "skill"),
-        SkillSpecCodec().encode(SkillSpec("skill", "instructions")),
+        AssetKey("skill", "skill/SKILL.md"),
+        b"---\nname: skill\ndescription: Test skill.\n---\ninstructions",
     )
 
     capture = await CapabilityGroup("workspace", assets=store).capture()
@@ -465,12 +470,11 @@ async def test_builtin_loader_batches_declaration_version_reads() -> None:
     ]
     assert len(store.version_reads) == 3
     assert tuple(tuple(ref.key for ref in batch) for batch in store.version_reads) == (
-        (AssetKey("agent", "agent"),),
-        (AssetKey("skill", "skill"),),
-        (AssetKey("mcp", "server"),),
+        (AssetKey("agent", "agent/AGENT.md"),),
+        (AssetKey("skill", "skill/SKILL.md"),),
+        (AssetKey("mcp", "server/mcp.json"),),
     )
     assert store.individual_reads == 0
-
 
 def test_capability_group_does_not_expose_logical_asset_crud() -> None:
     group = CapabilityGroup[object]("group")
