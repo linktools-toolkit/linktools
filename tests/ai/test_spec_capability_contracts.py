@@ -175,6 +175,45 @@ def test_mcp_shared_config_rejects_transport_conflicts(
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
+def test_mcp_wire_round_trips_resource_backed_stdio() -> None:
+    codec = MCPServerSpecCodec()
+    server = MCPServerSpec(
+        "server",
+        "python",
+        ("resource:script.py",),
+        AssetKey("mcp", "server"),
+        env={"MODE": "readonly"},
+        revision=2,
+    )
+
+    restored = codec.decode(codec.encode(server))
+
+    assert restored.id == server.id
+    assert restored.revision == server.revision
+    assert restored.transport == "stdio"
+    assert restored.command == "python"
+    assert restored.args == ("resource:script.py",)
+    assert restored.resource == AssetKey("mcp", "server")
+    assert dict(restored.env) == {"MODE": "readonly"}
+
+
+def test_mcp_wire_rejects_resource_on_remote_transport() -> None:
+    codec = MCPServerSpecCodec()
+    payload = codec.to_payload(
+        MCPServerSpec(
+            "remote",
+            transport="streamable-http",
+            url="https://example.test/mcp",
+        )
+    )
+    payload["resource"] = {"kind": "mcp", "id": "remote"}
+
+    with pytest.raises(AIError) as error:
+        codec.from_payload(payload)
+
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+
 def test_mcp_durable_contract_excludes_connection_values() -> None:
     codec = MCPServerSpecCodec()
     first = MCPServerSpec(
