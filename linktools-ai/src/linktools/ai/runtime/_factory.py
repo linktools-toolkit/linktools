@@ -14,7 +14,7 @@ from linktools.core import environ
 from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
-    AssetSkillResourceSource,
+    AssetSkillSource,
     CapabilityContribution,
     CapabilityGroup,
     CapabilityGroupCapture,
@@ -165,7 +165,7 @@ async def compose_runtime_components(
         _validate_candidate_uniqueness(candidates)
         skill_sources = SkillSourceRegistry(
             tuple(
-                AssetSkillResourceSource(group.group_id, reader)
+                AssetSkillSource(group.group_id, reader)
                 for group in groups
                 if (reader := group.asset_reader) is not None
             )

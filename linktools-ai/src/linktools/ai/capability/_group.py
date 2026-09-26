@@ -380,9 +380,9 @@ def _validate_skill_source(
     source_ref = definition.source_ref
     if source_ref is None:
         return
-    if source_ref.asset_source_id != context.group_id:
+    if source_ref.source_id != context.group_id:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    versions = tuple(item.asset for item in source_ref.resource_versions)
+    versions = tuple(item.asset for item in source_ref.resources)
     try:
         captured = context.bind_versions(tuple(ref.key for ref in versions))
     except AIError as error:

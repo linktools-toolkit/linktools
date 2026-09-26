@@ -746,10 +746,10 @@ async def _skill_sandbox_resources(
         resource = await SandboxResource.from_asset_versions(
             skill.id,
             reader,
-            {item.path: item.asset for item in source_ref.resource_versions},
+            {item.path: item.asset for item in source_ref.resources},
             executable_bits={
                 item.path: item.executable_bits
-                for item in source_ref.resource_versions
+                for item in source_ref.resources
             },
         )
         if resource is None:

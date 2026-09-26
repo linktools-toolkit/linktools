@@ -31,7 +31,7 @@ from ._resource_path import (
     validate_resource_tree,
 )
 from ._skill import SkillDefinition
-from ._skill_source import SkillResourceVersion, SkillSourceRef
+from ._skill_source import SkillResource, SkillSourceRef
 
 if TYPE_CHECKING:
     from ._loading import CapabilityLoadContext, CapabilityLoadEntry
@@ -156,7 +156,7 @@ async def _load_skills(
         resource_keys = tuple(candidate.key for _relative, candidate in resources)
         refs = context.bind_versions(resource_keys)
         paths = await context.asset_reader.local_paths(resource_keys)
-        versions: list[SkillResourceVersion] = []
+        versions: list[SkillResource] = []
         for (relative, _candidate), ref, path in zip(resources, refs, paths, strict=True):
             mode = 0
             if path is not None:
@@ -164,7 +164,7 @@ async def _load_skills(
                     mode = (await asyncio.to_thread(path.stat)).st_mode & 0o111
                 except OSError as error:
                     raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            versions.append(SkillResourceVersion(relative, ref, mode))
+            versions.append(SkillResource(relative, ref, mode))
         result.append(
             SkillDefinition(
                 value,
