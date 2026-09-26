@@ -556,16 +556,63 @@ def _decode_mcp_wire_server(raw: Mapping[str, object]) -> MCPServerSpec:
     identity = raw.get("id")
     revision = _decode_revision(raw)
     transport = raw.get("transport")
-    if not isinstance(identity, str) or not identity.strip() or not isinstance(transport, str):
+    if (
+        not isinstance(identity, str)
+        or not identity.strip()
+        or transport not in {"stdio", "streamable-http", "sse"}
+    ):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    payload = dict(raw)
-    payload["type"] = transport
+
     try:
-        return _decode_mcp_author_server(
-            payload,
-            identity=identity,
+        if transport == "stdio":
+            if "url" in raw or "headers" in raw:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            command = raw.get("command")
+            args = raw.get("args", [])
+            env = raw.get("env", {})
+            resource = _decode_asset_key(raw.get("resource"))
+            if not isinstance(command, str) or not command.strip():
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            if not isinstance(args, list) or any(
+                not isinstance(item, str) for item in args
+            ):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            if not isinstance(env, Mapping) or any(
+                not isinstance(key, str)
+                or not key
+                or not isinstance(value, str)
+                for key, value in env.items()
+            ):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            return MCPServerSpec(
+                identity,
+                command,
+                tuple(args),
+                resource,
+                transport="stdio",
+                env=dict(env),
+                revision=revision,
+            )
+
+        if any(key in raw for key in ("command", "args", "env", "resource")):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        url = raw.get("url")
+        headers = raw.get("headers", {})
+        if not isinstance(url, str) or not url.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if not isinstance(headers, Mapping) or any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(value, str)
+            for key, value in headers.items()
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        return MCPServerSpec(
+            identity,
+            transport=transport,
+            url=url,
+            headers=dict(headers),
             revision=revision,
-            package=False,
         )
     except AIError:
         raise
