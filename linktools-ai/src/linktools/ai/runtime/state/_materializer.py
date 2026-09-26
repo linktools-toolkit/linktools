@@ -34,7 +34,7 @@ from ._contracts import (
     TaskRepositories,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
-from ._memory import MemoryStateStorageGroup, MemoryStateStore
+from ._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import (
     RuntimeDomain,
@@ -102,7 +102,7 @@ async def materialize_runtime_storage(
         filesystem_domains: dict[Path, list[RuntimeDomain]] = {}
         filesystem_routes: dict[Path, RuntimeStorageRoute] = {}
         filesystem_member_roots: dict[RuntimeDomain, Path] = {}
-        memory_group = MemoryStateStorageGroup(read_only=read_only)
+        memory_group = InMemoryStateStorageGroup(read_only=read_only)
         for domain in RuntimeDomain:
             route = plan.route(domain)
             if route.kind in {"sqlite", "sql"}:
@@ -120,7 +120,7 @@ async def materialize_runtime_storage(
                 sql_routes[key] = route
                 continue
             if route.kind == "memory":
-                stores[domain] = MemoryStateStore(memory_group)
+                stores[domain] = InMemoryStateStore(memory_group)
             elif route.kind == "filesystem":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -174,7 +174,7 @@ async def materialize_runtime_storage(
             cleanups.append(group.close)
 
         for store in stores.values():
-            if isinstance(store, (MemoryStateStore, FilesystemStateStore)):
+            if isinstance(store, (InMemoryStateStore, FilesystemStateStore)):
                 await store.initialize()
 
         for key, domains in sql_groups.items():

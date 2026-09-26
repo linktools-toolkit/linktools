@@ -44,7 +44,7 @@ from ..task import (
 from ._artifact import DefaultArtifactService
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
-from ._history import StepExecutionHistoryReader
+from ._history_projection import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._runtime_identity import token_seed
 from ._session_timeline import (

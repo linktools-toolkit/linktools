@@ -57,7 +57,7 @@ from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._external import DefaultExternalService
 from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
 from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
-from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
+from ._history_projection import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._input import ExecutionInputMaterializer
 from ._local import LocalExecutionBackend

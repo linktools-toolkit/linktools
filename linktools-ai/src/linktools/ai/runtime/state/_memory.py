@@ -32,13 +32,13 @@ _logger = environ.get_logger("ai.runtime.state.memory")
 class _MemoryGroupTransaction:
     def __init__(
         self,
-        group: "MemoryStateStorageGroup",
-        transactions: Mapping["MemoryStateStore", StateTransaction],
+        group: "InMemoryStateStorageGroup",
+        transactions: Mapping["InMemoryStateStore", StateTransaction],
     ) -> None:
         self._group = group
         self._transactions = transactions
 
-    def transaction(self, store: "MemoryStateStore") -> StateTransaction:
+    def transaction(self, store: "InMemoryStateStore") -> StateTransaction:
         if store.storage_group is not self._group:
             raise RuntimeError("store does not belong to this StateStorageGroup")
         try:
@@ -49,7 +49,7 @@ class _MemoryGroupTransaction:
             ) from error
 
 
-class MemoryStateStorageGroup:
+class InMemoryStateStorageGroup:
     """Atomic group coordinator for independent in-memory logical stores."""
 
     def __init__(self, *, read_only: bool = False) -> None:
@@ -58,7 +58,7 @@ class MemoryStateStorageGroup:
 
     async def read(
         self,
-        store: "MemoryStateStore",
+        store: "InMemoryStateStore",
         fn: StateCallback[ValueT],
     ) -> ValueT:
         self._ensure_member(store)
@@ -84,7 +84,7 @@ class MemoryStateStorageGroup:
 
     async def mutate(
         self,
-        stores: Sequence["MemoryStateStore"],
+        stores: Sequence["InMemoryStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
         if self._read_only:
@@ -120,7 +120,7 @@ class MemoryStateStorageGroup:
 
     def _transaction(
         self,
-        store: "MemoryStateStore",
+        store: "InMemoryStateStore",
         *,
         now: datetime | None = None,
     ) -> _MemoryTransaction:
@@ -134,16 +134,16 @@ class MemoryStateStorageGroup:
             now=now,
         )
 
-    def _ensure_member(self, store: "MemoryStateStore") -> None:
+    def _ensure_member(self, store: "InMemoryStateStore") -> None:
         if store.storage_group is not self:
             raise RuntimeError("store does not belong to this StateStorageGroup")
         store._ensure_ready()
 
 
-class MemoryStateStore:
+class InMemoryStateStore:
     """Atomic process-local StateStore used by tests and volatile routes."""
 
-    def __init__(self, group: MemoryStateStorageGroup | None = None) -> None:
+    def __init__(self, group: InMemoryStateStorageGroup | None = None) -> None:
         self._records: dict[bytes, StoredRecord] = {}
         self._aliases: dict[bytes, bytes] = {}
         self._sequences: dict[bytes, int] = {}
@@ -153,7 +153,7 @@ class MemoryStateStore:
         self._lock = asyncio.Lock()
         self._closed = False
         self._initialized = False
-        self._storage_group = group or MemoryStateStorageGroup()
+        self._storage_group = group or InMemoryStateStorageGroup()
 
     @property
     def storage_group(self) -> StateStorageGroup:
@@ -218,4 +218,4 @@ class MemoryStateStore:
                 self._operation_streams.pop(stream, None)
 
 
-__all__ = ["MemoryStateStorageGroup", "MemoryStateStore"]
+__all__ = ["InMemoryStateStorageGroup", "InMemoryStateStore"]
