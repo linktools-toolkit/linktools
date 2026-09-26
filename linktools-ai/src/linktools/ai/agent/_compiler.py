@@ -19,6 +19,7 @@ from ..model import ModelBinding, ModelResolver
 from ..spec import (
     AgentSpec,
     AgentSpecCodec,
+    MCPServerSpec,
     SubagentRef,
     mcp_server_selector,
     parse_mcp_tool_selector,
@@ -232,9 +233,20 @@ class AgentCompiler:
                 if candidate.id != pin.id or candidate.revision != pin.revision:
                     raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
             elif pin.kind == "mcp":
-                candidate = CapabilityContribution.from_mcp_contract(
-                    pin.contract,
-                )
+                current = self._by_identity.get(("mcp", pin.id))
+                if (
+                    current is None
+                    or current.revision != pin.revision
+                    or not isinstance(current.value, MCPServerSpec)
+                ):
+                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
+                try:
+                    candidate = CapabilityContribution.from_mcp_contract(
+                        pin.contract,
+                        current.value,
+                    )
+                except AIError as error:
+                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE) from error
             else:
                 current = self._by_identity.get((pin.kind, pin.id))
                 if (

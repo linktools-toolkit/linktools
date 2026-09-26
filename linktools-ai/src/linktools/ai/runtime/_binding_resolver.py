@@ -84,36 +84,39 @@ class _RuntimeBindingResolver:
         self,
         binding_contract: AgentBindingContract,
     ) -> AgentBindingContract:
-        execution_policy: "Mapping[str, JsonValue] | None" = None
+        current_binding = self._compiler.restore(binding_contract)
+        current_servers = {
+            server.id: server
+            for server in current_binding.compiled_agent.mcp_servers
+        }
         selected: list[CapabilityPin] = []
         codec = MCPServerSpecCodec()
         for pin in binding_contract.selected:
             if pin.kind != "mcp":
                 selected.append(pin)
                 continue
-            if execution_policy is None:
-                execution_policy = _mcp_execution_policy(self._sandbox)
-            server, resource_versions = codec.from_execution_payload(
-                pin.contract
+            server = current_servers.get(pin.id)
+            if server is None:
+                raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
+            resource_versions = codec.decode_execution_payload(
+                pin.contract,
+                declaration=server,
             )
-            current_policy = dict(execution_policy)
+            current_policy = dict(_mcp_execution_policy(server, self._sandbox))
             bound_policy = pin.contract.get("execution_policy")
             if bound_policy is not None and dict(bound_policy) != current_policy:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-
             asset_source_id = pin.contract.get("asset_source_id")
             if server.resource is None:
                 if resource_versions is not None or asset_source_id is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 asset_source_id = None
-            else:
-                if (
-                    resource_versions is None
-                    or not isinstance(asset_source_id, str)
-                    or not asset_source_id
-                ):
-                    raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
-
+            elif (
+                resource_versions is None
+                or not isinstance(asset_source_id, str)
+                or not asset_source_id
+            ):
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
             selected.append(
                 CapabilityPin(
                     "mcp",
