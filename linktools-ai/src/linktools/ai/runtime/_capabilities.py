@@ -394,7 +394,6 @@ async def compose_platform_capabilities(
         parent_agent_run_id=parent_agent_run_id,
         metadata={
             "capability_scope": "parent",
-            "agent_id": agent_id,
             **({} if history_id is None else {"history_id": history_id}),
             **(
                 {}
