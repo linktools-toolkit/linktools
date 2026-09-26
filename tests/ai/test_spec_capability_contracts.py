@@ -413,10 +413,10 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
     contract = definition.contract
     source = contract["source"]
     assert isinstance(source, dict)
-    versions = source["resources"]
-    assert isinstance(versions, list)
-    assert versions[0]["asset"] == asset.to_payload()
-    assert versions[0]["executable_bits"] == 0o111
+    resources = source["resources"]
+    assert isinstance(resources, list)
+    assert resources[0]["asset"] == asset.to_payload()
+    assert resources[0]["executable_bits"] == 0o111
 
     restored = SkillDefinition.from_contract(contract)
     assert restored == definition
