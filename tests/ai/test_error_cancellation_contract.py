@@ -72,15 +72,28 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
+    server = MCPServerSpec("server", "echo")
+    binding = _MCPResourceBinding(
+        None,
+        None,
+        {"version": 1, "boundary": "host-stdio"},
+    )
+    projections = await prepare_mcp_resource_projections(
+        (server,),
+        {server.id: binding},
+        asset_readers={},
+        sandboxed=False,
+    )
+
     with pytest.raises(AIError) as error:
         await materialize_mcp_capabilities(
-            (MCPServerSpec("server", "echo"),),
-            (mcp_server_selector("server"),),
+            (server,),
+            (mcp_server_selector(server.id),),
             sandbox=None,
             sandbox_session=None,
             host_cwd=None,
-            resource_bindings={},
-            projections={},
+            resource_bindings={server.id: binding},
+            projections=projections,
             tool_operations=None,
             tool_metrics=None,
         )
@@ -95,15 +108,28 @@ async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> Non
         runtime_root=tmp_path,
         bwrap_executable=tmp_path / "bwrap",
     )
+    server = MCPServerSpec("server", "echo")
+    binding = _MCPResourceBinding(
+        None,
+        None,
+        sandbox.stdio_execution_policy(),
+    )
+    projections = await prepare_mcp_resource_projections(
+        (server,),
+        {server.id: binding},
+        asset_readers={},
+        sandboxed=True,
+    )
+
     with pytest.raises(AIError) as error:
         await materialize_mcp_capabilities(
-            (MCPServerSpec("server", "echo"),),
-            (mcp_server_selector("server"),),
+            (server,),
+            (mcp_server_selector(server.id),),
             sandbox=sandbox,
             sandbox_session=None,
             host_cwd=None,
-            resource_bindings={},
-            projections={},
+            resource_bindings={server.id: binding},
+            projections=projections,
             tool_operations=None,
             tool_metrics=None,
         )

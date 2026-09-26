@@ -136,8 +136,8 @@ async def test_asset_snapshot_rejects_wrong_object_store_owner() -> None:
 async def test_builtin_loader_rejects_declaration_identity_mismatch() -> None:
     store = await _store()
     await store.put(
-        AssetKey("agent", "expected"),
-        AgentSpecCodec().encode(AgentSpec("actual", model="model")),
+        AssetKey("agent", "expected/AGENT.md"),
+        b"---\nid: actual\nmodel: model\n---\n",
     )
 
     with pytest.raises(AIError) as error:
@@ -333,8 +333,8 @@ class _DuplicateAgentLoader:
 async def test_duplicate_candidate_identity_is_rejected_after_all_loaders_finish() -> None:
     store = await _store()
     await store.put(
-        AssetKey("agent", "agent"),
-        AgentSpecCodec().encode(AgentSpec("agent", model="model")),
+        AssetKey("agent", "agent/AGENT.md"),
+        b"---\nmodel: model\n---\n",
     )
     group = CapabilityGroup("workspace", assets=store)
     group.loader("custom", _DuplicateAgentLoader())
@@ -357,7 +357,7 @@ class _RaceStore(AssetStore):
         values = await super().read_versions(refs)
         if not self._raced:
             self._raced = True
-            await self.put(AssetKey("skill", "late"), SkillSpecCodec().encode(SkillSpec("late", "late")))
+            await self.put(AssetKey("skill", "late/SKILL.md"), b"late")
         return values
 
 
@@ -366,7 +366,10 @@ async def test_capture_rejects_assets_added_during_declaration_loading() -> None
     backend = InMemoryAssetBackend()
     store = _RaceStore(backend)
     await store.initialize()
-    await store.put(AssetKey("skill", "first"), SkillSpecCodec().encode(SkillSpec("first", "first")))
+    await store.put(
+        AssetKey("skill", "first/SKILL.md"),
+        b"---\nname: first\ndescription: First skill.\n---\nfirst",
+    )
 
     with pytest.raises(AIError) as error:
         await CapabilityGroup("workspace", assets=store).capture()

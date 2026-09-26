@@ -64,6 +64,7 @@ from linktools.ai.spec import (
     AgentUsageLimits,
     MCPServerSpec,
     MCPServerSpecCodec,
+    SkillMarkdownSpecCodec,
     SkillSpec,
     SkillSpecCodec,
     canonical_selectors,
@@ -635,7 +636,7 @@ def test_mcp_package_resource_ignores_unrelated_fields() -> None:
     assert server.resource == AssetKey("mcp", "server")
 
 
-def test_mcp_author_resource_ignores_unrelated_fields() -> None:
+def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> None:
     server = MCPServerSpecCodec().decode_author(
         json.dumps(
             {
@@ -652,7 +653,7 @@ def test_mcp_author_resource_ignores_unrelated_fields() -> None:
         format="json",
     )
 
-    assert server.resource == AssetKey("mcp", "server/assets")
+    assert server.resource is None
 
 
 def test_durable_spec_readers_ignore_additive_fields() -> None:

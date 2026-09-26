@@ -216,7 +216,8 @@ def _bind_mcp_declaration(
             value,
             refs,
             asset_source_id=context.group_id,
-        )
+        ),
+        value,
     )
 
 
