@@ -181,25 +181,31 @@ CapabilityGroup AssetStore; a custom loader may change declaration format or
 layout but does not implement a second version store. No additional
 Registry/Provider abstraction is required.
 
-The built-in Agent loader accepts flat JSON at `<id>` and Markdown packages
-at `<id>/AGENT.md`; Skill packages use `<id>/SKILL.md`, and MCP packages use
-`<id>/mcp.json` or `<id>/mcp.yaml`. Author parsers validate syntax and the
-core fields they consume, but do not reject unrelated fields. Built-in Agent,
-Skill, and MCP decoders simply ignore fields outside their small authoring
-surface; custom loaders may still inspect those fields through the public
-parsers. `AgentMarkdownSpecCodec` exposes `parse()`, `from_payload()`, and
-`decode()` entry points for `AGENT.md`.
-Custom source kinds such as `worker` can use
-`AgentDeclarationLoader("worker", defaults=...)` to load the same Agent
-layouts with validated defaults. Defaults fill missing declaration fields;
-explicit Agent fields take precedence.
+The built-in file layouts are deliberately small: Agents use
+`<id>/AGENT.md`, Skills use `<id>/SKILL.md`, and resource-backed MCP servers
+use `<id>/mcp.json` or `<id>/mcp.yaml`. Flat Agent/Skill/MCP declaration
+files are not a second built-in authoring path. Author parsers validate the
+fields they consume without rejecting unrelated ordinary fields.
+`AgentMarkdownSpecCodec` exposes `parse()`, `from_payload()`, and
+`decode()` for custom Agent authoring. Custom source kinds such as `worker`
+can use `AgentDeclarationLoader("worker", defaults=...)`; explicit Agent
+fields still override validated defaults.
 
-`AGENT.md` and `SKILL.md` frontmatter, as well as flat Agent and Skill JSON
-declarations, may include a `metadata` map for extra data such as `author` or
-`version`. Values may be any JSON value, including nested maps and arrays.
-Metadata is retained in Agent and Skill specs and their spec wire payloads,
-but does not affect named revisions. Skill metadata is omitted from the
-instructions shown to the model.
+`AGENT.md` and `SKILL.md` may include a `metadata` map. Skill metadata is
+not shown to the model. The optional `metadata.linktools-revision` value may
+be a positive integer or its decimal string representation and maps only to
+the named Skill revision. Other Agent Skills fields, including
+`allowed-tools`, remain author content and do not grant Runtime permissions.
+
+Shared MCP configuration uses the common `mcpServers` JSON shape through
+`MCPServerSpecCodec.decode_config(data, revision=...)`. LinkTools does not
+auto-discover a project `.mcp.json` or treat arbitrary flat MCP JSON Assets as
+shared configuration. The host or a custom `CapabilityLoader` explicitly
+chooses the source and revision, then returns the resulting
+`MCPServerSpec` declarations into the same `CapabilityGroup.capture()` path.
+Supported transports are stdio, Streamable HTTP (`http` and
+`streamable-http` authoring names), and explicit legacy `sse`; LinkTools
+does not fall back from one remote transport to another.
 
 `CapabilityGroup.capture()` returns a `CapabilityGroupCapture`. Pass that
 capture to `Runtime.open()` when the host also needs to inspect the same
@@ -226,19 +232,22 @@ No Asset resource bytes are copied to a temporary directory or Runtime ObjectSto
 Because the paths point to original files, external edits after verification
 can be observed by an already running process.
 
-For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
-`resource=AssetKey("mcp", "server/assets")`. Arguments whose complete
-value starts with `resource:` then name files below that root. CapabilityGroup capture binds selected MCP files to Asset version references in the same group capture,
-rejecting absolute paths, traversal, and missing files. Runtime preserves those
-refs and adds only the execution policy required by the selected Sandbox.
-`resource:` arguments require local Asset files: LocalSandbox receives their
-verified original absolute paths and Bubblewrap mounts each selected file
-read-only. Asset updates after the
-CapabilityGroup capture do not alter that declaration capture; a later
-CapabilityGroup capture sees the newer Asset versions. Runtime does not copy
-MCP resource bytes to a temporary directory or persist a second copy.
-Without `resource`, existing argument strings keep their original
-meaning.
+For an MCP package, the package directory is the resource root; authors do
+not declare an Asset key or Asset version reference. Arguments whose complete
+value is `resource:<relative>` reference files below that package root.
+CapabilityGroup capture binds those files to Asset version references, rejects
+absolute paths, traversal and missing files, and Runtime preserves the refs
+without copying the bytes into Runtime storage. Outside a resource-backed MCP
+package, a string such as `resource:literal` remains an ordinary stdio
+argument.
+
+MCP connection values are live declaration data rather than durable semantic
+identity. The execution pin keeps the server id/revision, canonical transport,
+semantic args, resource refs and execution policy, but excludes
+`command`, remote `url`, `env` and `headers`. Recovery therefore requires
+the host to supply the current declaration with the same MCP id/revision;
+connection values may change under that identity, while transport, semantic
+args or resource semantics require a revision change.
 
 ### Execution sandbox
 
@@ -249,7 +258,7 @@ built-in local adapter. Without either, MCP stdio runs on the host and Skill
 locations remain virtual. LinkTools owns the stable model-visible workspace
 tool signatures, descriptions, metadata, and durable capability pins.
 
-A run opens a `SandboxSession` when it needs a selected Workspace filesystem/shell tool, a local Skill resource path, or a sandboxed MCP server. Workspace tool commands share that session, which is closed when the model run succeeds, fails, or is cancelled. Without a Workspace, the Sandbox uses the host current directory captured when Runtime opens as its execution root.
+A run opens a `SandboxSession` when it needs a selected Workspace filesystem/shell tool, a local Skill resource path, or a stdio MCP server assigned to that Sandbox. Workspace tool commands share that session, which is closed when the model run succeeds, fails, or is cancelled. Without a Workspace, stdio uses the host current directory captured when Runtime opens as its execution root. Streamable HTTP and SSE MCP connections are opened by the Runtime host and do not inherit Sandbox filesystem or network isolation claims.
 
 Use `DisabledSandbox` to keep workspace tool declarations and historical binding recovery available while making runtime workspace tool materialization fail with `SANDBOX_UNAVAILABLE`. A custom Sandbox failure does not fall back to the local host environment.
 

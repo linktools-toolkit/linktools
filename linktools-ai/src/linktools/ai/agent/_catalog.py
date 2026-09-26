@@ -65,8 +65,8 @@ def _same_compiled_agent(left: CompiledAgent, right: CompiledAgent) -> bool:
         and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_mcp) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_mcp)
         and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_runtime_capabilities) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_runtime_capabilities)
         and left.selected_subagents == right.selected_subagents
-        and left.ordinary_tool_policy == right.ordinary_tool_policy
-        and left.mcp_selector_policy == right.mcp_selector_policy
+        and left.tool_policy == right.tool_policy
+        and left.mcp_policy == right.mcp_policy
     )
 
 

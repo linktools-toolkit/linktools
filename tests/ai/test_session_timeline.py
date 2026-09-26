@@ -159,8 +159,8 @@ async def _materialize_conversation(
             agent_run_id=agent_run_id,
             agent_conversation_id=agent_conversation_id,
             parent_agent_run_id=None,
-            agent_name="agent",
-            metadata={"agent_name": "agent", "history_id": history_id},
+            agent_id="agent",
+            metadata={"agent_id": "agent", "history_id": history_id},
             started_at=now,
         )
     )
@@ -191,7 +191,7 @@ async def _materialize_conversation(
             messages=messages,
             agent_conversation_id=agent_conversation_id,
             parent_agent_run_id=None,
-            agent_name="agent",
+            agent_id="agent",
             timestamp=now,
             state="complete",
             transcript_message_count_before=0,
@@ -268,8 +268,8 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
                 agent_run_id=stale_agent_run_id,
                 agent_conversation_id=stale_conversation_id,
                 parent_agent_run_id=None,
-                agent_name="agent",
-                metadata={"agent_name": "agent", "history_id": created.history_id},
+                agent_id="agent",
+                metadata={"agent_id": "agent", "history_id": created.history_id},
                 started_at=stale_now,
             )
         )
@@ -287,7 +287,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
                 messages=stale_messages,
                 agent_conversation_id=stale_conversation_id,
                 parent_agent_run_id=None,
-                agent_name="agent",
+                agent_id="agent",
                 timestamp=stale_now,
                 state="complete",
                 transcript_message_count_before=0,

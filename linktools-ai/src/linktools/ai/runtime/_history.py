@@ -1740,8 +1740,8 @@ def _trace_item(
         payload["token_usage"] = (
             _model_token_usage(event) if status == "SUCCEEDED" else None
         )
-    if event.agent_name is not None:
-        payload["agent_name"] = event.agent_name
+    if event.agent_id is not None:
+        payload["agent_id"] = event.agent_id
     if event.tool_call_id is not None:
         payload["tool_call_id"] = event.tool_call_id
     if event.tool_name is not None:

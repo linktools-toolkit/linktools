@@ -155,7 +155,7 @@ async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:
             tenant_id=tenant_id,
             execution_id=execution_id,
         ),
-        metadata={"agent_run_sequence": "1", "agent_name": "default"},
+        metadata={"agent_run_sequence": "1", "agent_id": "default"},
     )
     interactions = [
         _interaction(
@@ -245,7 +245,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
             tenant_id=tenant_id,
             execution_id=execution_id,
         ),
-        metadata={"agent_run_sequence": "1", "agent_name": "default"},
+        metadata={"agent_run_sequence": "1", "agent_id": "default"},
     )
     interactions = [
         _interaction(

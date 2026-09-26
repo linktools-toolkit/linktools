@@ -332,8 +332,8 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "task_terminal": ("node_id", "owner", "fence", "status", "result_digest", "error_code", "error_digest", "completed_at", "execution_id"),
         "tool_operation": ("tool_operation_id", "execution_id", "agent_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "status", "owner", "fence", "lease_expires_at", "error_code", "created_at", "updated_at", "arguments_payload", "result_payload", "error_payload"),
         "usage_metrics": ("model_requests", "tool_calls", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"),
-        "agent_run_record": ("agent_run_id", "agent_conversation_id", "parent_agent_run_id", "agent_name", "metadata", "started_at", "registration_id"),
-        "step_event": ("agent_run_id", "kind", "step_index", "timestamp", "agent_conversation_id", "parent_agent_run_id", "agent_name", "tool_call_id", "tool_name", "error", "metadata", "idempotency_key", "event_index"),
+        "agent_run_record": ("agent_run_id", "agent_conversation_id", "parent_agent_run_id", "agent_id", "metadata", "started_at"),
+        "step_event": ("agent_run_id", "kind", "step_index", "timestamp", "agent_conversation_id", "parent_agent_run_id", "agent_id", "tool_call_id", "tool_name", "error", "metadata", "idempotency_key", "event_index"),
     }
 )
 

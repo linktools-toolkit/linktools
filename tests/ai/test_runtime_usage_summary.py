@@ -121,8 +121,8 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
     run = AgentRunRecord(
         agent_run_id,
         agent_conversation_id,
-        agent_name="agent",
-        metadata={"agent_run_sequence": "1", "agent_name": "agent"},
+        agent_id="agent",
+        metadata={"agent_run_sequence": "1", "agent_id": "agent"},
     )
     interactions = (
         _interaction(

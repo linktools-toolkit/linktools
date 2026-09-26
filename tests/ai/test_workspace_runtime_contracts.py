@@ -167,18 +167,21 @@ async def test_memory_store_remains_writable_across_missing_delete_receipts() ->
 @pytest.mark.asyncio
 async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     assets_root = tmp_path / ".linktools"
-    agent_path = assets_root / "agents" / "default"
+    agent_path = assets_root / "agents" / "default" / "AGENT.md"
     skill_path = assets_root / "skills" / "review" / "SKILL.md"
-    mcp_path = assets_root / "mcp" / "local"
+    mcp_path = assets_root / "mcp" / "local" / "mcp.json"
     agent_path.parent.mkdir(parents=True)
     skill_path.parent.mkdir(parents=True)
     mcp_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(AgentSpecCodec().encode(AgentSpec("default", model="gpt-test")))
+    agent_path.write_text(
+        "---\nmodel: gpt-test\n---\n",
+        encoding="utf-8",
+    )
     skill_path.write_text(
         "---\nname: review\ndescription: Review changes.\n---\n\nReview changes.\n",
         encoding="utf-8",
     )
-    mcp_path.write_bytes(MCPServerSpecCodec().encode(MCPServerSpec("local", "echo")))
+    mcp_path.write_text('{"command":"echo"}', encoding="utf-8")
 
     source = DirectoryAssetBackend(
         str(assets_root),

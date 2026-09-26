@@ -129,7 +129,7 @@ CREATE TABLE ai_asset_batch_receipts (
 CREATE TABLE ai_objects (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the ObjectStore store identifier and object key.',
-    store_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Logical ObjectStore identifier that namespaces object keys.',
+    store_id VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Logical ObjectStore identifier that namespaces object keys.',
     object_key TEXT NOT NULL COMMENT 'Original opaque object key exposed by the ObjectStore API.',
     content_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 digest of the immutable object bytes.',
     size BIGINT NOT NULL COMMENT 'Exact immutable object size in bytes.',

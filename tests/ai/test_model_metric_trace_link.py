@@ -46,7 +46,7 @@ def _persistence(
 ) -> _RuntimeAgentRunPersistence:
     return _RuntimeAgentRunPersistence(
         capture=capture,
-        agent_name="agent",
+        agent_id="agent",
         agent_run_id=agent_run_id,
     )
 

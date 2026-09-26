@@ -122,7 +122,7 @@ def _persistence(
     )
     persistence = _RuntimeAgentRunPersistence(
         capture=capture,
-        agent_name="usage-test",
+        agent_id="usage-test",
         agent_run_id=agent_run_id,
     )
     observation = RuntimeModelObservationCapability(

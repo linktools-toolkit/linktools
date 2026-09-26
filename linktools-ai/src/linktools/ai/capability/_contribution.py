@@ -204,12 +204,11 @@ class CapabilityContribution(Generic[AppT]):
     def from_mcp_contract(
         cls,
         contract: Mapping[str, JsonValue],
+        value: MCPServerSpec,
     ) -> "CapabilityContribution[object]":
-        if not isinstance(contract, Mapping):
+        if not isinstance(contract, Mapping) or not isinstance(value, MCPServerSpec):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value, _resource_versions = MCPServerSpecCodec().from_execution_payload(
-            contract
-        )
+        MCPServerSpecCodec().decode_binding_payload(contract, declaration=value)
         return _ContractContribution("mcp", value.id, value, contract)
 
     @classmethod
@@ -335,7 +334,7 @@ def _contribution_contract(
     if kind == "skill" and isinstance(value, SkillDefinition):
         return value.contract
     if kind == "mcp" and isinstance(value, MCPServerSpec):
-        return MCPServerSpecCodec().to_payload(value)
+        return MCPServerSpecCodec().to_contract_payload(value)
     if kind == "runtime_capability" and isinstance(value, AbstractCapability):
         contract = {
             "version": 1,

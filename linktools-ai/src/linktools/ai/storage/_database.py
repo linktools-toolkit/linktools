@@ -62,11 +62,16 @@ class SqlStorageContext:
         )
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self.owns_engine:
-            await self.engine.dispose()
+        async with self._initialize_lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                if self.owns_engine:
+                    await self.engine.dispose()
+            except BaseException:
+                self._closed = False
+                raise
 
     async def run_mutation(
         self,

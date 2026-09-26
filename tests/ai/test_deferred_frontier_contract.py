@@ -112,7 +112,7 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
             execution_id=None,
             agent_run_id="run",
         ),
-        agent_name="agent",
+        agent_id="agent",
         agent_run_id="run",
         deferred_pause_sink=captured.append,
     )
@@ -155,7 +155,7 @@ async def test_runtime_step_persistence_requires_pause_sink_for_native_deferred(
             execution_id=None,
             agent_run_id="run",
         ),
-        agent_name="agent",
+        agent_id="agent",
         agent_run_id="run",
     )
     persistence._last_observed_step_index = 3

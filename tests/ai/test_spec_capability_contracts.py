@@ -46,9 +46,9 @@ from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._harness_memory import select_harness_memory_tools
 from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
-    _MCPResourceBinding,
+    _MCPBinding,
     _bound_resource_versions,
-    prepare_mcp_resource_projections,
+    prepare_mcp_projections,
 )
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -64,6 +64,7 @@ from linktools.ai.spec import (
     AgentUsageLimits,
     MCPServerSpec,
     MCPServerSpecCodec,
+    SkillMarkdownSpecCodec,
     SkillSpec,
     SkillSpecCodec,
     canonical_selectors,
@@ -106,6 +107,137 @@ def test_skill_wildcard_allows_preload_outside_explicit_requirements() -> None:
     )
     assert spec.allow_skills == ("*", "required")
     assert spec.preload_skills == ("preloaded",)
+
+
+def test_skill_markdown_accepts_string_revision_without_exposing_new_fields() -> None:
+    codec = SkillMarkdownSpecCodec()
+    content = (
+        "---\n"
+        "name: review\n"
+        "description: Review changes.\n"
+        "metadata:\n"
+        '  linktools-revision: "2"\n'
+        "---\n"
+        "Review changes.\n"
+    )
+    spec = codec.decode(content.encode())
+    assert spec.revision == 2
+    assert "linktools-revision" not in spec.metadata
+    assert codec.encode(spec) == content.encode()
+
+
+def test_mcp_shared_config_normalizes_supported_transports() -> None:
+    servers = MCPServerSpecCodec().decode_config(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "local": {
+                        "command": "python",
+                        "args": ["-m", "server"],
+                        "env": {"MODE": "readonly"},
+                        "future": {"kept-open": True},
+                    },
+                    "remote": {
+                        "url": "https://example.test/mcp",
+                        "headers": {"X-Tenant": "tenant"},
+                    },
+                    "legacy": {
+                        "type": "sse",
+                        "url": "https://example.test/sse",
+                    },
+                }
+            }
+        ).encode()
+    )
+    by_id = {server.id: server for server in servers}
+    assert by_id["local"].transport == "stdio"
+    assert dict(by_id["local"].env) == {"MODE": "readonly"}
+    assert by_id["remote"].transport == "streamable-http"
+    assert by_id["legacy"].transport == "sse"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"command": "python", "url": "https://example.test/mcp"},
+        {"type": "stdio", "url": "https://example.test/mcp"},
+        {"type": "http", "command": "python"},
+        {"type": "unknown", "url": "https://example.test/mcp"},
+    ),
+)
+def test_mcp_shared_config_rejects_transport_conflicts(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(AIError) as error:
+        MCPServerSpecCodec().decode_config(
+            json.dumps({"mcpServers": {"server": payload}}).encode()
+        )
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+
+def test_mcp_wire_round_trips_resource_backed_stdio() -> None:
+    codec = MCPServerSpecCodec()
+    server = MCPServerSpec(
+        "server",
+        "python",
+        ("resource:script.py",),
+        AssetKey("mcp", "server"),
+        env={"MODE": "readonly"},
+        revision=2,
+    )
+
+    restored = codec.decode(codec.encode(server))
+
+    assert restored.id == server.id
+    assert restored.revision == server.revision
+    assert restored.transport == "stdio"
+    assert restored.command == "python"
+    assert restored.args == ("resource:script.py",)
+    assert restored.resource == AssetKey("mcp", "server")
+    assert dict(restored.env) == {"MODE": "readonly"}
+
+
+def test_mcp_wire_rejects_resource_on_remote_transport() -> None:
+    codec = MCPServerSpecCodec()
+    payload = codec.to_payload(
+        MCPServerSpec(
+            "remote",
+            transport="streamable-http",
+            url="https://example.test/mcp",
+        )
+    )
+    payload["resource"] = {"kind": "mcp", "id": "remote"}
+
+    with pytest.raises(AIError) as error:
+        codec.from_payload(payload)
+
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+
+def test_mcp_durable_contract_excludes_connection_values() -> None:
+    codec = MCPServerSpecCodec()
+    first = MCPServerSpec(
+        "remote",
+        transport="streamable-http",
+        url="https://first.example/mcp",
+        headers={"Authorization": "secret-a"},
+    )
+    second = MCPServerSpec(
+        "remote",
+        transport="streamable-http",
+        url="https://second.example/mcp",
+        headers={"Authorization": "secret-b"},
+    )
+    assert codec.to_contract_payload(first) == codec.to_contract_payload(second)
+    payload = codec.to_binding_payload(
+        first,
+        None,
+        execution_policy={"version": 1, "boundary": "host-network"},
+    )
+    encoded = json.dumps(payload)
+    assert "first.example" not in encoded
+    assert "secret-a" not in encoded
+    assert codec.decode_binding_payload(payload, declaration=second) is None
 
 
 def test_mcp_selectors_round_trip_logical_names() -> None:
@@ -543,7 +675,7 @@ def test_mcp_package_resource_ignores_unrelated_fields() -> None:
     assert server.resource == AssetKey("mcp", "server")
 
 
-def test_mcp_author_resource_ignores_unrelated_fields() -> None:
+def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> None:
     server = MCPServerSpecCodec().decode_author(
         json.dumps(
             {
@@ -560,7 +692,7 @@ def test_mcp_author_resource_ignores_unrelated_fields() -> None:
         format="json",
     )
 
-    assert server.resource == AssetKey("mcp", "server/assets")
+    assert server.resource is None
 
 
 def test_durable_spec_readers_ignore_additive_fields() -> None:
@@ -582,18 +714,29 @@ def test_durable_spec_readers_ignore_additive_fields() -> None:
     mcp_payload["future_note"] = {"category": "display"}
     assert mcp_codec.from_payload(mcp_payload) == server
 
-    execution_payload = mcp_codec.to_execution_payload(
+    binding_payload = mcp_codec.to_binding_payload(
         server,
         None,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
-    execution_payload["future_note"] = {"category": "display"}
-    assert mcp_codec.from_execution_payload(execution_payload) == (server, None)
+    binding_payload["future_note"] = {"category": "display"}
+    assert (
+        mcp_codec.decode_binding_payload(
+            binding_payload,
+            declaration=server,
+        )
+        is None
+    )
 
 
 def test_mcp_execution_policy_rejects_non_string_workspace_access() -> None:
     codec = MCPServerSpecCodec()
-    payload = codec.to_payload(MCPServerSpec("server", "command"))
+    server = MCPServerSpec("server", "command")
+    payload = codec.to_binding_payload(
+        server,
+        None,
+        execution_policy={"version": 1, "boundary": "host-stdio"},
+    )
     payload["execution_policy"] = {
         "version": 1,
         "boundary": "workspace-stdio",
@@ -603,7 +746,7 @@ def test_mcp_execution_policy_rejects_non_string_workspace_access() -> None:
     }
 
     with pytest.raises(AIError) as error:
-        codec.from_execution_payload(payload)
+        codec.decode_binding_payload(payload, declaration=server)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -615,11 +758,11 @@ def test_mcp_execution_resource_contract_rejects_missing_versions() -> None:
         ("resource:script.py",),
         AssetKey("mcp", "server"),
     )
-    payload = codec.to_payload(server)
+    payload = codec.to_contract_payload(server)
     payload["execution_policy"] = {"version": 1, "boundary": "host-stdio"}
 
     with pytest.raises(AIError) as error:
-        codec.from_execution_payload(payload)
+        codec.decode_binding_payload(payload, declaration=server)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -647,13 +790,13 @@ def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
         2,
     )
 
-    first = codec.to_execution_payload(
+    first = codec.to_binding_payload(
         server,
         (first_ref,),
         asset_source_id="group-a",
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
-    second = codec.to_execution_payload(
+    second = codec.to_binding_payload(
         server,
         (second_ref,),
         asset_source_id="group-b",
@@ -662,8 +805,7 @@ def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
 
     assert first["args"] == ["resource:script.py"]
     assert first["asset_source_id"] == "group-a"
-    restored, versions = codec.from_execution_payload(first)
-    assert restored == server
+    versions = codec.decode_binding_payload(first, declaration=server)
     assert versions == (first_ref,)
     assert capability_ref_payload("mcp", server.id, first) == (
         capability_ref_payload("mcp", server.id, second)
@@ -683,8 +825,11 @@ async def _capture_mcp_resource_versions(
         for item in capture.contributions
         if item.kind == "mcp" and item.id == server.id
     )
-    _restored, versions = MCPServerSpecCodec().from_execution_payload(
-        contribution.contract
+    declaration = contribution.value
+    assert isinstance(declaration, MCPServerSpec)
+    versions = MCPServerSpecCodec().decode_binding_payload(
+        contribution.contract,
+        declaration=declaration,
     )
     assert versions is not None
     return versions
@@ -831,7 +976,7 @@ async def test_mcp_resource_versions_reject_invalid_tree(
                 versions = await store.resolve_versions(keys)
                 _bound_resource_versions(
                     server,
-                    _MCPResourceBinding(
+                    _MCPBinding(
                         versions,
                         "application",
                         {"version": 1, "boundary": "host-stdio"},
@@ -849,13 +994,13 @@ async def test_mcp_resource_prefix_is_literal_without_resource() -> None:
         "python",
         ("resource:literal-value",),
     )
-    binding = _MCPResourceBinding(
+    binding = _MCPBinding(
         None,
         None,
         {"version": 1, "boundary": "host-stdio"},
     )
 
-    projections = await prepare_mcp_resource_projections(
+    projections = await prepare_mcp_projections(
         (server,),
         {server.id: binding},
         asset_readers={},
@@ -889,10 +1034,10 @@ async def test_mcp_resource_path_requires_local_asset_files() -> None:
         await store.put(helper, b"VALUE = 42\n")
         versions = await _capture_mcp_resource_versions(store, server)
         with pytest.raises(AIError) as raised:
-            await prepare_mcp_resource_projections(
+            await prepare_mcp_projections(
                 (server,),
                 {
-                    server.id: _MCPResourceBinding(
+                    server.id: _MCPBinding(
                         versions,
                         "application",
                         {"version": 1, "boundary": "host-stdio"},
@@ -935,12 +1080,12 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
     await store.initialize()
     try:
         versions = await _capture_mcp_resource_versions(store, server)
-        binding = _MCPResourceBinding(
+        binding = _MCPBinding(
             versions,
             "application",
             {"version": 1, "boundary": "host-stdio"},
         )
-        host = await prepare_mcp_resource_projections(
+        host = await prepare_mcp_projections(
             (server,),
             {server.id: binding},
             asset_readers={"application": store},
@@ -949,7 +1094,7 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
         assert host[server.id].args == (str(script.resolve()),)
         assert host[server.id].resources == ()
 
-        sandboxed = await prepare_mcp_resource_projections(
+        sandboxed = await prepare_mcp_projections(
             (server,),
             {server.id: binding},
             asset_readers={"application": store},

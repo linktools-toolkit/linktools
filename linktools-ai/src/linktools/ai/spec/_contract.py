@@ -6,7 +6,9 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import ClassVar, Literal
+from urllib.parse import urlsplit
 
 from ..asset import AssetKey
 from ..core import (
@@ -364,25 +366,78 @@ class SubagentRef:
 @dataclass(frozen=True, slots=True)
 class MCPServerSpec:
     id: str
-    command: str
+    command: "str | None" = field(default=None, repr=False, compare=False)
     args: "tuple[str, ...]" = ()
     resource: "AssetKey | None" = None
+    transport: "Literal[\"stdio\", \"streamable-http\", \"sse\"]" = field(
+        default="stdio",
+        kw_only=True,
+    )
+    url: "str | None" = field(
+        default=None,
+        kw_only=True,
+        repr=False,
+        compare=False,
+    )
+    env: "Mapping[str, str]" = field(
+        default_factory=dict,
+        kw_only=True,
+        repr=False,
+        compare=False,
+    )
+    headers: "Mapping[str, str]" = field(
+        default_factory=dict,
+        kw_only=True,
+        repr=False,
+        compare=False,
+    )
     revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
         _validate_revision(self.revision)
         if not isinstance(self.id, str) or not self.id.strip():
             raise ValueError("MCP server id must be non-empty")
-        if not isinstance(self.command, str) or not self.command.strip():
-            raise ValueError("MCP server command must be non-empty")
-        if isinstance(self.args, (str, bytes, bytearray)) or not isinstance(self.args, Sequence):
+        if self.transport not in {"stdio", "streamable-http", "sse"}:
+            raise ValueError("MCP server transport is invalid")
+        if isinstance(self.args, (str, bytes, bytearray)) or not isinstance(
+            self.args,
+            Sequence,
+        ):
             raise TypeError("MCP server args must be a string sequence")
         args = tuple(self.args)
         if any(not isinstance(item, str) for item in args):
             raise TypeError("MCP server args must be strings")
+        env = _validated_string_mapping(self.env, "env")
+        headers = _validated_string_mapping(self.headers, "headers")
+        if self.transport == "stdio":
+            if not isinstance(self.command, str) or not self.command.strip():
+                raise ValueError("MCP stdio command must be non-empty")
+            if self.url is not None or headers:
+                raise ValueError("MCP stdio transport cannot define remote connection fields")
+        else:
+            if self.command is not None or args or env or self.resource is not None:
+                raise ValueError("MCP remote transport cannot define stdio fields")
+            if not isinstance(self.url, str) or not self.url.strip():
+                raise ValueError("MCP remote URL must be non-empty")
+            parsed = urlsplit(self.url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("MCP remote URL must be absolute HTTP(S)")
         object.__setattr__(self, "args", args)
+        object.__setattr__(self, "env", env)
+        object.__setattr__(self, "headers", headers)
         if self.resource is not None and not isinstance(self.resource, AssetKey):
             raise TypeError("MCP resource must be an AssetKey")
+
+
+def _validated_string_mapping(value: object, field_name: str) -> Mapping[str, str]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"MCP {field_name} must be a string mapping")
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key or not isinstance(item, str):
+            raise TypeError(f"MCP {field_name} must be a string mapping")
+        result[key] = item
+    return MappingProxyType(result)
 
 
 __all__ = [

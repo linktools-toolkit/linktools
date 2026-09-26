@@ -169,7 +169,7 @@ class RuntimeCaptureStore:
                 step_index=step_index,
                 agent_conversation_id=run.agent_conversation_id,
                 parent_agent_run_id=run.parent_agent_run_id,
-                agent_name=run.agent_name,
+                agent_id=run.agent_id,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 error=error,

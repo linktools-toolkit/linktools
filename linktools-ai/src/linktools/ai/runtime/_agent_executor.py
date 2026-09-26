@@ -125,11 +125,11 @@ from ._compaction import RuntimeCompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._mcp import (
-    _MCPResourceBinding,
-    _MCPResourceProjection,
+    _MCPBinding,
+    _MCPProjection,
     close_mcp_resources,
     materialize_mcp_capabilities,
-    prepare_mcp_resource_projections,
+    prepare_mcp_projections,
 )
 from ._memory import MemoryStore
 from ._metric_capability import RuntimeModelObservationCapability
@@ -212,10 +212,10 @@ class _AgentRunScope:
     ) = None
     sandbox_session: "SandboxSession | None" = None
     skill_resource_paths: Mapping[str, "str | None"] = field(default_factory=dict)
-    mcp_resource_bindings: Mapping[str, _MCPResourceBinding] = field(
+    mcp_bindings: Mapping[str, _MCPBinding] = field(
         default_factory=dict
     )
-    mcp_resource_projections: Mapping[str, _MCPResourceProjection] = field(
+    mcp_projections: Mapping[str, _MCPProjection] = field(
         default_factory=dict
     )
     mode: ExecutionMode = "run"
@@ -419,7 +419,11 @@ class AgentExecutor:
         )
         workspace = scope.workspace
         backend = self._sandbox
-        mcp_resource_bindings = _mcp_resource_bindings(scope.binding)
+        mcp_bindings = _mcp_bindings(scope.binding)
+        has_stdio_mcp = any(
+            server.transport == "stdio"
+            for server in scope.binding.compiled_agent.mcp_servers
+        )
         if backend is None:
             skill_resources: tuple[SandboxResource, ...] = ()
             resource_keys: Mapping[str, "str | None"] = {
@@ -431,9 +435,9 @@ class AgentExecutor:
                 scope.binding.compiled_agent,
                 self._asset_sources,
             )
-        mcp_projections = await prepare_mcp_resource_projections(
+        mcp_projections = await prepare_mcp_projections(
             scope.binding.compiled_agent.mcp_servers,
-            mcp_resource_bindings,
+            mcp_bindings,
             asset_readers=self._asset_sources,
             sandboxed=backend is not None,
         )
@@ -448,7 +452,7 @@ class AgentExecutor:
                 or (
                     not selected
                     and not skill_resources
-                    and not scope.binding.compiled_agent.mcp_servers
+                    and not has_stdio_mcp
                 )
             ):
                 return await self._execute(
@@ -458,8 +462,8 @@ class AgentExecutor:
                             skill.id: None
                             for skill in scope.binding.compiled_agent.skill_definitions
                         },
-                        mcp_resource_bindings=mcp_resource_bindings,
-                        mcp_resource_projections=mcp_projections,
+                        mcp_bindings=mcp_bindings,
+                        mcp_projections=mcp_projections,
                     ),
                     run_usage=run_usage,
                     usage_limits=usage_limits,
@@ -496,8 +500,8 @@ class AgentExecutor:
                     scope,
                     sandbox_session=session,
                     skill_resource_paths=resource_paths,
-                    mcp_resource_bindings=mcp_resource_bindings,
-                    mcp_resource_projections=mcp_projections,
+                    mcp_bindings=mcp_bindings,
+                    mcp_projections=mcp_projections,
                 ),
                 run_usage=run_usage,
                 usage_limits=usage_limits,
@@ -661,15 +665,25 @@ async def _close_mcp_resources(
         raise primary_error from cleanup_error
 
 
-def _mcp_resource_bindings(
+def _mcp_bindings(
     binding: AgentBinding,
-) -> dict[str, _MCPResourceBinding]:
+) -> dict[str, _MCPBinding]:
     codec = MCPServerSpecCodec()
-    result: dict[str, _MCPResourceBinding] = {}
+    servers = {
+        server.id: server
+        for server in binding.compiled_agent.mcp_servers
+    }
+    result: dict[str, _MCPBinding] = {}
     for pin in binding.binding_contract.selected:
         if pin.kind != "mcp":
             continue
-        server, versions = codec.from_execution_payload(pin.contract)
+        server = servers.get(pin.id)
+        if server is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        versions = codec.decode_binding_payload(
+            pin.contract,
+            declaration=server,
+        )
         asset_source_id = pin.contract.get("asset_source_id")
         if server.resource is not None:
             if (
@@ -685,7 +699,7 @@ def _mcp_resource_bindings(
         policy = pin.contract.get("execution_policy")
         if not isinstance(policy, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result[server.id] = _MCPResourceBinding(
+        result[server.id] = _MCPBinding(
             versions,
             asset_source_id,
             policy,
@@ -943,12 +957,12 @@ async def _materialize_agent(
         capabilities.extend(
             await materialize_mcp_capabilities(
                 compiled_agent.mcp_servers,
-                compiled_agent.mcp_selector_policy,
+                compiled_agent.mcp_policy,
                 sandbox=sandbox,
                 sandbox_session=scope.sandbox_session,
                 host_cwd=(scope.execution_cwd if sandbox is None else None),
-                resource_bindings=scope.mcp_resource_bindings,
-                projections=scope.mcp_resource_projections,
+                bindings=scope.mcp_bindings,
+                projections=scope.mcp_projections,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
             )
@@ -978,7 +992,7 @@ async def _materialize_agent(
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
-        agent_name=compiled_agent.spec.id,
+        agent_id=compiled_agent.spec.id,
         agent_run_id=scope.agent_run_id,
         execution_id=scope.context.execution_id,
         agent_run_sequence=scope.agent_run_sequence,
@@ -986,7 +1000,7 @@ async def _materialize_agent(
         memory_scope=scope.context.memory_scope,
         run_store=scope.run_store,
         memory_store=scope.memory_store,
-        ordinary_tool_policy=compiled_agent.ordinary_tool_policy,
+        tool_policy=compiled_agent.tool_policy,
         compaction_policy=compaction_policy,
         limits=scope.limits,
         planning=scope.planning,

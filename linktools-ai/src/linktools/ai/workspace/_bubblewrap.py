@@ -31,6 +31,7 @@ from ._sandbox import (
     SandboxSession,
     SandboxStdioProcess,
     StdioSandbox,
+    _normalize_stdio_environment,
     normalize_workspace_input_path,
 )
 from ._root import Workspace, validate_workspace_path
@@ -335,6 +336,7 @@ class _BubblewrapSandboxSession:
         args: "Sequence[str | SandboxResourcePath]" = (),
         *,
         resources: "Sequence[SandboxResource]" = (),
+        environment: "Mapping[str, str] | None" = None,
     ) -> SandboxStdioProcess:
         async with self._stdio_lock:
             self._ensure_open_sync()
@@ -357,6 +359,7 @@ class _BubblewrapSandboxSession:
                 tuple(resources),
             )
             command_args = _stdio_command_args(args, selected_resources)
+            process_environment = _normalize_stdio_environment(environment)
             self._stdio_execution_policy()
             lock_root = (
                 self._workspace.locks_root
@@ -374,6 +377,7 @@ class _BubblewrapSandboxSession:
                 mode="stdio",
                 command=command,
                 command_args=command_args,
+                environment=process_environment,
             )
             runtime_pidfd = _open_runtime_pidfd()
             try:
@@ -1301,6 +1305,7 @@ def _guardian_config(
     mode: str = "worker",
     command: str | None = None,
     command_args: tuple[str, ...] = (),
+    environment: "Mapping[str, str] | None" = None,
 ) -> dict[str, Any]:
     resource_specs = [
         {"id": resource.id, "path": _resource_guest_path(resource.id)}
@@ -1318,6 +1323,7 @@ def _guardian_config(
         mode=mode,
         command=command,
         command_args=command_args,
+        environment=environment,
     )
     return {
         "version": PROTOCOL_VERSION,
@@ -1339,6 +1345,7 @@ def _build_bwrap_args(
     mode: str = "worker",
     command: str | None = None,
     command_args: tuple[str, ...] = (),
+    environment: "Mapping[str, str] | None" = None,
 ) -> list[str]:
     args = [
         str(bwrap),
@@ -1450,6 +1457,8 @@ def _build_bwrap_args(
             "/workspace",
         )
     )
+    for key, value in sorted((environment or {}).items()):
+        args.extend(("--setenv", key, value))
     if mode == "worker":
         args.extend(
             (

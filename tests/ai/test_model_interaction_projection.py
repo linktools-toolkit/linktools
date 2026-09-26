@@ -531,7 +531,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             AgentRunRecord(
                 "run",
                 agent_conversation_id="conversation",
-                agent_name="parent",
+                agent_id="parent",
             )
         )
         journal = ModelRequestJournal(
@@ -624,7 +624,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
                 step_index=2,
                 messages=list(capture.transcript_messages()),
                 agent_conversation_id="conversation",
-                agent_name="parent",
+                agent_id="parent",
                 state="complete",
                 transcript_message_count_before=0,
             )
