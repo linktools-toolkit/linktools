@@ -18,7 +18,7 @@ from linktools.ai.runtime._capabilities import (
     compose_platform_capabilities,
 )
 from linktools.ai.runtime._harness_planning import HarnessPlanning
-from linktools.ai.runtime._compaction import RuntimeCompactionPolicy
+from linktools.ai.runtime._compaction import CompactionPolicy
 from linktools.ai.runtime.state._steps import (
     StagingAgentRunStore,
 )
@@ -47,7 +47,7 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         run_store=StagingAgentRunStore(),
         memory_store=None,
         tool_policy=(),
-        compaction_policy=RuntimeCompactionPolicy(),
+        compaction_policy=CompactionPolicy(),
         limits=PromptLimits(),
         planning=True,
         context_target_tokens=None,

@@ -25,7 +25,7 @@ from linktools.ai.capability import (
 )
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime._binding_resolver import _RuntimeBindingResolver
+from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_capture import TaskCapabilityCaptureStore
@@ -54,7 +54,7 @@ from linktools.ai.workspace import BubblewrapSandbox
 class _BindingFixture:
     compiler: AgentCompiler
     catalog: AgentCatalog
-    resolver: _RuntimeBindingResolver
+    resolver: _AgentBindingResolver
     assets: AssetStore
     binding: AgentBinding
 
@@ -134,7 +134,7 @@ async def _fixture() -> _BindingFixture:
             for agent_id, spec in specs.items()
         }
     )
-    resolver = _RuntimeBindingResolver(
+    resolver = _AgentBindingResolver(
         catalog,
         compiler,
     )
@@ -313,7 +313,7 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
     catalog = AgentCatalog(
         {specification.id: compiler.compile(specification)}
     )
-    resolver = _RuntimeBindingResolver(
+    resolver = _AgentBindingResolver(
         catalog,
         compiler,
     )
@@ -370,7 +370,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
         runtime_root=tmp_path,
         bwrap_executable=tmp_path / "bwrap",
     )
-    resolver = _RuntimeBindingResolver(
+    resolver = _AgentBindingResolver(
         catalog,
         compiler,
         sandbox=sandbox,
@@ -443,7 +443,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
                 for agent_id, spec in specs.items()
             }
         )
-        resolver = _RuntimeBindingResolver(catalog, compiler)
+        resolver = _AgentBindingResolver(catalog, compiler)
         binding = compiler.bind(catalog.root_agent("parent")).binding_contract
 
         await store.put(resource, b"print('updated')")

@@ -4,7 +4,7 @@
 
 import pytest
 from linktools.ai.observe import Observation
-from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
+from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from pydantic_ai import RunContext
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -24,7 +24,7 @@ class _Recorder:
 @pytest.mark.asyncio
 async def test_actual_model_attempts_never_reuse_observation_identity() -> None:
     recorder = _Recorder()
-    capability = RuntimeModelObservationCapability(
+    capability = ModelObservationCapability(
         recorder,
         source_namespace="workspace",
         tenant_id="tenant",

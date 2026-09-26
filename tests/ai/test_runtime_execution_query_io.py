@@ -13,7 +13,7 @@ from linktools.ai.core import (
     Principal,
 )
 from linktools.ai.runtime import ListExecutionRequest
-from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
+from linktools.ai.runtime._history_projection_service import DefaultExecutionHistoryService
 from linktools.ai.runtime.state._contracts import (
     ExecutionCandidate,
     ExecutionCandidatePage,

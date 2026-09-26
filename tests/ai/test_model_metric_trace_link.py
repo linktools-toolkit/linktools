@@ -6,12 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.observe import Observation
-from linktools.ai.runtime._capture import RuntimeCaptureStore
+from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._capabilities import (
-    _RuntimeAgentRunPersistence,
+    _AgentRunPersistenceCapability,
 )
-from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
-from linktools.ai.runtime._history import _trace_item
+from linktools.ai.runtime._metric_capability import ModelObservationCapability
+from linktools.ai.runtime._history_projection import _trace_item
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._metric_id import _model_observation_id
 from pydantic_ai import Agent, ModelRetry, RunContext
@@ -41,10 +41,10 @@ async def _text_model(
 
 
 def _persistence(
-    capture: RuntimeCaptureStore,
+    capture: AgentRunRecorder,
     agent_run_id: str,
-) -> _RuntimeAgentRunPersistence:
-    return _RuntimeAgentRunPersistence(
+) -> _AgentRunPersistenceCapability:
+    return _AgentRunPersistenceCapability(
         capture=capture,
         agent_id="agent",
         agent_run_id=agent_run_id,
@@ -55,9 +55,9 @@ def _model_metrics(
     recorder: _Recorder | None,
     agent_run_id: str,
     journal: ModelRequestJournal,
-    capture: RuntimeCaptureStore,
-) -> RuntimeModelObservationCapability:
-    return RuntimeModelObservationCapability(
+    capture: AgentRunRecorder,
+) -> ModelObservationCapability:
+    return ModelObservationCapability(
         recorder,
         source_namespace="workspace",
         tenant_id="tenant",
@@ -93,7 +93,7 @@ async def test_model_metric_and_trace_share_observation_id_and_duration() -> Non
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = RuntimeCaptureStore(store, execution_id=None, agent_run_id=agent_run_id)
+    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         TestModel(custom_output_text="done"),
         deps_type=object,
@@ -155,7 +155,7 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = RuntimeCaptureStore(store, execution_id=None, agent_run_id=agent_run_id)
+    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         FunctionModel(fail_model),
         deps_type=object,
@@ -210,7 +210,7 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = RuntimeCaptureStore(store, execution_id=None, agent_run_id=agent_run_id)
+    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         FunctionModel(_text_model),
         deps_type=object,
@@ -269,7 +269,7 @@ async def test_output_retry_trace_lineage_does_not_require_metrics() -> None:
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = RuntimeCaptureStore(store, execution_id=None, agent_run_id=agent_run_id)
+    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         FunctionModel(_text_model),
         capabilities=[
@@ -309,7 +309,7 @@ async def test_model_trace_omits_metric_metadata_when_metrics_disabled() -> None
         execution_id="execution",
         agent_run_id=agent_run_id,
     )
-    capture = RuntimeCaptureStore(store, execution_id=None, agent_run_id=agent_run_id)
+    capture = AgentRunRecorder(store, execution_id=None, agent_run_id=agent_run_id)
     agent = Agent(
         TestModel(custom_output_text="done"),
         capabilities=[
