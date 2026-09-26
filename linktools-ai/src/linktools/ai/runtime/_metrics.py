@@ -43,7 +43,7 @@ _FRAMEWORK_CORRELATION_KEYS = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeMetricStatus:
+class MetricBufferStatus:
     enabled: bool
     accepting: bool
     accepted: int
@@ -59,13 +59,13 @@ class RuntimeMetricStatus:
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeMetricFlushResult:
+class MetricFlushResult:
     completed: bool
-    status: RuntimeMetricStatus
+    status: MetricBufferStatus
 
 
-def _disabled_metric_status() -> RuntimeMetricStatus:
-    return RuntimeMetricStatus(False, False, 0, 0, 0, 0, 0, 0)
+def _disabled_metric_status() -> MetricBufferStatus:
+    return MetricBufferStatus(False, False, 0, 0, 0, 0, 0, 0)
 
 
 def _metric_correlation(
@@ -79,7 +79,7 @@ def _metric_correlation(
     return values
 
 
-class _RuntimeMetricBuffer(MetricRecorder):
+class _MetricBuffer(MetricRecorder):
     """Bound one Runtime's automatic observations without owning the Metrics store."""
 
     def __init__(self, metrics: Metrics) -> None:
@@ -135,11 +135,11 @@ class _RuntimeMetricBuffer(MetricRecorder):
     def release_execution_context(self, execution_id: str) -> None:
         self._execution_contexts.pop(execution_id, None)
 
-    def status(self) -> RuntimeMetricStatus:
+    def status(self) -> MetricBufferStatus:
         pending = self._accepted - self._persisted - self._lost
         if pending < 0:
             raise RuntimeError("runtime metric counters are inconsistent")
-        return RuntimeMetricStatus(
+        return MetricBufferStatus(
             True,
             self._accepting,
             self._accepted,
@@ -154,7 +154,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
             self._last_failure_code,
         )
 
-    async def flush(self, *, timeout_seconds: float = 5.0) -> RuntimeMetricFlushResult:
+    async def flush(self, *, timeout_seconds: float = 5.0) -> MetricFlushResult:
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
@@ -163,7 +163,7 @@ class _RuntimeMetricBuffer(MetricRecorder):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         target = self._accepted
         if self._resolved >= target:
-            return RuntimeMetricFlushResult(True, self.status())
+            return MetricFlushResult(True, self.status())
 
         async def wait_resolved() -> None:
             while self._resolved < target:
@@ -175,8 +175,8 @@ class _RuntimeMetricBuffer(MetricRecorder):
         try:
             await asyncio.wait_for(wait_resolved(), float(timeout_seconds))
         except asyncio.TimeoutError:
-            return RuntimeMetricFlushResult(False, self.status())
-        return RuntimeMetricFlushResult(True, self.status())
+            return MetricFlushResult(False, self.status())
+        return MetricFlushResult(True, self.status())
 
     @property
     def _resolved(self) -> int:
@@ -445,7 +445,7 @@ def _bind_metric_execution_context(
     execution_id: str,
     correlation: CorrelationData,
 ) -> None:
-    if isinstance(recorder, _RuntimeMetricBuffer):
+    if isinstance(recorder, _MetricBuffer):
         recorder.bind_execution_context(execution_id, correlation)
 
 
@@ -453,7 +453,7 @@ def _release_metric_execution_context(
     recorder: MetricRecorder | None,
     execution_id: str,
 ) -> None:
-    if not isinstance(recorder, _RuntimeMetricBuffer):
+    if not isinstance(recorder, _MetricBuffer):
         return
     try:
         recorder.release_execution_context(execution_id)
@@ -620,4 +620,4 @@ def _try_record(
         return False
 
 
-__all__ = ["RuntimeMetricFlushResult", "RuntimeMetricStatus"]
+__all__ = ["MetricFlushResult", "MetricBufferStatus"]

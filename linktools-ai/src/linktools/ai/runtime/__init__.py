@@ -12,14 +12,14 @@ from ..task import (
 )
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
-from ._metrics import RuntimeMetricFlushResult, RuntimeMetricStatus
+from ._metrics import MetricFlushResult, MetricBufferStatus
 from ._runtime_history import ExecutionInfo, RuntimeHistory
 from ._snapshot import (
     RestoredRuntime,
     RuntimeSnapshot,
     SnapshotExclusiveGuard,
     SnapshotLimits,
-    SnapshotTargetInspection,
+    SnapshotTargetInfo,
 )
 from ._runtime_service import Runtime
 from ._task import TaskGraphRun
@@ -161,8 +161,8 @@ __all__ = [
     "RuntimeDomain",
     "RuntimeContext",
     "RuntimeHistory",
-    "RuntimeMetricFlushResult",
-    "RuntimeMetricStatus",
+    "MetricFlushResult",
+    "MetricBufferStatus",
     "RuntimeRetentionMode",
     "RuntimeStorage",
     "RuntimeStoragePlan",
@@ -171,7 +171,7 @@ __all__ = [
     "RuntimeSnapshot",
     "SnapshotExclusiveGuard",
     "SnapshotLimits",
-    "SnapshotTargetInspection",
+    "SnapshotTargetInfo",
     "SessionHistoryItem",
     "SessionHistoryReader",
     "SessionService",

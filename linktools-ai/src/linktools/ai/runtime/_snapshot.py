@@ -43,7 +43,7 @@ _logger = environ.get_logger("ai.runtime.snapshot")
 
 
 @dataclass(frozen=True, slots=True)
-class SnapshotTargetInspection:
+class SnapshotTargetInfo:
     status: str
     generation: str | None
     snapshot_digest: str
@@ -457,13 +457,13 @@ class RuntimeSnapshot:
         *,
         object_store: ObjectStore,
         limits: SnapshotLimits,
-    ) -> SnapshotTargetInspection:
+    ) -> SnapshotTargetInfo:
         await cls.verify(ref, object_store=object_store, limits=limits)
         current = _read_current(Path(target) / "current.json")
         if current is None:
-            return SnapshotTargetInspection("missing", None, ref.digest)
+            return SnapshotTargetInfo("missing", None, ref.digest)
         if current.get("snapshot_digest") != ref.digest:
-            return SnapshotTargetInspection(
+            return SnapshotTargetInfo(
                 "conflict",
                 cast(str | None, current.get("generation")),
                 ref.digest,
@@ -492,7 +492,7 @@ class RuntimeSnapshot:
                 }:
                     raise
                 status = "modified"
-        return SnapshotTargetInspection(status, generation, ref.digest)
+        return SnapshotTargetInfo(status, generation, ref.digest)
 
     @classmethod
     async def collect_temporary(cls, target: str | Path) -> int:
@@ -1395,5 +1395,5 @@ __all__ = [
     "RuntimeSnapshot",
     "SnapshotExclusiveGuard",
     "SnapshotLimits",
-    "SnapshotTargetInspection",
+    "SnapshotTargetInfo",
 ]

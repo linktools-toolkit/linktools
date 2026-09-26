@@ -62,7 +62,7 @@ from ._history_service import DefaultExecutionHistoryService
 from ._input import ExecutionInputMaterializer
 from ._local import LocalExecutionBackend
 from ._memory import MemoryStore, RuntimeMemoryStore
-from ._metrics import _RuntimeMetricBuffer
+from ._metrics import _MetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
@@ -93,7 +93,7 @@ class _RuntimeComponents:
     close_callback: Callable[[], Awaitable[None]]
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
-    metric_control: _RuntimeMetricBuffer | None
+    metric_control: _MetricBuffer | None
     binding_resolver: _RuntimeBindingResolver
     history: object
 
@@ -328,7 +328,7 @@ def _runtime_close_actions(
     execution: DefaultExecutionService,
     backend: LocalExecutionBackend | None,
     input_materializer: ExecutionInputMaterializer,
-    metric_buffer: _RuntimeMetricBuffer | None,
+    metric_buffer: _MetricBuffer | None,
     storage: RuntimeStorage,
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
@@ -494,7 +494,7 @@ async def _build_local_components(
     session_execution_ready: bool,
     metrics: "Metrics | None",
 ) -> _RuntimeComponents:
-    metric_buffer: _RuntimeMetricBuffer | None = None
+    metric_buffer: _MetricBuffer | None = None
     metric_source_namespace: str | None = None
     backend: LocalExecutionBackend | None = None
 
@@ -518,7 +518,7 @@ async def _build_local_components(
         if not storage.ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         _require_storage_identity(storage, namespace=namespace, tenant_id=tenant_id)
-        metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
+        metric_buffer = None if metrics is None else _MetricBuffer(metrics)
         metric_source_namespace = None if metric_buffer is None else namespace
         runtime_bridge = _ExecutionRuntimeBridge()
         live_broker = LiveExecutionEventBroker()
