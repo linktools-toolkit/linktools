@@ -25,7 +25,7 @@ from linktools.ai.runtime._tool_boundary import (
     RuntimeToolBoundaryToolset,
 )
 from linktools.ai.workspace import (
-    WorkspaceToolPermissionPolicy,
+    ToolPermissionPolicy,
 )
 from ._runtime_test_helpers import tool_with_metadata
 
@@ -95,7 +95,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
             "_read_file": descriptor
         },
         id="workspace",
-            workspace_policy=WorkspaceToolPermissionPolicy(default="ask"),
+            permission_policy=ToolPermissionPolicy(default="ask"),
         tool_operations=bridge,  # type: ignore[arg-type]
     )
 
