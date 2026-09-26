@@ -64,7 +64,7 @@ def test_agent_binding_contract_persists_binding_inputs() -> None:
 
 def test_capability_pin_persists_contract_once() -> None:
     pin = CapabilityPin(
-        "runtime_capability",
+        "capability",
         "guardrail",
         {
             "version": 1,
@@ -76,7 +76,7 @@ def test_capability_pin_persists_contract_once() -> None:
     payload = pin.to_payload()
 
     assert payload == {
-        "kind": "runtime_capability",
+        "kind": "capability",
         "id": "guardrail",
             "contract": {
                 "version": 1,

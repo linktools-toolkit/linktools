@@ -279,7 +279,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
         allow_tools=selectors,
         allow_skills=(),
         allow_subagents=(),
-        allow_runtime_capabilities=(),
+        allow_capabilities=(),
     )
     compiler = AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
@@ -317,12 +317,12 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
             compiler.compile(spec)
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
-    for field in ("allow_skills", "allow_subagents", "allow_runtime_capabilities"):
+    for field in ("allow_skills", "allow_subagents", "allow_capabilities"):
         kwargs = {
             "allow_tools": (),
             "allow_skills": (),
             "allow_subagents": (),
-            "allow_runtime_capabilities": (),
+            "allow_capabilities": (),
             field: ("*", "missing"),
         }
         spec = AgentSpec("agent", **kwargs)
@@ -352,7 +352,7 @@ def test_global_tool_wildcard_preserves_exact_mcp_requirement() -> None:
         allow_tools=("*", exact),
         allow_skills=(),
         allow_subagents=(),
-        allow_runtime_capabilities=(),
+        allow_capabilities=(),
     )
     compiler = AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").capture(),
@@ -452,7 +452,7 @@ def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> Non
 def test_workspace_sandbox_capability_id_is_reserved() -> None:
     group = CapabilityGroup[object]("custom")
     with pytest.raises(AIError) as raised:
-        group.runtime_capability(_SpoofedSandboxCapability())
+        group.capability(_SpoofedSandboxCapability())
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 

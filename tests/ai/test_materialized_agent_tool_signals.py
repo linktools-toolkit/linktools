@@ -87,14 +87,14 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
 ) -> None:
     application = CapabilityGroup[None]("application")
     application.tool(_business_tool, name="business", effect_policy="replay_safe")
-    application.runtime_capability(_FailingCapability())
+    application.capability(_FailingCapability())
     application.agent(
         "default",
         model="default",
         allow_tools=("business", "read_file"),
         allow_skills=(),
         allow_subagents=(),
-        allow_runtime_capabilities=("application.failing-capability",),
+        allow_capabilities=("application.failing-capability",),
         tool_retries=0,
         output_retries=0,
     )
