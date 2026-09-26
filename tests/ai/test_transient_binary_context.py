@@ -12,7 +12,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from linktools.ai.runtime._capture import RuntimeCaptureStore
+from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._message import (
     binary_content_usage,
     project_transient_binary_content,
@@ -82,7 +82,7 @@ def test_only_binary_after_latest_complete_response_remains_pending() -> None:
 
 
 def test_checkpoint_context_projects_consumed_binary_even_without_compaction() -> None:
-    capture = RuntimeCaptureStore(
+    capture = AgentRunRecorder(
         object(),  # type: ignore[arg-type]
         execution_id="execution",
         agent_run_id="run",
@@ -99,7 +99,7 @@ def test_checkpoint_context_projects_consumed_binary_even_without_compaction() -
 
 
 def test_checkpoint_context_composes_compaction_with_pending_binary() -> None:
-    capture = RuntimeCaptureStore(
+    capture = AgentRunRecorder(
         object(),  # type: ignore[arg-type]
         execution_id="execution",
         agent_run_id="run",
@@ -126,12 +126,12 @@ async def test_checkpoint_recovery_keeps_pending_and_drops_consumed_binary() -> 
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("pending"))
     await store.register_agent_run(AgentRunRecord("consumed"))
-    pending_capture = RuntimeCaptureStore(
+    pending_capture = AgentRunRecorder(
         store,
         execution_id=None,
         agent_run_id="pending",
     )
-    consumed_capture = RuntimeCaptureStore(
+    consumed_capture = AgentRunRecorder(
         store,
         execution_id=None,
         agent_run_id="consumed",
