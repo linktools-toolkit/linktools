@@ -205,45 +205,61 @@ def test_mcp_durable_contract_excludes_connection_values() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("transport", "server_transport", "transport_class"),
+    ("transport", "path"),
     (
-        ("streamable-http", "streamable-http", "StreamableHttpTransport"),
-        ("sse", "sse", "SSETransport"),
+        ("streamable-http", "/mcp"),
+        ("sse", "/sse"),
     ),
 )
 async def test_remote_mcp_transport_discovers_tools_through_runtime_boundary(
-    monkeypatch: pytest.MonkeyPatch,
     transport: str,
-    server_transport: str,
-    transport_class: str,
+    path: str,
 ) -> None:
-    import fastmcp.client.transports as fastmcp_transports
-    from fastmcp import FastMCP
-    from fastmcp.utilities.tests import asgi_server
+    import socket
 
-    remote = FastMCP("runtime-transport-test")
+    import uvicorn
+    from mcp.server.mcpserver import MCPServer
 
-    @remote.tool
+    remote = MCPServer("runtime-transport-test")
+
+    @remote.tool(description="Echo a value.", structured_output=False)
     def echo(value: str) -> str:
         return value
 
-    async with asgi_server(remote, transport=server_transport) as running:
-        def create_transport(
-            url: str,
-            headers: dict[str, str] | None = None,
-        ) -> object:
-            assert url == running.url
-            return running.transport(headers=headers)
-
-        monkeypatch.setattr(
-            fastmcp_transports,
-            transport_class,
-            create_transport,
+    app = (
+        remote.streamable_http_app(streamable_http_path=path)
+        if transport == "streamable-http"
+        else remote.sse_app(sse_path=path)
+    )
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    listener.setblocking(False)
+    port = listener.getsockname()[1]
+    runner = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            log_level="critical",
+            access_log=False,
         )
+    )
+    server_task = asyncio.create_task(runner.serve(sockets=[listener]))
+    capabilities = ()
+    try:
+        for _ in range(500):
+            if runner.started:
+                break
+            if server_task.done():
+                await server_task
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("MCP test server did not start")
+
         server = MCPServerSpec(
             "remote",
             transport=transport,
-            url=running.url,
+            url=f"http://127.0.0.1:{port}{path}",
             headers={"X-Test": "value"},
         )
         binding = _MCPResourceBinding(
@@ -268,11 +284,14 @@ async def test_remote_mcp_transport_discovers_tools_through_runtime_boundary(
             tool_operations=None,
             tool_metrics=None,
         )
-        try:
-            tools = await capabilities[0].get_toolset().get_tools(_context())
-            assert _expected_mcp_tool_name("remote", "echo") in tools
-        finally:
+        tools = await capabilities[0].get_toolset().get_tools(_context())
+        assert _expected_mcp_tool_name("remote", "echo") in tools
+    finally:
+        if capabilities:
             await close_mcp_resources(capabilities)
+        runner.should_exit = True
+        await asyncio.wait_for(server_task, 5)
+        listener.close()
 
 
 def test_mcp_selectors_round_trip_logical_names() -> None:
