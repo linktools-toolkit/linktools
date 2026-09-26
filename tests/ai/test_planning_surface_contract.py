@@ -46,7 +46,7 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         memory_scope=None,
         run_store=StagingAgentRunStore(),
         memory_store=None,
-        ordinary_tool_policy=(),
+        tool_policy=(),
         compaction_policy=RuntimeCompactionPolicy(),
         limits=PromptLimits(),
         planning=True,

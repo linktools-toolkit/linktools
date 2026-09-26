@@ -2844,7 +2844,7 @@ class LocalExecutionBackend:
             )
             memory = None
             selected_memory = select_harness_memory_tools(
-                compiled_agent.ordinary_tool_policy
+                compiled_agent.tool_policy
             )
             if current.memory_scope is not None and selected_memory:
                 if self._memory_store_factory is None:

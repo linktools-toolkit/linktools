@@ -957,7 +957,7 @@ async def _materialize_agent(
         capabilities.extend(
             await materialize_mcp_capabilities(
                 compiled_agent.mcp_servers,
-                compiled_agent.mcp_selector_policy,
+                compiled_agent.mcp_policy,
                 sandbox=sandbox,
                 sandbox_session=scope.sandbox_session,
                 host_cwd=(scope.execution_cwd if sandbox is None else None),
@@ -1000,7 +1000,7 @@ async def _materialize_agent(
         memory_scope=scope.context.memory_scope,
         run_store=scope.run_store,
         memory_store=scope.memory_store,
-        ordinary_tool_policy=compiled_agent.ordinary_tool_policy,
+        tool_policy=compiled_agent.tool_policy,
         compaction_policy=compaction_policy,
         limits=scope.limits,
         planning=scope.planning,

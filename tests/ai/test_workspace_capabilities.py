@@ -362,8 +362,8 @@ def test_global_tool_wildcard_preserves_exact_mcp_requirement() -> None:
 
     definition = compiler.compile(spec)
 
-    assert mcp_server_selector(server.id) in definition.mcp_selector_policy
-    assert exact in definition.mcp_selector_policy
+    assert mcp_server_selector(server.id) in definition.mcp_policy
+    assert exact in definition.mcp_policy
 
 
 @pytest.mark.asyncio
