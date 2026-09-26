@@ -16,12 +16,13 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..spec import (
-    AgentMarkdownSpecCodec,
+    AgentSpecAdapter,
     AgentSpec,
     MCPServerSpec,
+    MCPServerSpecAdapter,
     MCPServerSpecCodec,
-    SkillMarkdownSpecAdapter,
-    SkillMarkdownSpecCodec,
+    SkillSpecAdapter,
+    SkillSpecAdapter,
     RepositoryInstructionDocument,
 )
 from ._contribution import CapabilityContribution
@@ -64,7 +65,7 @@ class AgentDeclarationLoader:
                 self._defaults = ImmutableJsonMapping(defaults)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-            AgentMarkdownSpecCodec().from_payload(
+            AgentSpecAdapter().from_mapping(
                 {"system_prompt": ""},
                 logical_id="defaults-validation",
                 defaults=self._defaults,
@@ -114,7 +115,7 @@ async def _load_agents(
 ) -> "Sequence[AgentSpec]":
     declarations = _package_declarations(context.list(kind=source_kind), ("/AGENT.md",))
     values = await context.read_many(tuple(entry.key for entry in declarations))
-    markdown = AgentMarkdownSpecCodec()
+    adapter = AgentSpecAdapter()
     result: list[AgentSpec] = []
     for entry, data in zip(declarations, values, strict=True):
         logical_id = entry.key.id[: -len("/AGENT.md")]
@@ -122,7 +123,7 @@ async def _load_agents(
             validate_logical_id(logical_id)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        result.append(markdown.decode(data, logical_id=logical_id, defaults=defaults))
+        result.append(adapter.decode_markdown(data, logical_id=logical_id, defaults=defaults))
     return result
 
 
@@ -133,15 +134,14 @@ async def _load_skills(
     declarations = _package_declarations(entries, ("/SKILL.md",))
     values = await context.read_many(tuple(entry.key for entry in declarations))
     result: list[SkillDefinition] = []
-    markdown = SkillMarkdownSpecCodec()
-    adapter = SkillMarkdownSpecAdapter()
+    adapter = SkillSpecAdapter()
     for entry, data in zip(declarations, values, strict=True):
         logical_id = entry.key.id[: -len("/SKILL.md")]
         try:
             validate_logical_id(logical_id)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        value = adapter.to_logical(logical_id, markdown.decode(data))
+        value = adapter.decode_markdown(data, logical_id=logical_id)
         prefix = f"{logical_id}/"
         resources: list[tuple[str, CapabilityLoadEntry]] = []
         for candidate in entries:
@@ -180,15 +180,21 @@ async def _load_mcp(
     entries = context.list(kind="mcp")
     declarations = _package_declarations(entries, ("/mcp.json", "/mcp.yaml"))
     values = await context.read_many(tuple(entry.key for entry in declarations))
-    codec = MCPServerSpecCodec()
+    adapter = MCPServerSpecAdapter()
     result: list[MCPServerSpec] = []
     for entry, data in zip(declarations, values, strict=True):
         suffix = "/mcp.json" if entry.key.id.endswith("/mcp.json") else "/mcp.yaml"
         result.append(
-            codec.decode_author(
-                data,
-                format="json" if suffix.endswith(".json") else "yaml",
-                package_id=entry.key.id[: -len(suffix)],
+            (
+                adapter.decode_json(
+                    data,
+                    package_id=entry.key.id[: -len(suffix)],
+                )
+                if suffix.endswith(".json")
+                else adapter.decode_yaml(
+                    data,
+                    package_id=entry.key.id[: -len(suffix)],
+                )
             )
         )
     return result

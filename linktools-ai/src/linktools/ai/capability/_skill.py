@@ -11,7 +11,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..core import JsonValue
 from ..asset import AssetVersionRef
 from ..errors import AIError, ErrorCode
-from ..spec import SkillMarkdownSpecCodec, SkillSpec, SkillSpecCodec
+from ..spec import SkillSpec, SkillSpecCodec
 from ._context import AgentContext
 from ._skill_source import (
     SkillLocation,
@@ -42,7 +42,7 @@ class SkillDefinition:
 
     @property
     def model_content(self) -> str:
-        return SkillMarkdownSpecCodec().model_content(self.spec.content)
+        return SkillSpecCodec().model_content(self.spec)
 
     @property
     def contract(self) -> "dict[str, JsonValue]":
