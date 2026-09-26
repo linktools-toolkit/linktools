@@ -742,7 +742,7 @@ async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
         commit_then_fail,
     )
     try:
-        run = AgentRunRecord("run", agent_conversation_id="conversation", agent_name="default")
+        run = AgentRunRecord("run", agent_conversation_id="conversation", agent_id="default")
         checkpoint = AgentRunCheckpoint(
             agent_run_id="run",
             step_index=1,
@@ -780,7 +780,7 @@ async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() ->
     try:
         recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
         assert isinstance(recovery, StateStepArchive)
-        run = AgentRunRecord("run", agent_conversation_id="conversation", agent_name="default")
+        run = AgentRunRecord("run", agent_conversation_id="conversation", agent_id="default")
         await recovery.register_agent_run(run)
         first = AgentRunCheckpoint(
             agent_run_id="run",
@@ -811,7 +811,7 @@ async def test_run_checkpoint_relocation_is_idempotent_and_validates_prefix() ->
         bad_run = AgentRunRecord(
             "bad-run",
             agent_conversation_id="conversation",
-            agent_name="default",
+            agent_id="default",
         )
         await recovery.register_agent_run(bad_run)
         await recovery.materialize_checkpoint(
@@ -856,7 +856,7 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_checkpoint() -> 
         run = AgentRunRecord(
             "run",
             agent_conversation_id="conversation",
-            agent_name="default",
+            agent_id="default",
             metadata={"history_id": "history"},
         )
         await recovery.register_agent_run(run)
@@ -1087,14 +1087,14 @@ async def test_recovery_preparation_failure_releases_its_owned_flight(
     run = AgentRunRecord(
         "run",
         agent_conversation_id="conversation",
-        agent_name="default",
+        agent_id="default",
         metadata={"history_id": "history"},
     )
     checkpoint = AgentRunCheckpoint(
         agent_run_id="run",
         step_index=1,
         agent_conversation_id=run.agent_conversation_id,
-        agent_name=run.agent_name,
+        agent_id=run.agent_id,
         messages=[ModelRequest(parts=[UserPromptPart("inspect")])],
         transcript_message_count_before=0,
     )

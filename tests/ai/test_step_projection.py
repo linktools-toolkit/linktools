@@ -26,7 +26,7 @@ def _run() -> AgentRunRecord:
         agent_run_id="run",
         agent_conversation_id="conversation",
         parent_agent_run_id=None,
-        agent_name="agent",
+        agent_id="agent",
         metadata={},
         started_at=datetime.now(timezone.utc),
     )
@@ -89,7 +89,7 @@ async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
                     step_index=index,
                     timestamp=now,
                     agent_conversation_id=run.agent_conversation_id,
-                    agent_name=run.agent_name,
+                    agent_id=run.agent_id,
                 )
             )
 
@@ -109,7 +109,7 @@ async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
             ],
             agent_conversation_id=run.agent_conversation_id,
             parent_agent_run_id=None,
-            agent_name=run.agent_name,
+            agent_id=run.agent_id,
             timestamp=now,
             transcript_message_count_before=0,
         )
@@ -145,7 +145,7 @@ async def test_agent_run_reuses_durable_recovery_identity(tmp_path: Path) -> Non
             agent_run_id="run",
             agent_conversation_id="conversation",
             parent_agent_run_id=None,
-            agent_name="agent",
+            agent_id="agent",
             metadata={"scope": "recovery"},
             started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
@@ -154,7 +154,7 @@ async def test_agent_run_reuses_durable_recovery_identity(tmp_path: Path) -> Non
             agent_run_id="run",
             agent_conversation_id="conversation",
             parent_agent_run_id=None,
-            agent_name="agent",
+            agent_id="agent",
             metadata={"scope": "recovery"},
             started_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
         )

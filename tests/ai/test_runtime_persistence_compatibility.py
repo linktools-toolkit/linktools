@@ -300,7 +300,7 @@ def test_step_persistence_reads_current_payload() -> None:
         agent_run_id="run",
         agent_conversation_id="conversation",
         parent_agent_run_id=None,
-        agent_name="agent",
+        agent_id="agent",
         metadata={},
         started_at=now,
     )

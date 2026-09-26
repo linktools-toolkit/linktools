@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Bridge sandbox-owned stdio bytes to the public MCP client session API."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -33,19 +33,24 @@ class _SandboxMCPTransport(ClientTransport):
         command: str,
         args: tuple[str | SandboxResourcePath, ...],
         resources: tuple[SandboxResource, ...],
+        environment: "Mapping[str, str] | None" = None,
     ) -> None:
         self._session = session
         self._command = command
         self._args = args
         self._resources = resources
+        self._environment = dict(environment or {})
         self._process: SandboxStdioProcess | None = None
 
     @asynccontextmanager
     async def connect_session(self, **session_kwargs: Any) -> AsyncIterator[ClientSession]:
+        kwargs: dict[str, object] = {"resources": self._resources}
+        if self._environment:
+            kwargs["environment"] = self._environment
         process = await self._session.open_stdio_process(
             self._command,
             self._args,
-            resources=self._resources,
+            **kwargs,
         )
         self._process = process
         read_send, read_receive = anyio.create_memory_object_stream(1)

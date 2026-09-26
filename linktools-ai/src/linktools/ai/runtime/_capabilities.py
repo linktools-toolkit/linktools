@@ -61,7 +61,7 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
     """Persist Runtime-owned step events, raw occurrences, and recovery checkpoints."""
 
     capture: RuntimeCaptureStore = field(repr=False, compare=False)
-    agent_name: str
+    agent_id: str
     agent_run_id: str
     parent_agent_run_id: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
@@ -136,7 +136,7 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
                 agent_run_id=self.agent_run_id,
                 agent_conversation_id=ctx.conversation_id,
                 parent_agent_run_id=self.parent_agent_run_id,
-                agent_name=self.agent_name,
+                agent_id=self.agent_id,
                 metadata=dict(self.metadata),
                 started_at=datetime.now(timezone.utc),
             )
@@ -346,7 +346,7 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
                 messages=list(raw),
                 agent_conversation_id=ctx.conversation_id,
                 parent_agent_run_id=self.parent_agent_run_id,
-                agent_name=self.agent_name,
+                agent_id=self.agent_id,
                 state=state,
                 context_messages=context_messages,
                 transcript_message_count_before=self._last_checkpoint_transcript_count,
@@ -361,7 +361,7 @@ class _RuntimeAgentRunPersistence(AbstractCapability[None]):
 
 async def compose_platform_capabilities(
     *,
-    agent_name: str,
+    agent_id: str,
     agent_run_id: str,
     execution_id: str | None = None,
     agent_run_sequence: int | None,
@@ -369,7 +369,7 @@ async def compose_platform_capabilities(
     memory_scope: str | None,
     run_store: AgentRunStore,
     memory_store: MemoryStore | None,
-    ordinary_tool_policy: tuple[str, ...],
+    tool_policy: tuple[str, ...],
     compaction_policy: RuntimeCompactionPolicy,
     limits: PromptLimits,
     planning: bool,
@@ -389,12 +389,11 @@ async def compose_platform_capabilities(
     )
     persistence = _RuntimeAgentRunPersistence(
         capture=capture,
-        agent_name=agent_name,
+        agent_id=agent_id,
         agent_run_id=agent_run_id,
         parent_agent_run_id=parent_agent_run_id,
         metadata={
             "capability_scope": "parent",
-            "agent_name": agent_name,
             **({} if history_id is None else {"history_id": history_id}),
             **(
                 {}
@@ -405,13 +404,13 @@ async def compose_platform_capabilities(
         deferred_pause_sink=deferred_pause_sink,
     )
     capabilities.append(persistence)
-    selected_memory = select_harness_memory_tools(ordinary_tool_policy)
+    selected_memory = select_harness_memory_tools(tool_policy)
     if memory_scope is not None and selected_memory:
         if memory_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         memory_capability = build_harness_memory(
             memory_store,
-            allow_tools=ordinary_tool_policy,
+            allow_tools=tool_policy,
             capability_id=_MEMORY_CAPABILITY_ID,
         )
         capabilities.append(memory_capability)
@@ -442,7 +441,7 @@ async def compose_platform_capabilities(
     _logger.debug(
         "platform capabilities composed: agent=%s step=%s memory_tools=%s "
         "planning=%s compaction_policy=per-run",
-        agent_name,
+        agent_id,
         agent_run_id,
         selected_memory,
         planning,

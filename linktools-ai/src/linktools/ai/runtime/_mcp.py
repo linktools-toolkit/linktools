@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Materialize compiler-selected stdio MCP as Runtime capabilities."""
+"""Materialize compiler-selected MCP servers as Runtime capabilities."""
 
 import asyncio
 import json
@@ -64,14 +64,14 @@ def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
 
 
 @dataclass(frozen=True, slots=True)
-class _MCPResourceBinding:
+class _MCPBinding:
     versions: "tuple[AssetVersionRef, ...] | None"
     asset_source_id: "str | None"
     execution_policy: Mapping[str, JsonValue]
 
 
 @dataclass(frozen=True, slots=True)
-class _MCPResourceProjection:
+class _MCPProjection:
     server_id: str
     args: tuple[str | SandboxResourcePath, ...]
     resources: tuple[SandboxResource, ...]
@@ -227,23 +227,23 @@ def _raise_primary_after_cleanup(
         raise primary_error from typed_cleanup_error
 
 
-async def prepare_mcp_resource_projections(
+async def prepare_mcp_projections(
     servers: Sequence[MCPServerSpec],
-    resources: Mapping[str, _MCPResourceBinding],
+    bindings: Mapping[str, _MCPBinding],
     *,
     asset_readers: Mapping[str, AssetStoreReader],
     sandboxed: bool,
-) -> dict[str, _MCPResourceProjection]:
+) -> dict[str, _MCPProjection]:
     """Verify selected Asset versions and expose existing local resource files."""
-    projections: dict[str, _MCPResourceProjection] = {}
+    projections: dict[str, _MCPProjection] = {}
     for server in servers:
-        binding = resources.get(server.id)
+        binding = bindings.get(server.id)
         if binding is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if server.resource is None:
             if binding.versions is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            projections[server.id] = _MCPResourceProjection(
+            projections[server.id] = _MCPProjection(
                 server.id,
                 tuple(server.args),
                 (),
@@ -284,7 +284,7 @@ async def prepare_mcp_resource_projections(
                 if sandboxed
                 else str(local_files[relative])
             )
-        projections[server.id] = _MCPResourceProjection(
+        projections[server.id] = _MCPProjection(
             server.id,
             tuple(arguments),
             (resource,) if sandboxed and resource is not None else (),
@@ -299,51 +299,79 @@ async def materialize_mcp_capabilities(
     sandbox: Sandbox | None,
     sandbox_session: object | None,
     host_cwd: "str | None",
-    resource_bindings: Mapping[str, _MCPResourceBinding],
-    projections: Mapping[str, _MCPResourceProjection],
+    bindings: Mapping[str, _MCPBinding],
+    projections: Mapping[str, _MCPProjection],
     tool_operations: "ToolOperationBridge | None",
     tool_metrics: "_ToolMetricContext | None",
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
-    """Materialize only compiler-selected stdio MCP servers."""
-    from fastmcp.client.transports import StdioTransport
+    """Materialize compiler-selected MCP servers."""
+    from fastmcp.client.transports import (
+        SSETransport,
+        StdioTransport,
+        StreamableHttpTransport,
+    )
+
     policy, required = _selector_policy(selectors)
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
     values: list[AbstractCapability[AgentContext[object]]] = []
-    current_policy = _mcp_execution_policy(sandbox)
-    if sandbox is not None and not isinstance(
-        sandbox_session,
-        StdioSandboxSession,
-    ):
-        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-    if policy and sandbox is None and host_cwd is None:
-        raise AIError(
-            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-            safe_details={"reason": "mcp_cwd_unavailable"},
-        )
     try:
         for server in servers:
             if server.id not in policy:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            binding = resource_bindings.get(server.id)
+            binding = bindings.get(server.id)
             projection = projections.get(server.id)
             if binding is None or projection is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            current_policy = _mcp_execution_policy(server, sandbox)
             if dict(binding.execution_policy) != dict(current_policy):
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             allowed = policy[server.id]
-            if sandbox is None:
-                transport = StdioTransport(
-                    server.command,
-                    list(projection.args),
-                    cwd=host_cwd,
+
+            if server.transport == "stdio":
+                if sandbox is None:
+                    if host_cwd is None:
+                        raise AIError(
+                            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                            safe_details={"reason": "mcp_cwd_unavailable"},
+                        )
+                    if server.command is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    transport = StdioTransport(
+                        server.command,
+                        list(projection.args),
+                        cwd=host_cwd,
+                        env=dict(server.env) or None,
+                    )
+                else:
+                    if (
+                        not isinstance(sandbox_session, StdioSandboxSession)
+                        or server.command is None
+                    ):
+                        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+                    transport = _SandboxMCPTransport(
+                        sandbox_session,
+                        server.command,
+                        projection.args,
+                        projection.resources,
+                        server.env,
+                    )
+            elif server.transport == "streamable-http":
+                if server.url is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                transport = StreamableHttpTransport(
+                    server.url,
+                    headers=dict(server.headers) or None,
+                )
+            elif server.transport == "sse":
+                if server.url is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                transport = SSETransport(
+                    server.url,
+                    headers=dict(server.headers) or None,
                 )
             else:
-                transport = _SandboxMCPTransport(
-                    sandbox_session,
-                    server.command,
-                    projection.args,
-                    projection.resources,
-                )
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
             client = Client(transport)
             toolset = _MCPDiscoveryToolset(
                 client,
@@ -372,8 +400,9 @@ async def materialize_mcp_capabilities(
                 )
             )
             _logger.debug(
-                "MCP server materialized: server=%s selected_tools=%s",
+                "MCP server materialized: server=%s transport=%s selected_tools=%s",
                 server.id,
+                server.transport,
                 "*" if allowed is None else tuple(sorted(allowed)),
             )
     except BaseException as primary_error:
@@ -387,7 +416,7 @@ async def materialize_mcp_capabilities(
 
 def _bound_resource_versions(
     server: MCPServerSpec,
-    binding: _MCPResourceBinding,
+    binding: _MCPBinding,
 ) -> "dict[str, AssetVersionRef]":
     if binding.versions is None:
         raise AIError(
@@ -472,8 +501,11 @@ def _model_tool_name(server_id: str, tool_name: str) -> str:
 
 
 def _mcp_execution_policy(
+    server: MCPServerSpec,
     sandbox: Sandbox | None,
 ) -> Mapping[str, JsonValue]:
+    if server.transport != "stdio":
+        return {"version": 1, "boundary": "host-network"}
     if sandbox is None:
         return {"version": 1, "boundary": "host-stdio"}
     if not isinstance(sandbox, StdioSandbox):

@@ -2487,7 +2487,7 @@ class StateStepArchive(AgentRunStore):
             messages=list(raw_messages),
             agent_conversation_id=run.agent_conversation_id,
             parent_agent_run_id=run.parent_agent_run_id,
-            agent_name=run.agent_name,
+            agent_id=run.agent_id,
             timestamp=latest.timestamp,
             state=latest.state,
             context_messages=context_messages,
@@ -2631,7 +2631,7 @@ def _conversation_relocated_checkpoint_matches(
         or observed.step_index != source.step_index
         or observed.agent_conversation_id != source.agent_conversation_id
         or observed.parent_agent_run_id != source.parent_agent_run_id
-        or observed.agent_name != source.agent_name
+        or observed.agent_id != source.agent_id
         or observed.timestamp != source.timestamp
         or observed.state != source.state
         or observed.idempotency_key != source.idempotency_key

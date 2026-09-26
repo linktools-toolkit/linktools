@@ -19,8 +19,8 @@ class CompiledAgent:
     selected_mcp: "tuple[CapabilityContribution[object], ...]"
     selected_runtime_capabilities: "tuple[CapabilityContribution[object], ...]"
     selected_subagents: "tuple[str, ...]"
-    ordinary_tool_policy: "tuple[str, ...]"
-    mcp_selector_policy: "tuple[str, ...]"
+    tool_policy: "tuple[str, ...]"
+    mcp_policy: "tuple[str, ...]"
 
     def __post_init__(self) -> None:
         if not isinstance(self.spec, AgentSpec):

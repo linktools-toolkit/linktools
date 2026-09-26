@@ -71,7 +71,7 @@ def _tool_run(agent_run_id: str) -> AgentRunRecord:
         agent_run_id=agent_run_id,
         agent_conversation_id="conversation",
         parent_agent_run_id=None,
-        agent_name="agent",
+        agent_id="agent",
         metadata={},
         started_at=datetime.now(timezone.utc),
     )

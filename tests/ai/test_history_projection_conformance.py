@@ -208,7 +208,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                         step_index=3,
                         timestamp=now,
                         agent_conversation_id=run.agent_conversation_id,
-                        agent_name=run.agent_name,
+                        agent_id=run.agent_id,
                     ),
                 ),
                 checkpoints=(),
@@ -236,7 +236,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                     ],
                     agent_conversation_id=run.agent_conversation_id,
                     parent_agent_run_id=run.parent_agent_run_id,
-                    agent_name=run.agent_name,
+                    agent_id=run.agent_id,
                     timestamp=now,
                     transcript_message_count_before=0,
                 ),
@@ -277,7 +277,7 @@ async def test_terminal_prepare_accepts_an_unprojected_execution_run(
                     execution_id="execution",
                 ),
                 parent_agent_run_id=None,
-                agent_name="default",
+                agent_id="default",
                 metadata={"agent_run_sequence": "1"},
                 started_at=now,
             )
@@ -333,7 +333,7 @@ async def test_conversation_head_replacement_preserves_physical_identity(
             agent_run_id="run",
             agent_conversation_id="conversation",
             parent_agent_run_id=None,
-            agent_name="default",
+            agent_id="default",
             metadata={"history_id": "history"},
             started_at=now,
         )
@@ -345,7 +345,7 @@ async def test_conversation_head_replacement_preserves_physical_identity(
                 messages=[ModelRequest(parts=[UserPromptPart(content="hello")])],
                 agent_conversation_id="conversation",
                 parent_agent_run_id=None,
-                agent_name="default",
+                agent_id="default",
                 timestamp=now,
                 transcript_message_count_before=0,
             ),
@@ -526,10 +526,10 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
             agent_run_id=agent_run_id,
             agent_conversation_id=agent_conversation_id,
             parent_agent_run_id=None,
-            agent_name="default",
+            agent_id="default",
             metadata={
                 "agent_run_sequence": str(sequence),
-                "agent_name": "default",
+                "agent_id": "default",
             },
             started_at=now,
         )
@@ -541,7 +541,7 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
             step_index=1,
             timestamp=now,
             agent_conversation_id=agent_conversation_id,
-            agent_name="default",
+            agent_id="default",
         )
     )
     await state.run_store.append_event(
@@ -551,7 +551,7 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
             step_index=2,
             timestamp=now,
             agent_conversation_id=agent_conversation_id,
-            agent_name="default",
+            agent_id="default",
             metadata={
                 "linktools.ai.model_usage.input_tokens": "0",
                 "linktools.ai.model_usage.output_tokens": "0",
@@ -579,7 +579,7 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
             ],
             agent_conversation_id=agent_conversation_id,
             parent_agent_run_id=None,
-            agent_name="default",
+            agent_id="default",
             timestamp=now,
             transcript_message_count_before=0,
         )

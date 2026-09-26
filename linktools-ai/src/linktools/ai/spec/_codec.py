@@ -325,7 +325,7 @@ class SkillMarkdownSpecCodec:
                 raise
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
         metadata = dict(frontmatter.get("metadata", {}))
-        revision = metadata.pop("linktools-revision", 1)
+        revision = _skill_revision(metadata.pop("linktools-revision", 1))
         if (
             frontmatter["name"] != value.id
             or frontmatter["description"] != value.description
@@ -343,7 +343,7 @@ class SkillMarkdownSpecCodec:
             content = data.decode("utf-8")
             frontmatter = _parse_skill_markdown(content)
             metadata = dict(frontmatter.get("metadata", {}))
-            revision = metadata.pop("linktools-revision", 1)
+            revision = _skill_revision(metadata.pop("linktools-revision", 1))
             return SkillSpec(
                 frontmatter["name"],
                 content,
@@ -398,23 +398,46 @@ def retarget_skill_markdown(content: str, local_name: str) -> str:
 
 class MCPServerSpecCodec:
     def to_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
+        """Return the complete declaration wire payload, including connection data."""
         if not isinstance(value, MCPServerSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid")
         payload: dict[str, JsonValue] = {
             "version": 1,
             "id": value.id,
             "revision": value.revision,
-            "command": value.command,
-            "args": list(value.args),
+            "transport": value.transport,
         }
-        if value.resource is not None:
-            payload["resource"] = {
-                "kind": value.resource.kind,
-                "id": value.resource.id,
-            }
+        if value.transport == "stdio":
+            payload["command"] = value.command
+            if value.args:
+                payload["args"] = list(value.args)
+            if value.env:
+                payload["env"] = dict(value.env)
+            if value.resource is not None:
+                payload["resource"] = {"kind": value.resource.kind, "id": value.resource.id}
+        else:
+            payload["url"] = value.url
+            if value.headers:
+                payload["headers"] = dict(value.headers)
         return payload
 
-    def to_execution_payload(
+    def to_contract_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
+        """Return connection-free semantic MCP behavior for durable bindings."""
+        if not isinstance(value, MCPServerSpec):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid")
+        payload: dict[str, JsonValue] = {
+            "version": 1,
+            "id": value.id,
+            "revision": value.revision,
+            "transport": value.transport,
+        }
+        if value.args:
+            payload["args"] = list(value.args)
+        if value.resource is not None:
+            payload["resource"] = {"kind": value.resource.kind, "id": value.resource.id}
+        return payload
+
+    def to_binding_payload(
         self,
         value: MCPServerSpec,
         resource_versions: "Sequence[AssetVersionRef] | None",
@@ -422,12 +445,9 @@ class MCPServerSpecCodec:
         asset_source_id: "str | None" = None,
         execution_policy: "Mapping[str, JsonValue] | None" = None,
     ) -> "dict[str, JsonValue]":
-        """Return the MCP contract stored in an execution binding."""
-        payload = self.to_payload(value)
+        payload = self.to_contract_payload(value)
         if execution_policy is not None:
-            payload["execution_policy"] = _execution_policy_payload(
-                execution_policy
-            )
+            payload["execution_policy"] = _execution_policy_payload(execution_policy)
         if value.resource is None:
             if resource_versions is not None or asset_source_id is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -436,30 +456,23 @@ class MCPServerSpecCodec:
             not isinstance(item, AssetVersionRef) for item in resource_versions
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        versions = tuple(
-            sorted(
-                resource_versions,
-                key=lambda item: (item.key.kind, item.key.id),
-            )
-        )
+        versions = tuple(sorted(resource_versions, key=lambda item: (item.key.kind, item.key.id)))
         if len({item.key for item in versions}) != len(versions):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if not isinstance(asset_source_id, str) or not asset_source_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        payload["resource_versions"] = [
-            item.to_payload() for item in versions
-        ]
+        payload["resource_versions"] = [item.to_payload() for item in versions]
         payload["asset_source_id"] = asset_source_id
         return payload
 
-    def to_wire_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
-        return self.to_payload(value)
-
     def from_payload(self, raw: Mapping[str, object]) -> MCPServerSpec:
-        value, resource_versions = self._decode_payload(raw, execution=False)
-        if resource_versions is not None:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        return value
+        _require_v1(raw)
+        if any(key in raw for key in ("resource_versions", "asset_source_id", "execution_policy")):
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                "MCP binding fields are Runtime-owned",
+            )
+        return _decode_mcp_wire_server(raw)
 
     def decode_author(
         self,
@@ -468,7 +481,6 @@ class MCPServerSpecCodec:
         format: Literal["json", "yaml"],
         package_id: "str | None" = None,
     ) -> MCPServerSpec:
-        """Decode a strict flat or package MCP declaration."""
         if format not in {"json", "yaml"}:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         raw = (
@@ -476,128 +488,272 @@ class MCPServerSpecCodec:
             if format == "json"
             else decode_author_yaml_mapping(data)
         )
-        payload: dict[str, object] = {
-            "version": raw.get("version", _VERSION),
-            "revision": raw.get("revision", 1),
-            "id": raw.get("id"),
-            "command": raw.get("command"),
-            "args": raw.get("args", []),
-        }
-        if "resource" in raw:
-            payload["resource"] = raw["resource"]
-        version = payload.get("version")
-        if (
-            isinstance(version, bool)
-            or not isinstance(version, int)
-            or version != _VERSION
-        ):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        identity = payload.get("id")
+        identity = raw.get("id")
         if package_id is None:
             if not isinstance(identity, str) or not identity.strip():
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        elif "id" in raw and identity != package_id:
+            return _decode_mcp_author_server(
+                raw,
+                identity=identity,
+                revision=_decode_author_revision(raw.get("revision", 1)),
+                package=False,
+            )
+        if "id" in raw and identity != package_id:
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        resource = payload.get("resource")
-        if resource is not None and not isinstance(resource, Mapping):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if package_id is not None:
-            payload["id"] = package_id
-            package_resource = AssetKey("mcp", package_id)
-            if "resource" in payload and _decode_asset_key(
-                payload["resource"]
-            ) != package_resource:
-                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-            payload["resource"] = {
-                "kind": package_resource.kind,
-                "id": package_resource.id,
-            }
-        return self.from_payload(payload)
+        return _decode_mcp_author_server(
+            raw,
+            identity=package_id,
+            revision=_decode_author_revision(raw.get("revision", 1)),
+            package=True,
+        )
 
-    def from_execution_payload(
+    def decode_config(
         self,
-        raw: Mapping[str, object],
-    ) -> "tuple[MCPServerSpec, tuple[AssetVersionRef, ...] | None]":
-        """Decode an MCP contract carried by an execution binding."""
-        return self._decode_payload(raw, execution=True)
+        data: bytes,
+        *,
+        revision: int = 1,
+    ) -> "tuple[MCPServerSpec, ...]":
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        raw = decode_author_json_mapping(data)
+        servers = raw.get("mcpServers")
+        if not isinstance(servers, Mapping):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        result: list[MCPServerSpec] = []
+        for identity in sorted(servers):
+            value = servers[identity]
+            if not isinstance(identity, str) or not identity.strip() or not isinstance(value, Mapping):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            result.append(
+                _decode_mcp_author_server(
+                    value,
+                    identity=identity,
+                    revision=revision,
+                    package=False,
+                )
+            )
+        return tuple(result)
 
-    def _decode_payload(
+    def decode_binding_payload(
         self,
         raw: Mapping[str, object],
         *,
-        execution: bool,
-    ) -> "tuple[MCPServerSpec, tuple[AssetVersionRef, ...] | None]":
-        _require_v1(raw)
-        if not execution and (
-            "resource_versions" in raw
-            or "asset_source_id" in raw
-            or "execution_policy" in raw
-        ):
-            raise AIError(
-                ErrorCode.OUTPUT_CONTRACT_INVALID,
-                "MCP execution resource fields are Runtime-owned",
-            )
-        identity = raw.get("id")
-        revision = _decode_revision(raw)
-        command = raw.get("command")
-        resource = _decode_asset_key(raw.get("resource"))
-        resource_versions: tuple[AssetVersionRef, ...] | None = None
-        raw_versions = raw.get("resource_versions") if execution else None
-        if raw_versions is not None:
-            if not isinstance(raw_versions, list):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                parsed = tuple(
-                    AssetVersionRef.from_payload(item)
-                    for item in raw_versions
-                )
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            keys = tuple(item.key for item in parsed)
-            if len(keys) != len(set(keys)):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            resource_versions = tuple(
-                sorted(parsed, key=lambda item: (item.key.kind, item.key.id))
-            )
-        if execution and "execution_policy" in raw:
-            _execution_policy_payload(raw["execution_policy"])
-            if resource is not None and resource_versions is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        asset_source_id = raw.get("asset_source_id") if execution else None
-        if resource_versions is None:
-            if execution and "asset_source_id" in raw:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        else:
-            if (
-                resource is None
-                or not isinstance(asset_source_id, str)
-                or not asset_source_id
+        declaration: MCPServerSpec,
+    ) -> "tuple[AssetVersionRef, ...] | None":
+        semantic, resource_versions = _decode_mcp_binding_contract(raw)
+        if semantic != self.to_contract_payload(declaration):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return resource_versions
+
+    def encode(self, value: MCPServerSpec) -> bytes:
+        return _encode(self.to_payload(value))
+
+    def decode(self, data: bytes) -> MCPServerSpec:
+        return self.from_payload(_decode(data))
+
+
+def _decode_mcp_wire_server(raw: Mapping[str, object]) -> MCPServerSpec:
+    identity = raw.get("id")
+    revision = _decode_revision(raw)
+    transport = raw.get("transport")
+    if (
+        not isinstance(identity, str)
+        or not identity.strip()
+        or transport not in {"stdio", "streamable-http", "sse"}
+    ):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+
+    try:
+        if transport == "stdio":
+            if "url" in raw or "headers" in raw:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            command = raw.get("command")
+            args = raw.get("args", [])
+            env = raw.get("env", {})
+            resource = _decode_asset_key(raw.get("resource"))
+            if not isinstance(command, str) or not command.strip():
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            if not isinstance(args, list) or any(
+                not isinstance(item, str) for item in args
             ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        args = raw.get("args", [])
-        if not isinstance(identity, str) or not identity.strip():
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server id must be a non-empty string")
-        if not isinstance(command, str) or not command.strip():
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server command must be a non-empty string")
-        if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server args must be a string array")
-        try:
-            value = MCPServerSpec(
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            if not isinstance(env, Mapping) or any(
+                not isinstance(key, str)
+                or not key
+                or not isinstance(value, str)
+                for key, value in env.items()
+            ):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            return MCPServerSpec(
                 identity,
                 command,
                 tuple(args),
                 resource,
+                transport="stdio",
+                env=dict(env),
+                revision=revision,
+            )
+
+        if any(key in raw for key in ("command", "args", "env", "resource")):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        url = raw.get("url")
+        headers = raw.get("headers", {})
+        if not isinstance(url, str) or not url.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if not isinstance(headers, Mapping) or any(
+            not isinstance(key, str)
+            or not key
+            or not isinstance(value, str)
+            for key, value in headers.items()
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        return MCPServerSpec(
+            identity,
+            transport=transport,
+            url=url,
+            headers=dict(headers),
+            revision=revision,
+        )
+    except AIError:
+        raise
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+
+
+def _decode_mcp_author_server(
+    raw: Mapping[str, object],
+    *,
+    identity: str,
+    revision: int,
+    package: bool,
+) -> MCPServerSpec:
+    transport_value = raw.get("type")
+    has_command = "command" in raw
+    has_url = "url" in raw
+    if transport_value is None:
+        if has_command == has_url:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        transport = "stdio" if has_command else "streamable-http"
+    elif isinstance(transport_value, str):
+        transport = "streamable-http" if transport_value in {"http", "streamable-http"} else transport_value
+    else:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    if transport not in {"stdio", "streamable-http", "sse"}:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    if package and transport != "stdio":
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+
+    if transport == "stdio":
+        if "url" in raw or "headers" in raw:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        command = raw.get("command")
+        args = raw.get("args", [])
+        env = raw.get("env", {})
+        if not isinstance(command, str) or not command.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if not isinstance(env, Mapping) or any(
+            not isinstance(key, str) or not key or not isinstance(value, str)
+            for key, value in env.items()
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        try:
+            return MCPServerSpec(
+                identity,
+                command,
+                tuple(args),
+                AssetKey("mcp", identity) if package else None,
+                transport="stdio",
+                env=dict(env),
                 revision=revision,
             )
         except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid") from error
-        return value, resource_versions
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
 
-    def encode(self, value: MCPServerSpec) -> bytes:
-        return _encode(self.to_wire_payload(value))
+    if any(key in raw for key in ("command", "args", "env")):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    url = raw.get("url")
+    headers = raw.get("headers", {})
+    if not isinstance(url, str) or not url.strip():
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    if not isinstance(headers, Mapping) or any(
+        not isinstance(key, str) or not key or not isinstance(value, str)
+        for key, value in headers.items()
+    ):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    try:
+        return MCPServerSpec(
+            identity,
+            transport=transport,
+            url=url,
+            headers=dict(headers),
+            revision=revision,
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
 
-    def decode(self, data: bytes) -> MCPServerSpec:
-        return self.from_payload(_decode(data))
+
+def _decode_mcp_binding_contract(
+    raw: Mapping[str, object],
+) -> "tuple[dict[str, JsonValue], tuple[AssetVersionRef, ...] | None]":
+    _require_v1(raw)
+    if any(key in raw for key in ("command", "url", "env", "headers")):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    identity = raw.get("id")
+    revision = _decode_revision(raw)
+    transport = raw.get("transport")
+    args = raw.get("args", [])
+    resource = _decode_asset_key(raw.get("resource"))
+    if (
+        not isinstance(identity, str)
+        or not identity.strip()
+        or transport not in {"stdio", "streamable-http", "sse"}
+        or not isinstance(args, list)
+        or any(not isinstance(item, str) for item in args)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if transport != "stdio" and (args or resource is not None):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    semantic: dict[str, JsonValue] = {
+        "version": 1,
+        "id": identity,
+        "revision": revision,
+        "transport": transport,
+    }
+    if args:
+        semantic["args"] = list(args)
+    if resource is not None:
+        semantic["resource"] = {"kind": resource.kind, "id": resource.id}
+
+    resource_versions: tuple[AssetVersionRef, ...] | None = None
+    raw_versions = raw.get("resource_versions")
+    if raw_versions is not None:
+        if not isinstance(raw_versions, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            parsed = tuple(AssetVersionRef.from_payload(item) for item in raw_versions)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        keys = tuple(item.key for item in parsed)
+        if len(keys) != len(set(keys)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        resource_versions = tuple(sorted(parsed, key=lambda item: (item.key.kind, item.key.id)))
+    asset_source_id = raw.get("asset_source_id")
+    if resource is None:
+        if resource_versions is not None or asset_source_id is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    elif resource_versions is None or not isinstance(asset_source_id, str) or not asset_source_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if "execution_policy" in raw:
+        _execution_policy_payload(raw["execution_policy"])
+    return semantic, resource_versions
+
+
+def _decode_author_revision(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    return value
 
 
 def _encode(value: "dict[str, object]") -> bytes:
@@ -609,10 +765,11 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     policy = dict(value)
     boundary = policy.get("boundary")
-    if boundary == "host-stdio":
-        if policy != {"version": 1, "boundary": "host-stdio"}:
+    if boundary in {"host-stdio", "host-network"}:
+        expected = {"version": 1, "boundary": boundary}
+        if policy != expected:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return {"version": 1, "boundary": "host-stdio"}
+        return expected
     expected = {
         "version",
         "boundary",
@@ -773,6 +930,20 @@ def _construct_mapping(loader: _StrictSafeLoader, node: yaml.nodes.MappingNode, 
 _StrictSafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
 
 
+def _skill_revision(value: object) -> int:
+    if isinstance(value, bool):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    if isinstance(value, int):
+        revision = value
+    elif isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value) is not None:
+        revision = int(value)
+    else:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    if revision < 1:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    return revision
+
+
 def _parse_skill_markdown(content: str) -> dict[str, object]:
     lines = content.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
@@ -794,9 +965,7 @@ def _parse_skill_markdown(content: str) -> dict[str, object]:
         metadata = frontmatter["metadata"]
         if not isinstance(metadata, Mapping):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        revision = metadata.get("linktools-revision", 1)
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        _skill_revision(metadata.get("linktools-revision", 1))
         try:
             normalized = normalize_json_value(dict(metadata))
             frontmatter["metadata"] = dict(

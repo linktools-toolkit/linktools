@@ -362,8 +362,8 @@ def test_global_tool_wildcard_preserves_exact_mcp_requirement() -> None:
 
     definition = compiler.compile(spec)
 
-    assert mcp_server_selector(server.id) in definition.mcp_selector_policy
-    assert exact in definition.mcp_selector_policy
+    assert mcp_server_selector(server.id) in definition.mcp_policy
+    assert exact in definition.mcp_policy
 
 
 @pytest.mark.asyncio
@@ -372,9 +372,9 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
     declaration_root = tmp_path / "declarations"
     agent_dir = declaration_root / "custom-agents"
     agent_dir.mkdir(parents=True)
-    (agent_dir / "audit").write_bytes(
-        AgentSpecCodec().encode(AgentSpec("audit", model="default"))
-    )
+    audit = agent_dir / "audit" / "AGENT.md"
+    audit.parent.mkdir(parents=True)
+    audit.write_text("---\nmodel: default\n---\n", encoding="utf-8")
     backend = DirectoryAssetBackend(
         str(declaration_root),
         path_adapter=PrefixAssetPathAdapter(
