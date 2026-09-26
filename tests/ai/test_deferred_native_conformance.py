@@ -130,7 +130,7 @@ async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
             execution_id=None,
             agent_run_id=agent_run_id,
         ),
-        agent_name="agent",
+        agent_id="agent",
         agent_run_id=agent_run_id,
     )
     agent = Agent(TestModel(custom_output_text="ok"))
