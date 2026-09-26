@@ -7,8 +7,8 @@ from collections.abc import Sequence
 import pytest
 from linktools.ai.core import PromptLimits
 from linktools.ai.runtime._compaction import (
-    RuntimeCompaction,
-    RuntimeCompactionPolicy,
+    CompactionCapability,
+    CompactionPolicy,
 )
 from linktools.ai.runtime._journal import ModelRequestFact, ModelRequestJournal
 from pydantic_ai.messages import (
@@ -27,7 +27,7 @@ from pydantic_ai.usage import RunUsage
 
 
 async def _provider_context(
-    capability: RuntimeCompaction,
+    capability: CompactionCapability,
     ctx: RunContext[object],
     request_context: ModelRequestContext,
 ) -> ModelRequestContext:
@@ -102,7 +102,7 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
             )
         )
 
-    capability = RuntimeCompaction(
+    capability = CompactionCapability(
         1,
         limits=PromptLimits(),
         journal=journal,
@@ -228,10 +228,10 @@ async def test_compaction_target_does_not_rewrite_history_below_threshold() -> N
     )
 
     provider_context = await _provider_context(
-        RuntimeCompaction(
+        CompactionCapability(
             1_000_000,
             limits=PromptLimits(),
-            policy=RuntimeCompactionPolicy(
+            policy=CompactionPolicy(
                 context_dedupe_by_tool={
                     "inspect_document": "workspace_file_read_v1",
                 },
@@ -263,10 +263,10 @@ async def test_compaction_without_target_still_deduplicates_file_reads() -> None
     )
 
     provider_context = await _provider_context(
-        RuntimeCompaction(
+        CompactionCapability(
             None,
             limits=PromptLimits(),
-            policy=RuntimeCompactionPolicy(
+            policy=CompactionPolicy(
                 context_dedupe_by_tool={
                     "inspect_document": "workspace_file_read_v1",
                 },
@@ -323,10 +323,10 @@ async def test_compaction_keeps_semantic_control_results() -> None:
         model_request_parameters=ModelRequestParameters(),
     )
     provider_context = await _provider_context(
-        RuntimeCompaction(
+        CompactionCapability(
             1,
             limits=PromptLimits(),
-            policy=RuntimeCompactionPolicy(
+            policy=CompactionPolicy(
                 keep_result_tools=frozenset({"hidden_control"}),
             ),
         ),

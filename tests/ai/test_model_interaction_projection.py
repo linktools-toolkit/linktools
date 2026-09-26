@@ -31,7 +31,7 @@ from linktools.ai.runtime._attachment import (
     bind_tool_return_attachments,
     input_attachment_views,
 )
-from linktools.ai.runtime._capture import RuntimeCaptureStore
+from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._message import decode_model_messages
 from linktools.ai.runtime._model_interaction import (
@@ -216,7 +216,7 @@ async def test_model_request_records_attach_files_call_identity() -> None:
     store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
+    capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
     return_value = {
         "files": [
             {
@@ -290,7 +290,7 @@ async def test_model_request_preserves_duplicate_initial_attachment_identity() -
     store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
-    capture = RuntimeCaptureStore(
+    capture = AgentRunRecorder(
         store,
         execution_id="execution",
         agent_run_id="run",
@@ -345,7 +345,7 @@ async def test_model_request_preserves_input_attachment_identifiers() -> None:
     store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
-    capture = RuntimeCaptureStore(
+    capture = AgentRunRecorder(
         store,
         execution_id="execution",
         agent_run_id="run",
@@ -390,7 +390,7 @@ async def test_success_request_does_not_stage_full_message_payloads() -> None:
     store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
+    capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
     message = ModelRequest(parts=[UserPromptPart("hello")])
     journal = _journal()
     fact = journal.begin(1)
@@ -428,7 +428,7 @@ async def test_failed_request_inlines_context_only_after_failure() -> None:
     store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
+    capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
     message = ModelRequest(parts=[UserPromptPart("hello")])
     journal = _journal()
     fact = journal.begin(1)
@@ -458,7 +458,7 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
     store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
+    capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
     business = {"timestamp": "before", "nested": {"value": 1}}
     request = ModelRequest(
         parts=[
@@ -522,7 +522,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="interaction-tool-roundtrip", tenant_id="tenant")
     try:
-        capture = RuntimeCaptureStore(
+        capture = AgentRunRecorder(
             state.run_store,
             execution_id="execution",
             agent_run_id="run",
@@ -657,7 +657,7 @@ async def test_compaction_request_uses_explicit_source_not_stale_projection() ->
     store = ModelInteractionStagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
-    capture = RuntimeCaptureStore(store, execution_id="execution", agent_run_id="run")
+    capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
     stale_source = (ModelRequest(parts=[UserPromptPart("stale")]),)
     capture.remember_context_projection(
         stale_source,

@@ -14,7 +14,7 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._memory import RuntimeMemoryStore, _decode_receipt
 from linktools.ai.runtime.state._contracts import MemoryRecord
-from linktools.ai.runtime.state._memory import MemoryStateStorageGroup, MemoryStateStore
+from linktools.ai.runtime.state._memory import InMemoryStateStorageGroup, InMemoryStateStore
 from linktools.ai.runtime.state._repositories import MemoryRepositoryImpl
 from linktools.ai.storage import StoredPayload
 
@@ -108,7 +108,7 @@ async def test_list_paths_fails_closed_if_repository_breaks_prefix_contract() ->
 
 async def test_memory_repository_projects_logical_path_as_sort_key() -> None:
     repository = MemoryRepositoryImpl(
-        MemoryStateStore(MemoryStateStorageGroup()),
+        InMemoryStateStore(InMemoryStateStorageGroup()),
         namespace="memory-ordering",
         tenant_id="tenant",
     )
@@ -130,7 +130,7 @@ async def test_memory_repository_projects_logical_path_as_sort_key() -> None:
 
 async def test_memory_repository_accepts_full_harness_path_length() -> None:
     repository = MemoryRepositoryImpl(
-        MemoryStateStore(MemoryStateStorageGroup()),
+        InMemoryStateStore(InMemoryStateStorageGroup()),
         namespace="memory-long-path",
         tenant_id="tenant",
     )
@@ -153,7 +153,7 @@ async def test_memory_repository_accepts_full_harness_path_length() -> None:
 
 
 async def test_memory_repository_applies_prefix_before_limit() -> None:
-    state = MemoryStateStore(MemoryStateStorageGroup())
+    state = InMemoryStateStore(InMemoryStateStorageGroup())
     await state.initialize()
     try:
         repository = MemoryRepositoryImpl(
