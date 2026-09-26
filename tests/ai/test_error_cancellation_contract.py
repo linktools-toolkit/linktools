@@ -20,12 +20,12 @@ from linktools.ai.runtime._agent_executor import (
 from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._mcp import (
-    _MCPResourceBinding,
+    _MCPBinding,
     _MCPRuntimeCapability,
     _raise_primary_after_cleanup,
     close_mcp_resources,
     materialize_mcp_capabilities,
-    prepare_mcp_resource_projections,
+    prepare_mcp_projections,
 )
 from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -61,7 +61,7 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
             sandbox=None,
             sandbox_session=None,
             host_cwd=str(tmp_path),
-            resource_bindings={},
+            bindings={},
             projections={},
             tool_operations=None,
             tool_metrics=None,
@@ -73,12 +73,12 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
     server = MCPServerSpec("server", "echo")
-    binding = _MCPResourceBinding(
+    binding = _MCPBinding(
         None,
         None,
         {"version": 1, "boundary": "host-stdio"},
     )
-    projections = await prepare_mcp_resource_projections(
+    projections = await prepare_mcp_projections(
         (server,),
         {server.id: binding},
         asset_readers={},
@@ -92,7 +92,7 @@ async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
             sandbox=None,
             sandbox_session=None,
             host_cwd=None,
-            resource_bindings={server.id: binding},
+            bindings={server.id: binding},
             projections=projections,
             tool_operations=None,
             tool_metrics=None,
@@ -109,12 +109,12 @@ async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> Non
         bwrap_executable=tmp_path / "bwrap",
     )
     server = MCPServerSpec("server", "echo")
-    binding = _MCPResourceBinding(
+    binding = _MCPBinding(
         None,
         None,
         sandbox.stdio_execution_policy(),
     )
-    projections = await prepare_mcp_resource_projections(
+    projections = await prepare_mcp_projections(
         (server,),
         {server.id: binding},
         asset_readers={},
@@ -128,7 +128,7 @@ async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> Non
             sandbox=sandbox,
             sandbox_session=None,
             host_cwd=None,
-            resource_bindings={server.id: binding},
+            bindings={server.id: binding},
             projections=projections,
             tool_operations=None,
             tool_metrics=None,
@@ -148,12 +148,12 @@ async def test_remote_mcp_materialization_does_not_require_sandbox_or_cwd(
         url="https://example.test/mcp",
         headers={"X-Test": "value"},
     )
-    binding = _MCPResourceBinding(
+    binding = _MCPBinding(
         None,
         None,
         {"version": 1, "boundary": "host-network"},
     )
-    projections = await prepare_mcp_resource_projections(
+    projections = await prepare_mcp_projections(
         (server,),
         {server.id: binding},
         asset_readers={},
@@ -165,7 +165,7 @@ async def test_remote_mcp_materialization_does_not_require_sandbox_or_cwd(
         sandbox=None,
         sandbox_session=None,
         host_cwd=None,
-        resource_bindings={server.id: binding},
+        bindings={server.id: binding},
         projections=projections,
         tool_operations=None,
         tool_metrics=None,
