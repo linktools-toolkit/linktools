@@ -121,7 +121,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         if recovery is not None:
             durable = await recovery.get_agent_run(agent_run_id=record.agent_run_id)
             if durable is not None:
-                if _agent_run_registration_identity(durable) != _agent_run_registration_identity(record):
+                if _agent_run_identity(durable) != _agent_run_identity(record):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 record = durable
                 restored = await recovery.latest_checkpoint(
@@ -1761,14 +1761,13 @@ def _relocated_checkpoint_matches(
     )
 
 
-def _agent_run_registration_identity(run: AgentRunRecord) -> tuple[object, ...]:
+def _agent_run_identity(run: AgentRunRecord) -> tuple[object, ...]:
     return (
         run.agent_run_id,
         run.agent_conversation_id,
         run.parent_agent_run_id,
-        run.agent_name,
+        run.agent_id,
         tuple(sorted(run.metadata.items())),
-        run.registration_id,
     )
 
 
