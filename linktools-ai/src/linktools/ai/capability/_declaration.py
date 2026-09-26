@@ -155,7 +155,7 @@ async def _load_skills(
         resource_keys = tuple(candidate.key for _relative, candidate in resources)
         refs = context.bind_versions(resource_keys)
         paths = await context.asset_reader.local_paths(resource_keys)
-        versions: list[SkillResource] = []
+        resources: list[SkillResource] = []
         for (relative, _candidate), ref, path in zip(resources, refs, paths, strict=True):
             mode = 0
             if path is not None:
@@ -163,11 +163,11 @@ async def _load_skills(
                     mode = (await asyncio.to_thread(path.stat)).st_mode & 0o111
                 except OSError as error:
                     raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            versions.append(SkillResource(relative, ref, mode))
+            resources.append(SkillResource(relative, ref, mode))
         result.append(
             SkillDefinition(
                 value,
-                SkillSourceRef(context.group_id, logical_id, tuple(versions)),
+                SkillSourceRef(context.group_id, logical_id, tuple(resources)),
             )
         )
     return result
