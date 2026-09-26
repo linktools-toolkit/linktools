@@ -48,11 +48,11 @@ class SkillSourceRef:
             validate_logical_id(self.root)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        versions = tuple(self.resources)
-        if any(not isinstance(item, SkillResource) for item in versions):
+        resources = tuple(self.resources)
+        if any(not isinstance(item, SkillResource) for item in resources):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        ordered = tuple(sorted(versions, key=lambda item: item.path))
-        if ordered != versions or len({item.path for item in versions}) != len(versions):
+        ordered = tuple(sorted(resources, key=lambda item: item.path))
+        if ordered != resources or len({item.path for item in resources}) != len(resources):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 @dataclass(frozen=True, slots=True)
 class SkillLocation:
@@ -97,7 +97,7 @@ class SkillSource(Protocol):
 class LocalSkillSource:
     def __init__(self, source_id: str, root: "str | Path") -> None:
         if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("asset source id must be non-empty")
+            raise ValueError("skill source id must be non-empty")
         self._source_id = source_id
         self._root = Path(root).expanduser().resolve()
 
@@ -173,7 +173,7 @@ class AssetSkillSource:
 
     def __init__(self, source_id: str, asset_reader: AssetStoreReader) -> None:
         if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("asset source id must be non-empty")
+            raise ValueError("skill source id must be non-empty")
         if not isinstance(asset_reader, AssetStoreReader):
             raise TypeError("asset_reader must provide AssetStoreReader operations")
         self._source_id = source_id
