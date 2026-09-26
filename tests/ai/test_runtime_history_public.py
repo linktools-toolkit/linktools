@@ -31,7 +31,7 @@ from linktools.ai.runtime import (
     RuntimeStorage,
     UsageSummary,
 )
-from linktools.ai.runtime._history_projection_service import DefaultExecutionHistoryService
+from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._runtime_history import RuntimeHistory
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
