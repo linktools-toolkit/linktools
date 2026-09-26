@@ -420,6 +420,10 @@ class AgentExecutor:
         workspace = scope.workspace
         backend = self._sandbox
         mcp_resource_bindings = _mcp_resource_bindings(scope.binding)
+        has_stdio_mcp = any(
+            server.transport == "stdio"
+            for server in scope.binding.compiled_agent.mcp_servers
+        )
         if backend is None:
             skill_resources: tuple[SandboxResource, ...] = ()
             resource_keys: Mapping[str, "str | None"] = {
@@ -448,7 +452,7 @@ class AgentExecutor:
                 or (
                     not selected
                     and not skill_resources
-                    and not scope.binding.compiled_agent.mcp_servers
+                    and not has_stdio_mcp
                 )
             ):
                 return await self._execute(
@@ -665,11 +669,21 @@ def _mcp_resource_bindings(
     binding: AgentBinding,
 ) -> dict[str, _MCPResourceBinding]:
     codec = MCPServerSpecCodec()
+    servers = {
+        server.id: server
+        for server in binding.compiled_agent.mcp_servers
+    }
     result: dict[str, _MCPResourceBinding] = {}
     for pin in binding.binding_contract.selected:
         if pin.kind != "mcp":
             continue
-        server, versions = codec.from_execution_payload(pin.contract)
+        server = servers.get(pin.id)
+        if server is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        versions = codec.decode_execution_payload(
+            pin.contract,
+            declaration=server,
+        )
         asset_source_id = pin.contract.get("asset_source_id")
         if server.resource is not None:
             if (

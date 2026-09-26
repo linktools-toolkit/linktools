@@ -346,6 +346,28 @@ class StdioSandbox(Sandbox, Protocol):
     def stdio_execution_policy(self) -> Mapping[str, JsonValue]: ...
 
 
+def _normalize_stdio_environment(
+    value: "Mapping[str, str] | None",
+) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    result: dict[str, str] = {}
+    for key, item in value.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or "=" in key
+            or "\x00" in key
+            or not isinstance(item, str)
+            or "\x00" in item
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        result[key] = item
+    return result
+
+
 @runtime_checkable
 class StdioSandboxSession(SandboxSession, Protocol):
     async def open_stdio_process(
@@ -354,6 +376,7 @@ class StdioSandboxSession(SandboxSession, Protocol):
         args: "Sequence[str | SandboxResourcePath]" = (),
         *,
         resources: "Sequence[SandboxResource]" = (),
+        environment: "Mapping[str, str] | None" = None,
     ) -> SandboxStdioProcess: ...
 
 

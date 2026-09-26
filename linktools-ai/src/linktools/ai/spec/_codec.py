@@ -721,10 +721,11 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     policy = dict(value)
     boundary = policy.get("boundary")
-    if boundary == "host-stdio":
-        if policy != {"version": 1, "boundary": "host-stdio"}:
+    if boundary in {"host-stdio", "host-network"}:
+        expected = {"version": 1, "boundary": boundary}
+        if policy != expected:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return {"version": 1, "boundary": "host-stdio"}
+        return expected
     expected = {
         "version",
         "boundary",
