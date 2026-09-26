@@ -263,7 +263,7 @@ class SkillSpecCodec:
         return self.from_author_payload(decode_author_json_mapping(data))
 
     def encode(self, value: SkillSpec) -> bytes:
-        return _encode(self.to_payload(value))
+        return _encode(self.to_wire_payload(value))
 
     def decode(self, data: bytes) -> SkillSpec:
         return self.from_payload(_decode(data))
@@ -546,7 +546,7 @@ class MCPServerSpecCodec:
         return resource_versions
 
     def encode(self, value: MCPServerSpec) -> bytes:
-        return _encode(self.to_wire_payload(value))
+        return _encode(self.to_payload(value))
 
     def decode(self, data: bytes) -> MCPServerSpec:
         return self.from_payload(_decode(data))
