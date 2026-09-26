@@ -81,14 +81,14 @@ class SkillDefinition:
         elif isinstance(source, Mapping):
             source_id = source.get("source_id")
             root = source.get("root")
-            raw_versions = source.get("resources")
-            versions: tuple[SkillResource, ...] = ()
-            if raw_versions is not None:
-                if not isinstance(raw_versions, list):
+            raw_resources = source.get("resources")
+            resources: tuple[SkillResource, ...] = ()
+            if raw_resources is not None:
+                if not isinstance(raw_resources, list):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                parsed: list[SkillResource] = []
+                parsed_resources: list[SkillResource] = []
                 try:
-                    for raw in raw_versions:
+                    for raw in raw_resources:
                         if not isinstance(raw, Mapping):
                             raise ValueError
                         path = raw.get("path")
@@ -100,7 +100,7 @@ class SkillDefinition:
                             or not isinstance(mode, int)
                         ):
                             raise ValueError
-                        parsed.append(
+                        parsed_resources.append(
                             SkillResource(
                                 path,
                                 AssetVersionRef.from_payload(asset),
@@ -109,12 +109,12 @@ class SkillDefinition:
                         )
                 except (TypeError, ValueError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                versions = tuple(sorted(parsed, key=lambda item: item.path))
+                resources = tuple(sorted(parsed_resources, key=lambda item: item.path))
             try:
                 source_ref = SkillSourceRef(
                     source_id,
                     root,
-                    versions,
+                    resources,
                 )
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
