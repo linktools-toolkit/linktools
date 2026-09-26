@@ -20,7 +20,7 @@ from ._output import OutputBinding, OutputMode
 if TYPE_CHECKING:
     from ._compiled import CompiledAgent
 
-_PIN_KINDS = frozenset({"tool", "skill", "mcp", "runtime_capability"})
+_PIN_KINDS = frozenset({"tool", "skill", "mcp", "capability"})
 _PIN_FIELDS = frozenset({"kind", "id", "contract"})
 _BINDING_VERSION = 1
 _BINDING_FIELDS = frozenset(
@@ -38,7 +38,7 @@ _BINDING_FIELDS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class CapabilityPin:
-    kind: Literal["tool", "skill", "mcp", "runtime_capability"]
+    kind: Literal["tool", "skill", "mcp", "capability"]
     id: str
     contract: Mapping[str, JsonValue]
 
@@ -145,10 +145,10 @@ class AgentBindingContract:
         selected = tuple(
             (
                 *sorted(
-                    (item for item in self.selected if item.kind != "runtime_capability"),
+                    (item for item in self.selected if item.kind != "capability"),
                     key=lambda item: (item.kind, item.id),
                 ),
-                *(item for item in self.selected if item.kind == "runtime_capability"),
+                *(item for item in self.selected if item.kind == "capability"),
             )
         )
         if selected != self.selected or len({(item.kind, item.id) for item in selected}) != len(selected):
@@ -329,7 +329,7 @@ def _compiled_agent_selected_pins(
             ),
             key=lambda item: (item.kind, item.id),
         ),
-        *compiled_agent.selected_runtime_capabilities,
+        *compiled_agent.selected_capabilities,
     )
     return tuple(
         CapabilityPin(

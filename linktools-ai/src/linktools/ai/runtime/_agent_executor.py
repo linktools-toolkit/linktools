@@ -838,7 +838,7 @@ async def _materialize_agent(
     capabilities: list[AbstractCapability[AgentContext[object]]] = [
         PydanticToolControlCapability()
     ]
-    for candidate in compiled_agent.selected_runtime_capabilities:
+    for candidate in compiled_agent.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         capabilities.append(candidate.value)

@@ -172,7 +172,7 @@ class _MCPDiscoveryToolset(MCPToolset[object]):
         return tools
 
 
-class _MCPRuntimeCapability(AbstractCapability[AgentContext[object]]):
+class _MCPCapability(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
         capability_id: str,
@@ -199,7 +199,7 @@ async def close_mcp_resources(
     """Close selected MCP client processes."""
     failure: BaseException | None = None
     for capability in capabilities:
-        if isinstance(capability, _MCPRuntimeCapability):
+        if isinstance(capability, _MCPCapability):
             try:
                 await capability.close_resources()
             except BaseException as error:
@@ -393,7 +393,7 @@ async def materialize_mcp_capabilities(
                 tool_metrics=tool_metrics,
             )
             values.append(
-                _MCPRuntimeCapability(
+                _MCPCapability(
                     f"linktools.ai.mcp.{server.id}",
                     boundary,
                     client,
