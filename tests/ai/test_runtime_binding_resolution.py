@@ -328,10 +328,11 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         "version": 1,
         "boundary": "host-stdio",
     }
-    restored_server, resource_versions = MCPServerSpecCodec().from_execution_payload(
-        pin.contract
+    resource_versions = MCPServerSpecCodec().decode_execution_payload(
+        pin.contract,
+        declaration=server,
     )
-    assert restored_server.args == ("resource:literal-value",)
+    assert server.args == ("resource:literal-value",)
     assert resource_versions is None
     assert len(selected) == 1
     assert (

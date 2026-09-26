@@ -8,7 +8,6 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
-from ..asset import AssetKey
 from ..core import (
     DEFAULT_DISCOVERY_POLICY,
     ImmutableJsonMapping,
@@ -19,12 +18,10 @@ from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentMarkdownSpecCodec,
     AgentSpec,
-    AgentSpecCodec,
     MCPServerSpec,
     MCPServerSpecCodec,
     SkillMarkdownSpecAdapter,
     SkillMarkdownSpecCodec,
-    SkillSpecCodec,
     RepositoryInstructionDocument,
 )
 from ._contribution import CapabilityContribution

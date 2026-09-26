@@ -33,13 +33,13 @@ class _SandboxMCPTransport(ClientTransport):
         command: str,
         args: tuple[str | SandboxResourcePath, ...],
         resources: tuple[SandboxResource, ...],
-        environment: Mapping[str, str],
+        environment: "Mapping[str, str] | None" = None,
     ) -> None:
         self._session = session
         self._command = command
         self._args = args
         self._resources = resources
-        self._environment = dict(environment)
+        self._environment = dict(environment or {})
         self._process: SandboxStdioProcess | None = None
 
     @asynccontextmanager

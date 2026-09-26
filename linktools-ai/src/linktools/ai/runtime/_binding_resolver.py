@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Resolve execution-owned Agent binding dependencies to immutable Asset versions."""
 
-from collections.abc import Mapping
 from dataclasses import replace
 
 from ..agent import (
@@ -12,9 +11,8 @@ from ..agent import (
     AgentCompiler,
     CapabilityPin,
 )
-from ..core import JsonValue
 from ..errors import AIError, ErrorCode
-from ..spec import MCPServerSpec, MCPServerSpecCodec
+from ..spec import MCPServerSpecCodec
 from ..workspace import Sandbox
 from ._mcp import _mcp_execution_policy
 

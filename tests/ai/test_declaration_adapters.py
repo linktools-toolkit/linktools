@@ -397,8 +397,11 @@ async def test_custom_mcp_loader_binds_resource_versions() -> None:
         assert len(capture.contributions) == 1
         contribution = capture.contributions[0]
         assert contribution.kind == "mcp"
-        server, versions = MCPServerSpecCodec().from_execution_payload(
-            contribution.contract
+        server = contribution.value
+        assert isinstance(server, MCPServerSpec)
+        versions = MCPServerSpecCodec().decode_execution_payload(
+            contribution.contract,
+            declaration=server,
         )
         assert server.resource == AssetKey("worker", "server")
         assert contribution.contract["asset_source_id"] == "application"
@@ -532,8 +535,9 @@ def _declarations() -> dict[AssetKey, bytes]:
             b"version: 1\ncommand: python\nargs: [resource:data.bin]\n"
         ),
         AssetKey("mcp", "security/audit/data.bin"): b"\x00\xff",
-        AssetKey("skill", "audit"): SkillSpecCodec().encode(
-            SkillSpec("audit", "audit instructions")
+        AssetKey("skill", "audit/SKILL.md"): (
+            b"---\nname: audit\ndescription: Audit changes.\n---\n"
+            b"audit instructions"
         ),
     }
 
@@ -599,69 +603,54 @@ async def test_declaration_loaders_are_backend_agnostic(
 
 
 @pytest.mark.asyncio
-async def test_flat_mcp_declaration_owns_ordinary_resource_files() -> None:
+async def test_shared_mcp_manifest_loads_multiple_servers() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
     try:
-        server = MCPServerSpec(
-            "server",
-            "python",
-            ("resource:script.py",),
-            AssetKey("mcp", "server/assets"),
-        )
         await store.put(
-            AssetKey("mcp", "server"),
-            MCPServerSpecCodec().encode(server),
-        )
-        await store.put(
-            AssetKey("mcp", "server/assets/script.py"),
-            b"print('resource')\n",
+            AssetKey("mcp", "shared.json"),
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "local": {"command": "python"},
+                        "remote": {
+                            "type": "http",
+                            "url": "https://example.test/mcp",
+                        },
+                    }
+                }
+            ).encode(),
         )
 
         capture = await CapabilityGroup("application", assets=store).capture()
-        contribution = next(
-            item
+        servers = {
+            item.id: item.value
             for item in capture.contributions
-            if item.kind == "mcp" and item.id == "server"
-        )
-        restored, versions = MCPServerSpecCodec().from_execution_payload(
-            contribution.contract
-        )
+            if item.kind == "mcp"
+        }
 
-        assert restored == server
-        assert versions is not None
-        assert tuple(ref.key.id for ref in versions) == (
-            "server/assets/script.py",
-        )
+        assert tuple(sorted(servers)) == ("local", "remote")
+        assert isinstance(servers["local"], MCPServerSpec)
+        assert isinstance(servers["remote"], MCPServerSpec)
+        assert servers["local"].transport == "stdio"
+        assert servers["remote"].transport == "streamable-http"
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_explicit_mcp_resource_reserves_declaration_filenames() -> None:
+async def test_mcp_package_resource_reserves_declaration_filename() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
     try:
-        server = MCPServerSpec(
-            "server",
-            "python",
-            ("resource:mcp.json",),
-            AssetKey("mcp", "server/assets"),
-        )
         await store.put(
-            AssetKey("mcp", "server"),
-            MCPServerSpecCodec().encode(server),
+            AssetKey("mcp", "server/mcp.json"),
+            b'{"command":"python","args":["resource:mcp.json"]}',
         )
-        await store.put(
-            AssetKey("mcp", "server/assets/mcp.json"),
-            b"resource-like declaration",
-        )
-
         with pytest.raises(AIError) as error:
             await CapabilityGroup("application", assets=store).capture()
-
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()

@@ -108,6 +108,98 @@ def test_skill_wildcard_allows_preload_outside_explicit_requirements() -> None:
     assert spec.preload_skills == ("preloaded",)
 
 
+def test_skill_markdown_accepts_string_revision_without_exposing_new_fields() -> None:
+    codec = SkillMarkdownSpecCodec()
+    content = (
+        "---\n"
+        "name: review\n"
+        "description: Review changes.\n"
+        "metadata:\n"
+        '  linktools-revision: "2"\n'
+        "---\n"
+        "Review changes.\n"
+    )
+    spec = codec.decode(content.encode())
+    assert spec.revision == 2
+    assert "linktools-revision" not in spec.metadata
+    assert codec.encode(spec) == content.encode()
+
+
+def test_mcp_shared_config_normalizes_supported_transports() -> None:
+    servers = MCPServerSpecCodec().decode_config(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "local": {
+                        "command": "python",
+                        "args": ["-m", "server"],
+                        "env": {"MODE": "readonly"},
+                        "future": {"kept-open": True},
+                    },
+                    "remote": {
+                        "url": "https://example.test/mcp",
+                        "headers": {"X-Tenant": "tenant"},
+                    },
+                    "legacy": {
+                        "type": "sse",
+                        "url": "https://example.test/sse",
+                    },
+                }
+            }
+        ).encode()
+    )
+    by_id = {server.id: server for server in servers}
+    assert by_id["local"].transport == "stdio"
+    assert dict(by_id["local"].env) == {"MODE": "readonly"}
+    assert by_id["remote"].transport == "streamable-http"
+    assert by_id["legacy"].transport == "sse"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"command": "python", "url": "https://example.test/mcp"},
+        {"type": "stdio", "url": "https://example.test/mcp"},
+        {"type": "http", "command": "python"},
+        {"type": "unknown", "url": "https://example.test/mcp"},
+    ),
+)
+def test_mcp_shared_config_rejects_transport_conflicts(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(AIError) as error:
+        MCPServerSpecCodec().decode_config(
+            json.dumps({"mcpServers": {"server": payload}}).encode()
+        )
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+
+def test_mcp_durable_contract_excludes_connection_values() -> None:
+    codec = MCPServerSpecCodec()
+    first = MCPServerSpec(
+        "remote",
+        transport="streamable-http",
+        url="https://first.example/mcp",
+        headers={"Authorization": "secret-a"},
+    )
+    second = MCPServerSpec(
+        "remote",
+        transport="streamable-http",
+        url="https://second.example/mcp",
+        headers={"Authorization": "secret-b"},
+    )
+    assert codec.to_contract_payload(first) == codec.to_contract_payload(second)
+    payload = codec.to_execution_payload(
+        first,
+        None,
+        execution_policy={"version": 1, "boundary": "host-network"},
+    )
+    encoded = json.dumps(payload)
+    assert "first.example" not in encoded
+    assert "secret-a" not in encoded
+    assert codec.decode_execution_payload(payload, declaration=second) is None
+
+
 def test_mcp_selectors_round_trip_logical_names() -> None:
     server_id = "审计/security"
     tool_name = "scan:files/%*__v2"
@@ -588,12 +680,23 @@ def test_durable_spec_readers_ignore_additive_fields() -> None:
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
     execution_payload["future_note"] = {"category": "display"}
-    assert mcp_codec.from_execution_payload(execution_payload) == (server, None)
+    assert (
+        mcp_codec.decode_execution_payload(
+            execution_payload,
+            declaration=server,
+        )
+        is None
+    )
 
 
 def test_mcp_execution_policy_rejects_non_string_workspace_access() -> None:
     codec = MCPServerSpecCodec()
-    payload = codec.to_payload(MCPServerSpec("server", "command"))
+    server = MCPServerSpec("server", "command")
+    payload = codec.to_execution_payload(
+        server,
+        None,
+        execution_policy={"version": 1, "boundary": "host-stdio"},
+    )
     payload["execution_policy"] = {
         "version": 1,
         "boundary": "workspace-stdio",
@@ -603,7 +706,7 @@ def test_mcp_execution_policy_rejects_non_string_workspace_access() -> None:
     }
 
     with pytest.raises(AIError) as error:
-        codec.from_execution_payload(payload)
+        codec.decode_execution_payload(payload, declaration=server)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -615,11 +718,11 @@ def test_mcp_execution_resource_contract_rejects_missing_versions() -> None:
         ("resource:script.py",),
         AssetKey("mcp", "server"),
     )
-    payload = codec.to_payload(server)
+    payload = codec.to_contract_payload(server)
     payload["execution_policy"] = {"version": 1, "boundary": "host-stdio"}
 
     with pytest.raises(AIError) as error:
-        codec.from_execution_payload(payload)
+        codec.decode_execution_payload(payload, declaration=server)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -662,8 +765,7 @@ def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
 
     assert first["args"] == ["resource:script.py"]
     assert first["asset_source_id"] == "group-a"
-    restored, versions = codec.from_execution_payload(first)
-    assert restored == server
+    versions = codec.decode_execution_payload(first, declaration=server)
     assert versions == (first_ref,)
     assert capability_ref_payload("mcp", server.id, first) == (
         capability_ref_payload("mcp", server.id, second)
@@ -683,8 +785,11 @@ async def _capture_mcp_resource_versions(
         for item in capture.contributions
         if item.kind == "mcp" and item.id == server.id
     )
-    _restored, versions = MCPServerSpecCodec().from_execution_payload(
-        contribution.contract
+    declaration = contribution.value
+    assert isinstance(declaration, MCPServerSpec)
+    versions = MCPServerSpecCodec().decode_execution_payload(
+        contribution.contract,
+        declaration=declaration,
     )
     assert versions is not None
     return versions
