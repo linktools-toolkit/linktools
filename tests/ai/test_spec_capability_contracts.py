@@ -60,12 +60,14 @@ from linktools.ai.runtime.state import (
 )
 from linktools.ai.spec import (
     AgentSpec,
+    AgentSpecAdapter,
     AgentSpecCodec,
     AgentUsageLimits,
     MCPServerSpec,
+    MCPServerSpecAdapter,
     MCPServerSpecCodec,
-    SkillMarkdownSpecCodec,
     SkillSpec,
+    SkillSpecAdapter,
     SkillSpecCodec,
     canonical_selectors,
     capability_ref_payload,
@@ -110,7 +112,7 @@ def test_skill_wildcard_allows_preload_outside_explicit_requirements() -> None:
 
 
 def test_skill_markdown_accepts_string_revision_without_exposing_new_fields() -> None:
-    codec = SkillMarkdownSpecCodec()
+    adapter = SkillSpecAdapter()
     content = (
         "---\n"
         "name: review\n"
@@ -120,14 +122,14 @@ def test_skill_markdown_accepts_string_revision_without_exposing_new_fields() ->
         "---\n"
         "Review changes.\n"
     )
-    spec = codec.decode(content.encode())
+    spec = adapter.decode_markdown(content.encode())
     assert spec.revision == 2
     assert "linktools-revision" not in spec.metadata
-    assert codec.encode(spec) == content.encode()
+    assert adapter.encode_markdown(spec) == content.encode()
 
 
 def test_mcp_shared_config_normalizes_supported_transports() -> None:
-    servers = MCPServerSpecCodec().decode_config(
+    servers = MCPServerSpecAdapter().decode_config(
         json.dumps(
             {
                 "mcpServers": {
@@ -169,7 +171,7 @@ def test_mcp_shared_config_rejects_transport_conflicts(
     payload: dict[str, object],
 ) -> None:
     with pytest.raises(AIError) as error:
-        MCPServerSpecCodec().decode_config(
+        MCPServerSpecAdapter().decode_config(
             json.dumps({"mcpServers": {"server": payload}}).encode()
         )
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
@@ -199,7 +201,7 @@ def test_mcp_wire_round_trips_resource_backed_stdio() -> None:
 
 def test_mcp_wire_rejects_resource_on_remote_transport() -> None:
     codec = MCPServerSpecCodec()
-    payload = codec.to_payload(
+    payload = codec.to_wire_payload(
         MCPServerSpec(
             "remote",
             transport="streamable-http",
@@ -619,19 +621,20 @@ def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
 
 
 def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
-    agent = AgentSpecCodec().from_author_payload(
+    agent = AgentSpecAdapter().from_mapping(
         {
             "version": 1,
             "id": "agent",
             "model": "route",
             "planning": True,
             "future_metadata": {"future": True},
-        }
+        },
+        logical_id="agent",
     )
     assert agent.model == "route"
     assert agent.planning is False
 
-    skill = SkillSpecCodec().from_author_payload(
+    skill = SkillSpecAdapter().from_mapping(
         {
             "version": 1,
             "id": "skill",
@@ -641,7 +644,7 @@ def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
     )
     assert skill == SkillSpec("skill", "skill content")
 
-    server = MCPServerSpecCodec().decode_author(
+    server = MCPServerSpecAdapter().decode_json(
         json.dumps(
             {
                 "version": 1,
@@ -650,13 +653,12 @@ def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
                 "future_metadata": {"future": True},
             }
         ).encode(),
-        format="json",
     )
     assert server == MCPServerSpec("mcp", "echo")
 
 
 def test_mcp_package_resource_ignores_unrelated_fields() -> None:
-    server = MCPServerSpecCodec().decode_author(
+    server = MCPServerSpecAdapter().decode_json(
         json.dumps(
             {
                 "version": 1,
@@ -668,7 +670,6 @@ def test_mcp_package_resource_ignores_unrelated_fields() -> None:
                 },
             }
         ).encode(),
-        format="json",
         package_id="server",
     )
 
@@ -676,7 +677,7 @@ def test_mcp_package_resource_ignores_unrelated_fields() -> None:
 
 
 def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> None:
-    server = MCPServerSpecCodec().decode_author(
+    server = MCPServerSpecAdapter().decode_json(
         json.dumps(
             {
                 "version": 1,
@@ -689,7 +690,6 @@ def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> Non
                 },
             }
         ).encode(),
-        format="json",
     )
 
     assert server.resource is None
@@ -1111,7 +1111,7 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
 
 
 def test_agent_authoring_ignores_runtime_only_usage_limits() -> None:
-    spec = AgentSpecCodec().from_author_payload(
+    spec = AgentSpecAdapter().from_mapping(
         {
             "version": 1,
             "id": "agent",
@@ -1119,7 +1119,8 @@ def test_agent_authoring_ignores_runtime_only_usage_limits() -> None:
                 "model_requests": 1,
                 "future_limit": {"unit": "request"},
             },
-        }
+        },
+        logical_id="agent",
     )
     assert spec.usage_limits is None
 

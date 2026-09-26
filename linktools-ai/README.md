@@ -184,10 +184,11 @@ Registry/Provider abstraction is required.
 The built-in file layouts are deliberately small: Agents use
 `<id>/AGENT.md`, Skills use `<id>/SKILL.md`, and resource-backed MCP servers
 use `<id>/mcp.json` or `<id>/mcp.yaml`. Flat Agent/Skill/MCP declaration
-files are not a second built-in authoring path. Author parsers validate the
-fields they consume without rejecting unrelated ordinary fields.
-`AgentMarkdownSpecCodec` exposes `parse()`, `from_payload()`, and
-`decode()` for custom Agent authoring. Custom source kinds such as `worker`
+files are not a second built-in authoring path. Authoring adapters validate the fields they consume without rejecting unrelated
+ordinary fields. `AgentSpecAdapter`, `SkillSpecAdapter`, and
+`MCPServerSpecAdapter` convert supported authoring inputs into their matching
+Spec values, while the corresponding `*SpecCodec` classes own durable
+serialization and contract projections. Custom source kinds such as `worker`
 can use `AgentDeclarationLoader("worker", defaults=...)`; explicit Agent
 fields still override validated defaults.
 
@@ -198,7 +199,7 @@ the named Skill revision. Other Agent Skills fields, including
 `allowed-tools`, remain author content and do not grant Runtime permissions.
 
 Shared MCP configuration uses the common `mcpServers` JSON shape through
-`MCPServerSpecCodec.decode_config(data, revision=...)`. LinkTools does not
+`MCPServerSpecAdapter.decode_config(data, revision=...)`. LinkTools does not
 auto-discover a project `.mcp.json` or treat arbitrary flat MCP JSON Assets as
 shared configuration. The host or a custom `CapabilityLoader` explicitly
 chooses the source and revision, then returns the resulting
@@ -590,7 +591,7 @@ from linktools.ai import (
 Package-specific public contracts remain available from their owning packages,
 for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
 `linktools.ai.capability`, `linktools.ai.workspace`, and `linktools.ai.runtime`.
-These include `AgentMarkdownSpecCodec`, `AgentDeclarationLoader`,
+These include `AgentSpecAdapter`, `SkillSpecAdapter`, `MCPServerSpecAdapter`, `AgentDeclarationLoader`,
 `CapabilityGroupCapture`, MCP selector helpers, `WorkspaceToolDeclaration`, and the
 optional stdio sandbox protocols. `ErrorDiagnostics` is available from
 `linktools.ai.errors`.

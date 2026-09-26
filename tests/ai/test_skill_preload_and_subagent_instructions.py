@@ -58,7 +58,7 @@ def test_agent_spec_preload_rejects_invalid_type_wildcard_and_not_allowed() -> N
 
 
 def test_agent_spec_preload_rejects_unknown_version() -> None:
-    payload = AgentSpecCodec().to_payload(AgentSpec("agent"))
+    payload = AgentSpecCodec().to_contract_payload(AgentSpec("agent"))
     with pytest.raises(AIError) as error:
         AgentSpecCodec().from_payload({**payload, "version": 2})
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED

@@ -67,7 +67,7 @@ class AgentSpecAdapter:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
             if declared_id != logical_id:
                 raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        system_prompt = payload.get("system_prompt")
+        system_prompt = payload.get("system_prompt", "")
         if not isinstance(system_prompt, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         merged = _validated_agent_defaults(defaults, logical_id)
