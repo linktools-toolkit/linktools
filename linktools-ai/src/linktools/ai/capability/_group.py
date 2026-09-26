@@ -225,7 +225,7 @@ class CapabilityGroup(Generic[AppT]):
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
     ) -> "AbstractCapability[AgentContext[AppT]]":
-        """Register one always-selected Pydantic runtime behavior capability."""
+        """Register one Agent-selectable Pydantic runtime behavior capability."""
         _validate_revision(revision)
         capability_id = _capability_registration_id(capability, id)
         _validate_external_capability_id(capability_id)
