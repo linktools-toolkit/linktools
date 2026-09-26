@@ -52,7 +52,7 @@ from linktools.ai.runtime._mcp import (
 )
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
-    RuntimeToolBoundaryToolset,
+    BoundaryToolset,
 )
 from linktools.ai.runtime.state import (
     RuntimeDomain,
@@ -1199,7 +1199,7 @@ def _context() -> RunContext[None]:
 
 @pytest.mark.asyncio
 async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> None:
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (
             FunctionToolset(
                 [
@@ -1227,7 +1227,7 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
     assert await boundary.call_tool(
         "_business", {"value": "ok"}, context, tools["_business"]
     ) == "ok"
-    unknown = RuntimeToolBoundaryToolset(
+    unknown = BoundaryToolset(
         (FunctionToolset([_business]),),
         {},
         id="invalid",
@@ -1239,7 +1239,7 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
 
 @pytest.mark.asyncio
 async def test_runtime_tool_boundary_does_not_rewrite_explicit_descriptor() -> None:
-    boundary = RuntimeToolBoundaryToolset(
+    boundary = BoundaryToolset(
         (
             FunctionToolset(
                 [
