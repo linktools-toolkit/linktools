@@ -67,7 +67,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             agent_run_id="run",
             agent_conversation_id="conversation",
             parent_agent_run_id=None,
-            agent_name="agent",
+            agent_id="agent",
             metadata={"history_id": session.history_id},
             started_at=now,
         )
@@ -80,7 +80,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             ],
             agent_conversation_id="conversation",
             parent_agent_run_id=None,
-            agent_name="agent",
+            agent_id="agent",
             timestamp=now,
             state="complete",
             transcript_message_count_before=0,

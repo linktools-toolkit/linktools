@@ -121,8 +121,8 @@ class _Store:
                 AgentRunRecord(
                     agent_run_id=agent_run_id,
                     agent_conversation_id=agent_conversation_id,
-                    agent_name="default",
-                    metadata={"agent_run_sequence": "1", "agent_name": "default"},
+                    agent_id="default",
+                    metadata={"agent_run_sequence": "1", "agent_id": "default"},
                 ),
             )
 
@@ -139,7 +139,7 @@ class _Store:
                 step_index=0,
                 timestamp=record.created_at,
                 agent_conversation_id=run.agent_conversation_id,
-                agent_name="default",
+                agent_id="default",
             )
         ]
 
