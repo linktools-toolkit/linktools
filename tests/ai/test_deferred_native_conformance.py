@@ -125,7 +125,7 @@ async def test_ordinary_completed_checkpoint_behavior_is_unchanged() -> None:
     agent_run_id = "completed-run"
     store = _RecordingAgentRunStore()
     persistence = _AgentRunPersistenceCapability(
-        capture=AgentRunRecorder(
+        recorder=AgentRunRecorder(
             store,
             execution_id=None,
             agent_run_id=agent_run_id,

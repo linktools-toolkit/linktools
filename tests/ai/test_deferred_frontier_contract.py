@@ -107,7 +107,7 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
     store = _Store()
     captured: list[int] = []
     persistence = _AgentRunPersistenceCapability(
-        capture=AgentRunRecorder(
+        recorder=AgentRunRecorder(
             store,  # type: ignore[arg-type]
             execution_id=None,
             agent_run_id="run",
@@ -150,7 +150,7 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
 @pytest.mark.asyncio
 async def test_runtime_step_persistence_requires_pause_sink_for_native_deferred() -> None:
     persistence = _AgentRunPersistenceCapability(
-        capture=AgentRunRecorder(
+        recorder=AgentRunRecorder(
             _Store(),  # type: ignore[arg-type]
             execution_id=None,
             agent_run_id="run",

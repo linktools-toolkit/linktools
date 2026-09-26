@@ -21,7 +21,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ListExecutionRequest, RuntimeHistory
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._history_projection_service import DefaultExecutionHistoryService
+from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.runtime.state._contracts import (
     ExecutionCandidate,
