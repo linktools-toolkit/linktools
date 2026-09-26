@@ -182,7 +182,7 @@ class AgentSpecCodec:
         return decode_author_json_mapping(data)
 
     def encode(self, value: AgentSpec) -> bytes:
-        return _encode(self.to_payload(value))
+        return _encode(self.to_wire_payload(value))
 
     def decode(self, data: bytes) -> AgentSpec:
         return self.from_payload(_decode(data))
