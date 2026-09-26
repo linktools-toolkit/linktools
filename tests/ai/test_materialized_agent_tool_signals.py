@@ -21,7 +21,7 @@ from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
-    WorkspaceToolPermissionPolicy,
+    ToolPermissionPolicy,
 )
 
 
@@ -104,7 +104,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
         tmp_path,
 
         policy=WorkspacePolicy(
-            tool_permissions=WorkspaceToolPermissionPolicy(default="deny")
+            tool_permissions=ToolPermissionPolicy(default="deny")
         ),
     )
     state = RuntimeStorage.in_memory()

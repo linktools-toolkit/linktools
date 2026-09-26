@@ -15,7 +15,7 @@ from linktools.ai.runtime._tool_boundary import (
 )
 from linktools.ai.workspace import (
     ToolPermissionRule,
-    WorkspaceToolPermissionPolicy,
+    ToolPermissionPolicy,
 )
 from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.models.test import TestModel
@@ -189,7 +189,7 @@ async def test_ask_boundary_defers_before_runtime_operation() -> None:
             "read_file": descriptor
         },
         id="workspace",
-        workspace_policy=WorkspaceToolPermissionPolicy(
+        permission_policy=ToolPermissionPolicy(
             (ToolPermissionRule("ask", tool_name="read_file"),)
         ),
         tool_operations=bridge,  # type: ignore[arg-type]

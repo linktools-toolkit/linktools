@@ -38,7 +38,7 @@ from linktools.ai.workspace import (
     SandboxSession,
     ToolPermissionRule,
     Workspace,
-    WorkspaceToolPermissionPolicy,
+    ToolPermissionPolicy,
 )
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ApprovalRequired
@@ -547,7 +547,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
             )
         },
         id="workspace-boundary",
-            workspace_policy=WorkspaceToolPermissionPolicy(
+            permission_policy=ToolPermissionPolicy(
                 (ToolPermissionRule(decision, tool_name="read_file"),)  # type: ignore[arg-type]
             ),
         sandbox_session=session,

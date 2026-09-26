@@ -24,7 +24,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
-from linktools.ai.workspace import WorkspaceToolPermissionPolicy
+from linktools.ai.workspace import ToolPermissionPolicy
 from ._runtime_test_helpers import tool_with_metadata
 
 
@@ -99,14 +99,14 @@ async def _call(
     descriptor: ManagedToolDescriptor,
     *,
     bridge: _Bridge | None = None,
-    workspace_policy: Any = None,
+    permission_policy: Any = None,
 ) -> tuple[Any, _Bridge | None]:
     selected_bridge = bridge
     boundary = RuntimeToolBoundaryToolset(
         (FunctionToolset([tool_with_metadata(handler, descriptor)]),),
         {handler.__name__: descriptor},
         id="test.boundary",
-        workspace_policy=workspace_policy,
+        permission_policy=permission_policy,
         tool_operations=selected_bridge,  # type: ignore[arg-type]
     )
     context = _context()
@@ -153,7 +153,7 @@ async def test_workspace_approval_precedes_tool_operation_admission() -> None:
                 tool_class="filesystem.write",
             ),
             bridge=bridge,
-            workspace_policy=WorkspaceToolPermissionPolicy(default="ask"),
+            permission_policy=ToolPermissionPolicy(default="ask"),
         )
     assert bridge.calls == []
 

@@ -107,7 +107,7 @@ async def _boundary(
             )
         },
         id="workspace-boundary",
-        workspace_policy=workspace.policy.tool_permissions,
+        permission_policy=workspace.policy.tool_permissions,
         sandbox_session=session,  # type: ignore[arg-type]
         repository_boundary=repository,
     )
