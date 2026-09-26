@@ -16,7 +16,7 @@ from linktools.ai.runtime._tool_boundary import (
     BoundaryToolset,
 )
 from linktools.ai.runtime._tool_metrics import (
-    RuntimeToolMetricsCapability,
+    ToolMetricsCapability,
     _ToolMetricContext,
 )
 from ._runtime_test_helpers import tool_with_metadata
@@ -253,7 +253,7 @@ async def test_capability_tool_signal_is_observed_before_control_conversion(
     expected_code: str,
 ) -> None:
     recorder = _Recorder()
-    capability = RuntimeToolMetricsCapability(_metric_context(recorder))
+    capability = ToolMetricsCapability(_metric_context(recorder))
     call = ToolCallPart("capability_tool", args={}, tool_call_id="call")
     tool_def = ToolDefinition(name="capability_tool")
 

@@ -17,7 +17,7 @@ from linktools.ai.core import (
     agent_run_id as make_agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._history import StepExecutionHistoryReader
+from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
 from linktools.ai.spec import AgentSpec

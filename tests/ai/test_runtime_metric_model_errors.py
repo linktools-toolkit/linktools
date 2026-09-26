@@ -6,7 +6,7 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Observation
 from linktools.ai.runtime._metric_capability import (
-    RuntimeModelObservationCapability,
+    ModelObservationCapability,
     _http_error_code,
     _model_error_code,
 )
@@ -50,7 +50,7 @@ def test_model_metric_unknown_error_matches_runtime_internal_error() -> None:
 @pytest.mark.asyncio
 async def test_model_cancellation_records_cancelled_observation() -> None:
     recorder = _Recorder()
-    capability = RuntimeModelObservationCapability(
+    capability = ModelObservationCapability(
         recorder,
         source_namespace="workspace",
         tenant_id="tenant",
