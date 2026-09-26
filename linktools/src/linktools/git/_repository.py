@@ -48,29 +48,6 @@ _FETCH_SUPPORTS_QUIET = "quiet" in inspect.signature(porcelain.fetch).parameters
 _STASH_POP_REQUIRES_INDEX = "index" in inspect.signature(porcelain.stash_pop).parameters
 
 
-_IDENTITY_RE = re.compile(r"^(?P<name>.*?)\s*<(?P<email>.+?)>\s*$")
-
-
-def _split_identity(identity: str) -> "tuple[str, str]":
-    """Split a dulwich-style ``"Name <email>"`` identity into its parts, for
-    passing to the system git CLI via GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL."""
-    match = _IDENTITY_RE.match(identity)
-    if not match:
-        raise GitError("Invalid author/committer identity: %r" % identity)
-    return match.group("name"), match.group("email")
-
-
-@contextlib.contextmanager
-def _wrap_protocol_errors():
-    """Turn a transport/protocol failure (bad URL, auth rejected, server
-    error, ...) into a plain ``GitError`` -- callers must never need to
-    import dulwich just to catch its own transport exception type."""
-    try:
-        yield
-    except GitProtocolError as exc:
-        raise GitError(str(exc)) from exc
-
-
 class GitHead(object):
     """A local git branch that can be checked out."""
 
@@ -85,6 +62,8 @@ class GitHead(object):
 
 class GitRepository(object):
     """Pure-Python git repository wrapper backed by dulwich."""
+
+    _IDENTITY_RE = re.compile(r"^(?P<name>.*?)\s*<(?P<email>.+?)>\s*$")
 
     def __init__(self, environ: "Any", path: "PathType") -> None:
         self._environ = environ
@@ -126,6 +105,23 @@ class GitRepository(object):
         key = "git-repo:" + utils.get_hash(self._path, "sha256")
         with self._environ.locks.process_lock(key):
             yield
+
+    @classmethod
+    def _split_identity(cls, identity: str) -> "tuple[str, str]":
+        """Split an identity for GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL."""
+        match = cls._IDENTITY_RE.match(identity)
+        if not match:
+            raise GitError("Invalid author/committer identity: %r" % identity)
+        return match.group("name"), match.group("email")
+
+    @classmethod
+    @contextlib.contextmanager
+    def _wrap_protocol_errors(cls):
+        """Translate dulwich transport failures to the repository error type."""
+        try:
+            yield
+        except GitProtocolError as exc:
+            raise GitError(str(exc)) from exc
 
     # -- reads -------------------------------------------------------------
 
@@ -192,7 +188,7 @@ class GitRepository(object):
 
     def push(self, remote_location: "str | None" = None,
              branch: "str | None" = None, force: bool = False) -> None:
-        with self._write_lock(), _wrap_protocol_errors():
+        with self._write_lock(), self._wrap_protocol_errors():
             refspecs = branch and self._branch_ref(branch).decode()
             porcelain.push(self._path, remote_location, refspecs, force=force)
 
@@ -208,7 +204,7 @@ class GitRepository(object):
         branch_ref = self._branch_ref(branch)
         target = self._remote_branch_target(branch)
         if target is None:
-            with _wrap_protocol_errors():
+            with self._wrap_protocol_errors():
                 if _FETCH_SUPPORTS_QUIET:
                     result = porcelain.fetch(self._path, depth=1, force=True, quiet=True)
                 else:
@@ -313,7 +309,7 @@ class GitRepository(object):
         if author:
             args += ["--author", author]
         if committer:
-            name, email = _split_identity(committer)
+            name, email = self._split_identity(committer)
             env["GIT_COMMITTER_NAME"] = name
             env["GIT_COMMITTER_EMAIL"] = email
         self._run_git_cli(
@@ -335,7 +331,7 @@ class GitRepository(object):
         branch_ref = self._current_branch_ref()
         with create_progress("message") as progress:
             try:
-                with _wrap_protocol_errors():
+                with self._wrap_protocol_errors():
                     porcelain.pull(
                         self._path,
                         refspecs=branch_ref,
@@ -350,7 +346,7 @@ class GitRepository(object):
         # These repos are shallow (depth=1) clones, so dulwich cannot merge or
         # rebase a diverged branch. Fetch remote objects and hard-reset.
         branch_ref = self._current_branch_ref()
-        with create_progress("message") as progress, _wrap_protocol_errors():
+        with create_progress("message") as progress, self._wrap_protocol_errors():
             result = porcelain.fetch(
                 self._path,
                 errstream=GitProgressStream(progress),
@@ -401,7 +397,7 @@ class GitRepository(object):
         if branch:
             kwargs["branch"] = branch
         try:
-            with create_progress("message") as progress, _wrap_protocol_errors():
+            with create_progress("message") as progress, cls._wrap_protocol_errors():
                 porcelain.clone(
                     url,
                     staging,

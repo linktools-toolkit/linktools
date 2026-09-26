@@ -24,18 +24,6 @@ if TYPE_CHECKING:
 __all__ = ["CommandStub"]
 
 
-def _quote_posix(value: str) -> str:
-    """Single-quote with the ``'\\''`` close-reopen trick (POSIX sh)."""
-    return "'" + value.replace("'", "'\\''") + "'"
-
-
-def _quote_windows(value: str) -> str:
-    """Double-quote for the Windows CRT/cmd argv parser, escaping an
-    embedded ``"`` as ``\\"``. ``%`` is left intact: ``%*`` (appended
-    separately) is what forwards caller args in a ``.bat``."""
-    return '"' + value.replace('"', '\\"') + '"'
-
-
 class CommandStub(object):
     """An executable wrapper script at ``<directory>/<name>`` (``.bat`` on
     Windows). ``write(argv)`` renders it atomically; ``remove()`` deletes it."""
@@ -75,11 +63,23 @@ class CommandStub(object):
         except FileNotFoundError:
             pass
 
+    @classmethod
+    def _quote_posix(cls, value: str) -> str:
+        """Single-quote with the ``'\\''`` close-reopen trick (POSIX sh)."""
+        return "'" + value.replace("'", "'\\''") + "'"
+
+    @classmethod
+    def _quote_windows(cls, value: str) -> str:
+        """Double-quote for the Windows CRT/cmd argv parser, escaping an
+        embedded ``\"`` as ``\\\"``. ``%`` is left intact: ``%*`` (appended
+        separately) is what forwards caller args in a ``.bat``."""
+        return '"' + value.replace('"', '\\"') + '"'
+
     def _render(self, args: "list[str]") -> str:
         if self.system == "windows":
-            body = " ".join(_quote_windows(a) for a in args)
+            body = " ".join(self._quote_windows(a) for a in args)
             return "@echo off\n" + body + " %*\nexit /b %ERRORLEVEL%\n"
-        body = " ".join(_quote_posix(a) for a in args)
+        body = " ".join(self._quote_posix(a) for a in args)
         return "#!/bin/sh\nexec " + body + " \"$@\"\n"
 
     @staticmethod
