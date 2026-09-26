@@ -734,13 +734,13 @@ async def _skill_sandbox_resources(
         if source_ref is None:
             continue
         resource_keys[skill.id] = None
-        reader = asset_readers.get(source_ref.asset_source_id)
+        reader = asset_readers.get(source_ref.source_id)
         if reader is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
                 safe_details={
                     "kind": "skill_asset_source",
-                    "asset_source_id": source_ref.asset_source_id,
+                    "source_id": source_ref.source_id,
                 },
             )
         resource = await SandboxResource.from_asset_versions(

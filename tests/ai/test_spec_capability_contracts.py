@@ -804,7 +804,7 @@ def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
     )
 
     assert first["args"] == ["resource:script.py"]
-    assert first["source_id"] == "group-a"
+    assert first["asset_source_id"] == "group-a"
     versions = codec.decode_binding_payload(first, declaration=server)
     assert versions == (first_ref,)
     assert capability_ref_payload("mcp", server.id, first) == (
