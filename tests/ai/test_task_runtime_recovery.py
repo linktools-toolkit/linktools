@@ -75,7 +75,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         )
         snapshot_manifest: dict[str, JsonValue] = {
             "kind": "task-capability-capture",
-            "format_version": 2,
+            "format_version": 1,
             "namespace": "default",
             "tenant_id": admission.principal.tenant_id,
             "graph_id": admission.graph_id,

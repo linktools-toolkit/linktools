@@ -785,15 +785,18 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
 @pytest.mark.parametrize(
     ("format_version", "corruption", "expected_code"),
     (
-        (1, "legacy", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
-        (2, "duplicate_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "duplicate_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2, "unknown_format", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
     ),
 )
 async def test_task_capability_capture_reader_rejects_invalid_declaration_manifests(
     tmp_path: Path,
-    format_version: int,
+    format_version: object,
     corruption: str,
     expected_code: ErrorCode,
 ) -> None:
@@ -830,6 +833,18 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
         "id": "test.expander",
         "revision": 1,
     }
+    task_declarations: list[dict[str, object]] = [declaration]
+    if corruption == "duplicate_task":
+        task_declarations = [declaration, declaration]
+    elif corruption == "invalid_task":
+        task_declarations = [{**declaration, "effect_policy": []}]
+    expander_declarations: list[dict[str, object]] = []
+    if corruption == "duplicate_expander":
+        expander_declarations = [expander_declaration, expander_declaration]
+    elif corruption == "invalid_expander":
+        expander_declarations = [
+            {**expander_declaration, "version": 1.0}
+        ]
     manifest: dict[str, object] = {
         "kind": "task-capability-capture",
         "format_version": format_version,
@@ -839,19 +854,13 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
         "request_digest": admission.initial_request_digest,
         "roots": {},
         "bindings": {},
+        "tasks": task_declarations,
+        "expanders": expander_declarations,
     }
-    if format_version == 2:
-        manifest["tasks"] = (
-            [declaration, declaration]
-            if corruption == "duplicate_task"
-            else [declaration]
-        )
-        if corruption != "missing_array":
-            manifest["expanders"] = (
-                [expander_declaration, expander_declaration]
-                if corruption == "duplicate_expander"
-                else []
-            )
+    if corruption == "wrong_kind":
+        manifest["kind"] = "invalid-kind"
+    if corruption == "missing_array":
+        del manifest["expanders"]
     payload = canonical_json_bytes(manifest)
     objects = state.object_store(RuntimeDomain.TASK)
 
