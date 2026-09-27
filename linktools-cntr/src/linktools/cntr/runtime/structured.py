@@ -40,8 +40,6 @@ class StructuredCommandOutputError(StructuredCommandError):
     pass
 
 
-_TRUNCATE_AT = 4000
-
 _REDACTED = "***"
 # Flags whose following token is a KEY=VALUE pair that may embed a secret,
 # e.g. --build-arg http_proxy=http://user:pass@host -- the value, not the
@@ -67,22 +65,6 @@ def redact_command(args: "tuple[str, ...] | None") -> "tuple[str, ...] | None":
     return tuple(redacted)
 
 
-def _truncate(text: "str | None") -> str:
-    if not text:
-        return ""
-    if len(text) <= _TRUNCATE_AT:
-        return text
-    return text[:_TRUNCATE_AT] + "...(truncated)"
-
-
-def _decode(chunk) -> str:
-    if chunk is None:
-        return ""
-    if isinstance(chunk, str):
-        return chunk
-    return chunk.decode(errors="ignore")
-
-
 @dataclass(frozen=True)
 class CommandResult:
     args: "tuple[str, ...]"
@@ -105,8 +87,26 @@ class StructuredCommandRunner:
     times it, it never spawns a process itself.
     """
 
+    _TRUNCATE_AT = 4000
+
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
+
+    @classmethod
+    def _truncate(cls, text: "str | None") -> str:
+        if not text:
+            return ""
+        if len(text) <= cls._TRUNCATE_AT:
+            return text
+        return text[:cls._TRUNCATE_AT] + "...(truncated)"
+
+    @classmethod
+    def _decode(cls, chunk: "Any") -> str:
+        if chunk is None:
+            return ""
+        if isinstance(chunk, str):
+            return chunk
+        return chunk.decode(errors="ignore")
 
     def execute(
             self,
@@ -130,9 +130,9 @@ class StructuredCommandRunner:
         try:
             for out, err in process.fetch(timeout=timeout):
                 if out:
-                    stdout_chunks.append(_decode(out))
+                    stdout_chunks.append(self._decode(out))
                 if err:
-                    stderr_chunks.append(_decode(err))
+                    stderr_chunks.append(self._decode(err))
             returncode = process.returncode
         finally:
             # Always reap the process tree and close its pipes, timed out or
@@ -164,7 +164,7 @@ class StructuredCommandRunner:
             error_cls = error_type or StructuredCommandError
             raise error_cls(
                 f"Command failed (exit {result.returncode}): {' '.join(args)}\n"
-                f"stderr: {_truncate(result.stderr)}"
+                f"stderr: {self._truncate(result.stderr)}"
             )
         return result
 
@@ -189,6 +189,6 @@ class StructuredCommandRunner:
             raise StructuredCommandOutputError(
                 f"Command produced invalid JSON: {' '.join(result.args)}\n"
                 f"error: {exc}\n"
-                f"stdout: {_truncate(result.stdout)}\n"
-                f"stderr: {_truncate(result.stderr)}"
+                f"stdout: {self._truncate(result.stdout)}\n"
+                f"stderr: {self._truncate(result.stderr)}"
             ) from exc
