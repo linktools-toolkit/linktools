@@ -32,7 +32,11 @@ from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
 from ._contribution import CapabilityContribution, _freeze_contribution
-from ._declaration import BuiltinDeclarationLoader, _bind_mcp_declaration
+from ._declaration import (
+    BuiltinDeclarationLoader,
+    _bind_mcp_contribution,
+    _bind_mcp_declaration,
+)
 from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillDefinition
 from ._task import TaskExpander
@@ -320,7 +324,7 @@ class CapabilityGroup(Generic[AppT]):
                         item = CapabilityContribution.from_declaration(value)
                     elif isinstance(value, CapabilityContribution):
                         item = (
-                            _bind_mcp_declaration(value.value, context)
+                            _bind_mcp_contribution(value, context)
                             if value.kind == "mcp"
                             else value
                         )

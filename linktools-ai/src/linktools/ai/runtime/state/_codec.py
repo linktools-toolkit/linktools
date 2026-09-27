@@ -1688,11 +1688,23 @@ def iter_runtime_object_dependencies(
         return
 
     if reference.key.startswith("v1/task-capability-capture/"):
+        format_version = manifest.get("format_version")
+        if (
+            isinstance(format_version, bool)
+            or not isinstance(format_version, int)
+            or format_version < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if format_version == 1:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if format_version != 2:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
             manifest.get("kind") != "task-capability-capture"
-            or manifest.get("format_version") != 1
             or not isinstance(manifest.get("roots"), Mapping)
             or not isinstance(manifest.get("bindings"), Mapping)
+            or not isinstance(manifest.get("tasks"), list)
+            or not isinstance(manifest.get("expanders"), list)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for values in (manifest["roots"], manifest["bindings"]):

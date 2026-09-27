@@ -19,7 +19,6 @@ from ..capability import (
     CapabilityGroup,
     CapabilityGroupCapture,
     SkillSourceRegistry,
-    TaskExpander,
 )
 from ..core import (
     HmacCursorSigner,
@@ -39,7 +38,7 @@ from ..spec import (
     RepositoryInstructions,
 )
 from ..storage import ObjectStore, PayloadPolicy
-from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
+from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher
 from ..workspace import (
     WorkspaceInstructionResolver,
     LocalSandbox,
@@ -176,13 +175,13 @@ async def compose_runtime_components(
             for document in group.instructions.documents
         )
         rules = RepositoryInstructions(instruction_documents)
-        task_handlers = tuple(
-            candidate.value
+        task_contributions = tuple(
+            candidate
             for candidate in candidates
             if candidate.kind == "task"
         )
-        task_expanders = tuple(
-            candidate.value
+        expander_contributions = tuple(
+            candidate
             for candidate in candidates
             if candidate.kind == "task_expander"
         )
@@ -284,8 +283,8 @@ async def compose_runtime_components(
             limits=selected_limits,
             execution_cwd=execution_cwd,
             app=app,
-            task_handlers=task_handlers,
-            task_expanders=task_expanders,
+            task_contributions=task_contributions,
+            expander_contributions=expander_contributions,
             history_reader=history_reader,
             session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
@@ -479,8 +478,8 @@ async def _build_local_components(
     limits: PromptLimits,
     execution_cwd: "str | None",
     app: AppT,
-    task_handlers: Sequence[TaskNodeHandler[AppT]],
-    task_expanders: Sequence[TaskExpander],
+    task_contributions: Sequence[CapabilityContribution[AppT]],
+    expander_contributions: Sequence[CapabilityContribution[AppT]],
     history_reader: ExecutionHistoryReader,
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
@@ -687,8 +686,8 @@ async def _build_local_components(
                 payload_policy=PayloadPolicy(inline_limit_bytes=0),
                 object_domain=RuntimeDomain.TASK,
             ),
-            handlers=task_handlers,
-            expanders=task_expanders,
+            task_contributions=task_contributions,
+            expander_contributions=expander_contributions,
             release_dependency_hold=execution.release_dependency_hold,
             task_durable=(
                 storage.plan.route(RuntimeDomain.TASK).retention

@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 """Private immutable capability capture used by admitted TaskGraphs."""
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import cast
+from typing import Callable, cast
 
 from ..agent import AgentBindingContract, AgentCompiler
-from ..core import JsonValue, canonical_json_bytes, canonical_sha256
+from ..capability import CapabilityContribution
+from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
@@ -16,17 +18,57 @@ from ._agent_binding_resolver import _AgentBindingResolver
 from ._runtime_identity import task_capability_capture_key
 
 _KIND = "task-capability-capture"
-_VERSION = 1
+_VERSION = 2
+_TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_BUILTIN_TASKS: dict[tuple[str, int], dict[str, JsonValue]] = {
+    ("linktools.ai.agent", 1): {
+        "version": 1,
+        "id": "linktools.ai.agent",
+        "revision": 1,
+        "effect_policy": "none",
+        "output_contract": {"kind": "json"},
+        "reconcile": False,
+    },
+    ("linktools.ai.input", 1): {
+        "version": 1,
+        "id": "linktools.ai.input",
+        "revision": 1,
+        "effect_policy": "none",
+        "output_contract": {"kind": "json"},
+        "reconcile": False,
+    },
+}
+
+
+def builtin_task_declaration(
+    task_id: str,
+    revision: int,
+) -> Mapping[str, JsonValue] | None:
+    declaration = _BUILTIN_TASKS.get((task_id, revision))
+    if declaration is None:
+        return None
+    return ImmutableJsonMapping(declaration)
 
 
 @dataclass(frozen=True, slots=True)
 class TaskCapabilityCapture:
     roots: Mapping[str, AgentBindingContract]
     bindings: Mapping[str, AgentBindingContract]
+    tasks: Mapping[tuple[str, int], Mapping[str, JsonValue]] = field(
+        default_factory=dict
+    )
+    expanders: Mapping[tuple[str, int], Mapping[str, JsonValue]] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         roots = dict(sorted(self.roots.items()))
         bindings = dict(sorted(self.bindings.items()))
+        tasks = _freeze_declarations(self.tasks, _task_declaration_identity)
+        expanders = _freeze_declarations(
+            self.expanders,
+            _expander_declaration_identity,
+        )
         if (
             any(
                 not isinstance(key, str)
@@ -46,6 +88,8 @@ class TaskCapabilityCapture:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         object.__setattr__(self, "roots", MappingProxyType(roots))
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
+        object.__setattr__(self, "tasks", MappingProxyType(tasks))
+        object.__setattr__(self, "expanders", MappingProxyType(expanders))
 
 
 class TaskCapabilityCaptureStore:
@@ -76,11 +120,14 @@ class TaskCapabilityCaptureStore:
         self,
         admission: TaskGraphAdmission,
         graph: TaskGraph,
+        *,
+        task_contributions: Sequence[CapabilityContribution[object]] = (),
+        expander_contributions: Sequence[CapabilityContribution[object]] = (),
     ) -> TaskCapabilityCapture:
         key = self._key(admission)
         existing = await self._objects.stat(key)
         if existing is not None:
-            return await self._read(
+            capture = await self._read(
                 ObjectRef(
                     self._objects.store_id,
                     key,
@@ -89,6 +136,32 @@ class TaskCapabilityCaptureStore:
                 ),
                 admission,
             )
+            _validate_required_declarations(
+                capture,
+                graph,
+                task_contributions,
+                expander_contributions,
+            )
+            return capture
+
+        task_declarations = _task_declarations(task_contributions)
+        expander_declarations = _expander_declarations(expander_contributions)
+        if any(node.expander is not None for node in graph.nodes):
+            captured_tasks = task_declarations
+            captured_expanders = expander_declarations
+        else:
+            captured_tasks = {
+                identity: task_declarations[identity]
+                for identity in _required_task_identities(graph)
+                if identity in task_declarations
+            }
+            captured_expanders = {}
+        for identity in _required_task_identities(graph):
+            if identity not in captured_tasks:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+        for identity in _required_expander_identities(graph):
+            if identity not in captured_expanders:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
 
         node_bindings = tuple(
             binding_contract
@@ -124,6 +197,14 @@ class TaskCapabilityCaptureStore:
                 key: value.to_payload()
                 for key, value in sorted(bindings.items())
             },
+            "tasks": [
+                dict(value)
+                for _identity, value in sorted(captured_tasks.items())
+            ],
+            "expanders": [
+                dict(value)
+                for _identity, value in sorted(captured_expanders.items())
+            ],
         }
         payload = canonical_json_bytes(manifest)
         digest = canonical_sha256(manifest)
@@ -144,7 +225,7 @@ class TaskCapabilityCaptureStore:
             current = await self._objects.stat(key)
             if current is None:
                 raise
-            return await self._read(
+            capture = await self._read(
                 ObjectRef(
                     self._objects.store_id,
                     key,
@@ -153,7 +234,14 @@ class TaskCapabilityCaptureStore:
                 ),
                 admission,
             )
-        return await self._read(
+            _validate_required_declarations(
+                capture,
+                graph,
+                task_contributions,
+                expander_contributions,
+            )
+            return capture
+        capture = await self._read(
             ObjectRef(
                 self._objects.store_id,
                 stat.key,
@@ -162,6 +250,13 @@ class TaskCapabilityCaptureStore:
             ),
             admission,
         )
+        _validate_required_declarations(
+            capture,
+            graph,
+            task_contributions,
+            expander_contributions,
+        )
+        return capture
 
     async def load(
         self,
@@ -236,6 +331,8 @@ class TaskCapabilityCaptureStore:
             != admission.initial_request_digest
             or not isinstance(manifest.get("roots"), Mapping)
             or not isinstance(manifest.get("bindings"), Mapping)
+            or not isinstance(manifest.get("tasks"), list)
+            or not isinstance(manifest.get("expanders"), list)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -267,7 +364,15 @@ class TaskCapabilityCaptureStore:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._compiler.restore(binding_contract)
-        return TaskCapabilityCapture(roots, bindings)
+        tasks = _read_declarations(
+            manifest["tasks"],
+            _task_declaration_identity,
+        )
+        expanders = _read_declarations(
+            manifest["expanders"],
+            _expander_declaration_identity,
+        )
+        return TaskCapabilityCapture(roots, bindings, tasks, expanders)
 
     def _key(self, admission: TaskGraphAdmission) -> str:
         return task_capability_capture_key(
@@ -278,7 +383,236 @@ class TaskCapabilityCaptureStore:
         )
 
 
+def _task_declarations(
+    contributions: Sequence[CapabilityContribution[object]],
+) -> dict[tuple[str, int], dict[str, JsonValue]]:
+    declarations = dict(_BUILTIN_TASKS)
+    for contribution in contributions:
+        if (
+            not isinstance(contribution, CapabilityContribution)
+            or contribution.kind != "task"
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        contract = contribution.contract
+        identity = _task_declaration_identity(contract)
+        if identity != (contribution.id, contribution.revision):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if identity in declarations:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        declarations[identity] = contract
+    return dict(sorted(declarations.items()))
+
+
+def _expander_declarations(
+    contributions: Sequence[CapabilityContribution[object]],
+) -> dict[tuple[str, int], dict[str, JsonValue]]:
+    declarations: dict[tuple[str, int], dict[str, JsonValue]] = {}
+    for contribution in contributions:
+        if (
+            not isinstance(contribution, CapabilityContribution)
+            or contribution.kind != "task_expander"
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        contract = contribution.contract
+        identity = _expander_declaration_identity(contract)
+        if identity != (contribution.id, contribution.revision):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if identity in declarations:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        declarations[identity] = contract
+    return dict(sorted(declarations.items()))
+
+
+def _required_task_identities(graph: TaskGraph) -> tuple[tuple[str, int], ...]:
+    identities: set[tuple[str, int]] = set()
+    for node in graph.nodes:
+        identities.add(
+            _validate_task_identity(
+                node.input.get("task_id"),
+                node.input.get("task_revision"),
+            )
+        )
+    return tuple(sorted(identities))
+
+
+def _required_expander_identities(
+    graph: TaskGraph,
+) -> tuple[tuple[str, int], ...]:
+    return tuple(
+        sorted(
+            {
+                (node.expander.id, node.expander.revision)
+                for node in graph.nodes
+                if node.expander is not None
+            }
+        )
+    )
+
+
+def _validate_required_declarations(
+    capture: TaskCapabilityCapture,
+    graph: TaskGraph,
+    task_contributions: Sequence[CapabilityContribution[object]],
+    expander_contributions: Sequence[CapabilityContribution[object]],
+) -> None:
+    current_tasks = _task_declarations(task_contributions)
+    current_expanders = _expander_declarations(expander_contributions)
+    for identity in _required_task_identities(graph):
+        captured = capture.tasks.get(identity)
+        current = current_tasks.get(identity)
+        if captured is None or current is None:
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={
+                    "kind": "task",
+                    "task_id": identity[0],
+                    "task_revision": identity[1],
+                },
+            )
+        if dict(captured) != current:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                safe_details={
+                    "kind": "task",
+                    "task_id": identity[0],
+                    "task_revision": identity[1],
+                },
+            )
+    for identity in _required_expander_identities(graph):
+        captured = capture.expanders.get(identity)
+        current = current_expanders.get(identity)
+        if captured is None or current is None:
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={
+                    "kind": "task_expander",
+                    "expander_id": identity[0],
+                    "expander_revision": identity[1],
+                },
+            )
+        if dict(captured) != current:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                safe_details={
+                    "kind": "task_expander",
+                    "expander_id": identity[0],
+                    "expander_revision": identity[1],
+                },
+            )
+
+
+def _read_declarations(
+    values: object,
+    identity_of: "Callable[[object], tuple[str, int]]",
+) -> dict[tuple[str, int], Mapping[str, JsonValue]]:
+    if not isinstance(values, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    declarations: dict[tuple[str, int], Mapping[str, JsonValue]] = {}
+    for value in values:
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            declaration = ImmutableJsonMapping(value)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        identity = identity_of(declaration)
+        if identity in declarations:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        declarations[identity] = declaration
+    return dict(sorted(declarations.items()))
+
+
+def _freeze_declarations(
+    values: Mapping[tuple[str, int], Mapping[str, JsonValue]],
+    identity_of: "Callable[[object], tuple[str, int]]",
+) -> dict[tuple[str, int], Mapping[str, JsonValue]]:
+    if not isinstance(values, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    declarations: dict[tuple[str, int], Mapping[str, JsonValue]] = {}
+    for identity, value in values.items():
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            declaration = ImmutableJsonMapping(value)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if identity_of(declaration) != identity or identity in declarations:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        declarations[identity] = declaration
+    return dict(sorted(declarations.items()))
+
+
+def _task_declaration_identity(value: object) -> tuple[str, int]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "version",
+        "id",
+        "revision",
+        "effect_policy",
+        "output_contract",
+        "reconcile",
+    }:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    identity = _validate_task_identity(value.get("id"), value.get("revision"))
+    output_contract = value.get("output_contract")
+    if (
+        isinstance(value.get("version"), bool)
+        or value.get("version") != 1
+        or value.get("effect_policy")
+        not in {"none", "replay_safe", "non_replay_safe"}
+        or not isinstance(value.get("reconcile"), bool)
+        or not isinstance(output_contract, Mapping)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if output_contract.get("kind") == "json":
+        if set(output_contract) != {"kind"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    elif output_contract.get("kind") == "schema":
+        if (
+            set(output_contract) != {"kind", "schema"}
+            or not isinstance(output_contract.get("schema"), Mapping)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    else:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return identity
+
+
+def _expander_declaration_identity(value: object) -> tuple[str, int]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "version",
+        "id",
+        "revision",
+    }:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    identity = _validate_task_identity(value.get("id"), value.get("revision"))
+    if (
+        isinstance(value.get("version"), bool)
+        or value.get("version") != 1
+        or identity[0].startswith("linktools.ai.")
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return identity
+
+
+def _validate_task_identity(
+    task_id: object,
+    revision: object,
+) -> tuple[str, int]:
+    if (
+        not isinstance(task_id, str)
+        or _TASK_ID.fullmatch(task_id) is None
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if task_id.startswith("linktools.ai.") and (task_id, revision) not in _BUILTIN_TASKS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return task_id, revision
+
+
 __all__ = [
+    "builtin_task_declaration",
     "TaskCapabilityCapture",
     "TaskCapabilityCaptureStore",
 ]

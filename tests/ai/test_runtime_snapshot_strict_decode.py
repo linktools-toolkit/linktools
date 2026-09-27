@@ -23,6 +23,7 @@ from linktools.ai.runtime import RuntimeSnapshot, RuntimeStorage
 from linktools.ai.runtime import _snapshot as runtime_snapshot_module
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
 from linktools.ai.runtime.state import _root as runtime_storage_root_module
+from linktools.ai.runtime.state import _codec as runtime_storage_codec
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
     encode_envelope,
@@ -141,6 +142,61 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
             limits=limits,
         )
     assert runtime_error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("format_version", "fields", "expected_code"),
+    (
+        (
+            1,
+            {"roots": {}, "bindings": {}},
+            ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+        ),
+        (
+            3,
+            {"roots": {}, "bindings": {}, "tasks": [], "expanders": []},
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            True,
+            {"roots": {}, "bindings": {}, "tasks": [], "expanders": []},
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            2,
+            {"roots": {}, "bindings": {}, "tasks": []},
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+    ),
+)
+def test_snapshot_task_capture_dependencies_classify_versions(
+    format_version: object,
+    fields: dict[str, object],
+    expected_code: ErrorCode,
+) -> None:
+    manifest = {
+        "kind": "task-capability-capture",
+        "format_version": format_version,
+        **fields,
+    }
+    payload = canonical_json_bytes(manifest)
+    reference = ObjectRef(
+        "runtime",
+        "v1/task-capability-capture/capture",
+        "a" * 64,
+        len(payload),
+    )
+
+    with pytest.raises(AIError) as raised:
+        tuple(
+            runtime_storage_codec.iter_runtime_object_dependencies(
+                reference,
+                payload,
+                default_domain=RuntimeDomain.TASK,
+            )
+        )
+
+    assert raised.value.code is expected_code
 
 
 @pytest.mark.asyncio

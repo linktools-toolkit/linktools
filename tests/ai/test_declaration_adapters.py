@@ -4,6 +4,7 @@
 
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -413,6 +414,228 @@ async def test_custom_mcp_loader_binds_resource_versions() -> None:
         reader = capture.asset_reader
         assert reader is not None
         assert await reader.read_versions(versions) == (b"original",)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_prebound_mcp_loader_preserves_resources_and_execution_policy() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    resource = AssetKey("worker", "server/script.py")
+    await store.put(resource, b"script")
+    await store.put(AssetKey("worker", "server/unused.py"), b"unused")
+    server = MCPServerSpec(
+        "server",
+        "python",
+        ("resource:script.py",),
+        AssetKey("worker", "server"),
+    )
+    codec = MCPServerSpecCodec()
+    versions = await store.resolve_versions((resource,))
+    policy = {"version": 1, "boundary": "host-stdio"}
+    contract = codec.to_binding_payload(
+        server,
+        versions,
+        asset_source_id="application",
+        execution_policy=policy,
+    )
+    contribution = CapabilityContribution.from_mcp_contract(contract, server)
+
+    class WorkerLoader:
+        source_kind = "worker"
+
+        async def load(
+            self,
+            _context: CapabilityLoadContext,
+        ) -> "Sequence[CapabilityContribution[object]]":
+            return (contribution,)
+
+    group = CapabilityGroup("application", assets=store)
+    group.loader("worker", WorkerLoader())
+    try:
+        capture = await group.capture()
+        bound = capture.contributions[0]
+        assert bound.contract == contract
+        assert (
+            codec.decode_binding_payload(bound.contract, declaration=server)
+            == versions
+        )
+        assert bound.contract["execution_policy"] == policy
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_binding", ("source", "resource"))
+async def test_prebound_mcp_loader_rejects_wrong_source_or_resource(
+    invalid_binding: str,
+) -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    resource = AssetKey("worker", "server/script.py")
+    await store.put(resource, b"script")
+    server = MCPServerSpec(
+        "server",
+        "python",
+        ("resource:script.py",),
+        AssetKey("worker", "server"),
+    )
+    codec = MCPServerSpecCodec()
+    versions = await store.resolve_versions((resource,))
+    source_id = "application"
+    if invalid_binding == "source":
+        source_id = "another-group"
+    else:
+        versions = (
+            replace(versions[0], key=AssetKey("worker", "outside.py")),
+        )
+    contribution = CapabilityContribution.from_mcp_contract(
+        codec.to_binding_payload(
+            server,
+            versions,
+            asset_source_id=source_id,
+        ),
+        server,
+    )
+
+    class WorkerLoader:
+        source_kind = "worker"
+
+        async def load(
+            self,
+            _context: CapabilityLoadContext,
+        ) -> "Sequence[CapabilityContribution[object]]":
+            return (contribution,)
+
+    group = CapabilityGroup("application", assets=store)
+    group.loader("worker", WorkerLoader())
+    try:
+        with pytest.raises(AIError) as error:
+            await group.capture()
+        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_prebound_mcp_loader_rejects_stale_resource_versions() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    resource = AssetKey("worker", "server/script.py")
+    await store.put(resource, b"original")
+    server = MCPServerSpec(
+        "server",
+        "python",
+        ("resource:script.py",),
+        AssetKey("worker", "server"),
+    )
+    codec = MCPServerSpecCodec()
+    versions = await store.resolve_versions((resource,))
+    contribution = CapabilityContribution.from_mcp_contract(
+        codec.to_binding_payload(
+            server,
+            versions,
+            asset_source_id="application",
+        ),
+        server,
+    )
+    await store.put(resource, b"changed")
+
+    class WorkerLoader:
+        source_kind = "worker"
+
+        async def load(
+            self,
+            _context: CapabilityLoadContext,
+        ) -> "Sequence[CapabilityContribution[object]]":
+            return (contribution,)
+
+    group = CapabilityGroup("application", assets=store)
+    group.loader("worker", WorkerLoader())
+    try:
+        with pytest.raises(AIError) as error:
+            await group.capture()
+        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_prebound_mcp_loader_reports_deleted_resource_as_snapshot_conflict() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    resource = AssetKey("worker", "server/script.py")
+    await store.put(resource, b"original")
+    server = MCPServerSpec(
+        "server",
+        "python",
+        ("resource:script.py",),
+        AssetKey("worker", "server"),
+    )
+    codec = MCPServerSpecCodec()
+    versions = await store.resolve_versions((resource,))
+    contribution = CapabilityContribution.from_mcp_contract(
+        codec.to_binding_payload(
+            server,
+            versions,
+            asset_source_id="application",
+        ),
+        server,
+    )
+    await store.delete(resource)
+
+    class WorkerLoader:
+        source_kind = "worker"
+
+        async def load(
+            self,
+            _context: CapabilityLoadContext,
+        ) -> "Sequence[CapabilityContribution[object]]":
+            return (contribution,)
+
+    group = CapabilityGroup("application", assets=store)
+    group.loader("worker", WorkerLoader())
+    try:
+        with pytest.raises(AIError) as error:
+            await group.capture()
+        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_prebound_mcp_without_resources_keeps_execution_policy() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    server = MCPServerSpec("server", "python")
+    codec = MCPServerSpecCodec()
+    policy = {"version": 1, "boundary": "host-stdio"}
+    contribution = CapabilityContribution.from_mcp_contract(
+        codec.to_binding_payload(server, None, execution_policy=policy),
+        server,
+    )
+
+    class WorkerLoader:
+        source_kind = "worker"
+
+        async def load(
+            self,
+            _context: CapabilityLoadContext,
+        ) -> "Sequence[CapabilityContribution[object]]":
+            return (contribution,)
+
+    group = CapabilityGroup("application", assets=store)
+    group.loader("worker", WorkerLoader())
+    try:
+        capture = await group.capture()
+        assert capture.contributions[0].contract == contribution.contract
+        assert capture.contributions[0].contract["execution_policy"] == policy
     finally:
         await store.close()
 

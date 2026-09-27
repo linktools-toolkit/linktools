@@ -231,6 +231,48 @@ def _bind_mcp_declaration(
     )
 
 
+def _bind_mcp_contribution(
+    contribution: CapabilityContribution[object],
+    context: CapabilityLoadContext,
+) -> CapabilityContribution[object]:
+    if (
+        not isinstance(contribution, CapabilityContribution)
+        or contribution.kind != "mcp"
+        or not isinstance(contribution.value, MCPServerSpec)
+    ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    value = contribution.value
+    contract = contribution.contract
+    is_bound = any(
+        key in contract
+        for key in ("resource_versions", "asset_source_id", "execution_policy")
+    )
+    if not is_bound:
+        return _bind_mcp_declaration(value, context)
+
+    codec = MCPServerSpecCodec()
+    versions = codec.decode_binding_payload(contract, declaration=value)
+    root = value.resource
+    if root is None:
+        return CapabilityContribution.from_mcp_contract(contract, value)
+    source_id = contract.get("asset_source_id")
+    if source_id != context.group_id or versions is None:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+    paths: set[str] = set()
+    keys = tuple(ref.key for ref in versions)
+    for key in keys:
+        relative = mcp_resource_path(key, root)
+        if relative is None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        paths.add(relative)
+    validate_resource_tree(paths)
+    _validate_resource_arguments(value.args, paths)
+    if context.bind_versions(keys) != versions:
+        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+    return CapabilityContribution.from_mcp_contract(contract, value)
+
+
 async def _load_rules(
     context: CapabilityLoadContext,
 ) -> "Sequence[RepositoryInstructionDocument]":

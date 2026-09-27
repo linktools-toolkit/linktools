@@ -16,6 +16,8 @@
 .worktrees/
 .docs/
 .superpowers/
+.multica/
+.multica*
 docs/superpowers/
 
 linktools*/build/
