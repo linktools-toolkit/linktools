@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 
 from ...core import ImmutableJsonMapping, JsonValue
 from ...errors import AIError, ErrorCode
+from ...spec import canonicalize_json_schema
 
 TASK_CAPABILITY_CAPTURE_FORMAT_VERSION = 1
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -58,11 +59,16 @@ def task_declaration_identity(value: object) -> tuple[str, int]:
         if set(output_contract) != {"kind"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     elif output_contract.get("kind") == "schema":
+        schema = output_contract.get("schema")
         if (
             set(output_contract) != {"kind", "schema"}
-            or not isinstance(output_contract.get("schema"), Mapping)
+            or not isinstance(schema, Mapping)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            canonicalize_json_schema(schema)
+        except AIError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     else:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if identity[0].startswith("linktools.ai.") and identity not in _BUILTIN_TASK_IDENTITIES:

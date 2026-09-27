@@ -153,6 +153,7 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
         (1, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "invalid_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_schema", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "duplicate_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
@@ -181,6 +182,16 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
         task_declarations = [task_declaration, task_declaration]
     elif corruption == "invalid_task":
         task_declarations = [{**task_declaration, "effect_policy": []}]
+    elif corruption == "invalid_schema":
+        task_declarations = [
+            {
+                **task_declaration,
+                "output_contract": {
+                    "kind": "schema",
+                    "schema": {"type": 42},
+                },
+            }
+        ]
     expander_declarations: list[dict[str, object]] = []
     if corruption == "duplicate_expander":
         expander_declarations = [expander_declaration, expander_declaration]

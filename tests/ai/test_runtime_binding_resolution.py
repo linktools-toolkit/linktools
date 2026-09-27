@@ -42,7 +42,12 @@ from linktools.ai.runtime._runtime_identity import task_capability_capture_key
 from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_capture import TaskCapabilityCaptureStore
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, SnapshotLimits
+from linktools.ai.runtime.state import (
+    RuntimeDomain,
+    RuntimeStorage,
+    SnapshotLimits,
+    read_task_capability_capture_declarations,
+)
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import (
     AgentSpec,
@@ -781,6 +786,32 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
         await fixture.assets.close()
 
 
+def test_task_capability_capture_reader_preserves_valid_json_schema() -> None:
+    declaration: dict[str, object] = {
+        "version": 1,
+        "id": "test.capture",
+        "revision": 1,
+        "effect_policy": "none",
+        "output_contract": {
+            "kind": "schema",
+            "schema": {
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+            },
+        },
+        "reconcile": False,
+    }
+
+    tasks, expanders = read_task_capability_capture_declarations(
+        [declaration],
+        [],
+    )
+
+    assert tasks[("test.capture", 1)] == declaration
+    assert not expanders
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("format_version", "corruption", "expected_code"),
@@ -789,6 +820,7 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
         (1, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "invalid_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_schema", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (2, "unknown_format", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
@@ -838,6 +870,16 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
         task_declarations = [declaration, declaration]
     elif corruption == "invalid_task":
         task_declarations = [{**declaration, "effect_policy": []}]
+    elif corruption == "invalid_schema":
+        task_declarations = [
+            {
+                **declaration,
+                "output_contract": {
+                    "kind": "schema",
+                    "schema": {"type": 42},
+                },
+            }
+        ]
     expander_declarations: list[dict[str, object]] = []
     if corruption == "duplicate_expander":
         expander_declarations = [expander_declaration, expander_declaration]
