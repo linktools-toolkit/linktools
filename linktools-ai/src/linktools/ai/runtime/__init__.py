@@ -21,7 +21,6 @@ from ._snapshot import (
     SnapshotLimits,
     SnapshotTargetInfo,
 )
-from ._task_capability_capture import builtin_task_declaration
 from ._runtime_service import Runtime
 from ._task import TaskGraphRun
 from .recovery import (
@@ -195,5 +194,4 @@ __all__ = [
     "UpdateSessionRequest",
     "UsageReadCutoff",
     "UsageSummary",
-    "builtin_task_declaration",
 ]

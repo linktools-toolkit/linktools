@@ -42,10 +42,8 @@ from linktools.ai.runtime._runtime_identity import task_capability_capture_key
 from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_capture import TaskCapabilityCaptureStore
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
-from linktools.ai.runtime.state import (
-    RuntimeDomain,
-    RuntimeStorage,
-    SnapshotLimits,
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, SnapshotLimits
+from linktools.ai.runtime.state._task_capability_capture import (
     read_task_capability_capture_declarations,
 )
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput

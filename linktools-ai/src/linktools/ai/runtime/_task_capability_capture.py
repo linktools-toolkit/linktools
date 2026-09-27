@@ -16,7 +16,7 @@ from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
 from ._agent_binding_resolver import _AgentBindingResolver
 from ._runtime_identity import task_capability_capture_key
-from .state.task_capability_capture import (
+from .state._task_capability_capture import (
     TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
     read_task_capability_capture_declarations,
     task_declaration_identity,

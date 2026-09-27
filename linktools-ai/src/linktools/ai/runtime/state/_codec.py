@@ -131,7 +131,7 @@ from ._contracts import (
     TranscriptSeekRecord,
     TranscriptSpanRef,
 )
-from .task_capability_capture import (
+from ._task_capability_capture import (
     TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
     read_task_capability_capture_declarations,
 )
