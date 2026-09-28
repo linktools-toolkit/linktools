@@ -209,11 +209,11 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
             models=_DiagnosticModels(),  # type: ignore[arg-type]
             storage=reopened,
         ) as runtime:
-            result = await runtime.execution.result(
+            result = await runtime.executions.result(
                 started.execution_id,
                 principal=runtime.default_principal,
             )
-            events = await runtime.event.list(
+            events = await runtime.events.list(
                 started.execution_id,
                 principal=runtime.default_principal,
                 limit=100,

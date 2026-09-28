@@ -202,7 +202,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
-        result = await runtime.agent("default").run(secret, timeout_seconds=10)
+        result = await runtime.agents.get("default").run(secret, timeout_seconds=10)
         assert result.status is ExecutionStatus.SUCCEEDED
 
     end = datetime.now(timezone.utc) + timedelta(seconds=1)
@@ -250,7 +250,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
-        result = await runtime.agent("default").run("hello", timeout_seconds=10)
+        result = await runtime.agents.get("default").run("hello", timeout_seconds=10)
         assert result.status is ExecutionStatus.SUCCEEDED
 
 

@@ -23,8 +23,6 @@ from linktools.ai.capability import (
     SkillDefinition,
     SkillResource,
     SkillSourceRef,
-    TaskExpander,
-    TaskExpansionContext,
 )
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -38,7 +36,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.runtime._context import RuntimeContext
-from linktools.ai.runtime._runtime_identity import task_capability_capture_key
+from linktools.ai.runtime._runtime_identity import task_capture_key
 from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_capture import TaskCapabilityCaptureStore
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
@@ -58,14 +56,17 @@ from linktools.ai.storage import (
     StoredPayload,
 )
 from linktools.ai.task import (
+    Task,
+    TaskExpansionContext,
+    TaskExpander,
+    TaskExpanderRef,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphRequest,
-    TaskFunction,
     TaskNode,
     TaskNodeContext,
-    TaskExpanderRef,
+    TaskRef,
 )
 from linktools.ai.workspace import BubblewrapSandbox
 
@@ -214,17 +215,30 @@ async def test_binding_resolution_preserves_direct_child_asset_versions() -> Non
 async def test_task_capture_does_not_build_static_root_closure() -> None:
     fixture = await _fixture()
     try:
+        class CaptureRunner:
+            pass
+
+        task = Task.from_runner(
+            "test.capture-agent",
+            CaptureRunner(),  # type: ignore[arg-type]
+            contract={
+                "version": 1,
+                "type": "agent",
+                "effect_policy": "none",
+                "output_contract": {"kind": "json"},
+                "reconcile": False,
+                "config": {
+                    "agent_id": "parent",
+                    "agent_revision": 1,
+                    "binding_contract": fixture.binding.binding_contract.to_payload(),
+                    "input_mode": "literal",
+                },
+            },
+        )
         graph = TaskGraph(
             "graph",
             (
-                TaskNode(
-                    "root",
-                    input={
-                        "task_id": "linktools.ai.agent",
-                        "task_revision": 1,
-                        "binding_contract": fixture.binding.binding_contract.to_payload(),
-                    },
-                ),
+                TaskNode("root", task=task),
             ),
         )
         admission = TaskGraphAdmission.from_request(
@@ -243,7 +257,7 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
             agent_task_id="linktools.ai.agent",
         )
 
-        capability_capture = await captures.capture(admission, graph)
+        capability_capture = await captures.capture(admission, graph, tasks=(task,))
 
         assert capability_capture.roots == {}
         resolved_binding = capability_capture.bindings[fixture.binding.binding_digest]
@@ -287,28 +301,16 @@ async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
             ) -> tuple[TaskNode, ...]:
                 return ()
 
-        required_handler = TaskFunction[None]("test.capture-required", 1, run_task)
-        unused_a_handler = TaskFunction[None]("test.capture-unused-a", 1, run_task)
-        unused_b_handler = TaskFunction[None]("test.capture-unused-b", 1, run_task)
-        required = CapabilityContribution.from_task(
-            required_handler,
-            effect_policy="none",
-        )
-        unused_a = CapabilityContribution.from_task(
-            unused_a_handler,
-            effect_policy="none",
-        )
-        unused_b = CapabilityContribution.from_task(
-            unused_b_handler,
-            effect_policy="none",
-        )
-        expander: TaskExpander = Expander()
-        expander_contribution = CapabilityContribution.from_task_expander(expander)
+        required = Task("test.capture-required", run_task, effect_policy="none")
+        unused_a = Task("test.capture-unused-a", run_task, effect_policy="none")
+        unused_b = Task("test.capture-unused-b", run_task, effect_policy="none")
+        expander = TaskExpander("test.capture-expander", Expander().expand)
         graph = TaskGraph(
             "capture-race",
             (
-                required_handler.node(
+                TaskNode(
                     "root",
+                    task=required,
                     expander=TaskExpanderRef(expander.id, expander.revision),
                 ),
             ),
@@ -321,7 +323,7 @@ async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
                 TaskGraphLimits(),
             )
         )
-        key = task_capability_capture_key(
+        key = task_capture_key(
             "namespace",
             "tenant",
             admission.graph_id,
@@ -340,14 +342,14 @@ async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
             captures.capture(
                 admission,
                 graph,
-                task_contributions=(required, unused_a),
-                expander_contributions=(expander_contribution,),
+                tasks=(required, unused_a),
+                expanders=(expander,),
             ),
             captures.capture(
                 admission,
                 graph,
-                task_contributions=(required, unused_b),
-                expander_contributions=(expander_contribution,),
+                tasks=(required, unused_b),
+                expanders=(expander,),
             ),
         )
 
@@ -691,20 +693,33 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
     tmp_path: Path,
 ) -> None:
     fixture = await _fixture()
+    class CaptureRunner:
+        pass
+
+    task = Task.from_runner(
+        "test.capture-agent",
+        CaptureRunner(),  # type: ignore[arg-type]
+        contract={
+            "version": 1,
+            "type": "agent",
+            "effect_policy": "none",
+            "output_contract": {"kind": "json"},
+            "reconcile": False,
+            "config": {
+                "agent_id": "parent",
+                "agent_revision": 1,
+                "binding_contract": fixture.binding.binding_contract.to_payload(),
+                "input_mode": "literal",
+            },
+        },
+    )
     storage_root = tmp_path / "task-state"
     state = RuntimeStorage.filesystem(storage_root)
     await state.initialize(namespace="namespace", tenant_id="tenant")
     graph = TaskGraph(
         "graph",
         (
-            TaskNode(
-                "root",
-                input={
-                    "task_id": "linktools.ai.agent",
-                    "task_revision": 1,
-                    "binding_contract": fixture.binding.binding_contract.to_payload(),
-                },
-            ),
+            TaskNode("root", task=task),
         ),
     )
     admission = TaskGraphAdmission.from_request(
@@ -723,10 +738,10 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
             state.object_store(RuntimeDomain.TASK),
             agent_task_id="linktools.ai.agent",
         )
-        await capabilities.capture(admission, graph)
+        await capabilities.capture(admission, graph, tasks=(task,))
         await state.task.admissions.admit(admission, graph)
         loaded = await capabilities.load(admission)
-        assert set(loaded.tasks) == {("linktools.ai.agent", 1)}
+        assert set(loaded.tasks) == {("test.capture-agent", 1)}
         assert not loaded.expanders
         binding = loaded.bindings[fixture.binding.binding_digest]
         resolved_ref = _skill_ref(_resolved_child(binding))
@@ -770,7 +785,7 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
             agent_task_id="linktools.ai.agent",
         )
         loaded = await restored_capabilities.load(admission)
-        assert set(loaded.tasks) == {("linktools.ai.agent", 1)}
+        assert set(loaded.tasks) == {("test.capture-agent", 1)}
         assert not loaded.expanders
         binding = loaded.bindings[fixture.binding.binding_digest]
         restored_ref = _skill_ref(_resolved_child(binding))
@@ -785,14 +800,14 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
 @pytest.mark.parametrize(
     ("format_version", "corruption", "expected_code"),
     (
-        (1, "duplicate_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "invalid_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "invalid_schema", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "unknown_format", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        (2, "duplicate_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2, "invalid_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2, "invalid_schema", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (3, "unknown_format", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
     ),
 )
 async def test_task_capability_capture_reader_rejects_invalid_declaration_manifests(
@@ -807,10 +822,7 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
     graph = TaskGraph(
         "capture-reader",
         (
-            TaskNode(
-                "root",
-                input={"task_id": "test.capture", "task_revision": 1},
-            ),
+            TaskNode("root", task=TaskRef("test.capture", 1)),
         ),
     )
     admission = TaskGraphAdmission.from_request(
@@ -825,6 +837,7 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
         "version": 1,
         "id": "test.capture",
         "revision": 1,
+        "type": "function",
         "effect_policy": "none",
         "output_contract": {"kind": "json"},
         "reconcile": False,
@@ -857,7 +870,7 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
             {**expander_declaration, "version": 1.0}
         ]
     manifest: dict[str, object] = {
-        "kind": "task-capability-capture",
+        "kind": "task-definition-capture",
         "format_version": format_version,
         "namespace": "namespace",
         "tenant_id": "tenant",
@@ -879,7 +892,7 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
         yield payload
 
     await objects.put(
-        task_capability_capture_key(
+        task_capture_key(
             "namespace",
             "tenant",
             admission.graph_id,

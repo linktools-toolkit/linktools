@@ -709,9 +709,14 @@ async def test_task_heartbeat_loss_waits_for_cancellation_resistant_runner(
         failure=None,
         closed=False,
     )
-    node = SimpleNamespace(node_id="node", dependencies=())
+    node = SimpleNamespace(node_id="node", dependencies=(), task=None)
     lease_state = SimpleNamespace(
-        lease=SimpleNamespace(graph_id="graph", node_id="node", fence=1),
+        lease=SimpleNamespace(
+            graph_id="graph",
+            node_id="node",
+            execution_id="execution",
+            fence=1,
+        ),
         lock=asyncio.Lock(),
     )
 

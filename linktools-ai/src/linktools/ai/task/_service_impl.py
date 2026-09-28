@@ -73,6 +73,13 @@ class _LocalTaskWaiter(Protocol):
         tenant_id: str,
     ) -> int | None: ...
 
+    def graph_failure(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> AIError | None: ...
+
     async def wait_graph_activity(
         self,
         graph_id: str,
@@ -513,7 +520,11 @@ class DefaultTaskGraphService(TaskGraphService):
             operation_id,
             tenant_id=tenant_id,
         )
-        if existing is None and initial.status is not TaskStatus.RECOVERY_REQUIRED:
+        if existing is None and initial.status not in {
+            TaskStatus.RECOVERY_REQUIRED,
+            TaskStatus.PENDING,
+            TaskStatus.RUNNING,
+        }:
             raise AIError(ErrorCode.TASK_NOT_READY)
         request_digest = canonical_sha256(
             {
@@ -549,7 +560,10 @@ class DefaultTaskGraphService(TaskGraphService):
                 tenant_id=tenant_id,
                 cancel_requested=cancel_requested,
             )
-        elif existing is None:
+        elif existing is None and view.status not in {
+            TaskStatus.PENDING,
+            TaskStatus.RUNNING,
+        }:
             raise AIError(ErrorCode.TASK_NOT_READY)
         if view.status is TaskStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -1273,7 +1287,7 @@ class DefaultTaskGraphService(TaskGraphService):
             if pending_wait_error is not None:
                 raise pending_wait_error
             try:
-                fallback_backoff = await self._wait_event_observation_opportunity(
+                fallback_backoff = await self._wait_graph_activity_opportunity(
                     graph_id,
                     tenant_id=tenant_id,
                     after_generation=generation,
@@ -1293,7 +1307,7 @@ class DefaultTaskGraphService(TaskGraphService):
             return None
         return waiter.graph_activity_generation(graph_id, tenant_id=tenant_id)
 
-    async def _wait_event_observation_opportunity(
+    async def _wait_graph_activity_opportunity(
         self,
         graph_id: str,
         *,
@@ -1329,7 +1343,11 @@ class DefaultTaskGraphService(TaskGraphService):
         principal: Principal,
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult:
-        if timeout_seconds is not None and timeout_seconds < 0:
+        if timeout_seconds is not None and (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or timeout_seconds < 0
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
         async def consume() -> TaskGraphResult:
@@ -1345,43 +1363,40 @@ class DefaultTaskGraphService(TaskGraphService):
                 AuthorizationAction.TASK_READ,
                 header,
             )
-            latest = await self._persistence.tasks.latest_event(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            if latest is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if latest.status is TaskStatus.WAITING:
-                initial_state = await self._persistence.tasks.graph_state(
+            fallback_backoff = 1.0
+            while True:
+                state = await self._persistence.tasks.graph_state(
                     graph_id,
                     tenant_id=tenant_id,
                 )
-                if initial_state is None:
+                if state is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if _stable_waiting_state(initial_state):
-                    return _state_result(initial_state)
-            if not (
-                latest.node_id is None
-                and _observation_boundary(latest.status)
-            ):
-                async for event in self._observe_graph_events_authorized(
+                if _terminal(state.status):
+                    await self._observe_metric_history(state, tenant_id=tenant_id)
+                    return _state_result(state)
+                if state.status is TaskStatus.RECOVERY_REQUIRED:
+                    return _state_result(state)
+                waiter = self._local_waiter
+                if _stable_waiting_state(state) and (
+                    not _has_wait_bound_node(state)
+                    or waiter is None
+                    or not waiter.owns_graph(graph_id, tenant_id=tenant_id)
+                ):
+                    return _state_result(state)
+                if waiter is not None:
+                    failure = waiter.graph_failure(graph_id, tenant_id=tenant_id)
+                    if failure is not None:
+                        raise failure
+                generation = self._local_activity_generation(
                     graph_id,
                     tenant_id=tenant_id,
-                    after_sequence=latest.sequence,
-                ):
-                    if event.node_id is None and _observation_boundary(event.status):
-                        break
-                else:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            state = await self._persistence.tasks.graph_state(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            if state is None or not _observation_boundary(state.status):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if _terminal(state.status):
-                await self._observe_metric_history(state, tenant_id=tenant_id)
-            return _state_result(state)
+                )
+                fallback_backoff = await self._wait_graph_activity_opportunity(
+                    graph_id,
+                    tenant_id=tenant_id,
+                    after_generation=generation,
+                    fallback_backoff=fallback_backoff,
+                )
 
         try:
             if timeout_seconds is None:
@@ -2133,6 +2148,19 @@ def _stable_waiting_state(state: TaskGraphState) -> bool:
         state.status not in {TaskStatus.READY, TaskStatus.RUNNING}
         for state in unfinished
     )
+
+
+def _has_wait_bound_node(state: TaskGraphState) -> bool:
+    state_by_id = {node.node_id: node for node in state.node_states}
+    for node in state.nodes:
+        node_state = state_by_id[node.node_id]
+        if node_state.status is TaskStatus.WAITING and not (
+            node.task is not None
+            and node.task.id == "linktools.ai.input"
+            and node.task.revision == 1
+        ):
+            return True
+    return False
 
 
 def _state_result(state: TaskGraphState) -> TaskGraphResult:

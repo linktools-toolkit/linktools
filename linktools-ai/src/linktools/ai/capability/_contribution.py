@@ -2,12 +2,10 @@
 # -*- coding: utf-8 -*-
 """Capability contribution contracts and deterministic serialization."""
 
-import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Generic, Literal, TypeAlias, TypeVar
 
-from pydantic import BaseModel
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 
@@ -21,15 +19,8 @@ from ..spec import (
     canonicalize_pydantic_model_schema,
     capability_ref_payload,
 )
-from ..task import (
-    TaskEffectResolution,
-    TaskExpanderRef,
-    TaskNodeContext,
-    TaskNodeHandler,
-)
 from ._context import AgentContext
 from ._skill import SkillDefinition
-from ._task import TaskExpander
 from ._tool_metadata import validate_tool_metadata
 
 AppT = TypeVar("AppT")
@@ -40,8 +31,6 @@ ContributionKind = Literal[
     "skill",
     "mcp",
     "capability",
-    "task",
-    "task_expander",
 ]
 ContributionValue: TypeAlias = (
     Tool
@@ -49,36 +38,7 @@ ContributionValue: TypeAlias = (
     | SkillDefinition
     | MCPServerSpec
     | AbstractCapability
-    | TaskNodeHandler[object]
-    | TaskExpander
 )
-_TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
-_RESERVED_TASK_ID_PREFIX = "linktools.ai."
-_RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
-
-
-@dataclass(frozen=True, slots=True)
-class _TaskHandlerAdapter(Generic[AppT]):
-    handler: TaskNodeHandler[AppT]
-    id: str
-    revision: int
-    effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
-    output_type: "type[BaseModel] | None"
-    reconcile: (
-        Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None
-    ) = field(default=None, repr=False, compare=False)
-
-    def normalize(
-        self,
-        input: Mapping[str, JsonValue],
-    ) -> Mapping[str, JsonValue]:
-        return self.handler.normalize(input)
-
-    async def run(self, context: TaskNodeContext[AppT]) -> JsonValue:
-        return await self.handler.run(context)
-
-    async def cancel(self, context: TaskNodeContext[AppT]) -> None:
-        await self.handler.cancel(context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +47,7 @@ class CapabilityContribution(Generic[AppT]):
     id: str
     value: (
         "Tool[AgentContext[AppT]] | AgentSpec | SkillDefinition | MCPServerSpec | "
-        "AbstractCapability[AgentContext[AppT]] | TaskNodeHandler[AppT] | TaskExpander"
+        "AbstractCapability[AgentContext[AppT]]"
     )
 
     def __post_init__(self) -> None:
@@ -97,8 +57,6 @@ class CapabilityContribution(Generic[AppT]):
             "skill",
             "mcp",
             "capability",
-            "task",
-            "task_expander",
         } or not isinstance(self.id, str) or not self.id.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "tool" and not isinstance(self.value, Tool):
@@ -110,10 +68,6 @@ class CapabilityContribution(Generic[AppT]):
         if self.kind == "mcp" and not isinstance(self.value, MCPServerSpec):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "capability" and not isinstance(self.value, AbstractCapability):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "task" and not isinstance(self.value, TaskNodeHandler):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "task_expander" and not isinstance(self.value, TaskExpander):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "tool" and self.value.name != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -132,14 +86,6 @@ class CapabilityContribution(Generic[AppT]):
             if capability.id is None and capability.defer_loading:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             _validate_external_capability_id(self.id)
-        if self.kind == "task":
-            identity, _revision = _task_identity(self.value)
-            if self.id != identity:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.kind == "task_expander":
-            identity, _revision = _expander_identity(self.value)
-            if self.id != identity:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
     @property
     def revision(self) -> int:
@@ -204,52 +150,6 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         MCPServerSpecCodec().decode_binding_payload(contract, declaration=value)
         return _ContractContribution("mcp", value.id, value, contract)
-
-    @classmethod
-    def from_task(
-        cls,
-        value: "TaskNodeHandler[AppT]",
-        *,
-        effect_policy: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
-        output_type: "type[BaseModel] | None" = None,
-        reconcile: (
-            "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
-        ) = None,
-    ) -> "CapabilityContribution[AppT]":
-        if not isinstance(value, TaskNodeHandler):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if reconcile is not None and not callable(reconcile):
-            raise TypeError("reconcile must be callable")
-        identity, task_revision = _task_identity(value)
-        adapted = _TaskHandlerAdapter(
-            value,
-            identity,
-            task_revision,
-            effect_policy,
-            output_type,
-            reconcile,
-        )
-        return _ContractContribution(
-            "task",
-            identity,
-            adapted,
-            _contribution_contract("task", identity, adapted),
-        )
-
-    @classmethod
-    def from_task_expander(
-        cls,
-        value: TaskExpander,
-    ) -> "CapabilityContribution[object]":
-        identity, _revision = _expander_identity(value)
-        return _ContractContribution(
-            "task_expander",
-            identity,
-            value,
-            _contribution_contract("task_expander", identity, value),
-        )
 
     @property
     def contract(self) -> "dict[str, JsonValue]":
@@ -344,76 +244,7 @@ def _contribution_contract(
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         return contract
-    if kind == "task" and isinstance(value, TaskNodeHandler):
-        task_id, task_revision = _task_identity(value)
-        if identity != task_id:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return {
-            "version": 1,
-            "id": task_id,
-            "revision": task_revision,
-            "effect_policy": _task_effect_policy(value),
-            "output_contract": _task_output_contract(value),
-            "reconcile": getattr(value, "reconcile", None) is not None,
-        }
-    if kind == "task_expander" and isinstance(value, TaskExpander):
-        expander_id, expander_revision = _expander_identity(value)
-        if identity != expander_id:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return {
-            "version": 1,
-            "id": expander_id,
-            "revision": expander_revision,
-        }
     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
-def _task_identity(handler: object) -> tuple[str, int]:
-    if not isinstance(handler, TaskNodeHandler):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    task_id = handler.id
-    task_revision = handler.revision
-    if (
-        not isinstance(task_id, str)
-        or _TASK_ID.fullmatch(task_id) is None
-        or task_id.startswith(_RESERVED_TASK_ID_PREFIX)
-        or isinstance(task_revision, bool)
-        or not isinstance(task_revision, int)
-        or task_revision < 1
-    ):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return task_id, task_revision
-
-
-def _task_effect_policy(handler: object) -> str:
-    effect_policy = getattr(handler, "effect_policy", None)
-    if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return effect_policy
-
-
-def _task_output_contract(handler: object) -> JsonValue:
-    output_type = getattr(handler, "output_type", None)
-    if output_type is None:
-        return {"kind": "json"}
-    if not isinstance(output_type, type) or not issubclass(output_type, BaseModel):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return {
-        "kind": "schema",
-        "schema": canonicalize_pydantic_model_schema(output_type),
-    }
-
-
-def _expander_identity(expander: object) -> tuple[str, int]:
-    if not isinstance(expander, TaskExpander):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    try:
-        reference = TaskExpanderRef(expander.id, expander.revision)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    if reference.id.startswith(_RESERVED_EXPANDER_ID_PREFIX):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return reference.id, reference.revision
 
 
 def _validate_external_capability_id(value: str) -> None:

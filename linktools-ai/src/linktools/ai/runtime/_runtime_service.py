@@ -3,6 +3,7 @@
 """Public Runtime composition boundary and runtime-bound convenience behavior."""
 
 import asyncio
+import inspect
 import secrets
 from dataclasses import replace
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -17,6 +18,8 @@ from ..agent import (
     AgentCatalog,
     AgentCompiler,
     CompiledAgent,
+    OutputBinding,
+    restore_output,
 )
 from ..capability import CapabilityGroup, CapabilityGroupCapture
 from ..core import (
@@ -29,10 +32,13 @@ from ..core import (
     TaskStatus,
     ThinkingValue,
     PromptLimits,
+    Page,
     normalize_correlation,
     normalize_execution_mode,
     normalize_thinking,
     overlay_correlation,
+    canonical_sha256,
+    principal_identity_payload,
     validate_agent_id,
     validate_idempotency_key,
     validate_memory_scope,
@@ -46,20 +52,34 @@ if TYPE_CHECKING:
     from ..observe import Metrics
     from ..task import TaskResultRecord
     from ._runtime_history import RuntimeHistory
+    from .state._contracts import (
+        StoredUserInput,
+        TaskAdmissionRepository,
+        TaskPreparedInputRecord,
+    )
 from ..task import (
     CancelGraphRequest,
+    Task,
+    TaskExpander,
+    TaskGraphAdmission,
     TaskGraph,
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphService,
+    RecoverGraphRequest,
     TaskResultRef,
     TaskNode,
+    TaskNodeInvocation,
     TaskExpanderRef,
 )
 from ._agent import Agent, Execution, Session
 from ._agent_binding_resolver import _AgentBindingResolver
 from ._task import TaskGraphRun
+from ._tasks import RuntimeTasks, TaskEngine
+from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
+from ._agent_task import RuntimeAgentTaskRunner
+from ._agent_task_input import AgentTaskInputBuilder
 from ._context import RuntimeContext
 from ._input import CanonicalUserInput
 from ._metrics import (
@@ -79,6 +99,7 @@ from .service_api import (
     EventService,
     ExternalService,
     ExecutionRequest,
+    ExecutionResult,
     ExecutionService,
     ForkExecutionRequest,
     ForkSessionRequest,
@@ -99,31 +120,27 @@ AppT = TypeVar("AppT")
 
 
 class _TaskNodeRuntimePort(Protocol):
-    def admit_node(self, node: "TaskNode") -> "TaskNode": ...
-
-    def build_agent_task(
+    async def activate_graph(
         self,
-        agent_id: str,
-        agent_revision: int,
-        node_id: str,
-        user_prompt: CanonicalUserInput,
+        graph: TaskGraph,
+        tasks: Sequence[Task[AppT]],
+        expanders: Sequence[TaskExpander],
         *,
-        dependencies: tuple[str, ...] = (),
-        budget_cost: int = 1,
-        output_type: "type[BaseModel] | None" = None,
-        planning: "bool | None" = None,
-        thinking: "ThinkingValue | None" = None,
-        expander: "TaskExpanderRef | None" = None,
-        input_refs: "Mapping[str, TaskResultRef] | None" = None,
-        timeout_seconds: "float | None" = None,
-        max_attempts: int = 1,
-        retry_delay_seconds: float = 0,
-        files: Sequence[str] = (),
-        session_id: "str | None" = None,
-        memory_scope: "str | None" = None,
-        compiled_agent: "CompiledAgent | None" = None,
-        dependency_policy: str = "all_succeeded",
-    ) -> "TaskNode": ...
+        track_pre_admission: bool = False,
+    ) -> object | None: ...
+
+    async def finish_graph_activation(
+        self,
+        graph_id: str,
+        tenant_id: str,
+        activation: object,
+        *,
+        admitted: bool,
+    ) -> None: ...
+
+    async def load_admission(self, admission: TaskGraphAdmission) -> None: ...
+
+    def admit_node(self, node: "TaskNode") -> "TaskNode": ...
 
     async def get_result_record(
         self,
@@ -133,12 +150,75 @@ class _TaskNodeRuntimePort(Protocol):
         tenant_id: str,
     ) -> "TaskResultRecord | None": ...
 
+    async def get_result_records(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> "Mapping[str, TaskResultRecord]": ...
+
     async def read_result_record(
         self,
         record: "TaskResultRecord",
         *,
         principal: "Principal | None" = None,
     ) -> JsonValue: ...
+
+    async def result_payload_size(
+        self,
+        record: "TaskResultRecord",
+        *,
+        principal: "Principal",
+    ) -> int: ...
+
+    async def read_execution_failure(
+        self,
+        execution_id: str,
+        *,
+        principal: "Principal",
+    ) -> "ExecutionResult | None": ...
+
+    async def read_input_result(
+        self,
+        invocation: "TaskNodeInvocation",
+        name: str,
+    ) -> JsonValue: ...
+
+    async def read_input_result_ref(
+        self,
+        invocation: "TaskNodeInvocation",
+        name: str,
+    ) -> TaskResultRef: ...
+
+    async def restore_prepared_agent_prompt(
+        self,
+        value: "StoredUserInput",
+    ) -> CanonicalUserInput: ...
+
+    async def store_prepared_agent_prompt(
+        self,
+        value: CanonicalUserInput,
+        *,
+        files: Sequence[str],
+        tenant_id: str,
+    ) -> "StoredUserInput": ...
+
+    async def get_prepared_agent_input(
+        self,
+        invocation: "TaskNodeInvocation",
+    ) -> "TaskPreparedInputRecord | None": ...
+
+    async def publish_prepared_agent_input(
+        self,
+        invocation: "TaskNodeInvocation",
+        *,
+        input_identity: str,
+        source_refs: tuple[tuple[str, TaskResultRef], ...],
+        stored_user_input: "StoredUserInput",
+        final_input_digest: str,
+        request_identity: str,
+    ) -> "TaskPreparedInputRecord": ...
 
 
 class _MetricControl(Protocol):
@@ -212,6 +292,7 @@ class Runtime(Generic[AppT]):
         context: RuntimeContext[AppT],
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
+        task_admissions: "TaskAdmissionRepository | None" = None,
         tree_streamer: "_ExecutionTreeStreamer | None" = None,
         metric_control: "_MetricControl | None" = None,
         _binding_resolver: "_AgentBindingResolver | None" = None,
@@ -236,14 +317,16 @@ class Runtime(Generic[AppT]):
             raise TypeError("context must be RuntimeContext")
         self._catalog = catalog
         self._compiler = compiler
-        self.execution = execution
-        self.session = session
-        self.graph = graph
-        self.evaluation = evaluation
-        self.approval = approval
-        self.external = external
-        self.event = event
-        self.artifact = artifact
+        self._execution_service = execution
+        self.executions = RuntimeExecutions(execution, self._get_execution)
+        self._session_service = session
+        self.sessions = RuntimeSessions(session, self._get_session)
+        self._graph_service = graph
+        self.evaluations = evaluation
+        self.approvals = approval
+        self.external_calls = external
+        self.events = event
+        self.artifacts = artifact
         self.history = history
         self._namespace = validate_persistence_namespace(namespace)
         self._context = context
@@ -254,6 +337,10 @@ class Runtime(Generic[AppT]):
         )
         self._close_callback = close_callback
         self._task_node_runtime = task_node_runtime
+        self._task_admissions = task_admissions
+        self.tasks = RuntimeTasks(self, graph)
+        self.agents = RuntimeAgents(self._get_agent)
+        self.metrics = RuntimeMetrics(self._metric_status, self._flush_metrics)
         self._tree_streamer = tree_streamer
         self._metric_control = metric_control
         self._binding_resolver = _binding_resolver
@@ -358,11 +445,11 @@ class Runtime(Generic[AppT]):
     def correlation(self) -> CorrelationData:
         return self._context.correlation
 
-    def metric_status(self) -> MetricBufferStatus:
+    def _metric_status(self) -> MetricBufferStatus:
         control = self._metric_control
         return _disabled_metric_status() if control is None else control.status()
 
-    async def flush_metrics(
+    async def _flush_metrics(
         self,
         *,
         timeout_seconds: float = 5.0,
@@ -379,20 +466,62 @@ class Runtime(Generic[AppT]):
             return MetricFlushResult(True, _disabled_metric_status())
         return await control.flush(timeout_seconds=timeout_seconds)
 
-    def agent(
-        self,
-        agent_id: str = "default",
-        *,
-        model: "str | None" = None,
-        system_prompt: "str | None" = None,
-        instructions: "Sequence[str] | None" = None,
-        allow_tools: "Sequence[str] | None" = None,
-        allow_skills: "Sequence[str] | None" = None,
-    ) -> "Agent[AppT]":
-        """Resolve one root Agent, optionally deriving narrower call semantics."""
+    def _get_agent(self, agent_id: str = "default") -> "Agent[AppT]":
         self._ensure_open()
         validate_agent_id(agent_id)
         root = self._catalog.root_agent(agent_id)
+        return Agent(self, root.spec.id, root.spec.revision)
+
+    async def _get_execution(
+        self,
+        execution_id: str,
+        principal: Principal | None,
+    ) -> Execution[AppT]:
+        self._ensure_open()
+        validate_resource_id(execution_id)
+        resolved_principal = self._resolve_principal(principal)
+        await self.executions.inspect(execution_id, principal=resolved_principal)
+        return Execution(
+            self,
+            execution_id,
+            resolved_principal,
+            self._watch_execution_tree,
+        )
+
+    async def _get_session(
+        self,
+        session_id: str,
+        principal: Principal | None,
+    ) -> Session[AppT]:
+        self._ensure_open()
+        validate_resource_id(session_id)
+        resolved_principal = self._resolve_principal(principal)
+        view = await self._session_service.get(
+            session_id,
+            principal=resolved_principal,
+        )
+        return Session(
+            self,
+            view.agent_id,
+            None,
+            view.session_id,
+            resolved_principal,
+        )
+
+    def _derive_agent(
+        self,
+        agent: Agent[AppT],
+        *,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        instructions: Sequence[str] | None = None,
+        allow_tools: Sequence[str] | None = None,
+        allow_skills: Sequence[str] | None = None,
+    ) -> "Agent[AppT]":
+        self._ensure_open()
+        if not isinstance(agent, Agent) or agent.runtime is not self:
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        root = self._compiled_agent(agent.id, agent.revision, agent.compiled)
         if all(
             value is None
             for value in (
@@ -403,7 +532,7 @@ class Runtime(Generic[AppT]):
                 allow_skills,
             )
         ):
-            return Agent(self, root.spec.id, root.spec.revision)
+            return agent
         changes: dict[str, object] = {}
         if model is not None:
             changes["model"] = model
@@ -475,7 +604,7 @@ class Runtime(Generic[AppT]):
         user_prompt: CanonicalUserInput,
         *,
         files: Sequence[str],
-        output: "type[BaseModel] | None",
+        output: "type[BaseModel] | OutputBinding | None",
         principal: "Principal | None",
         session_id: "str | None",
         idempotency_key: "str | None",
@@ -515,7 +644,7 @@ class Runtime(Generic[AppT]):
             files=resolved_files,
         )
         if session_id is None:
-            handle = await self.execution.start(
+            handle = await self.executions.start(
                 binding.binding_digest,
                 request,
                 binding_contract=binding.binding_contract,
@@ -535,7 +664,7 @@ class Runtime(Generic[AppT]):
                 correlation=effective_correlation,
                 files=request.files,
             )
-            handle = await self.session.resume(
+            handle = await self.sessions.resume(
                 compiled_agent.spec.id,
                 binding.binding_digest,
                 session_id,
@@ -577,7 +706,7 @@ class Runtime(Generic[AppT]):
             correlation=_request_correlation(correlation),
             files=_request_files(files),
         )
-        handle = await self.execution.retry(execution_id, request)
+        handle = await self.executions.retry(execution_id, request)
         return Execution(
             self,
             handle.execution_id,
@@ -603,32 +732,12 @@ class Runtime(Generic[AppT]):
             correlation=_request_correlation(correlation),
             files=_request_files(files),
         )
-        handle = await self.execution.fork(execution_id, request)
+        handle = await self.executions.fork(execution_id, request)
         return Execution(
             self,
             handle.execution_id,
             principal,
             self._watch_execution_tree,
-        )
-
-    async def cancel(
-        self,
-        execution_id: str,
-        *,
-        principal: "Principal | None" = None,
-        idempotency_key: "str | None" = None,
-        force: bool = False,
-    ) -> CancelExecutionResult:
-        self._ensure_open()
-        resolved_principal = self._resolve_principal(principal)
-        validate_resource_id(execution_id)
-        return await self.execution.cancel(
-            execution_id,
-            CancelExecutionRequest(
-                resolved_principal,
-                idempotency_key or secrets.token_urlsafe(32),
-                force,
-            ),
         )
 
     async def _create_session_for_agent(
@@ -646,7 +755,7 @@ class Runtime(Generic[AppT]):
         values = dict(metadata or {})
         if any(key.startswith("linktools.ai.") for key in values):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        return await self.session.create(
+        return await self.sessions.create(
             agent_id,
             CreateSessionRequest(
                 resolved_principal,
@@ -670,7 +779,7 @@ class Runtime(Generic[AppT]):
         compiled_agent: "CompiledAgent | None" = None,
     ) -> "Session[AppT]":
         resolved_principal = self._resolve_principal(principal)
-        await self.session.fork(
+        await self.sessions.fork(
             agent_id,
             session_id,
             ForkSessionRequest(
@@ -701,7 +810,7 @@ class Runtime(Generic[AppT]):
         cwd: "str | None",
     ) -> SessionView:
         resolved_principal = self._resolve_principal(principal)
-        return await self.session.update(
+        return await self.sessions.update(
             agent_id,
             session_id,
             UpdateSessionRequest(
@@ -723,7 +832,7 @@ class Runtime(Generic[AppT]):
         wait_timeout_seconds: int,
     ) -> SessionView:
         resolved_principal = self._resolve_principal(principal)
-        return await self.session.close(
+        return await self.sessions.close(
             session_id,
             CloseSessionRequest(
                 resolved_principal,
@@ -750,7 +859,7 @@ class Runtime(Generic[AppT]):
                 compiled_agent=compiled_agent,
             )
         )
-        return await self.evaluation.start(
+        return await self.evaluations.start(
             binding.binding_digest,
             request,
             binding_contract=binding.binding_contract,
@@ -762,7 +871,7 @@ class Runtime(Generic[AppT]):
         evaluation_id: str,
         request: ReplayEvaluationRequest,
     ) -> "Execution[AppT]":
-        handle = await self.evaluation.replay(
+        handle = await self.evaluations.replay(
             agent_id,
             evaluation_id,
             request,
@@ -774,173 +883,107 @@ class Runtime(Generic[AppT]):
             self._watch_execution_tree,
         )
 
-    def _task_for_agent(
+    def _task_from_agent(
         self,
-        agent_id: str,
-        agent_revision: int,
-        node_id: str,
-        user_prompt: CanonicalUserInput,
+        task_id: str,
+        agent: Agent[AppT],
         *,
-        dependencies: tuple[str, ...],
-        budget_cost: int,
-        output_type: "type[BaseModel] | None",
-        planning: "bool | None",
-        thinking: "ThinkingValue | None",
-        expander: "TaskExpanderRef | None",
-        input_refs: "Mapping[str, TaskResultRef] | None" = None,
-        timeout_seconds: "float | None" = None,
-        max_attempts: int = 1,
-        retry_delay_seconds: float = 0,
-        files: Sequence[str] = (),
-        session_id: "str | None" = None,
-        memory_scope: "str | None" = None,
-        compiled_agent: "CompiledAgent | None" = None,
-        dependency_policy: str = "all_succeeded",
-    ) -> TaskNode:
-        return self._require_task_node_runtime().build_agent_task(
-            agent_id,
-            agent_revision,
-            node_id,
-            user_prompt,
-            dependencies=dependencies,
-            budget_cost=budget_cost,
-            output_type=output_type,
-            planning=planning,
-            thinking=thinking,
-            expander=expander,
-            input_refs=input_refs,
-            timeout_seconds=timeout_seconds,
-            max_attempts=max_attempts,
-            retry_delay_seconds=retry_delay_seconds,
-            files=files,
-            session_id=session_id,
-            memory_scope=memory_scope,
-            compiled_agent=compiled_agent,
-            dependency_policy=dependency_policy,
-        )
-
-    async def start_graph(
-        self,
-        graph: TaskGraph,
-        *,
-        principal: "Principal | None" = None,
-        idempotency_key: str,
-        limits: "TaskGraphLimits | None" = None,
-        correlation: "Mapping[str, object] | None" = None,
-    ) -> "TaskGraphRun[AppT]":
-        request = await self._admit_graph(
-            graph,
-            principal=principal,
-            idempotency_key=idempotency_key,
-            limits=limits,
-            correlation=correlation,
-        )
-        await self.graph.start(request)
-        return TaskGraphRun(
-            self,
-            graph.graph_id,
-            request.principal,
-            self._watch_execution_tree,
-        )
-
-    def graph_run(
-        self,
-        graph_id: str,
-        *,
-        principal: "Principal | None" = None,
-    ) -> TaskGraphRun[AppT]:
-        """Return a durable graph handle without starting another scheduler."""
+        revision: int,
+        build_input: AgentTaskInputBuilder | None,
+    ) -> Task[AppT]:
         self._ensure_open()
-        validate_resource_id(graph_id)
-        return TaskGraphRun(
-            self,
-            graph_id,
-            self._resolve_principal(principal),
-            self._watch_execution_tree,
-        )
+        if not isinstance(agent, Agent) or agent.runtime is not self:
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        if build_input is not None and not inspect.iscoroutinefunction(build_input):
+            raise TypeError("build_input must be async")
+        compiled = self._compiled_agent(agent.id, agent.revision, agent.compiled)
+        binding_contract = self._compiler.bind(compiled).binding_contract
+        input_mode = "projected" if build_input is not None else "literal"
 
-    async def run_graph(
-        self,
-        graph: TaskGraph,
-        *,
-        principal: "Principal | None" = None,
-        idempotency_key: str,
-        limits: "TaskGraphLimits | None" = None,
-        timeout_seconds: "float | None" = None,
-        correlation: "Mapping[str, object] | None" = None,
-        observer: "Callable[[TaskGraphRunEvent], Awaitable[None]] | None" = None,
-    ) -> TaskGraphResult:
-        run = await self.start_graph(
-            graph,
-            principal=principal,
-            idempotency_key=idempotency_key,
-            limits=limits,
-            correlation=correlation,
-        )
-        return await run.wait(
-            timeout_seconds=timeout_seconds,
-            observer=observer,
-        )
+        async def start_execution(
+            invocation: TaskNodeInvocation,
+            prompt: CanonicalUserInput,
+            *,
+            files: Sequence[str],
+            session_id: str | None,
+            memory_scope: str | None,
+            planning: bool,
+            thinking: ThinkingValue,
+            idempotency_key: str,
+        ) -> Execution[AppT]:
+            output_type: type[BaseModel] | OutputBinding | None = (
+                invocation.node.output_type
+            )
+            if output_type is None and invocation.node.output_contract is not None:
+                output_contract = invocation.node.output_contract
+                mode = output_contract.get("mode")
+                schema = output_contract.get("schema")
+                if mode is not None and schema is not None:
+                    output_type = restore_output(mode, schema)
+            if not isinstance(output_type, OutputBinding) and (
+                not isinstance(output_type, type)
+                or not issubclass(output_type, BaseModel)
+            ):
+                output_type = None
+            return await self._start_for_agent(
+                agent.id,
+                agent.revision,
+                prompt,
+                files=files,
+                output=output_type,
+                principal=invocation.principal,
+                session_id=session_id,
+                idempotency_key=idempotency_key,
+                memory_scope=memory_scope,
+                mode="run",
+                planning=planning,
+                thinking=thinking,
+                correlation=invocation.correlation,
+                compiled_agent=compiled,
+            )
 
-    async def read_task_result(
-        self,
-        graph_id: str,
-        node_id: str,
-        *,
-        principal: "Principal | None" = None,
-    ) -> JsonValue:
-        self._ensure_open()
-        resolved_principal = self._resolve_principal(principal)
-        graph_state = await self.graph.state(
-            graph_id,
-            principal=resolved_principal,
+        async def get_execution(
+            execution_id: str,
+            principal: Principal,
+        ) -> Execution[AppT]:
+            return Execution(self, execution_id, principal, self._watch_execution_tree)
+
+        node_runtime = self._require_task_node_runtime()
+        runner = RuntimeAgentTaskRunner[AppT](
+            id=task_id,
+            revision=revision,
+            input_mode=input_mode,
+            planning_default=compiled.spec.planning,
+            thinking_default=compiled.spec.thinking,
+            binding_contract=binding_contract.to_payload(),
+            build_input=build_input,
+            start_execution=start_execution,
+            get_execution=get_execution,
+            result_reader=node_runtime.read_input_result,
+            result_ref_reader=node_runtime.read_input_result_ref,
+            get_prepared_input=node_runtime.get_prepared_agent_input,
+            publish_prepared_input=node_runtime.publish_prepared_agent_input,
+            store_prepared_prompt=node_runtime.store_prepared_agent_prompt,
+            restore_prepared_prompt=node_runtime.restore_prepared_agent_prompt,
         )
-        state = next(
-            (value for value in graph_state.node_states if value.node_id == node_id),
-            None,
-        )
-        if state is None:
-            raise AIError(
-                ErrorCode.STORAGE_NOT_FOUND,
-                safe_details={"graph_id": graph_id, "node_id": node_id},
-            )
-        if state.status in {
-            TaskStatus.PENDING,
-            TaskStatus.READY,
-            TaskStatus.RUNNING,
-            TaskStatus.WAITING,
-            TaskStatus.RECOVERY_REQUIRED,
-        }:
-            raise AIError(
-                ErrorCode.TASK_NOT_READY,
-                safe_details={"graph_id": graph_id, "node_id": node_id},
-            )
-        if state.status in {
-            TaskStatus.FAILED,
-            TaskStatus.BLOCKED,
-            TaskStatus.CANCELLED,
-        }:
-            details: dict[str, JsonValue] = {
-                "graph_id": graph_id,
-                "node_id": node_id,
-                "status": state.status.value,
-            }
-            if state.error_code is not None:
-                details["error_code"] = state.error_code
-            raise AIError(ErrorCode.TASK_NODE_FAILED, safe_details=details)
-        if state.status is not TaskStatus.SUCCEEDED or state.result_digest is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        task_runtime = self._require_task_node_runtime()
-        record = await task_runtime.get_result_record(
-            graph_id,
-            node_id,
-            tenant_id=resolved_principal.tenant_id,
-        )
-        if record is None or record.result_digest != state.result_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await task_runtime.read_result_record(
-            record,
-            principal=resolved_principal,
+        contract: dict[str, JsonValue] = {
+            "version": 1,
+            "type": "agent",
+            "effect_policy": "none",
+            "output_contract": {"kind": "json"},
+            "reconcile": False,
+            "config": {
+                "agent_id": compiled.spec.id,
+                "agent_revision": compiled.spec.revision,
+                "binding_contract": binding_contract.to_payload(),
+                "input_mode": input_mode,
+            },
+        }
+        return Task.from_runner(
+            task_id,
+            runner,
+            revision=revision,
+            contract=contract,
         )
 
     def _task_execution(
@@ -976,19 +1019,19 @@ class Runtime(Generic[AppT]):
         idempotency_key: str | None,
         force: bool,
     ) -> CancelExecutionResult:
-        view = await self.execution.inspect(
+        view = await self.executions.inspect(
             execution_id,
             principal=principal,
         )
         key = idempotency_key or secrets.token_urlsafe(32)
         try:
             if view.binding_kind == "task":
-                cancelled = await self.execution.cancel_task(
+                cancelled = await self.executions.cancel_task(
                     execution_id,
                     principal=principal,
                 )
             else:
-                cancelled = await self.execution.cancel(
+                cancelled = await self.executions.cancel(
                     execution_id,
                     CancelExecutionRequest(
                         principal,
@@ -998,7 +1041,7 @@ class Runtime(Generic[AppT]):
                 )
         except AIError as error:
             if error.code is ErrorCode.TASK_EFFECT_UNKNOWN:
-                await self.graph.cancel_node(
+                await self._graph_service.cancel_node(
                     graph_id,
                     node_id,
                     execution_id,
@@ -1011,7 +1054,7 @@ class Runtime(Generic[AppT]):
             raise
 
         if cancelled.cancelled:
-            await self.graph.cancel_node(
+            await self._graph_service.cancel_node(
                 graph_id,
                 node_id,
                 execution_id,
@@ -1063,7 +1106,10 @@ class Runtime(Generic[AppT]):
         principal: Principal,
     ) -> None:
         try:
-            session = await self.session.get(session_id, principal=principal)
+            session = await self._session_service.get(
+                session_id,
+                principal=principal,
+            )
         except AIError as error:
             if error.code not in {
                 ErrorCode.SESSION_NOT_FOUND,
@@ -1071,7 +1117,7 @@ class Runtime(Generic[AppT]):
             }:
                 raise
             try:
-                await self.session.create(
+                await self.sessions.create(
                     compiled_agent.spec.id,
                     CreateSessionRequest(
                         principal,
@@ -1085,7 +1131,10 @@ class Runtime(Generic[AppT]):
             except AIError as create_error:
                 if create_error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
-            session = await self.session.get(session_id, principal=principal)
+            session = await self._session_service.get(
+                session_id,
+                principal=principal,
+            )
         if session.status is not SessionStatus.OPEN:
             raise AIError(ErrorCode.SESSION_CONFLICT)
         if session.agent_id != compiled_agent.spec.id:
@@ -1104,6 +1153,45 @@ class Runtime(Generic[AppT]):
         if self._task_node_runtime is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._task_node_runtime
+
+    async def _recover_pending_tasks(
+        self,
+        engine: TaskEngine[AppT],
+        *,
+        cursor: str | None,
+        limit: int,
+        principal: Principal | None,
+    ) -> Page[TaskGraphResult]:
+        self._ensure_open()
+        admissions = self._task_admissions
+        if admissions is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        resolved_principal = self._resolve_principal(principal)
+        if resolved_principal.tenant_id != self.tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        page = await admissions.list_recoverable_page(
+            cursor=cursor,
+            limit=limit,
+        )
+        recovered: list[TaskGraphResult] = []
+        for launch in page.items:
+            if launch.principal.tenant_id != resolved_principal.tenant_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await engine._activate_graph(launch.graph_id, resolved_principal)
+            idempotency_key = "recover-pending-" + canonical_sha256(
+                {
+                    "namespace": self.namespace,
+                    "principal": principal_identity_payload(resolved_principal),
+                    "graph_id": launch.graph_id,
+                }
+            )
+            recovered.append(
+                await self._graph_service.recover(
+                    launch.graph_id,
+                    RecoverGraphRequest(resolved_principal, idempotency_key),
+                )
+            )
+        return Page(tuple(recovered), page.next_cursor)
 
     async def close(self) -> None:
         async with self._close_lock:
@@ -1236,6 +1324,7 @@ async def _open_runtime(
             context=context,
             close_callback=components.close_callback,
             task_node_runtime=components.task_node_runtime,
+            task_admissions=components.task_admissions,
             tree_streamer=components.tree_streamer,
             metric_control=components.metric_control,
             _binding_resolver=components.binding_resolver,

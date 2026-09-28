@@ -147,16 +147,48 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
 @pytest.mark.parametrize(
     ("format_version", "corruption", "expected_code"),
     (
-        (2, "valid", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        (
+            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION + 1,
+            "valid",
+            ErrorCode.STORAGE_VERSION_UNSUPPORTED,
+        ),
         (True, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1.0, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "invalid_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "invalid_schema", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "duplicate_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (1, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2.0, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (
+            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            "missing_array",
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            "wrong_kind",
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            "invalid_task",
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            "invalid_schema",
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            "duplicate_task",
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            "duplicate_expander",
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            "invalid_expander",
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
     ),
 )
 def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
@@ -168,6 +200,7 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
         "version": 1,
         "id": "test.capture",
         "revision": 1,
+        "type": "function",
         "effect_policy": "none",
         "output_contract": {"kind": "json"},
         "reconcile": False,
@@ -200,12 +233,12 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
             {**expander_declaration, "version": 1.0}
         ]
     manifest: dict[str, object] = {
-        "kind": (
-            "invalid-kind"
-            if corruption == "wrong_kind"
-            else "task-capability-capture"
-        ),
+        "kind": "invalid-kind" if corruption == "wrong_kind" else "task-definition-capture",
         "format_version": format_version,
+        "namespace": "runtime",
+        "tenant_id": "tenant",
+        "graph_id": "graph",
+        "request_digest": "a" * 64,
         "roots": {},
         "bindings": {},
         "tasks": task_declarations,
@@ -216,7 +249,7 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
     payload = canonical_json_bytes(manifest)
     reference = ObjectRef(
         "runtime",
-        "v1/task-capability-capture/capture",
+        "v2/task-capture/capture",
         "a" * 64,
         len(payload),
     )

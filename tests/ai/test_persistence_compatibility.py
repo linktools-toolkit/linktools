@@ -114,13 +114,17 @@ def test_model_message_v1_fixture() -> None:
     assert decoded == _model_message_values()
 
 
-def _custom_wire_values() -> dict[str, JsonValue]:
-    task_node = TaskNode(
+def _custom_task_node() -> TaskNode:
+    return TaskNode(
         "node",
         ("dependency",),
         input={"key": "value"},
         budget_cost=2,
     )
+
+
+def _custom_wire_values() -> dict[str, JsonValue]:
+    task_node = _custom_task_node()
     task_wire = cast(dict[str, JsonValue], runtime_codec.encode_domain(task_node))
     task_wire = dict(task_wire)
     task_wire["schema"] = runtime_codec.CURRENT_DATA_VERSION
@@ -143,7 +147,7 @@ def _custom_wire_values() -> dict[str, JsonValue]:
     )
     version = runtime_codec.CURRENT_DATA_VERSION
     return {
-        f"task_node@{version}": task_wire,
+        runtime_codec.wire_type_id(task_node): task_wire,
         f"execution_terminal_commit@{version}:idempotency_terminal_update": runtime_codec.encode_domain(idempotency),
         f"execution_terminal_commit@{version}:operation_terminal_update": runtime_codec.encode_domain(operation),
     }
@@ -153,7 +157,7 @@ def _decode_custom_wire_values(
     value: Mapping[str, object],
 ) -> tuple[TaskNode, IdempotencyTerminalUpdate, OperationTerminalUpdate]:
     version = runtime_codec.CURRENT_DATA_VERSION
-    task_wire = value[f"task_node@{version}"]
+    task_wire = value[runtime_codec.wire_type_id(_custom_task_node())]
     if not isinstance(task_wire, Mapping) or task_wire.get("schema") != version:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     task_payload = dict(task_wire)

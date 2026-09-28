@@ -196,6 +196,8 @@ class _TaskRepository(Protocol):
         tenant_id: str,
         error_code: str,
         error_digest: str,
+        error_origin: str = "node",
+        safe_error_details: Mapping[str, JsonValue] | None = None,
         execution_id: "str | None" = None,
         graph_id: "str | None" = None,
         node_id: "str | None" = None,
@@ -556,6 +558,7 @@ class LocalTaskGraphLauncher:
                 execution_id=execution_id,
                 error_code=error.code.value,
                 error_digest=digest,
+                error_origin="execution",
                 expected_fence=expected_fence,
             )
         else:
@@ -841,6 +844,17 @@ class LocalTaskGraphLauncher:
             return None
         return run.generation
 
+    def graph_failure(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> AIError | None:
+        run = self._graphs.get((tenant_id, graph_id))
+        if run is None or run.failure is None:
+            return None
+        return _copy_ai_error(run.failure)
+
     async def wait_graph_activity(
         self,
         graph_id: str,
@@ -942,7 +956,11 @@ class LocalTaskGraphLauncher:
                     node = static.get(state.node_id)
                     if node is None or state.execution_id is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if state.execution_id.startswith("wait:"):
+                    if (
+                        node.task is not None
+                        and node.task.id == "linktools.ai.input"
+                        and node.task.revision == 1
+                    ):
                         continue
                     task = asyncio.create_task(
                         self._wait_bound_node(run, node, state.execution_id),
@@ -1150,6 +1168,7 @@ class LocalTaskGraphLauncher:
                     execution_id=execution_id,
                     error_code=code,
                     error_digest=digest,
+                    error_origin="execution",
                 )
                 return
             if isinstance(error, AIError) and error.code is ErrorCode.TASK_DAG_INVALID:
@@ -1164,6 +1183,7 @@ class LocalTaskGraphLauncher:
                     execution_id=execution_id,
                     error_code=error.code.value,
                     error_digest=digest,
+                    safe_error_details=error.safe_details,
                 )
                 return
             cause = (
@@ -1274,7 +1294,9 @@ class LocalTaskGraphLauncher:
                     request.principal,
                     request.correlation,
                     dependency_results,
+                    execution_id=lease_state.lease.execution_id,
                     dependency_states=dependency_states,
+                    task_lease=lease_state.lease,
                 ),
                 control=control,
             ),
@@ -1382,6 +1404,17 @@ class LocalTaskGraphLauncher:
                             tenant_id=tenant_id,
                             error_code=code,
                             error_digest=digest,
+                            error_origin=(
+                                "execution"
+                                if isinstance(error, TaskNodeRunError)
+                                else "node"
+                            ),
+                            safe_error_details=(
+                                {}
+                                if isinstance(error, TaskNodeRunError)
+                                or not isinstance(error, AIError)
+                                else error.safe_details
+                            ),
                             execution_id=execution_id,
                             graph_id=(
                                 graph_id
@@ -1468,7 +1501,12 @@ class LocalTaskGraphLauncher:
             raise
         finally:
             execution_id = control.handed_off_execution_id
-            if execution_id is not None and not execution_id.startswith("wait:"):
+            is_input_wait = (
+                node.task is not None
+                and node.task.id == "linktools.ai.input"
+                and node.task.revision == 1
+            )
+            if execution_id is not None and not is_input_wait:
                 await self._release_execution_hold(
                     execution_id,
                     tenant_id=tenant_id,

@@ -31,6 +31,7 @@ from ._contracts import (
     MemoryRecord,
     RecoveryCheckpoint,
     SessionRecord,
+    TaskPreparedInputRecord,
     ToolOperationRecord,
     TranscriptChunk,
     TranscriptHeadRecord,
@@ -97,6 +98,7 @@ _ALLOWED_RECORD_KINDS = {
             "task_node_definition",
             "task_node_state",
             "task_result",
+            "task_prepared_input",
         }
     ),
     RuntimeDomain.EVALUATION: frozenset({"evaluation", "idempotency"}),
@@ -137,6 +139,7 @@ _RECORD_TYPES = {
     "task_node_definition": TaskNode,
     "task_node_state": TaskNodeView,
     "task_result": TaskResultRecord,
+    "task_prepared_input": TaskPreparedInputRecord,
     "agent_run": AgentRunRecord,
 }
 
@@ -458,6 +461,40 @@ def _expected_record(
             "graph",
             value.graph_id,
         )
+    elif isinstance(value, TaskPreparedInputRecord):
+        _require_anchor(
+            namespace, tenant_id, domain, records, "task_graph", value.graph_id
+        )
+        admission_key = record_key_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            "task_admission",
+            value.graph_id,
+        )
+        admission_record = records.get(admission_key)
+        if admission_record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        admission = _decode_record(admission_record)
+        if (
+            not isinstance(admission, TaskGraphAdmission)
+            or admission.initial_request_digest != value.admission_digest
+            or value.tenant_id != tenant_id
+            or any(
+                reference.namespace != namespace
+                or reference.tenant_id != tenant_id
+                for _name, reference in value.source_refs
+            )
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        parent = parent_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "graph",
+            value.graph_id,
+        )
     elif isinstance(value, TranscriptHeadRecord):
         if value.owner_domain.value != domain.value:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -562,6 +599,8 @@ def _record_identity(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return [graph_id, value.node_id]
     if isinstance(value, TaskResultRecord):
+        return [value.graph_id, value.node_id]
+    if isinstance(value, TaskPreparedInputRecord):
         return [value.graph_id, value.node_id]
     if isinstance(value, TranscriptHeadRecord):
         return value.owner_id

@@ -21,13 +21,13 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
 from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
 from linktools.ai.task import (
-    CancelGraphRequest,
     DefaultTaskGraphService,
+    Task,
     TaskEvent,
     TaskEventType,
     TaskGraph,
@@ -39,9 +39,9 @@ from linktools.ai.task import (
     TaskLease,
     TaskNode,
     TaskNodeInvocation,
-    TaskNodeView,
     TaskNodeRunControl,
     TaskNodeRunResult,
+    TaskNodeView,
     TaskTerminalRecord,
 )
 from pydantic_ai.models.test import TestModel
@@ -122,6 +122,28 @@ async def _noop_cancel(
     del self, invocation
 
 
+def _agent_task(runtime: Runtime[object]) -> Task[object]:
+    return runtime.tasks.from_agent(
+        "sqlite.agent.default",
+        runtime.agents.get("default"),
+    )
+
+
+def _agent_node(
+    task: Task[object],
+    node_id: str,
+    prompt: str,
+    *,
+    dependencies: tuple[str, ...] = (),
+) -> TaskNode:
+    return TaskNode(
+        node_id,
+        dependencies,
+        task=task,
+        input=AgentTaskInput(prompt),
+    )
+
+
 @pytest.mark.asyncio
 async def test_sqlite_state_group_serializes_mutation_callbacks(
     tmp_path: Path,
@@ -183,21 +205,22 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
         storage=state,
         capabilities=(_agent_group(),),
     ) as runtime:
-        agent = runtime.agent("default")
+        task = _agent_task(runtime)
+        engine = runtime.tasks.bind(task)
         for index in range(20):
             graph = TaskGraph(
                 f"serial-{index}",
                 (
-                    agent.task("a", "run a"),
-                    agent.task("b", "run b", dependencies=("a",)),
+                    _agent_node(task, "a", "run a"),
+                    _agent_node(task, "b", "run b", dependencies=("a",)),
                 ),
             )
-            result = await runtime.run_graph(
+            run = await engine.start(
                 graph,
                 idempotency_key=f"submit:serial:{index}",
                 limits=TaskGraphLimits(max_concurrency=1),
-                timeout_seconds=10,
             )
+            result = await run.wait(timeout_seconds=10)
             assert result.status is TaskStatus.SUCCEEDED
             assert all(
                 node.status is TaskStatus.SUCCEEDED for node in result.node_results
@@ -207,22 +230,23 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
             graph = TaskGraph(
                 f"parallel-{index}",
                 (
-                    agent.task("a", "run a"),
-                    agent.task("b", "run b"),
-                    agent.task("c", "run c"),
-                    agent.task(
+                    _agent_node(task, "a", "run a"),
+                    _agent_node(task, "b", "run b"),
+                    _agent_node(task, "c", "run c"),
+                    _agent_node(
+                        task,
                         "join",
                         "join",
                         dependencies=("a", "b", "c"),
                     ),
                 ),
             )
-            result = await runtime.run_graph(
+            run = await engine.start(
                 graph,
                 idempotency_key=f"submit:parallel:{index}",
                 limits=TaskGraphLimits(max_concurrency=3),
-                timeout_seconds=10,
             )
+            result = await run.wait(timeout_seconds=10)
             assert result.status is TaskStatus.SUCCEEDED
             assert all(
                 node.status is TaskStatus.SUCCEEDED for node in result.node_results
@@ -267,20 +291,21 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
         storage=state,
         capabilities=(_agent_group(),),
     ) as runtime:
-        agent = runtime.agent("default")
+        task = _agent_task(runtime)
+        engine = runtime.tasks.bind(task)
         graph = TaskGraph(
             "failure",
             (
-                agent.task("fail", "fail"),
-                agent.task("dependent", "dependent", dependencies=("fail",)),
+                _agent_node(task, "fail", "fail"),
+                _agent_node(task, "dependent", "dependent", dependencies=("fail",)),
             ),
         )
-        result = await runtime.run_graph(
+        run = await engine.start(
             graph,
             idempotency_key="submit:failure",
             limits=TaskGraphLimits(max_concurrency=1),
-            timeout_seconds=10,
         )
+        result = await run.wait(timeout_seconds=10)
 
     statuses = {node.node_id: node.status for node in result.node_results}
     errors = {node.node_id: node.error_code for node in result.node_results}
@@ -330,21 +355,19 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         storage=state,
         capabilities=(_agent_group(),),
     ) as runtime:
-        agent = runtime.agent("default")
-        graph = TaskGraph("timeout", (agent.task("blocked", "blocked"),))
+        task = _agent_task(runtime)
+        engine = runtime.tasks.bind(task)
+        graph = TaskGraph("timeout", (_agent_node(task, "blocked", "blocked"),))
+        run = await engine.start(
+            graph,
+            idempotency_key="submit:timeout",
+            limits=TaskGraphLimits(max_concurrency=1),
+        )
         with pytest.raises(AIError) as raised:
-            await runtime.run_graph(
-                graph,
-                idempotency_key="submit:timeout",
-                limits=TaskGraphLimits(max_concurrency=1),
-                timeout_seconds=0.05,
-            )
+            await run.wait(timeout_seconds=0.05)
         assert raised.value.code is ErrorCode.TASK_WAIT_TIMEOUT
         await asyncio.wait_for(started.wait(), timeout=1)
-        view = await runtime.graph.cancel(
-            graph.graph_id,
-            CancelGraphRequest(runtime.default_principal, "cancel:timeout"),
-        )
+        view = await run.cancel(idempotency_key="cancel:timeout")
         assert view.status is TaskStatus.CANCELLED
 
 

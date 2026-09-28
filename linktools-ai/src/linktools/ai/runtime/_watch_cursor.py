@@ -16,6 +16,7 @@ from ._cursor import encode_cursor as encode_runtime_cursor
 from ._runtime_identity import token_seed
 
 _WATCH_CURSOR_VERSION = 1
+_RESULTS_CURSOR_VERSION = 1
 
 
 def encode_execution_watch_cursor(
@@ -162,6 +163,63 @@ def decode_graph_watch_cursor(
     return sequence, execution
 
 
+def encode_task_results_cursor(
+    namespace: str,
+    tenant_id: str,
+    graph_id: str,
+    *,
+    include_content: bool,
+    max_content_bytes: int,
+    graph_sequence: int,
+    last_node_id: str,
+) -> str:
+    if (
+        isinstance(graph_sequence, bool)
+        or not isinstance(graph_sequence, int)
+        or graph_sequence < 0
+        or not isinstance(last_node_id, str)
+        or not last_node_id
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return encode_runtime_cursor(
+        _signer(namespace, "task-graph-results"),
+        tenant_id=tenant_id,
+        resource_kind="TASK_GRAPH_RESULTS",
+        filter_digest=_results_filter_digest(
+            graph_id,
+            include_content=include_content,
+            max_content_bytes=max_content_bytes,
+        ),
+        position=last_node_id,
+        revision=graph_sequence,
+    )
+
+
+def decode_task_results_cursor(
+    namespace: str,
+    tenant_id: str,
+    graph_id: str,
+    cursor: str,
+    *,
+    include_content: bool,
+    max_content_bytes: int,
+) -> tuple[int, str]:
+    payload = decode_runtime_cursor(
+        cursor,
+        _signer(namespace, "task-graph-results"),
+        tenant_id=tenant_id,
+        resource_kind="TASK_GRAPH_RESULTS",
+        filter_digest=_results_filter_digest(
+            graph_id,
+            include_content=include_content,
+            max_content_bytes=max_content_bytes,
+        ),
+    )
+    if not payload.position:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return payload.revision, payload.position
+
+
 def _signer(namespace: str, purpose: str) -> HmacCursorSigner:
     return HmacCursorSigner(purpose, token_seed(namespace))
 
@@ -184,6 +242,32 @@ def _filter_digest(
             "kind": kind,
             "resource_id": resource_id,
             "include_content": include_content,
+        }
+    )
+
+
+def _results_filter_digest(
+    graph_id: str,
+    *,
+    include_content: bool,
+    max_content_bytes: int,
+) -> str:
+    if (
+        not isinstance(graph_id, str)
+        or not graph_id
+        or not isinstance(include_content, bool)
+        or isinstance(max_content_bytes, bool)
+        or not isinstance(max_content_bytes, int)
+        or max_content_bytes < 1
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return canonical_sha256(
+        {
+            "version": _RESULTS_CURSOR_VERSION,
+            "kind": "task_graph_results",
+            "graph_id": graph_id,
+            "include_content": include_content,
+            "max_content_bytes": max_content_bytes,
         }
     )
 
@@ -223,8 +307,10 @@ def _graph_execution_sequences(
 
 
 __all__ = [
+    "decode_task_results_cursor",
     "decode_execution_watch_cursor",
     "decode_graph_watch_cursor",
+    "encode_task_results_cursor",
     "encode_execution_watch_cursor",
     "encode_graph_watch_cursor",
 ]

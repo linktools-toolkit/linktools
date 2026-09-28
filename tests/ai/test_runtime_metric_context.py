@@ -94,7 +94,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
         control = runtime._metric_control  # type: ignore[attr-defined]
         assert isinstance(control, _MetricBuffer)
         assert control.try_record(observation) is True
-        flushed = await runtime.flush_metrics()
+        flushed = await runtime.metrics.flush()
         assert flushed.completed is True
 
     stored = await metrics.get_observation(observation.observation_id)

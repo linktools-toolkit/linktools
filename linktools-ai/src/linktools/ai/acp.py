@@ -73,7 +73,7 @@ class ACPAgent:
     async def new_session(self, cwd: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         _, schema = _require_acp()
-        session = await self._runtime.agent().create_session(
+        session = await self._runtime.agents.get().create_session(
             uuid4().hex,
             principal=self._principal,
             cwd=cwd,
@@ -83,13 +83,13 @@ class ACPAgent:
     async def load_session(self, cwd: str, session_id: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         _, schema = _require_acp()
-        await self._runtime.session.get(session_id, principal=self._principal)
+        await self._runtime.sessions.get(session_id, principal=self._principal)
         return schema.LoadSessionResponse()
 
     async def list_sessions(self, cwd: "str | None" = None, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
         _, schema = _require_acp()
-        page = await self._runtime.session.list(ListSessionRequest(self._principal, limit=200))
+        page = await self._runtime.sessions.list(ListSessionRequest(self._principal, limit=200))
         return schema.ListSessionsResponse(sessions=[schema.SessionInfo(sessionId=item.session_id, cwd=item.cwd or cwd or "") for item in page.items])
 
     async def resume_session(self, session_id: str, cwd: str, **kwargs: JsonValue) -> JsonValue:
@@ -100,8 +100,8 @@ class ACPAgent:
         _, schema = _require_acp()
         from .runtime import ForkSessionRequest
 
-        source = await self._runtime.session.get(session_id, principal=self._principal)
-        session = await self._runtime.session.fork(
+        source = await self._runtime.sessions.get(session_id, principal=self._principal)
+        session = await self._runtime.sessions.fork(
             source.agent_id,
             session_id,
             ForkSessionRequest(self._principal, uuid4().hex, uuid4().hex, cwd),
@@ -113,7 +113,7 @@ class ACPAgent:
         _, schema = _require_acp()
         from .runtime import CloseSessionRequest
 
-        await self._runtime.session.close(session_id, CloseSessionRequest(self._principal, uuid4().hex))
+        await self._runtime.sessions.close(session_id, CloseSessionRequest(self._principal, uuid4().hex))
         return schema.CloseSessionResponse()
 
     async def set_session_mode(self, session_id: str, mode_id: str, **kwargs: JsonValue) -> None:
@@ -130,8 +130,8 @@ class ACPAgent:
         self._require_initialized()
         _, schema = _require_acp()
         text = "".join(item.text for item in prompt)
-        loaded = await self._runtime.session.get(session_id, principal=self._principal)
-        execution = await self._runtime.agent(loaded.agent_id).start(
+        loaded = await self._runtime.sessions.get(session_id, principal=self._principal)
+        execution = await self._runtime.agents.get(loaded.agent_id).start(
             text,
             principal=self._principal,
             session_id=session_id,
@@ -151,12 +151,12 @@ class ACPAgent:
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
-        loaded = await self._runtime.session.reconcile(
+        loaded = await self._runtime.sessions.reconcile(
             session_id,
             principal=self._principal,
         )
         if loaded.active_execution_id is not None:
-            await self._runtime.execution.cancel(
+            await self._runtime.executions.cancel(
                 loaded.active_execution_id,
                 CancelExecutionRequest(self._principal, uuid4().hex, True),
             )

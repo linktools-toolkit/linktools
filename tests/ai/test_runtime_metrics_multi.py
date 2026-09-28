@@ -98,7 +98,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
                 capabilities=(_agent_group(),),
                 metrics=metrics,
             ) as runtime:
-                result = await runtime.agent("default").run(
+                result = await runtime.agents.get("default").run(
                     f"hello-{label}",
                     timeout_seconds=10,
                 )

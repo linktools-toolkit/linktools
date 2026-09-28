@@ -361,7 +361,11 @@ class _FailedRuntime:
     def __init__(self, result: ExecutionResult) -> None:
         self._agent = _FailedAgent(result)
 
-    def agent(self) -> _FailedAgent:
+    @property
+    def agents(self) -> "_FailedRuntime":
+        return self
+
+    def get(self) -> _FailedAgent:
         return self._agent
 
 
@@ -426,7 +430,11 @@ class _StreamingAgent:
 
 
 class _StreamingRuntime:
-    def agent(self) -> _StreamingAgent:
+    @property
+    def agents(self) -> "_StreamingRuntime":
+        return self
+
+    def get(self) -> _StreamingAgent:
         return _StreamingAgent()
 
 

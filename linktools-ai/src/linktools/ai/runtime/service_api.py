@@ -1231,6 +1231,9 @@ class ExecutionService(Protocol):
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...
+    async def result_payload_size(
+        self, execution_id: str, *, principal: Principal
+    ) -> int: ...
     async def wait(
         self,
         execution_id: str,
