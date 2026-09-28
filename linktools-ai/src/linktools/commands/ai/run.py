@@ -90,7 +90,7 @@ async def _emit_result(
     planning: bool,
     thinking: bool,
 ) -> int:
-    execution = await runtime.agent().start(
+    execution = await runtime.agents.get().start(
         prompt,
         session_id=session_id,
         memory_scope=memory_scope,

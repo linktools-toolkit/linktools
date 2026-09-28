@@ -64,7 +64,7 @@ async with Runtime.open(
     storage=storage,
     capabilities=(CapabilityGroup("workspace", workspace=workspace),),
 ) as runtime:
-    result = await runtime.agent("default").run(
+    result = await runtime.agents.get("default").run(
         "review this change",
         memory_scope="default",
         planning=True,
@@ -116,7 +116,7 @@ async with Runtime.open(
     storage=storage,
     capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
 ) as runtime:
-    result = await runtime.agent("audit").run("inspect ticket SEC-123")
+    result = await runtime.agents.get("audit").run("inspect ticket SEC-123")
 ```
 
 Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `CapabilityGroup.tool()` and `CapabilityGroup.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
@@ -344,7 +344,7 @@ Subagents are root Agent definitions selected from the same captured catalog. A 
 
 ## 5. Output contracts
 
-Output belongs to an execution, not to `AgentSpec`, `Runtime.agent()`, or Session identity:
+Output belongs to an execution, not to `AgentSpec` or Session identity:
 
 ```python
 from pydantic import BaseModel
@@ -353,7 +353,7 @@ class Finding(BaseModel):
     title: str
     severity: str
 
-agent = runtime.agent("audit")
+agent = runtime.agents.get("audit")
 result = await agent.run(
     "inspect the patch",
     output=Finding,
@@ -375,7 +375,7 @@ The binding contract does not persist Python output import paths or duplicate id
 ## 6. Sessions and executions
 
 ```python
-agent = runtime.agent("audit")
+agent = runtime.agents.get("audit")
 session = await agent.create_session("chat-1")
 
 first = await session.run("inspect the first change")
@@ -433,11 +433,33 @@ result = await agent.run(
 
 The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime storage rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
-If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. `Agent.task(files=...)` keeps the existing node-execution materialization semantics. Use `BinaryContent` or `WorkspaceFileInput` in the task prompt when bytes must be materialized at graph admission; delegated subagents use the same explicit execution-input rules.
+If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. Agent-backed Task nodes use `runtime.tasks.from_agent(...)` and `AgentTaskInput`; place workspace paths in its `files` field and prompt content in `prompt`. Runtime materializes those inputs at graph admission, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph state retains the captured input objects. Delegated subagents use the same explicit execution-input rules.
 
 Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `RuntimeHistory.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose known media type/size/digest, request association, and the optional opaque `input_identifier` originally supplied by the caller. Runtime does not interpret or synthesize that identifier for Workspace or `attach_files` inputs, and keeps `processing_status="unknown"` unless it has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
 
-`Agent.task()` prompts support both `BinaryContent` and `WorkspaceFileInput`. Runtime materializes their bytes when accepting the graph, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph state retains the captured input objects.
+### Agent-backed Task graphs
+
+Bind Agent-backed Task definitions through `runtime.tasks` and put prompt,
+parameters, and Workspace paths in `AgentTaskInput`:
+
+```python
+from linktools.ai.runtime import AgentTaskInput
+from linktools.ai.task import TaskGraph, TaskNode
+
+task = runtime.tasks.from_agent("writer-task", runtime.agents.get("writer"))
+engine = runtime.tasks.bind(task)
+graph = TaskGraph(
+    "draft-1",
+    (TaskNode("draft", task=task, input=AgentTaskInput("Say hello.")),),
+)
+run = await engine.start(graph, idempotency_key="draft-1")
+await run.wait()
+result = await run.result("draft")
+```
+
+Agent task prompt content supports native user content such as `BinaryContent`
+and `WorkspaceFileInput`. Runtime stores its captured bytes as part of the
+accepted graph input so retries and recovery do not reread the source files.
 
 ### Runtime context and execution queries
 
@@ -463,7 +485,7 @@ Execution metadata is available through the authorized public query surface:
 ```python
 from linktools.ai.runtime import ListExecutionRequest
 
-page = await runtime.execution.list(
+page = await runtime.executions.list(
     ListExecutionRequest(
         principal=runtime.default_principal,
         session_id="chat-1",

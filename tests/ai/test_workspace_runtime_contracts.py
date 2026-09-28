@@ -218,10 +218,10 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     ) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
-        created = await runtime.agent("default").create_session("remember")
-        agent_created = await runtime.agent("default").create_session("remember-agent")
+        created = await runtime.agents.get("default").create_session("remember")
+        agent_created = await runtime.agents.get("default").create_session("remember-agent")
         assert (
-            await runtime.session.history(
+            await runtime.sessions.history(
                 created.session_id,
                 principal=runtime.default_principal,
             )
@@ -236,7 +236,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
-        await runtime.agent("default").create_session("custom-tenant")
+        await runtime.agents.get("default").create_session("custom-tenant")
 
     async with Runtime.open(
         "default",
@@ -244,15 +244,15 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         storage=_workspace_runtime_storage(workspace),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
-        loaded = await runtime.session.get(
+        loaded = await runtime.sessions.get(
             created.session_id,
             principal=runtime.default_principal,
         )
-        agent_loaded = await runtime.session.get(
+        agent_loaded = await runtime.sessions.get(
             agent_created.session_id,
             principal=runtime.default_principal,
         )
-        history = await runtime.session.history(
+        history = await runtime.sessions.history(
             created.session_id,
             principal=runtime.default_principal,
         )

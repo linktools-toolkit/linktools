@@ -8,7 +8,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from linktools.errors import Error
 
@@ -161,6 +161,8 @@ class ErrorCode(str, Enum):
     TASK_NODE_FAILED = "TASK_NODE_FAILED"
     TASK_DEPENDENCY_FAILED = "TASK_DEPENDENCY_FAILED"
     TASK_OBSERVER_FAILED = "TASK_OBSERVER_FAILED"
+    TASK_OBSERVATION_FAILED = "TASK_OBSERVATION_FAILED"
+    TASK_INPUT_PROJECTION_FAILED = "TASK_INPUT_PROJECTION_FAILED"
     TASK_WAIT_TIMEOUT = "TASK_WAIT_TIMEOUT"
     HTTP_ROUTE_NOT_FOUND = "HTTP_ROUTE_NOT_FOUND"
     MODEL_REGISTRY_CONFLICT = "MODEL_REGISTRY_CONFLICT"
@@ -349,6 +351,39 @@ class AssetError(AIError):
         super().__init__(code, message)
 
 
+class TaskObservationError(AIError):
+    """An observer or presentation stream failed without changing Task state."""
+
+    def __init__(
+        self,
+        origin: Literal["callback", "stream"],
+        *,
+        cursor: str | None,
+        cause_code: str | None = None,
+        safe_details: "Mapping[str, _SafeJsonValue] | None" = None,
+        diagnostics: "ErrorDiagnostics | None" = None,
+    ) -> None:
+        if origin not in {"callback", "stream"}:
+            raise ValueError("task observation origin is invalid")
+        if cursor is not None and not isinstance(cursor, str):
+            raise TypeError("task observation cursor is invalid")
+        if cause_code is not None and (not isinstance(cause_code, str) or not cause_code):
+            raise ValueError("task observation cause code is invalid")
+        code = (
+            ErrorCode.TASK_OBSERVER_FAILED
+            if origin == "callback"
+            else ErrorCode.TASK_OBSERVATION_FAILED
+        )
+        super().__init__(
+            code,
+            safe_details=safe_details,
+            diagnostics=diagnostics,
+        )
+        self.origin = origin
+        self.cursor = cursor
+        self.cause_code = cause_code
+
+
 __all__ = [
     "AIError",
     "AssetError",
@@ -357,4 +392,5 @@ __all__ = [
     "InvalidStoragePathError",
     "SafeError",
     "StorageError",
+    "TaskObservationError",
 ]

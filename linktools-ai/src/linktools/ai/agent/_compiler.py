@@ -26,7 +26,7 @@ from ..spec import (
 )
 from ._binding import AgentBinding, AgentBindingContract, CapabilityPin
 from ._compiled import CompiledAgent
-from ._output import bind_output, restore_output
+from ._output import OutputBinding, bind_output, restore_output
 
 
 class AgentCompiler:
@@ -108,7 +108,7 @@ class AgentCompiler:
         self,
         compiled_agent: CompiledAgent,
         *,
-        output: "type[BaseModel] | None" = None,
+        output: "type[BaseModel] | OutputBinding | None" = None,
     ) -> AgentBinding:
         """Bind one CompiledAgent to durable output and child targets."""
         if not isinstance(compiled_agent, CompiledAgent):
@@ -128,7 +128,7 @@ class AgentCompiler:
         self,
         compiled_agent: CompiledAgent,
         *,
-        output: "type[BaseModel] | None" = None,
+        output: "type[BaseModel] | OutputBinding | None" = None,
     ) -> AgentBinding:
         """Bind one child with delegation disabled for that execution."""
         if not isinstance(compiled_agent, CompiledAgent):
@@ -150,10 +150,12 @@ class AgentCompiler:
         self,
         compiled_agent: CompiledAgent,
         *,
-        output: "type[BaseModel] | None",
+        output: "type[BaseModel] | OutputBinding | None",
         subagents: Sequence[SubagentRef],
     ) -> AgentBinding:
-        output_binding = bind_output(output)
+        output_binding = (
+            output if isinstance(output, OutputBinding) else bind_output(output)
+        )
         binding_contract = AgentBindingContract(
             agent_spec=AgentSpecCodec().from_payload(
                 AgentSpecCodec().to_contract_payload(compiled_agent.spec)

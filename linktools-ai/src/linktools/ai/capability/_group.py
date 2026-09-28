@@ -5,12 +5,11 @@
 import functools
 import inspect
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Generic, Literal, TypeVar, get_type_hints
 
 from linktools.core import environ
-from pydantic import BaseModel
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -27,7 +26,6 @@ from ..spec import (
     ThinkingValue,
     parse_mcp_tool_selector,
 )
-from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
 from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
@@ -39,7 +37,6 @@ from ._declaration import (
 )
 from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillDefinition
-from ._task import TaskExpander
 from ._tool_metadata import (
     tool_metadata,
     validate_tool_metadata,
@@ -179,47 +176,6 @@ class CapabilityGroup(Generic[AppT]):
             )
         )
         return adapted
-
-    def task(
-        self,
-        handler: "TaskNodeHandler[AppT]",
-        *,
-        effect_policy: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
-        output_type: "type[BaseModel] | None" = None,
-        reconcile: (
-            "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
-        ) = None,
-    ) -> "TaskNodeHandler[AppT]":
-        """Register one application-owned TaskNode handler revision."""
-        contribution = CapabilityContribution.from_task(
-            handler,
-            effect_policy=effect_policy,
-            output_type=output_type,
-            reconcile=reconcile,
-        )
-        if any(
-            value.kind == "task"
-            and value.id == contribution.id
-            and value.revision == contribution.revision
-            for value in self._contributions
-        ):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        self._contributions.append(contribution)
-        return handler
-
-    def task_expander(self, expander: TaskExpander) -> TaskExpanderRef:
-        """Register one pure application-owned TaskGraph expander revision."""
-        contribution = CapabilityContribution.from_task_expander(expander)
-        if any(
-            value.kind == "task_expander"
-            and value.id == contribution.id
-            and value.revision == contribution.revision
-            for value in self._contributions
-        ):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        self._contributions.append(contribution)
-        return TaskExpanderRef(contribution.id, contribution.revision)
-
 
     def capability(
         self,

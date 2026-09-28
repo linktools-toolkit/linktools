@@ -83,7 +83,11 @@ class _StreamingRuntime:
     def __init__(self, events: tuple[ExecutionTreeEvent, ...]) -> None:
         self._events = events
 
-    def agent(self) -> _StreamingAgent:
+    @property
+    def agents(self) -> "_StreamingRuntime":
+        return self
+
+    def get(self) -> _StreamingAgent:
         return _StreamingAgent(self._events)
 
 
@@ -275,13 +279,14 @@ class _ACPExecution:
 class _ACPAgentRuntime:
     def __init__(self, execution: _ACPExecution) -> None:
         self._execution = execution
-        self.session = SimpleNamespace(get=self._get_session)
+        self.sessions = SimpleNamespace(get=self._get_session)
+        self.agents = SimpleNamespace(get=self._get_agent)
 
     async def _get_session(self, session_id: str, *, principal: Principal) -> object:
         del session_id, principal
         return SimpleNamespace(agent_id="agent")
 
-    def agent(self, agent_id: str) -> object:
+    def _get_agent(self, agent_id: str) -> object:
         assert agent_id == "agent"
         execution = self._execution
 

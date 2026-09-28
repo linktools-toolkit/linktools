@@ -82,7 +82,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
         storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        execution = await runtime.agent("default").start("read a file")
+        execution = await runtime.agents.get("default").start("read a file")
         record = None
         for _ in range(200):
             record = await state.execution.executions.get(

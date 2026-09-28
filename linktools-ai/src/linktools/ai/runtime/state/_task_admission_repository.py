@@ -333,7 +333,11 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         cursor: str | None,
         limit: int,
     ) -> Page[TaskGraphLaunch]:
-        if limit != 128:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         after_sort_key, after_key_digest = decode_record_cursor(cursor)
 

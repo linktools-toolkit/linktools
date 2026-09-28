@@ -19,7 +19,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode
 from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, read_object
 from ...task import TaskGraphAdmission
-from .._runtime_identity import task_capability_capture_key
+from .._runtime_identity import task_capture_key
 from ._contracts import (
     ArtifactRepositories,
     ConversationRepositories,
@@ -485,7 +485,7 @@ class RuntimeStorage:
             if reference.key.startswith(
                 (
                     "v1/asset-snapshot/",
-                    "v1/task-capability-capture/",
+                    "v2/task-capture/",
                 )
             ):
                 payload = await read_object(
@@ -544,7 +544,7 @@ class RuntimeStorage:
                             value.data,
                             TaskGraphAdmission,
                         )
-                        key = task_capability_capture_key(
+                        key = task_capture_key(
                             self.namespace,
                             admission.principal.tenant_id,
                             admission.graph_id,
@@ -791,7 +791,7 @@ class RuntimeStorage:
                         TaskGraphAdmission,
                     )
                     expected_task_object_keys.add(
-                        task_capability_capture_key(
+                        task_capture_key(
                             namespace,
                             admission.principal.tenant_id,
                             admission.graph_id,
@@ -861,7 +861,7 @@ class RuntimeStorage:
             if not source.key.startswith(
                 (
                     "v1/asset-snapshot/",
-                    "v1/task-capability-capture/",
+                    "v2/task-capture/",
                 )
             ):
                 continue

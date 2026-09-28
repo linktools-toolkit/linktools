@@ -50,7 +50,7 @@ async def test_workspace_less_runtime_runs_session_and_history() -> None:
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         assert runtime.namespace == "web-chat"
-        session = await runtime.agent("default").create_session("chat")
+        session = await runtime.agents.get("default").create_session("chat")
         result = await session.run("hello", timeout_seconds=10)
 
         assert result.status is ExecutionStatus.SUCCEEDED
@@ -66,7 +66,7 @@ async def test_workspace_less_runtime_rejects_files_and_explicit_cwd() -> None:
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
         with pytest.raises(AIError) as files_error:
-            await runtime.agent("default").run(
+            await runtime.agents.get("default").run(
                 "inspect",
                 files=("evidence.txt",),
                 timeout_seconds=10,
@@ -78,7 +78,7 @@ async def test_workspace_less_runtime_rejects_files_and_explicit_cwd() -> None:
         }
 
         with pytest.raises(AIError) as cwd_error:
-            await runtime.agent("default").create_session(
+            await runtime.agents.get("default").create_session(
                 "cwd-session",
                 cwd=".",
             )
@@ -106,7 +106,7 @@ async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> N
         capabilities=(group,),
     ) as runtime:
         with pytest.raises(AIError) as error:
-            await runtime.agent("default").run(
+            await runtime.agents.get("default").run(
                 "inspect",
                 files=("evidence.txt",),
             )
@@ -128,7 +128,7 @@ async def test_sandbox_group_can_be_composed_without_workspace() -> None:
         storage=RuntimeStorage.in_memory(),
         capabilities=(group,),
     ) as runtime:
-        result = await runtime.agent("default").run("hello", timeout_seconds=10)
+        result = await runtime.agents.get("default").run("hello", timeout_seconds=10)
     assert result.status is ExecutionStatus.SUCCEEDED
 
 
@@ -168,7 +168,7 @@ async def test_sandbox_without_workspace_exposes_local_skill_resources(
                 CapabilityGroup("sandbox", sandbox=sandbox),
             ),
         ) as runtime:
-            result = await runtime.agent("default").run(
+            result = await runtime.agents.get("default").run(
                 "review",
                 timeout_seconds=10,
             )
@@ -198,7 +198,7 @@ async def test_separate_sandbox_group_controls_workspace_input_reads(
         ),
     ) as runtime:
         with pytest.raises(AIError) as error:
-            await runtime.agent("default").run(
+            await runtime.agents.get("default").run(
                 "inspect",
                 files=("evidence.txt",),
             )
@@ -236,7 +236,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
         storage=RuntimeStorage.from_root(storage_root),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
-        await runtime.agent("default").create_session(
+        await runtime.agents.get("default").create_session(
             "cwd-session",
             cwd=".",
         )
@@ -247,7 +247,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
         storage=RuntimeStorage.from_root(storage_root),
     ) as runtime:
         with pytest.raises(AIError) as error:
-            await runtime.agent("default").run(
+            await runtime.agents.get("default").run(
                 "continue",
                 session_id="cwd-session",
                 timeout_seconds=10,

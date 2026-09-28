@@ -9,8 +9,9 @@ from ...core import ImmutableJsonMapping, JsonValue
 from ...errors import AIError, ErrorCode
 from ...spec import canonicalize_json_schema
 
-TASK_CAPABILITY_CAPTURE_FORMAT_VERSION = 1
+TASK_CAPABILITY_CAPTURE_FORMAT_VERSION = 2
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_TASK_TYPE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 def read_task_capability_capture_declarations(
     tasks: object,
     expanders: object,
@@ -26,27 +27,41 @@ def read_task_capability_capture_declarations(
 
 
 def task_declaration_identity(value: object) -> tuple[str, int]:
-    if not isinstance(value, Mapping) or set(value) != {
+    if not isinstance(value, Mapping) or not {
         "version",
         "id",
         "revision",
+        "type",
         "effect_policy",
         "output_contract",
         "reconcile",
+    }.issubset(value) or set(value) - {
+        "version",
+        "id",
+        "revision",
+        "type",
+        "effect_policy",
+        "output_contract",
+        "reconcile",
+        "config",
     }:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     identity = _task_identity(value.get("id"), value.get("revision"))
     output_contract = value.get("output_contract")
     contract_version = value.get("version")
+    task_type = value.get("type")
     effect_policy = value.get("effect_policy")
     if (
         isinstance(contract_version, bool)
         or not isinstance(contract_version, int)
         or contract_version != 1
+        or not isinstance(task_type, str)
+        or _TASK_TYPE.fullmatch(task_type) is None
         or not isinstance(effect_policy, str)
         or effect_policy not in {"none", "replay_safe", "non_replay_safe"}
         or not isinstance(value.get("reconcile"), bool)
         or not isinstance(output_contract, Mapping)
+        or ("config" in value and not isinstance(value.get("config"), Mapping))
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if output_contract.get("kind") == "json":

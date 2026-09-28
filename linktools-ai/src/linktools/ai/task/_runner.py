@@ -6,12 +6,14 @@ import re
 from datetime import datetime
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from ..core import CorrelationData, JsonValue, Principal
 from ..errors import AIError, ErrorCode
-from ._graph import TaskDependencyResult, TaskNode
+from ._graph import TaskDependencyResult, TaskLease, TaskNode
 from ._handler import TaskDependencyState, TaskEffectResolution
+
+AppT = TypeVar("AppT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,9 +81,10 @@ class TaskNodeInvocation:
     dependency_results: "Mapping[str, TaskDependencyResult]"
     execution_id: "str | None" = None
     dependency_states: "Mapping[str, TaskDependencyState]" = field(default_factory=dict)
+    task_lease: "TaskLease | None" = None
 
 
-class TaskNodeRunner(Protocol):
+class TaskNodeRunner(Protocol, Generic[AppT]):
     async def run(
         self,
         invocation: TaskNodeInvocation,

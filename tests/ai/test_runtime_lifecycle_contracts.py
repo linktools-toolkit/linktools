@@ -27,6 +27,7 @@ class _Components:
     event = object()
     artifact = object()
     task_node_runtime = None
+    task_admissions = None
     tree_streamer = None
     binding_resolver = None
 
@@ -462,7 +463,7 @@ async def test_build_abort_continues_after_input_cleanup_failure(
 
 
 @pytest.mark.asyncio
-async def test_late_build_abort_stops_after_owner_cleanup_failure(
+async def test_runtime_composition_defers_task_recovery_to_explicit_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -475,9 +476,6 @@ async def test_late_build_abort_stops_after_owner_cleanup_failure(
     async def fail_restore(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("restore failed")
 
-    async def fail_finalizers(_service: object) -> None:
-        raise RuntimeError("finalizer cleanup failed")
-
     async def count_state_close(current: RuntimeStorage) -> None:
         nonlocal state_close_calls
         state_close_calls += 1
@@ -488,22 +486,23 @@ async def test_late_build_abort_stops_after_owner_cleanup_failure(
         "recover_pending",
         fail_restore,
     )
-    monkeypatch.setattr(
-        factory.DefaultTaskGraphService,
-        "drain_owned_finalizers",
-        fail_finalizers,
-    )
     monkeypatch.setattr(RuntimeStorage, "close", count_state_close)
 
     try:
-        with pytest.raises(RuntimeError, match="restore failed"):
-            await factory.compose_runtime_components(
-                "lifecycle",
-                models=ModelRegistry.openai(model="test-model"),
-                storage=state,
-            )
+        components = await factory.compose_runtime_components(
+            "lifecycle",
+            models=ModelRegistry.openai(model="test-model"),
+            storage=state,
+        )
 
         assert state_close_calls == 0
         assert state.ready is True
+        with pytest.raises(RuntimeError, match="restore failed"):
+            await components.graph.recover_pending()
+        assert state_close_calls == 0
+        await components.close_callback()
+        assert state_close_calls == 1
+        assert state.ready is False
     finally:
-        await original_state_close(state)
+        if state.ready:
+            await original_state_close(state)

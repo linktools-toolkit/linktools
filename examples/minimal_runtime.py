@@ -32,7 +32,7 @@ async def run(project: Path) -> object:
         storage=RuntimeStorage.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        result = await runtime.agent("writer").run("Say hello.")
+        result = await runtime.agents.get("writer").run("Say hello.")
         return result.output
 
 

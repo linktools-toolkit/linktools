@@ -8,7 +8,7 @@ from ..errors import AIError, ErrorCode
 from ._schema import canonicalize_json_schema
 
 _CONTRIBUTION_KINDS = frozenset(
-    {"agent", "tool", "skill", "mcp", "capability", "task", "task_expander"}
+    {"agent", "tool", "skill", "mcp", "capability"}
 )
 
 
@@ -35,17 +35,7 @@ def capability_ref_payload(
         return _ref_payload(kind, identity, _revision(contract))
     if kind in {"tool", "capability"}:
         return _ref_payload(kind, identity, _revision(contract))
-    if kind == "task":
-        ref_id = _text(contract.get("id"))
-        revision = _positive_int(contract.get("revision"))
-        if identity != ref_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return _ref_payload(kind, ref_id, revision)
-    ref_id = _text(contract.get("id"))
-    revision = _positive_int(contract.get("revision"))
-    if identity != ref_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return _ref_payload(kind, ref_id, revision)
+    return _ref_payload(kind, identity, _revision(contract))
 
 
 def binding_digest_payload(

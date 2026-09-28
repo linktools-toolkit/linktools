@@ -3,13 +3,31 @@
 """Focused regression coverage for reliable mixed TaskGraph nodes."""
 
 import asyncio
+import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from ._task_test_helpers import admit_graph
-from linktools.ai.agent import AgentBindingContract, restore_output
-from linktools.ai.capability import CapabilityContribution, CapabilityGroup, TaskExpansionContext
+from ._task_test_helpers import (
+    CapabilityGroup,
+    TaskFunction,
+    admit_graph,
+    agent_task_definition,
+    agent_task_node,
+    clear_task_test_state,
+    get_task_graph_run,
+    run_task_graph,
+    register_task_definition,
+    start_task_graph,
+    start_task_request,
+    task_engine,
+    task_graph_cancel,
+    task_graph_resume,
+    task_graph_state,
+    task_graph_wait,
+    task_result,
+)
+from linktools.ai.agent import restore_output
 from linktools.ai.core import (
     JsonValue,
     Principal,
@@ -19,7 +37,12 @@ from linktools.ai.core import (
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import (
+    AgentTaskInput,
+    AgentTaskInputContext,
+    Runtime,
+    RuntimeStorage,
+)
 from linktools.ai.runtime._agent_task import _dependency_identity_payload
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
 from linktools.ai.runtime.state._codec import (
@@ -33,7 +56,6 @@ from linktools.ai.task import (
     LocalTaskGraphLauncher,
     TaskDependency,
     TaskDependencyState,
-    TaskFunction,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLaunch,
@@ -42,17 +64,27 @@ from linktools.ai.task import (
     TaskNode,
     TaskNodeContext,
     TaskNodeInvocation,
+    Task,
     TaskEffectResolution,
     TaskInputSupplyRequest,
+    TaskExpansionContext,
+    TaskExpander,
     TaskExpanderRef,
     TaskNodeRunControl,
     TaskNodeRunResult,
+    TaskNodeRunner,
     TaskResultRef,
 )
+from linktools.ai.task import _local as task_local
 from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
-from pydantic_ai.models.test import TestModel
 from pydantic_ai.messages import BinaryContent
+from pydantic_ai.models.test import TestModel
+
+
+@pytest.fixture(autouse=True)
+def _reset_task_registry() -> None:
+    clear_task_test_state()
 
 
 @pytest.mark.asyncio
@@ -92,18 +124,16 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         id = "example.attachments"
         revision = 1
 
+        def __init__(self, consumer: TaskNode) -> None:
+            self.consumer = consumer
+
         def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
+            del context
             return (
                 handler.node("hold"),
-                context.agent_task(
-                    "default",
-                    "consumer",
-                    ("inspect", attachment),
-                    dependencies=("hold",),
-                ),
+                self.consumer,
             )
 
-    application.task_expander(Expand())
     application.agent(
         "default",
         model="default",
@@ -120,30 +150,33 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        node = runtime.agent("default").task(
+        node = agent_task_node(runtime,
             "consumer",
             ("inspect", attachment),
             dependencies=("hold",),
         )
+        if dynamic:
+            application.task_expander(Expand(node))
         nodes = (
             (handler.node("plan", expander=TaskExpanderRef("example.attachments", 1)),)
             if dynamic
             else (handler.node("hold"), node)
         )
         graph = TaskGraph("attachment-graph", nodes)
-        run = await runtime.start_graph(graph, idempotency_key="attachment-1")
+        run = await start_task_graph(runtime, graph, idempotency_key="attachment-1")
         await asyncio.wait_for(started.wait(), 10)
         source.unlink()
-        repeated = await runtime.start_graph(graph, idempotency_key="attachment-1")
+        repeated = await start_task_graph(runtime, graph, idempotency_key="attachment-1")
         assert repeated.graph_id == run.graph_id
         snapshot = await state.task.tasks.scheduler_state(
             run.graph_id,
             tenant_id=runtime.tenant_id,
         )
         frozen_node = next(n for n in snapshot.nodes if n.node_id == "consumer")
-        stored = decode_domain(
-            frozen_node.input["user_prompt"]["value"], StoredUserInput
-        )
+        stored_prompt = frozen_node.input.get("prompt")
+        assert isinstance(stored_prompt, Mapping)
+        assert stored_prompt.get("kind") == "stored-user-content-v1"
+        stored = decode_domain(stored_prompt.get("value"), StoredUserInput)
         assert stored.payload.ref is not None
         frozen_bytes = await read_object(
             state.object_store(RuntimeDomain.TASK),
@@ -159,7 +192,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         )
         assert (RuntimeDomain.TASK, stored.payload.ref) in refs
         with pytest.raises(AIError) as rejected:
-            await runtime.start_graph(
+            await start_task_graph(runtime,
                 TaskGraph("forged-input", (handler.node("hold"), frozen_node)),
                 idempotency_key="forged-input-1",
             )
@@ -168,6 +201,7 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
         completed = await run.wait(timeout_seconds=10)
         assert completed.status is TaskStatus.SUCCEEDED
         consumer = next(n for n in completed.node_results if n.node_id == "consumer")
+        assert consumer.status is TaskStatus.SUCCEEDED
         record = await state.execution.executions.get(
             consumer.execution_id, tenant_id=runtime.tenant_id,
         )
@@ -242,31 +276,111 @@ class _TaskTestModels:
         return _TaskTestModelBinding()
 
 
-def test_direct_task_contribution_uses_group_task_defaults() -> None:
-    handler = TaskFunction[None]("example.direct", 1, _echo_task)
-    direct = CapabilityContribution.from_task(handler)
-
-    group = CapabilityGroup[None]("application")
-    group.task(handler)
-    captured = asyncio.run(group.capture())
-    registered = next(
-        item
-        for item in captured.contributions
-        if item.kind == "task" and item.id == handler.id
-    )
-
-    assert direct.contract == registered.contract
-    assert direct.contract["effect_policy"] == "non_replay_safe"
+class _StructuredTaskTestModelBinding(_TaskTestModelBinding):
+    def materialize(self) -> TestModel:
+        return TestModel(
+            custom_output_args={"value": "accepted"},
+            profile={"supports_json_schema_output": False},
+        )
 
 
-def test_task_registration_returns_original_handler() -> None:
-    group = CapabilityGroup[None]("application")
-    handler = TaskFunction[None]("example.echo", 1, _echo_task)
+class _StructuredTaskTestModels(_TaskTestModels):
+    def resolve(self, route_id: str) -> _StructuredTaskTestModelBinding:
+        if route_id != "default":
+            raise AssertionError(f"unexpected model route: {route_id}")
+        return _StructuredTaskTestModelBinding()
 
-    registered = group.task(handler, effect_policy="none")
+    def restore(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        route_id: "str | None" = None,
+    ) -> _StructuredTaskTestModelBinding:
+        super().restore(payload, route_id=route_id)
+        return _StructuredTaskTestModelBinding()
 
-    assert registered is handler
-    assert registered.node("node").node_id == "node"
+
+class _ContractTaskRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(
+        self,
+        invocation: TaskNodeInvocation,
+        *,
+        control: TaskNodeRunControl,
+    ) -> TaskNodeRunResult:
+        del invocation, control
+        self.calls += 1
+        return TaskNodeRunResult(
+            canonical_sha256({"value": "accepted"}),
+            "contract-runner-execution",
+        )
+
+    async def wait_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult:
+        del invocation
+        return TaskNodeRunResult(
+            canonical_sha256({"value": "accepted"}),
+            execution_id,
+        )
+
+    async def supply_input(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        value: JsonValue,
+    ) -> TaskNodeRunResult:
+        del invocation, execution_id, value
+        raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def resolve_effect(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        resolution: TaskEffectResolution,
+    ) -> TaskNodeRunResult | None:
+        del invocation, execution_id, resolution
+        raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        del invocation
+
+
+def test_task_definitions_keep_explicit_identity_and_contract() -> None:
+    definition = Task("example.direct", _echo_task, effect_policy="none")
+
+    assert (definition.ref.id, definition.ref.revision) == ("example.direct", 1)
+    assert definition.contract["type"] == "function"
+    assert definition.contract["effect_policy"] == "none"
+    assert TaskNode("node", task=definition).task == definition.ref
+
+
+def test_agent_task_input_ignores_unknown_non_execution_fields() -> None:
+    value = dict(AgentTaskInput("prompt", parameters={"task_id": "business"}))
+    value["metadata"] = {"source": "host"}
+
+    restored = AgentTaskInput.from_mapping(value)
+
+    assert restored.prompt == "prompt"
+    assert restored.parameters == {"task_id": "business"}
+    assert "metadata" not in restored
+
+
+@pytest.mark.asyncio
+async def test_task_view_rejects_duplicate_exact_definitions() -> None:
+    definition = Task("example.echo", _echo_task)
+    async with Runtime.open(
+        "duplicate-task-view",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+    ) as runtime:
+        with pytest.raises(AIError) as duplicate:
+            runtime.tasks.bind(definition, definition)
+    assert duplicate.value.code is ErrorCode.BINDING_CONFLICT
 
 
 async def _echo_task(context: TaskNodeContext[None]) -> JsonValue:
@@ -348,9 +462,9 @@ def test_all_terminal_uses_a_distinct_persisted_task_node_wire() -> None:
     default_wire = _encode_persisted_domain(default_node)
     terminal_wire = _encode_persisted_domain(terminal_node)
 
-    assert default_wire["$dataclass"] == "task_node"
+    assert default_wire["$dataclass"] == "task_node@2"
     assert "dependency_policy" not in default_wire["fields"]
-    assert terminal_wire["$dataclass"] == "task_node_terminal"
+    assert terminal_wire["$dataclass"] == "task_node_terminal@2"
     assert "dependency_policy" not in terminal_wire["fields"]
 
 
@@ -383,7 +497,7 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
         capabilities=(group,),
         storage=RuntimeStorage.in_memory(),
     ) as runtime:
-        run = await runtime.start_graph(
+        run = await start_task_graph(runtime,
             TaskGraph(
                 "graph",
                 (
@@ -394,7 +508,7 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
                         dependencies=("failed", "blocked"),
                         dependency_policy="all_terminal",
                     ),
-                    runtime.agent("default").task(
+                    agent_task_node(runtime,
                         "summary",
                         "Summarize upstream states",
                         dependencies=("failed", "blocked", "collect"),
@@ -466,19 +580,24 @@ class _AgentGraphExpander:
     id = "application.agent-graph"
     revision = 1
 
+    def __init__(self, task: Task[None]) -> None:
+        self._task = task
+
     def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
+        del context
         return (
-            context.agent_task(
-                "worker",
+            TaskNode(
                 "agent-child",
-                "return a child result",
-                input_refs={},
+                task=self._task,
+                input=AgentTaskInput(
+                    "return a child result",
+                    files=("context.txt",),
+                    session_id="expander-session",
+                    memory_scope="expander-memory",
+                ),
                 timeout_seconds=12,
                 max_attempts=2,
                 retry_delay_seconds=0.25,
-                files=("context.txt",),
-                session_id="expander-session",
-                memory_scope="expander-memory",
             ),
         )
 
@@ -487,86 +606,43 @@ class _AgentGraphExpander:
 async def test_task_handler_revisions_are_exact_and_reserved_namespace_is_closed() -> (
     None
 ):
-    group = CapabilityGroup[None]("application")
     v1 = TaskFunction[None]("example.echo", 1, _echo_task)
     v2 = TaskFunction[None]("example.echo", 2, _echo_task)
-
-    group.task(v1, effect_policy="none")
-    group.task(v2, effect_policy="none")
-    snapshot = await group.capture()
-
-    assert {
-        (item.kind, item.id, item.revision)
-        for item in snapshot.contributions
-        if item.kind == "task"
-    } == {
-        ("task", "example.echo", 1),
-        ("task", "example.echo", 2),
-    }
-    with pytest.raises(AIError) as duplicate:
-        group.task(TaskFunction[None]("example.echo", 1, _echo_task))
-    assert duplicate.value.code is ErrorCode.CAPABILITY_CONFLICT
+    async with Runtime.open(
+        "task-revision-view",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+    ) as runtime:
+        view = runtime.tasks.bind(v1, v2)
+        assert view is not None
+        with pytest.raises(AIError) as duplicate:
+            runtime.tasks.bind(v1, TaskFunction[None]("example.echo", 1, _echo_task))
+        assert duplicate.value.code is ErrorCode.BINDING_CONFLICT
     with pytest.raises(ValueError):
-        TaskFunction[None]("linktools.ai.custom", 1, _echo_task)
+        Task("linktools.ai.custom", _echo_task)
 
-    assert group.task_expander(_TestTaskExpander("application.expand"))
-    with pytest.raises(AIError) as expander_error:
-        group.task_expander(_TestTaskExpander("linktools.ai.expand"))
-    assert expander_error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    assert TaskExpander("application.expand", _TestTaskExpander("application.expand").expand)
+    with pytest.raises(ValueError):
+        TaskExpander("linktools.ai.expand", _TestTaskExpander("linktools.ai.expand").expand)
 
 
 @pytest.mark.asyncio
-async def test_captured_task_identity_survives_source_handler_mutation() -> None:
-    class MutableHandler:
-        def __init__(self) -> None:
-            self.id = "example.mutable-handler"
-            self.revision = 1
-
-        def normalize(
-            self,
-            value: Mapping[str, JsonValue],
-        ) -> Mapping[str, JsonValue]:
-            return value
-
-        async def run(self, _context: TaskNodeContext[None]) -> JsonValue:
-            return {"registered": True}
-
-        async def cancel(self, _context: TaskNodeContext[None]) -> None:
-            return None
-
-    handler = MutableHandler()
-    group = CapabilityGroup[None]("application")
-    group.task(handler, effect_policy="none")
-    capture = await group.capture()
-    handler.id = "example.mutated-handler"
-    handler.revision = 2
-
+async def test_graph_nodes_store_only_the_exact_task_reference() -> None:
+    handler = TaskFunction[None]("example.mutable-handler", 1, _echo_task)
+    node = handler.node("node")
+    assert node.task == handler.ref
     async with Runtime.open(
         "frozen-task-identity",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.in_memory(),
-        capabilities=(capture,),
     ) as runtime:
-        run = await runtime.start_graph(
-            TaskGraph(
-                "frozen-task-identity",
-                (
-                    TaskNode(
-                        "node",
-                        input={
-                            "task_id": "example.mutable-handler",
-                            "task_revision": 1,
-                        },
-                    ),
-                ),
-            ),
+        run = await start_task_graph(
+            runtime,
+            TaskGraph("frozen-task-identity", (node,)),
             idempotency_key="frozen-task-identity-0001",
         )
         result = await run.wait(timeout_seconds=10)
-        assert await runtime.read_task_result(
-            "frozen-task-identity",
-            "node",
-        ) == {"registered": True}
+        assert await run.result("node") == {"value": None}
 
     assert result.status is TaskStatus.SUCCEEDED
 
@@ -588,7 +664,7 @@ async def test_runtime_accepts_multiple_task_handler_revisions() -> None:
         storage=state,
         capabilities=(group,),
     ) as runtime:
-        run = await runtime.start_graph(
+        run = await start_task_graph(runtime,
             TaskGraph(
                 "task-revisions",
                 (v1.node("v1"), v2.node("v2")),
@@ -674,7 +750,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         first = handler.node("custom-first", input={"value": "seed"})
-        agent = runtime.agent("default").task(
+        agent = agent_task_node(runtime,
             "agent",
             "Return a short test response.",
             dependencies=("custom-first",),
@@ -682,7 +758,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
         last = handler.node("custom-last", dependencies=("agent",))
         graph = TaskGraph("mixed-graph", (first, agent, last))
 
-        result = await runtime.run_graph(
+        result = await run_task_graph(runtime,
             graph,
             idempotency_key="mixed-graph-run-0001",
             timeout_seconds=10,
@@ -690,9 +766,9 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
 
         assert result.status is TaskStatus.SUCCEEDED
         assert all(node.status is TaskStatus.SUCCEEDED for node in result.node_results)
-        first_output = await runtime.read_task_result(graph.graph_id, "custom-first")
-        agent_output = await runtime.read_task_result(graph.graph_id, "agent")
-        last_output = await runtime.read_task_result(graph.graph_id, "custom-last")
+        first_output = await task_result(runtime, graph.graph_id, "custom-first")
+        agent_output = await task_result(runtime, graph.graph_id, "agent")
+        last_output = await task_result(runtime, graph.graph_id, "custom-last")
         assert first_output == {"value": "seed"}
         assert isinstance(last_output, dict)
         assert last_output["upstream"] == agent_output
@@ -703,6 +779,558 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
             tenant_id="default",
         )
         assert set(persisted) == {"custom-first", "agent", "custom-last"}
+
+
+@pytest.mark.asyncio
+async def test_projected_agent_input_persists_only_declared_source_and_final_input() -> None:
+    application = CapabilityGroup[None]("application")
+    source = TaskFunction[None]("example.projected-source", 1, _echo_task)
+    application.task(source, effect_policy="none")
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+    calls: list[str] = []
+
+    async def build_input(context: AgentTaskInputContext) -> str:
+        assert context.input == {"request": "review"}
+        calls.append(context.node_id)
+        value = await context.result("source")
+        assert await context.result("source") == value
+        return f"{context.prompt}: {value['value']}"
+
+    state = RuntimeStorage.in_memory()
+    async with Runtime.open(
+        "projected-input",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(application,),
+    ) as runtime:
+        agent_task = runtime.tasks.from_agent(
+            "example.projected-agent",
+            runtime.agents.get("default"),
+            build_input=build_input,
+        )
+        graph = TaskGraph(
+            "projected-input-graph",
+            (
+                source.node("source", input={"value": "accepted"}),
+                TaskNode(
+                    "consumer",
+                    ("source",),
+                    task=agent_task,
+                    input=AgentTaskInput(
+                        "base prompt",
+                        parameters={"request": "review"},
+                    ),
+                ),
+            ),
+        )
+        run = await runtime.tasks.bind(source, agent_task).start(
+            graph,
+            idempotency_key="projected-input-run-0001",
+        )
+        result = await run.wait(timeout_seconds=10)
+
+        assert result.status is TaskStatus.SUCCEEDED, result.node_results
+        assert calls == ["consumer"]
+        prepared = await state.task.tasks.get_prepared_input(
+            graph.graph_id,
+            "consumer",
+            tenant_id=runtime.tenant_id,
+        )
+        assert prepared is not None
+        assert len(prepared.source_refs) == 1
+        source_name, source_ref = prepared.source_refs[0]
+        assert source_name == "source"
+        source_record = await state.task.tasks.get_results(
+            graph.graph_id,
+            ("source",),
+            tenant_id=runtime.tenant_id,
+        )
+        assert source_ref.result_digest == source_record["source"].result_digest
+        consumer_result = next(
+            node for node in result.node_results if node.node_id == "consumer"
+        )
+        execution = await state.execution.executions.get(
+            consumer_result.execution_id,
+            tenant_id=runtime.tenant_id,
+        )
+        assert execution.stored_user_input is not None
+        assert execution.stored_user_input.codec == "text"
+        assert execution.stored_user_input.payload.decode() == "base prompt: accepted"
+
+
+@pytest.mark.asyncio
+async def test_invalid_graph_request_does_not_reserve_task_definitions() -> None:
+    async def run_first(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        return {"owner": "first"}
+
+    async def run_second(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        return {"owner": "second"}
+
+    first = Task("example.admission-owner", run_first, effect_policy="none")
+    second = Task(
+        "example.admission-owner",
+        run_second,
+        effect_policy="replay_safe",
+    )
+    async with Runtime.open(
+        "task-admission-owner",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+    ) as runtime:
+        invalid_graph = TaskGraph(
+            "task-admission-owner-graph",
+            (TaskNode("node", task=first),),
+        )
+        with pytest.raises(AIError) as invalid_request:
+            await runtime.tasks.bind(first).start(
+                invalid_graph,
+                idempotency_key="",
+            )
+        assert invalid_request.value.code is ErrorCode.IDEMPOTENCY_KEY_INVALID
+
+        valid_graph = TaskGraph(
+            invalid_graph.graph_id,
+            (TaskNode("node", task=second),),
+        )
+        result = await runtime.tasks.bind(second).start(
+            valid_graph,
+            idempotency_key="task-admission-owner-valid-0001",
+        )
+        completed = await result.wait(timeout_seconds=10)
+
+    assert completed.status is TaskStatus.SUCCEEDED
+    assert completed.node_results[0].status is TaskStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_duplicate_graph_start_keeps_the_original_task_definition_owner() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def run_first(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        calls.append("first")
+        entered.set()
+        await release.wait()
+        return {"owner": "first"}
+
+    async def run_second(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        calls.append("second")
+        return {"owner": "second"}
+
+    first = Task("example.concurrent-owner", run_first, effect_policy="none")
+    second = Task("example.concurrent-owner", run_second, effect_policy="none")
+    graph = TaskGraph(
+        "concurrent-owner-graph",
+        (TaskNode("node", task=first),),
+    )
+    async with Runtime.open(
+        "concurrent-task-owner",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+    ) as runtime:
+        first_run = await runtime.tasks.bind(first).start(
+            graph,
+            idempotency_key="concurrent-owner-graph-0001",
+        )
+        await asyncio.wait_for(entered.wait(), 10)
+        repeated = await runtime.tasks.bind(second).start(
+            graph,
+            idempotency_key="concurrent-owner-graph-0001",
+        )
+        release.set()
+        first_result = await first_run.wait(timeout_seconds=10)
+        repeated_result = await repeated.wait(timeout_seconds=10)
+
+    assert first_result.status is TaskStatus.SUCCEEDED
+    assert repeated_result.status is TaskStatus.SUCCEEDED
+    assert calls == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "runner-contract-state"
+    runner = _ContractTaskRunner()
+    schema = _EffectOutput.model_json_schema()
+    task = Task.from_runner(
+        "example.contract-runner",
+        runner,  # type: ignore[arg-type]
+        contract={
+            "version": 1,
+            "type": "example.runner",
+            "effect_policy": "none",
+            "output_contract": {"kind": "schema", "schema": schema},
+            "reconcile": False,
+        },
+    )
+    graph = TaskGraph(
+        "runner-contract-graph",
+        (
+            TaskNode.wait("input"),
+            TaskNode("runner", ("input",), task=task),
+        ),
+    )
+    state = RuntimeStorage.filesystem(storage_root)
+    async with Runtime.open(
+        "runner-contract",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+    ) as runtime:
+        await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key="runner-contract-graph-0001",
+        )
+        wait_id = await _wait_for_input_execution(runtime, graph.graph_id)
+        initial = await state.task.tasks.graph_state(
+            graph.graph_id,
+            tenant_id=runtime.tenant_id,
+        )
+        assert initial is not None
+        runner_node = next(node for node in initial.nodes if node.node_id == "runner")
+        assert runner_node.output_contract == {
+            "mode": "structured",
+            "schema": schema,
+        }
+        assert runner_node.reconcile is False
+
+    recovered_storage = RuntimeStorage.filesystem(storage_root)
+    async with Runtime.open(
+        "runner-contract",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=recovered_storage,
+    ) as runtime:
+        engine = runtime.tasks.bind(task)
+        await engine.recover_pending()
+        resumed = await engine.get(graph.graph_id)
+        await resumed.resume(
+            "input",
+            TaskInputSupplyRequest(
+                runtime.default_principal,
+                wait_id,
+                {"value": "input"},
+                "runner-contract-input-0001",
+            ),
+        )
+        completed = await resumed.wait(timeout_seconds=10)
+        recovered_state = await recovered_storage.task.tasks.graph_state(
+            graph.graph_id,
+            tenant_id=runtime.tenant_id,
+        )
+        assert recovered_state is not None
+        runner_node = next(
+            node for node in recovered_state.nodes if node.node_id == "runner"
+        )
+        assert runner_node.output_contract == {
+            "mode": "structured",
+            "schema": schema,
+        }
+        assert runner_node.reconcile is False
+
+    assert completed.status is TaskStatus.SUCCEEDED
+    assert runner.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_projected_workers_issue_distinct_requests_and_persist_history(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    attachment = b"PROJECTED_ATTACHMENT_PAYLOAD"
+    (workspace_root / "brief.txt").write_bytes(attachment)
+    workspace = Workspace.load(workspace_root)
+    application = CapabilityGroup[None]("application")
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+    models = _TaskTestModels()
+    state = RuntimeStorage.in_memory()
+
+    async def read_source(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        return {
+            "customer": "Harbor-ALPHA",
+            "queue": "Queue-BETA",
+            "unprojected": "SECRET-UNPROJECTED-SOURCE-FIELD",
+        }
+
+    source = Task("example.dual-worker-source", read_source, effect_policy="none")
+
+    async def build_input(context: AgentTaskInputContext) -> str:
+        value = await context.result("source")
+        assert isinstance(value, dict)
+        if context.input["worker"] == "left":
+            return f"left projection customer={value['customer']}"
+        return f"right projection queue={value['queue']}"
+
+    async with Runtime.open(
+        "dual-projected-workers",
+        models=models,  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(
+            CapabilityGroup("workspace", workspace=workspace),
+            application,
+        ),
+    ) as runtime:
+        left = runtime.tasks.from_agent(
+            "example.dual-worker-left",
+            runtime.agents.get("default"),
+            build_input=build_input,
+        )
+        right = runtime.tasks.from_agent(
+            "example.dual-worker-right",
+            runtime.agents.get("default"),
+            build_input=build_input,
+        )
+        graph = TaskGraph(
+            "dual-projected-workers-graph",
+            (
+                TaskNode("source", task=source),
+                TaskNode(
+                    "left",
+                    ("source",),
+                    task=left,
+                    input=AgentTaskInput(
+                        "left request",
+                        parameters={"worker": "left"},
+                        files=("brief.txt",),
+                    ),
+                ),
+                TaskNode(
+                    "right",
+                    ("source",),
+                    task=right,
+                    input=AgentTaskInput(
+                        "right request",
+                        parameters={"worker": "right"},
+                    ),
+                ),
+            ),
+        )
+        run = await runtime.tasks.bind(source, left, right).start(
+            graph,
+            idempotency_key="dual-projected-workers-run-0001",
+        )
+        result = await run.wait(timeout_seconds=10)
+
+        assert result.status is TaskStatus.SUCCEEDED, result.node_results
+
+        source_record = (
+            await state.task.tasks.get_results(
+                graph.graph_id,
+                ("source",),
+                tenant_id=runtime.tenant_id,
+            )
+        )["source"]
+        node_results = {node.node_id: node for node in result.node_results}
+        for node_id, marker in (
+            ("left", "Harbor-ALPHA"),
+            ("right", "Queue-BETA"),
+        ):
+            prepared = await state.task.tasks.get_prepared_input(
+                graph.graph_id,
+                node_id,
+                tenant_id=runtime.tenant_id,
+            )
+            assert prepared is not None
+            assert len(prepared.source_refs) == 1
+            source_name, source_ref = prepared.source_refs[0]
+            assert source_name == "source"
+            assert source_ref.result_digest == source_record.result_digest
+
+            execution_id = node_results[node_id].execution_id
+            assert execution_id is not None
+            interactions = await runtime.history.model_interactions(
+                execution_id,
+                principal=runtime.default_principal,
+                include_content=True,
+                limit=100,
+            )
+            assert interactions.next_cursor is None
+            assert len(interactions.items) == 1
+            interaction = interactions.items[0]
+            assert interaction.status == "SUCCEEDED"
+            assert interaction.content_included is True
+            assert marker in str(interaction.request)
+            other_marker = "Queue-BETA" if node_id == "left" else "Harbor-ALPHA"
+            assert other_marker not in str(interaction.request)
+            assert "SECRET-UNPROJECTED-SOURCE-FIELD" not in str(interaction.request)
+
+            history = await runtime.history.history(
+                execution_id,
+                principal=runtime.default_principal,
+                include_content=True,
+                limit=100,
+            )
+            assert history.next_cursor is None
+            assert any(
+                item.content_included and marker in str(item.content)
+                for item in history.items
+            )
+
+
+@pytest.mark.asyncio
+async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    attachment = b"RECOVERED_PROJECTED_ATTACHMENT"
+    attachment_path = workspace_root / "brief.txt"
+    attachment_path.write_bytes(attachment)
+    workspace = Workspace.load(workspace_root)
+    storage_root = tmp_path / "projected-file-state"
+    monkeypatch.setattr(task_local, "_LEASE_SECONDS", 1)
+    application = CapabilityGroup[None]("application")
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+    models = _TaskTestModels()
+    builds: list[str] = []
+    entered_start = asyncio.Event()
+
+    async def source_task(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        return {"ticket": "RECOVERY-317"}
+
+    async def build_input(context: AgentTaskInputContext) -> str:
+        builds.append(context.node_id)
+        source = await context.result("source")
+        assert isinstance(source, dict)
+        return f"inspect projected ticket {source['ticket']}"
+
+    source = Task("example.projected-file-source", source_task, effect_policy="none")
+    state = RuntimeStorage.filesystem(storage_root)
+    graph_id = "projected-file-recovery-graph"
+
+    async with Runtime.open(
+        "projected-file-recovery",
+        models=models,  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(
+            CapabilityGroup("workspace", workspace=workspace),
+            application,
+        ),
+    ) as runtime:
+        worker = runtime.tasks.from_agent(
+            "example.projected-file-worker",
+            runtime.agents.get("default"),
+            build_input=build_input,
+        )
+        graph = TaskGraph(
+            graph_id,
+            (
+                TaskNode("source", task=source),
+                TaskNode(
+                    "consumer",
+                    ("source",),
+                    task=worker,
+                    input=AgentTaskInput(
+                        "base request",
+                        files=("brief.txt",),
+                    ),
+                ),
+            ),
+        )
+        original_start = runtime._start_for_agent
+
+        async def pause_before_execution_start(
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            entered_start.set()
+            await asyncio.Event().wait()
+            return await original_start(*args, **kwargs)  # type: ignore[arg-type]
+
+        with monkeypatch.context() as patch:
+            patch.setattr(runtime, "_start_for_agent", pause_before_execution_start)
+            await runtime.tasks.bind(source, worker).start(
+                graph,
+                idempotency_key="projected-file-recovery-run-0001",
+            )
+            await asyncio.wait_for(entered_start.wait(), 10)
+            prepared = await state.task.tasks.get_prepared_input(
+                graph.graph_id,
+                "consumer",
+                tenant_id=runtime.tenant_id,
+            )
+            assert prepared is not None
+            file_views = prepared.stored_user_input.view["files"]
+            assert isinstance(file_views, list) and len(file_views) == 1
+            assert file_views[0]["digest"] == hashlib.sha256(attachment).hexdigest()
+            assert builds == ["consumer"]
+            await runtime.close()
+
+    attachment_path.unlink()
+    await asyncio.sleep(1.1)
+    recovered_storage = RuntimeStorage.filesystem(storage_root)
+    async with Runtime.open(
+        "projected-file-recovery",
+        models=models,  # type: ignore[arg-type]
+        storage=recovered_storage,
+        capabilities=(
+            CapabilityGroup("workspace", workspace=workspace),
+            application,
+        ),
+    ) as runtime:
+        worker = runtime.tasks.from_agent(
+            "example.projected-file-worker",
+            runtime.agents.get("default"),
+            build_input=build_input,
+        )
+        engine = runtime.tasks.bind(source, worker)
+        await engine.recover_pending()
+        recovered_run = await engine.get(graph.graph_id)
+        completed = await recovered_run.wait(timeout_seconds=10)
+
+        assert completed.status is TaskStatus.SUCCEEDED, completed.node_results
+        assert builds == ["consumer"]
+        consumer_result = next(
+            node for node in completed.node_results if node.node_id == "consumer"
+        )
+        assert consumer_result.execution_id is not None
+        interactions = await runtime.history.model_interactions(
+            consumer_result.execution_id,
+            principal=runtime.default_principal,
+            include_content=True,
+            limit=100,
+        )
+        assert interactions.next_cursor is None
+        assert len(interactions.items) == 1
+        assert interactions.items[0].status == "SUCCEEDED"
+        assert "RECOVERY-317" in str(interactions.items[0].request)
+        assert "brief.txt" in str(interactions.items[0].request)
+        history = await runtime.history.history(
+            consumer_result.execution_id,
+            principal=runtime.default_principal,
+            include_content=True,
+            limit=100,
+        )
+        assert any(
+            item.content_included and "RECOVERY-317" in str(item.content)
+            for item in history.items
+        )
 
 
 @pytest.mark.asyncio
@@ -717,7 +1345,6 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
     application.task(handler, effect_policy="none")
     application.task_expander(_ApplicationGraphExpander(handler))
-    application.task_expander(_AgentGraphExpander())
     application.agent(
         "default",
         model="default",
@@ -742,7 +1369,9 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        await runtime.agent("worker").create_session(
+        worker_task = agent_task_definition(runtime, "worker", "test.agent.worker")
+        application.task_expander(_AgentGraphExpander(worker_task))
+        await runtime.agents.get("worker").create_session(
             "expander-session",
             idempotency_key="expander-session-create-0001",
         )
@@ -755,7 +1384,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
                     expander=app_reference,
                 ),
                 handler.node("empty-root", expander=app_reference),
-                runtime.agent("default").task(
+                agent_task_node(runtime,
                     "agent-root",
                     "return a root result",
                     expander=agent_reference,
@@ -763,14 +1392,14 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
             ),
         )
 
-        result = await runtime.run_graph(
+        result = await run_task_graph(runtime,
             graph,
             idempotency_key="dynamic-expansion-run-0001",
             timeout_seconds=10,
         )
 
         assert result.status is TaskStatus.SUCCEEDED, result.node_results
-        assert await runtime.read_task_result(
+        assert await task_result(runtime,
             graph.graph_id,
             "agent-child",
         ) is not None
@@ -784,7 +1413,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
             "empty-root",
             "grandchild",
         }
-        snapshot = await runtime.graph.state(
+        snapshot = await task_graph_state(runtime,
             graph.graph_id,
             principal=runtime.default_principal,
         )
@@ -798,15 +1427,13 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         assert agent_child.timeout_seconds == 12
         assert agent_child.max_attempts == 2
         assert agent_child.retry_delay_seconds == 0.25
-        binding = AgentBindingContract.from_payload(
-            agent_child.input["binding_contract"]
-        )
-        assert binding.agent_spec.id == "worker"
+        assert agent_child.task == worker_task.ref
+        assert "binding_contract" not in agent_child.input
         child_state = next(
             state for state in snapshot.node_states if state.node_id == "agent-child"
         )
         assert child_state.execution_id is not None
-        child_execution = await runtime.execution.inspect(
+        child_execution = await runtime.executions.inspect(
             child_state.execution_id,
             principal=runtime.default_principal,
         )
@@ -819,19 +1446,20 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         persisted_agent_child = next(
             node for node in persisted.nodes if node.node_id == "agent-child"
         )
-        assert persisted_agent_child.input["files"] == ["context.txt"]
-        assert persisted_agent_child.input["session_id"] == "expander-session"
-        assert persisted_agent_child.input["memory_scope"] == "expander-memory"
+        persisted_input = AgentTaskInput.from_mapping(persisted_agent_child.input)
+        assert persisted_input.files == ("context.txt",)
+        assert persisted_input.session_id == "expander-session"
+        assert persisted_input.memory_scope == "expander-memory"
         assert snapshot.node_states[-1].status is TaskStatus.SUCCEEDED
         child_a_state = next(
             state for state in snapshot.node_states if state.node_id == "child-a"
         )
         assert child_a_state.execution_id is not None
-        assert await runtime.read_task_result(
+        assert await task_result(runtime,
             graph.graph_id,
             "grandchild",
         ) == {
-            "upstream": await runtime.read_task_result(graph.graph_id, "child-a"),
+            "upstream": await task_result(runtime, graph.graph_id, "child-a"),
             "execution_id": child_a_state.execution_id,
         }
         events = await state.task.tasks.list_events(
@@ -855,7 +1483,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
 async def _wait_for_input_execution(runtime: Runtime, graph_id: str) -> str:
     async def wait() -> str:
         while True:
-            snapshot = await runtime.graph.state(
+            snapshot = await task_graph_state(runtime,
                 graph_id,
                 principal=runtime.default_principal,
             )
@@ -904,10 +1532,10 @@ async def test_reopened_expansion_uses_captured_candidates_and_supports_nesting(
         (
             TaskNode.wait("input"),
             handler.node(
-                "root",
-                dependencies=("input",),
-                expander=expander_reference,
-            ),
+            "root",
+            dependencies=("input",),
+            expander=expander_reference,
+        ),
         ),
     )
     storage_root = tmp_path / "state"
@@ -921,7 +1549,7 @@ async def test_reopened_expansion_uses_captured_candidates_and_supports_nesting(
         storage=RuntimeStorage.filesystem(storage_root),
         capabilities=(initial_application,),
     ) as runtime:
-        await runtime.start_graph(
+        await start_task_graph(runtime,
             graph,
             idempotency_key="reopened-expansion-run-0001",
         )
@@ -938,7 +1566,7 @@ async def test_reopened_expansion_uses_captured_candidates_and_supports_nesting(
         capabilities=(application,),
     ) as runtime:
         principal = runtime.default_principal
-        await runtime.graph.resume(
+        await task_graph_resume(runtime,
             graph.graph_id,
             "input",
             TaskInputSupplyRequest(
@@ -948,7 +1576,7 @@ async def test_reopened_expansion_uses_captured_candidates_and_supports_nesting(
                 "reopened-expansion-input-0001",
             ),
         )
-        result = await runtime.graph.wait(
+        result = await task_graph_wait(runtime,
             graph.graph_id,
             principal=principal,
             timeout_seconds=10,
@@ -972,16 +1600,10 @@ async def test_reopened_expansion_rejects_a_new_runtime_task_candidate(
 
     required = TaskFunction[None]("example.reopened-required", 1, run_task)
     added = TaskFunction[None]("example.added-after-capture", 1, run_task)
-    expander_reference = TaskExpanderRef("example.added-candidate-expander", 1)
-
-    class Expander:
-        id = expander_reference.id
-        revision = expander_reference.revision
-
-        def expand(self, _context: TaskExpansionContext) -> tuple[TaskNode, ...]:
-            return (added.node("added"),)
-
-    expander = Expander()
+    expander = TaskExpander(
+        "example.added-candidate-expander",
+        lambda _context: (added.node("added"),),
+    )
     graph = TaskGraph(
         "reopened-added-candidate",
         (
@@ -989,39 +1611,33 @@ async def test_reopened_expansion_rejects_a_new_runtime_task_candidate(
             required.node(
                 "root",
                 dependencies=("input",),
-                expander=expander_reference,
+                expander=expander.ref,
             ),
         ),
     )
     storage_root = tmp_path / "state"
-    initial_application = CapabilityGroup[None]("application")
-    initial_application.task(required, effect_policy="none")
-    initial_application.task_expander(expander)
     async with Runtime.open(
         "reopened-added-candidate",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
-        capabilities=(initial_application,),
     ) as runtime:
-        await runtime.start_graph(
+        await runtime.tasks.bind(required, expander).start(
             graph,
             idempotency_key="reopened-added-candidate-run-0001",
         )
         wait_id = await _wait_for_input_execution(runtime, graph.graph_id)
 
-    reopened_application = CapabilityGroup[None]("application")
-    reopened_application.task(required, effect_policy="none")
-    reopened_application.task(added, effect_policy="none")
-    reopened_application.task_expander(expander)
     async with Runtime.open(
         "reopened-added-candidate",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=RuntimeStorage.filesystem(storage_root),
-        capabilities=(reopened_application,),
     ) as runtime:
         principal = runtime.default_principal
-        await runtime.graph.resume(
+        run = await runtime.tasks.bind(required, added, expander).get(
             graph.graph_id,
+            principal=principal,
+        )
+        await run.resume(
             "input",
             TaskInputSupplyRequest(
                 principal,
@@ -1030,15 +1646,11 @@ async def test_reopened_expansion_rejects_a_new_runtime_task_candidate(
                 "reopened-added-candidate-input-0001",
             ),
         )
-        result = await runtime.graph.wait(
-            graph.graph_id,
-            principal=principal,
-            timeout_seconds=10,
-        )
+        result = await run.wait(timeout_seconds=10)
 
     root = next(node for node in result.node_results if node.node_id == "root")
     assert result.status is TaskStatus.FAILED
-    assert root.error_code == ErrorCode.CAPABILITY_REQUIRED_MISSING.value
+    assert root.error_code == ErrorCode.BINDING_NOT_REGISTERED.value
     assert all(node.node_id != "added" for node in result.node_results)
 
 
@@ -1084,7 +1696,7 @@ async def test_public_graph_start_canonicalizes_registered_task_semantics() -> N
             runtime.default_principal,
             "task-public-start-0001",
         )
-        await runtime.graph.start(request)
+        await start_task_request(runtime, request)
         graph_state = await state.task.tasks.graph_state(
             "task-public-start",
             tenant_id=runtime.default_principal.tenant_id,
@@ -1121,10 +1733,11 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
         allow_subagents=(),
     )
 
+    state = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "typed-contract-reopen",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
-        storage=RuntimeStorage.filesystem(storage_root),
+        models=_StructuredTaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         graph = TaskGraph(
@@ -1134,13 +1747,10 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
                 TaskNode(
                     "typed-custom",
                     dependencies=("input",),
-                    input={
-                        "task_id": handler.id,
-                        "task_revision": handler.revision,
-                    },
+                    task=handler,
                     output_type=_EffectOutput,
                 ),
-                runtime.agent("default").task(
+                agent_task_node(runtime,
                     "typed-agent",
                     "return a structured result",
                     dependencies=("typed-custom",),
@@ -1148,7 +1758,7 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
                 ),
             ),
         )
-        await runtime.start_graph(
+        await start_task_graph(runtime,
             graph,
             idempotency_key="typed-contract-reopen-0001",
         )
@@ -1160,15 +1770,12 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
                 TaskNode(
                     "typed-custom-invalid",
                     dependencies=("input",),
-                    input={
-                        "task_id": handler.id,
-                        "task_revision": handler.revision,
-                    },
+                    task=handler,
                     output_type=_ChangedEffectOutput,
                 ),
             ),
         )
-        await runtime.start_graph(
+        await start_task_graph(runtime,
             invalid_custom_graph,
             idempotency_key="typed-custom-invalid-reopen-0001",
         )
@@ -1177,13 +1784,14 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
             invalid_custom_graph.graph_id,
         )
 
+    state = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "typed-contract-reopen",
-        models=_TaskTestModels(),  # type: ignore[arg-type]
-        storage=RuntimeStorage.filesystem(storage_root),
+        models=_StructuredTaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        recovered = await runtime.graph.state(
+        recovered = await task_graph_state(runtime,
             "typed-contract-reopen",
             principal=runtime.default_principal,
         )
@@ -1204,7 +1812,7 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
         assert invalid_agent_output.value.code is ErrorCode.OUTPUT_VALIDATION_FAILED
 
         with pytest.raises(AIError) as invalid_input:
-            await runtime.graph.resume(
+            await task_graph_resume(runtime,
                 "typed-contract-reopen",
                 "input",
                 TaskInputSupplyRequest(
@@ -1216,7 +1824,7 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
             )
         assert invalid_input.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
-        await runtime.graph.resume(
+        await task_graph_resume(runtime,
             "typed-contract-reopen",
             "input",
             TaskInputSupplyRequest(
@@ -1226,18 +1834,18 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
                 "typed-contract-valid-input-0001",
             ),
         )
-        result = await runtime.graph.wait(
+        result = await task_graph_wait(runtime,
             "typed-contract-reopen",
             principal=runtime.default_principal,
             timeout_seconds=10,
         )
         assert result.status is TaskStatus.SUCCEEDED
-        output = await runtime.read_task_result(
+        output = await task_result(runtime,
             "typed-contract-reopen",
             "typed-agent",
         )
         _EffectOutput.model_validate(output)
-        await runtime.graph.resume(
+        await task_graph_resume(runtime,
             "typed-custom-invalid-reopen",
             "input",
             TaskInputSupplyRequest(
@@ -1247,7 +1855,7 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
                 "typed-custom-invalid-input-0001",
             ),
         )
-        invalid_custom_result = await runtime.graph.wait(
+        invalid_custom_result = await task_graph_wait(runtime,
             "typed-custom-invalid-reopen",
             principal=runtime.default_principal,
             timeout_seconds=10,
@@ -1296,14 +1904,14 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
         storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        run = await runtime.start_graph(
+        run = await start_task_graph(runtime,
             TaskGraph("effect-applied", (handler.node("node"),)),
             idempotency_key="effect-applied-run-0001",
         )
         initial = await run.wait(timeout_seconds=10)
         assert initial.status is TaskStatus.RECOVERY_REQUIRED
 
-        snapshot = await runtime.graph.state(
+        snapshot = await task_graph_state(runtime,
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -1320,7 +1928,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
 
         assert resolved.status is TaskStatus.SUCCEEDED
         assert await run.result("node") == {"value": "recovered"}
-        execution = await runtime.execution.result(
+        execution = await runtime.executions.result(
             node_state.execution_id,
             principal=runtime.default_principal,
         )
@@ -1365,13 +1973,13 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
         storage=RuntimeStorage.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        run = await runtime.start_graph(
+        run = await start_task_graph(runtime,
             TaskGraph("effect-invalid", (handler.node("node"),)),
             idempotency_key="effect-invalid-run-0001",
         )
         initial = await run.wait(timeout_seconds=10)
         assert initial.status is TaskStatus.RECOVERY_REQUIRED
-        snapshot = await runtime.graph.state(
+        snapshot = await task_graph_state(runtime,
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -1386,7 +1994,7 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
         )
 
         assert resolved.status is TaskStatus.FAILED
-        execution = await runtime.execution.result(
+        execution = await runtime.executions.result(
             node_state.execution_id,
             principal=runtime.default_principal,
         )
@@ -1431,7 +2039,7 @@ async def test_not_applied_retries_same_execution_once(
         storage=RuntimeStorage.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        run = await runtime.start_graph(
+        run = await start_task_graph(runtime,
             TaskGraph(
                 "effect-retry",
                 (handler.node("node", max_attempts=2, retry_delay_seconds=0),),
@@ -1440,7 +2048,7 @@ async def test_not_applied_retries_same_execution_once(
         )
         initial = await run.wait(timeout_seconds=10)
         assert initial.status is TaskStatus.RECOVERY_REQUIRED
-        before = await runtime.graph.state(
+        before = await task_graph_state(runtime,
             run.graph_id,
             principal=runtime.default_principal,
         )
@@ -1458,12 +2066,12 @@ async def test_not_applied_retries_same_execution_once(
 
         assert final.status is TaskStatus.SUCCEEDED
         assert calls == 2
-        after = await runtime.graph.state(
+        after = await task_graph_state(runtime,
             run.graph_id,
             principal=runtime.default_principal,
         )
         assert after.node_states[0].execution_id == state_before.execution_id
-        execution = await runtime.execution.inspect(
+        execution = await runtime.executions.inspect(
             state_before.execution_id,
             principal=runtime.default_principal,
         )
@@ -1492,17 +2100,11 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
         storage=RuntimeStorage.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        run = await runtime.start_graph(
+        run = await start_task_graph(runtime,
             TaskGraph(
                 "deferred-input",
                 (
-                    TaskNode(
-                        "input",
-                        input={
-                            "task_id": "linktools.ai.input",
-                            "task_revision": 1,
-                        },
-                    ),
+                    TaskNode.wait("input"),
                 ),
             ),
             idempotency_key="deferred-input-run-0001",
@@ -1526,7 +2128,7 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
         replay = await run.resume("input", request)
         assert replay.status is TaskStatus.SUCCEEDED
 
-        same = await runtime.execution.supply_task_input(
+        same = await runtime.executions.supply_task_input(
             node_result.execution_id,
             principal=runtime.default_principal,
             value=None,
@@ -1534,7 +2136,7 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
         assert same.status.value == "SUCCEEDED"
 
         with pytest.raises(AIError) as raised:
-            await runtime.execution.supply_task_input(
+            await runtime.executions.supply_task_input(
                 node_result.execution_id,
                 principal=runtime.default_principal,
                 value={"different": True},
@@ -1766,7 +2368,7 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
         storage=state,
         capabilities=(first,),
     ) as runtime:
-        await runtime.start_graph(
+        await start_task_graph(runtime,
             graph,
             idempotency_key="semantic-drift-run-0001",
         )
@@ -1784,8 +2386,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
             models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.filesystem(storage_root),
             capabilities=(reconcile_removed,),
-        ):
-            pass
+        ) as runtime:
+            await task_engine(runtime).recover_pending()
     assert reconcile_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert reconcile_error.value.safe_details["reason"] == "task_reconcile_changed"
 
@@ -1802,8 +2404,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
             models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.filesystem(storage_root),
             capabilities=(output_changed,),
-        ):
-            pass
+        ) as runtime:
+            await task_engine(runtime).recover_pending()
     assert output_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert output_error.value.safe_details["reason"] == "task_output_contract_changed"
 
@@ -1819,8 +2421,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
             models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.filesystem(storage_root),
             capabilities=(output_removed,),
-        ):
-            pass
+        ) as runtime:
+            await task_engine(runtime).recover_pending()
     assert removed_output_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert (
         removed_output_error.value.safe_details["reason"]
@@ -1840,8 +2442,8 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
             models=_TaskTestModels(),  # type: ignore[arg-type]
             storage=RuntimeStorage.filesystem(storage_root),
             capabilities=(effect_changed,),
-        ):
-            pass
+        ) as runtime:
+            await task_engine(runtime).recover_pending()
     assert effect_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert effect_error.value.safe_details["reason"] == "task_effect_changed"
 
@@ -1885,12 +2487,12 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
         storage=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
-        await runtime.start_graph(
+        await start_task_graph(runtime,
             graph,
             idempotency_key="shutdown-graph-run-0001",
         )
         await asyncio.wait_for(entered.wait(), 10)
-        snapshot = await runtime.graph.state(
+        snapshot = await task_graph_state(runtime,
             graph.graph_id,
             principal=runtime.default_principal,
         )

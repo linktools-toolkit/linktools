@@ -211,7 +211,7 @@ async def test_terminal_stream_allows_immediate_runtime_close(
             storage=state,
             capabilities=(_agent_group(),),
         ) as runtime:
-            execution = await runtime.agent("default").start("hello")
+            execution = await runtime.agents.get("default").start("hello")
             terminal_events = []
             async for item in execution.watch():
                 if item.depth != 0:
@@ -312,14 +312,14 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             storage=state,
             capabilities=(_agent_group(),),
         ) as runtime:
-            created = await runtime.agent("default").create_session("session")
-            loaded = await runtime.session.get(
+            created = await runtime.agents.get("default").create_session("session")
+            loaded = await runtime.sessions.get(
                 created.session_id,
                 principal=runtime.default_principal,
             )
             assert loaded.session_id == created.session_id
 
-            result = await runtime.agent("default").run(
+            result = await runtime.agents.get("default").run(
                 "hello",
                 output=_PersistenceNestedOutput,
                 session_id=created.session_id,
@@ -362,11 +362,11 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             _encode_persisted_domain(persisted_result)
             _encode_persisted_domain(next_execution)
 
-            inspected = await runtime.execution.inspect(
+            inspected = await runtime.executions.inspect(
                 result.execution_id,
                 principal=runtime.default_principal,
             )
-            waited = await runtime.execution.wait(
+            waited = await runtime.executions.wait(
                 result.execution_id,
                 principal=runtime.default_principal,
             )
