@@ -23,7 +23,7 @@ async def test_in_memory_session_run_restores_timeline() -> None:
         storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
-        session = await runtime.agent("default").create_session("session")
+        session = await runtime.agents.get("default").create_session("session")
         first = await session.run("hello", timeout_seconds=10)
         second = await session.run("again", timeout_seconds=10)
         assert first.status is ExecutionStatus.SUCCEEDED
@@ -60,7 +60,7 @@ async def test_in_memory_fork_survives_parent_close() -> None:
         storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
-        parent = await runtime.agent("default").create_session("parent")
+        parent = await runtime.agents.get("default").create_session("parent")
         parent_turn = await parent.run("before fork", timeout_seconds=10)
         assert parent_turn.status is ExecutionStatus.SUCCEEDED
 

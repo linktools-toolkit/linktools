@@ -32,7 +32,11 @@ from linktools.ai.runtime._event import (
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor
-from linktools.ai.runtime.service_api import ExecutionEvent, ExecutionTreeEvent
+from linktools.ai.runtime.service_api import (
+    ExecutionEvent,
+    ExecutionTreeEvent,
+    ExecutionView,
+)
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
 from linktools.ai.runtime.state._contracts import (
     ExecutionCancelRequestCommit,
@@ -213,7 +217,7 @@ async def test_unconfirmed_completion_rejects_missing_durable_tail() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_wait_terminal_result_waits_for_observer_completion() -> None:
+async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
     principal = Principal("owner", "tenant")
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
@@ -327,8 +331,29 @@ async def test_graph_wait_terminal_result_waits_for_observer_completion() -> Non
                 event,
             )
 
+    class ExecutionService:
+        async def inspect(self, execution_id: str, *, principal: Principal):
+            del principal
+            assert execution_id == "execution"
+            return ExecutionView(
+                "execution",
+                "agent",
+                ExecutionStatus.STARTED,
+                ExecutionLineageKind.RUN,
+                None,
+                "execution",
+                None,
+                event_sequence=1,
+            )
+
+    runtime = SimpleNamespace(
+        namespace="watch-test",
+        graph=GraphService(),
+        executions=ExecutionService(),
+    )
     run = TaskGraphRun(
-        SimpleNamespace(namespace="watch-test", graph=GraphService()),
+        runtime,
+        runtime.graph,
         "graph",
         principal,
         watch_tree,
@@ -357,7 +382,7 @@ async def test_graph_wait_terminal_result_waits_for_observer_completion() -> Non
         {},
         durable_sequence=None,
     )
-    waiting = asyncio.create_task(run.wait(observer=observer))
+    observing = asyncio.create_task(run.observe(observer))
     await asyncio.wait_for(observed_live.wait(), 1)
 
     executions.execution = _execution(
@@ -368,14 +393,16 @@ async def test_graph_wait_terminal_result_waits_for_observer_completion() -> Non
         ExecutionEvent("execution", 2, "EXECUTION_SUCCEEDED", {}),
     )
     waiter_release.set()
-    await asyncio.sleep(0)
-    assert not waiting.done()
+    result = await asyncio.wait_for(run.wait(), 1)
+
+    assert result.status is TaskStatus.SUCCEEDED
+    assert not observed_terminal.is_set()
+    assert not observing.done()
 
     broker.complete("execution")
     graph_terminal_release.set()
-    result = await asyncio.wait_for(waiting, 1)
+    await asyncio.wait_for(observing, 1)
 
-    assert result.status is TaskStatus.SUCCEEDED
     assert observed_terminal.is_set()
     assert observed[-1].event == terminal_graph_event
     assert observed[-1].cursor is not None

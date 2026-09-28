@@ -4,6 +4,7 @@
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+import secrets
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
@@ -21,6 +22,7 @@ from .recovery import (
     ToolEffectResolutionResult,
 )
 from .service_api import (
+    CancelExecutionRequest,
     CancelExecutionResult,
     EvaluationHandle,
     ExecutionEvent,
@@ -40,7 +42,6 @@ from .service_api import (
 
 if TYPE_CHECKING:
     from ..agent import CompiledAgent
-    from ..task import TaskExpanderRef, TaskNode, TaskResultRef
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
@@ -71,7 +72,7 @@ class Execution(Generic[AppT]):
     async def wait(self, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
         if self._task_wait is not None:
             return await self._task_wait(timeout_seconds)
-        return await self._runtime.execution.wait(
+        return await self._runtime.executions.wait(
             self.execution_id,
             principal=self._principal,
             timeout_seconds=timeout_seconds,
@@ -142,15 +143,17 @@ class Execution(Generic[AppT]):
     ) -> CancelExecutionResult:
         if self._task_cancel is not None:
             return await self._task_cancel(idempotency_key, force)
-        return await self._runtime.cancel(
+        return await self._runtime.executions.cancel(
             self.execution_id,
-            principal=self._principal,
-            idempotency_key=idempotency_key,
-            force=force,
+            CancelExecutionRequest(
+                self._principal,
+                idempotency_key or secrets.token_urlsafe(32),
+                force,
+            ),
         )
 
     async def recovery_effects(self) -> tuple[ExecutionRecoveryEffect, ...]:
-        return await self._runtime.execution.recovery_effects(
+        return await self._runtime.executions.recovery_effects(
             self.execution_id,
             principal=self._principal,
         )
@@ -163,7 +166,7 @@ class Execution(Generic[AppT]):
         resolution: ToolEffectResolution,
         idempotency_key: str,
     ) -> ToolEffectResolutionResult:
-        return await self._runtime.execution.resolve_tool_effect(
+        return await self._runtime.executions.resolve_tool_effect(
             self.execution_id,
             ResolveToolEffectRequest(
                 self._principal,
@@ -175,7 +178,7 @@ class Execution(Generic[AppT]):
         )
 
     async def recover(self) -> "Execution[AppT]":
-        await self._runtime.execution.recover(
+        await self._runtime.executions.recover(
             self.execution_id,
             principal=self._principal,
         )
@@ -240,7 +243,7 @@ class Execution(Generic[AppT]):
         include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]":
-        return await self._runtime.execution.history(
+        return await self._runtime.executions.history(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
@@ -255,7 +258,7 @@ class Execution(Generic[AppT]):
         include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionTraceItem]":
-        return await self._runtime.execution.trace(
+        return await self._runtime.executions.trace(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
@@ -270,7 +273,7 @@ class Execution(Generic[AppT]):
         include_content: bool = False,
         limit: int = 100,
     ) -> "Page[TranscriptItem]":
-        return await self._runtime.execution.transcript(
+        return await self._runtime.executions.transcript(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
@@ -286,7 +289,7 @@ class Execution(Generic[AppT]):
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]":
-        return await self._runtime.execution.model_interactions(
+        return await self._runtime.executions.model_interactions(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
@@ -300,7 +303,7 @@ class Execution(Generic[AppT]):
 class Session(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     agent_id: str
-    _agent_revision: int
+    _agent_revision: int | None
     session_id: str
     _principal: "Principal | None" = None
     _compiled_agent: "CompiledAgent | None" = None
@@ -318,6 +321,19 @@ class Session(Generic[AppT]):
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
+        if self._agent_revision is None:
+            return await self._runtime.agents.get(self.agent_id).start(
+                user_prompt,
+                files=files,
+                output=output,
+                principal=principal or self._principal,
+                session_id=self.session_id,
+                idempotency_key=idempotency_key,
+                memory_scope=memory_scope,
+                planning=planning,
+                thinking=thinking,
+                correlation=correlation,
+            )
         return await self._runtime._start_for_agent(
             self.agent_id,
             self._agent_revision,
@@ -375,6 +391,19 @@ class Session(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
+        if self._agent_revision is None:
+            return await self._runtime.agents.get(self.agent_id).plan(
+                user_prompt,
+                files=files,
+                output=output,
+                principal=principal or self._principal,
+                session_id=self.session_id,
+                idempotency_key=idempotency_key,
+                memory_scope=memory_scope,
+                thinking=thinking,
+                correlation=correlation,
+                timeout_seconds=timeout_seconds,
+            )
         execution = await self._runtime._start_for_agent(
             self.agent_id,
             self._agent_revision,
@@ -400,7 +429,7 @@ class Session(Generic[AppT]):
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> "Page[SessionHistoryItem]":
-        return await self._runtime.session.history(
+        return await self._runtime.sessions.history(
             self.session_id,
             principal=self._runtime._resolve_principal(principal or self._principal),
             cursor=cursor,
@@ -414,7 +443,7 @@ class Session(Generic[AppT]):
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> "Page[SessionTurn]":
-        return await self._runtime.session.timeline(
+        return await self._runtime.sessions.timeline(
             self.session_id,
             principal=self._runtime._resolve_principal(principal or self._principal),
             cursor=cursor,
@@ -429,6 +458,18 @@ class Session(Generic[AppT]):
         idempotency_key: "str | None" = None,
         cwd: "str | None" = None,
     ) -> "Session[AppT]":
+        if self._agent_revision is None:
+            agent = self._runtime.agents.get(self.agent_id)
+            return await self._runtime._fork_session(
+                agent.id,
+                agent.revision,
+                self.session_id,
+                new_session_id,
+                principal=principal or self._principal,
+                idempotency_key=idempotency_key,
+                cwd=cwd,
+                compiled_agent=agent.compiled,
+            )
         return await self._runtime._fork_session(
             self.agent_id,
             self._agent_revision,
@@ -482,6 +523,37 @@ class Agent(Generic[AppT]):
     id: str
     _agent_revision: int
     _compiled_agent: "CompiledAgent | None" = None
+
+    @property
+    def runtime(self) -> "Runtime[AppT]":
+        """Runtime that owns this Agent definition."""
+        return self._runtime
+
+    @property
+    def revision(self) -> int:
+        return self._agent_revision
+
+    @property
+    def compiled(self) -> "CompiledAgent | None":
+        return self._compiled_agent
+
+    def derive(
+        self,
+        *,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        instructions: Sequence[str] | None = None,
+        allow_tools: Sequence[str] | None = None,
+        allow_skills: Sequence[str] | None = None,
+    ) -> "Agent[AppT]":
+        return self._runtime._derive_agent(
+            self,
+            model=model,
+            system_prompt=system_prompt,
+            instructions=instructions,
+            allow_tools=allow_tools,
+            allow_skills=allow_skills,
+        )
 
     async def start(
         self,
@@ -640,48 +712,5 @@ class Agent(Generic[AppT]):
             evaluation_id,
             request,
         )
-
-    def task(
-        self,
-        node_id: str,
-        user_prompt: "UserPromptInput",
-        *,
-        dependencies: tuple[str, ...] = (),
-        budget_cost: int = 1,
-        output_type: "type[BaseModel] | None" = None,
-        planning: "bool | None" = None,
-        thinking: "ThinkingValue | None" = None,
-        expander: "TaskExpanderRef | None" = None,
-        input_refs: "Mapping[str, TaskResultRef] | None" = None,
-        timeout_seconds: "float | None" = None,
-        max_attempts: int = 1,
-        retry_delay_seconds: float = 0,
-        files: Sequence[str] = (),
-        session_id: "str | None" = None,
-        memory_scope: "str | None" = None,
-        dependency_policy: str = "all_succeeded",
-    ) -> "TaskNode":
-        return self._runtime._task_for_agent(
-            self.id,
-            self._agent_revision,
-            node_id,
-            validate_user_input(user_prompt),
-            dependencies=dependencies,
-            budget_cost=budget_cost,
-            output_type=output_type,
-            planning=planning,
-            thinking=thinking,
-            expander=expander,
-            input_refs=input_refs,
-            timeout_seconds=timeout_seconds,
-            max_attempts=max_attempts,
-            retry_delay_seconds=retry_delay_seconds,
-            files=files,
-            session_id=session_id,
-            memory_scope=memory_scope,
-            dependency_policy=dependency_policy,
-            compiled_agent=self._compiled_agent,
-        )
-
 
 __all__ = ["Agent", "Execution", "Session"]

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Application-owned TaskNode handler contracts."""
+"""Task invocation context and effect result contracts."""
 
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
+from typing import Generic, Literal, Protocol, TypeVar
 
 from ..core import (
     ImmutableJsonMapping,
@@ -19,17 +19,10 @@ from ..core import (
     normalize_correlation,
 )
 from ..errors import AIError, ErrorCode
-from ._graph import (
-    TaskExpanderRef,
-    TaskNode,
-    TaskResultRef,
-    normalize_retry_delay_seconds,
-    normalize_timeout_seconds,
-)
+from ._graph import TaskResultRef, normalize_retry_delay_seconds, normalize_timeout_seconds
 
 AppT = TypeVar("AppT")
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
-_RESERVED_TASK_ID_PREFIX = "linktools.ai."
 _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
@@ -263,107 +256,11 @@ class TaskNodeContext(Generic[AppT]):
         return normalized
 
 
-@runtime_checkable
-class TaskNodeHandler(Protocol[AppT]):
-    @property
-    def id(self) -> str: ...
-
-    @property
-    def revision(self) -> int: ...
-
-    def normalize(
-        self,
-        input: Mapping[str, JsonValue],
-    ) -> Mapping[str, JsonValue]: ...
-
-    async def run(self, context: TaskNodeContext[AppT]) -> JsonValue: ...
-
-    async def cancel(self, context: TaskNodeContext[AppT]) -> None: ...
-
-
-@dataclass(frozen=True)
-class TaskFunction(Generic[AppT]):
-    id: str
-    revision: int
-    function: Callable[[TaskNodeContext[AppT]], Awaitable[JsonValue]] = field(
-        repr=False,
-        compare=False,
-    )
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.id, str)
-            or _TASK_ID.fullmatch(self.id) is None
-            or self.id.startswith(_RESERVED_TASK_ID_PREFIX)
-        ):
-            raise ValueError("task handler id is invalid")
-        if (
-            not isinstance(self.revision, int)
-            or isinstance(self.revision, bool)
-            or self.revision < 1
-        ):
-            raise ValueError("task handler revision must be positive")
-        if not callable(self.function):
-            raise TypeError("task handler function must be callable")
-
-    def normalize(
-        self,
-        input: Mapping[str, JsonValue],
-    ) -> Mapping[str, JsonValue]:
-        if not isinstance(input, Mapping):
-            raise TypeError("task input must be a mapping")
-        normalized = normalize_json_value(dict(input))
-        if not isinstance(normalized, dict):
-            raise TypeError("task input must be a mapping")
-        if "task_id" in normalized or "task_revision" in normalized:
-            raise ValueError("task handler input cannot contain reserved fields")
-        return normalized
-
-    async def run(self, context: TaskNodeContext[AppT]) -> JsonValue:
-        return await self.function(context)
-
-    async def cancel(self, context: TaskNodeContext[AppT]) -> None:
-        return None
-
-    def node(
-        self,
-        node_id: str,
-        *,
-        input: "Mapping[str, JsonValue] | None" = None,
-        dependencies: "tuple[str, ...]" = (),
-        budget_cost: int = 1,
-        expander: "TaskExpanderRef | None" = None,
-        input_refs: "Mapping[str, TaskResultRef] | None" = None,
-        timeout_seconds: "float | None" = None,
-        max_attempts: int = 1,
-        retry_delay_seconds: float = 0,
-        dependency_policy: str = "all_succeeded",
-    ) -> TaskNode:
-        normalized = self.normalize({} if input is None else input)
-        return TaskNode(
-            node_id,
-            dependencies,
-            input={
-                "task_id": self.id,
-                "task_revision": self.revision,
-                **normalized,
-            },
-            budget_cost=budget_cost,
-            expander=expander,
-            input_refs=input_refs,
-            timeout_seconds=timeout_seconds,
-            max_attempts=max_attempts,
-            retry_delay_seconds=retry_delay_seconds,
-            dependency_policy=dependency_policy,
-        )
-
-
 __all__ = [
     "TaskBindingContract",
     "TaskDependency",
     "TaskDependencyState",
     "TaskArtifactPublisher",
     "TaskEffectResolution",
-    "TaskFunction",
     "TaskNodeContext",
-    "TaskNodeHandler",
 ]

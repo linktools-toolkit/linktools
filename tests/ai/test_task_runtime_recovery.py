@@ -6,7 +6,6 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     JsonValue,
     Principal,
@@ -19,15 +18,15 @@ from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import (
-    TaskFunction,
+    Task,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphRequest,
+    TaskNode,
     TaskNodeContext,
 )
 from linktools.ai.storage import FilesystemObjectStore
-from linktools.ai.workspace import Workspace
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -36,7 +35,7 @@ async def _recover_node(context: TaskNodeContext[None]) -> JsonValue:
 
 
 @pytest.mark.asyncio
-async def test_sqlite_runtime_open_recovers_expired_task_lease(
+async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "state.sqlite"
@@ -46,18 +45,15 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
     finally:
         await engine.dispose()
 
-    workspace_root = tmp_path / "workspace"
-    workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root)
-    capabilities: CapabilityGroup[None] = CapabilityGroup("application")
-    handler = TaskFunction[None]("test.recovery", 1, _recover_node)
-    capabilities.task(handler, effect_policy="none")
-    graph = TaskGraph("reopen-expired", (handler.node("root"),))
-    request = TaskGraphRequest(
-        graph,
-        Principal("tester", "default"),
-        "submit:reopen-expired",
-        TaskGraphLimits(max_concurrency=1),
+    handler = Task("test.recovery", _recover_node, effect_policy="none")
+    graph = TaskGraph("reopen-expired", (TaskNode("root", task=handler),))
+    admission = TaskGraphAdmission.from_request(
+        TaskGraphRequest(
+            graph,
+            Principal("tester", "default"),
+            "submit:reopen-expired",
+            TaskGraphLimits(max_concurrency=1),
+        )
     )
     state = RuntimeStorage.sqlite(
         database,
@@ -68,14 +64,13 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         tenant_id="default",
     )
     try:
-        admission = TaskGraphAdmission.from_request(request)
         await state.task.admissions.admit(
             admission,
             graph,
         )
         snapshot_manifest: dict[str, JsonValue] = {
-            "kind": "task-capability-capture",
-            "format_version": 1,
+            "kind": "task-definition-capture",
+            "format_version": 2,
             "namespace": "default",
             "tenant_id": admission.principal.tenant_id,
             "graph_id": admission.graph_id,
@@ -87,6 +82,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
                     "version": 1,
                     "id": "test.recovery",
                     "revision": 1,
+                    "type": "function",
                     "effect_policy": "none",
                     "output_contract": {"kind": "json"},
                     "reconcile": False,
@@ -97,10 +93,10 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         snapshot_payload = canonical_json_bytes(snapshot_manifest)
         snapshot_digest = canonical_sha256(snapshot_manifest)
         snapshot_key = (
-            "v1/task-capability-capture/"
+            "v2/task-capture/"
             + canonical_sha256(
                 {
-                    "version": 1,
+                    "version": 2,
                     "namespace": "default",
                     "tenant_id": admission.principal.tenant_id,
                     "graph_id": admission.graph_id,
@@ -138,13 +134,10 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         "default",
         models=ModelRegistry.openai(model="gpt-test"),
         storage=reopened,
-        capabilities=(capabilities,),
     ) as runtime:
-        result = await runtime.graph.wait(
-            graph.graph_id,
-            principal=runtime.default_principal,
-            timeout_seconds=10,
-        )
+        run = await runtime.tasks.bind(handler).get(graph.graph_id)
+        await run.recover(idempotency_key="recover-expired-lease")
+        result = await run.wait(timeout_seconds=10)
         page = await reopened.task.admissions.list_recoverable_page(
             cursor=None,
             limit=128,

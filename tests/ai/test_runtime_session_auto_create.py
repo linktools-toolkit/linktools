@@ -37,7 +37,9 @@ class _RaceSessionService:
 @pytest.mark.asyncio
 async def test_session_auto_create_race_reuses_authorized_session() -> None:
     runtime = object.__new__(Runtime)
-    runtime.session = _RaceSessionService(authorize_after_conflict=True)
+    service = _RaceSessionService(authorize_after_conflict=True)
+    runtime._session_service = service
+    runtime.sessions = service
     definition = SimpleNamespace(
         digest="a" * 64,
         spec=SimpleNamespace(id="agent"),
@@ -49,14 +51,16 @@ async def test_session_auto_create_race_reuses_authorized_session() -> None:
         Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
     )
 
-    assert runtime.session.get_calls == 2
-    assert runtime.session.create_calls == 1
+    assert service.get_calls == 2
+    assert service.create_calls == 1
 
 
 @pytest.mark.asyncio
 async def test_session_auto_create_conflict_does_not_reveal_foreign_session() -> None:
     runtime = object.__new__(Runtime)
-    runtime.session = _RaceSessionService(authorize_after_conflict=False)
+    service = _RaceSessionService(authorize_after_conflict=False)
+    runtime._session_service = service
+    runtime.sessions = service
     definition = SimpleNamespace(
         digest="a" * 64,
         spec=SimpleNamespace(id="agent"),
@@ -70,5 +74,5 @@ async def test_session_auto_create_conflict_does_not_reveal_foreign_session() ->
         )
 
     assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
-    assert runtime.session.get_calls == 2
-    assert runtime.session.create_calls == 1
+    assert service.get_calls == 2
+    assert service.create_calls == 1

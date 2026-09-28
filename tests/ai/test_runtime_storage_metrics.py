@@ -69,7 +69,7 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
-        result = await runtime.agent("default").run("hello", timeout_seconds=10)
+        result = await runtime.agents.get("default").run("hello", timeout_seconds=10)
         assert result.status is ExecutionStatus.SUCCEEDED
 
     end = datetime.now(timezone.utc) + timedelta(seconds=1)

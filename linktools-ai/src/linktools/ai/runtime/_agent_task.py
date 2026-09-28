@@ -3,8 +3,8 @@
 """Runtime adapter for Agent-backed TaskGraph nodes."""
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable, Mapping
+from typing import Generic, TypeVar
 from typing import cast
 
 from linktools.core import environ
@@ -12,6 +12,7 @@ from linktools.core import environ
 from ..agent import AgentBindingContract, AgentCatalog, AgentCompiler
 from ..core import (
     CorrelationData,
+    ImmutableJsonMapping,
     ExecutionMode,
     ExecutionStatus,
     JsonValue,
@@ -19,6 +20,7 @@ from ..core import (
     TaskStatus,
     ThinkingValue,
     canonical_sha256,
+    normalize_json_value,
     normalize_execution_mode,
     normalize_thinking,
     principal_identity_payload,
@@ -30,8 +32,11 @@ from ..task import (
     TaskDependency,
     TaskDependencyState,
     TaskNode,
+    TaskNodeInvocation,
     TaskNodeRunControl,
     TaskNodeRunError,
+    TaskNodeRunResult,
+    TaskResultRef,
 )
 from ._input import (
     ExecutionInputMaterializer,
@@ -39,8 +44,8 @@ from ._input import (
     decode_user_content_payload,
 )
 from .state._codec import decode_domain
-from ._input_contract import append_user_input_text
-from .state._contracts import StoredUserInput
+from ._input import task_prompt_draft, validate_user_input
+from .state._contracts import StoredUserInput, TaskPreparedInputRecord
 from .service_api import (
     CancelExecutionRequest,
     ExecutionHandle,
@@ -50,8 +55,396 @@ from .service_api import (
     ResumeSessionRequest,
     SessionService,
 )
+from ._agent_task_input import (
+    AgentTaskInput,
+    AgentTaskInputBuilder,
+    AgentTaskInputContext,
+    _AgentTaskContextError,
+)
+from ._input_contract import CanonicalUserInput
 
 _logger = environ.get_logger("ai.runtime.planner")
+AppT = TypeVar("AppT")
+
+
+class RuntimeAgentTaskRunner(Generic[AppT]):
+    """TaskNodeRunner adapter that keeps Agent calls on Runtime execution APIs."""
+
+    def __init__(
+        self,
+        *,
+        id: str,
+        revision: int,
+        input_mode: str,
+        planning_default: bool,
+        thinking_default: ThinkingValue,
+        binding_contract: Mapping[str, JsonValue],
+        build_input: AgentTaskInputBuilder | None,
+        start_execution: Callable[..., Awaitable[object]],
+        get_execution: Callable[[str, Principal], Awaitable[object]],
+        result_reader: Callable[[TaskNodeInvocation, str], Awaitable[JsonValue]],
+        result_ref_reader: Callable[[TaskNodeInvocation, str], Awaitable[TaskResultRef]],
+        get_prepared_input: Callable[
+            [TaskNodeInvocation], Awaitable[TaskPreparedInputRecord | None]
+        ],
+        publish_prepared_input: Callable[..., Awaitable[TaskPreparedInputRecord]],
+        store_prepared_prompt: Callable[..., Awaitable[StoredUserInput]],
+        restore_prepared_prompt: Callable[
+            [StoredUserInput], Awaitable[CanonicalUserInput]
+        ],
+    ) -> None:
+        if input_mode not in {"literal", "projected"}:
+            raise ValueError("Agent Task input mode is invalid")
+        if (input_mode == "projected") != (build_input is not None):
+            raise ValueError("Agent Task input callback does not match input mode")
+        self.id = id
+        self.revision = revision
+        self.input_mode = input_mode
+        self._planning_default = planning_default
+        self._thinking_default = thinking_default
+        self._binding_contract = ImmutableJsonMapping(binding_contract)
+        self._build_input = build_input
+        self._start_execution = start_execution
+        self._get_execution = get_execution
+        self._result_reader = result_reader
+        self._result_ref_reader = result_ref_reader
+        self._get_prepared_input = get_prepared_input
+        self._publish_prepared_input = publish_prepared_input
+        self._store_prepared_prompt = store_prepared_prompt
+        self._restore_prepared_prompt = restore_prepared_prompt
+
+    def normalize(self, value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+        task_input = AgentTaskInput.from_mapping(value)
+        normalized = dict(task_input)
+        normalized["planning"] = (
+            self._planning_default
+            if task_input.planning is None
+            else task_input.planning
+        )
+        normalized["thinking"] = (
+            self._thinking_default
+            if task_input.thinking is None
+            else normalize_thinking(task_input.thinking)
+        )
+        return normalized
+
+    async def run(
+        self,
+        invocation: TaskNodeInvocation,
+        *,
+        control: TaskNodeRunControl,
+    ) -> TaskNodeRunResult:
+        task_input = AgentTaskInput.from_mapping(invocation.node.input)
+        files = task_input.files
+        request_identity: str | None = None
+        if self.input_mode == "literal":
+            if task_input.parameters:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            if task_input.stored_prompt is None:
+                prompt = task_input.prompt
+            else:
+                if not isinstance(task_input.stored_prompt, StoredUserInput):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                prompt = await self._restore_prepared_prompt(task_input.stored_prompt)
+                files = ()
+        else:
+            callback = self._build_input
+            if callback is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if task_input.files:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            input_identity = _agent_task_input_identity(
+                invocation,
+                task_input,
+                task_id=self.id,
+                task_revision=self.revision,
+                binding_contract=self._binding_contract,
+            )
+            prepared = await self._get_prepared_input(invocation)
+            if prepared is not None and prepared.input_identity != input_identity:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if invocation.execution_id is not None and prepared is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if prepared is not None:
+                prompt = await self._restore_prepared_prompt(
+                    prepared.stored_user_input
+                )
+                files = ()
+                request_identity = prepared.request_identity
+                expected_digest = _prepared_agent_input_digest(
+                    prompt, prepared.stored_user_input
+                )
+                expected_identity = _agent_task_request_identity(
+                    invocation,
+                    task_input,
+                    prompt,
+                    expected_digest,
+                    input_identity,
+                    self.id,
+                    self.revision,
+                    self._binding_contract,
+                )
+                if (
+                    expected_digest != prepared.final_input_digest
+                    or expected_identity != prepared.request_identity
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            else:
+                context = AgentTaskInputContext(
+                    invocation,
+                    task_input,
+                    lambda name: self._result_reader(invocation, name),
+                    lambda name: self._result_ref_reader(invocation, name),
+                )
+                try:
+                    projected = await callback(context)
+                    prompt = validate_user_input(projected)
+                except asyncio.CancelledError:
+                    raise
+                except _AgentTaskContextError as error:
+                    cause = error.__cause__
+                    if isinstance(cause, AIError):
+                        raise cause
+                    raise
+                except AIError as error:
+                    raise AIError(
+                        ErrorCode.TASK_INPUT_PROJECTION_FAILED,
+                        safe_details={"cause_code": error.code.value},
+                    ) from error
+                except Exception as error:  # noqa: BLE001
+                    raise AIError(
+                        ErrorCode.TASK_INPUT_PROJECTION_FAILED,
+                        safe_details={"cause_type": type(error).__name__},
+                    ) from error
+                stored = await self._store_prepared_prompt(
+                    prompt,
+                    tenant_id=invocation.principal.tenant_id,
+                )
+                final_input_digest = _prepared_agent_input_digest(prompt, stored)
+                request_identity = _agent_task_request_identity(
+                    invocation,
+                    task_input,
+                    prompt,
+                    final_input_digest,
+                    input_identity,
+                    self.id,
+                    self.revision,
+                    self._binding_contract,
+                )
+                prepared = await self._publish_prepared_input(
+                    invocation,
+                    input_identity=input_identity,
+                    source_refs=context.source_refs,
+                    stored_user_input=stored,
+                    final_input_digest=final_input_digest,
+                    request_identity=request_identity,
+                )
+                if (
+                    prepared.input_identity != input_identity
+                    or prepared.final_input_digest != final_input_digest
+                    or prepared.request_identity != request_identity
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                prompt = await self._restore_prepared_prompt(
+                    prepared.stored_user_input
+                )
+                files = ()
+
+        planning = (
+            self._planning_default
+            if task_input.planning is None
+            else task_input.planning
+        )
+        thinking = (
+            self._thinking_default
+            if task_input.thinking is None
+            else normalize_thinking(task_input.thinking)
+        )
+        try:
+            if request_identity is None:
+                request_identity = canonical_sha256(
+                    {
+                        "version": 1,
+                        "graph_id": invocation.graph_id,
+                        "node_id": invocation.node.node_id,
+                        "task_id": self.id,
+                        "task_revision": self.revision,
+                        "agent_binding_contract": dict(self._binding_contract),
+                        "principal": principal_identity_payload(invocation.principal),
+                        "prompt": task_prompt_draft(prompt),
+                        "parameters": dict(task_input.parameters),
+                        "files": list(files),
+                        "session_id": task_input.session_id,
+                        "memory_scope": task_input.memory_scope,
+                        "planning": planning,
+                        "thinking": thinking,
+                        "output_contract": _node_output_contract(invocation),
+                    }
+                )
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+        if request_identity is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        execution = (
+            await self._get_execution(
+                invocation.execution_id,
+                invocation.principal,
+            )
+            if invocation.execution_id is not None
+            else await self._start_execution(
+                invocation,
+                prompt,
+                files=files,
+                session_id=task_input.session_id,
+                memory_scope=task_input.memory_scope,
+                planning=planning,
+                thinking=thinking,
+                idempotency_key=request_identity,
+            )
+        )
+        execution_id = getattr(execution, "execution_id", None)
+        if not isinstance(execution_id, str) or not execution_id:
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+        current = control.execution_id
+        if current is None:
+            await control.bind_execution(execution_id)
+        elif current != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await control.handoff_execution(execution_id)
+        result = await execution.wait()
+        return _agent_task_result(result, execution_id)
+
+    async def wait_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult:
+        execution = await self._get_execution(execution_id, invocation.principal)
+        result = await execution.wait()
+        return _agent_task_result(result, execution_id)
+
+    async def supply_input(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        value: JsonValue,
+    ) -> TaskNodeRunResult:
+        del invocation, execution_id, value
+        raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def resolve_effect(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        resolution: object,
+    ) -> TaskNodeRunResult | None:
+        del invocation, execution_id, resolution
+        raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        execution_id = invocation.execution_id
+        if execution_id is None:
+            return
+        execution = await self._get_execution(execution_id, invocation.principal)
+        await execution.cancel()
+
+
+def _node_output_contract(invocation: TaskNodeInvocation) -> dict[str, JsonValue] | None:
+    value = invocation.node.output_contract
+    return None if value is None else dict(value)
+
+
+def _agent_task_input_identity(
+    invocation: TaskNodeInvocation,
+    task_input: AgentTaskInput,
+    *,
+    task_id: str,
+    task_revision: int,
+    binding_contract: Mapping[str, JsonValue],
+) -> str:
+    try:
+        return canonical_sha256(
+            {
+                "version": 1,
+                "graph_id": invocation.graph_id,
+                "node_id": invocation.node.node_id,
+                "task_id": task_id,
+                "task_revision": task_revision,
+                "binding_contract": dict(binding_contract),
+                "principal": principal_identity_payload(invocation.principal),
+                "input": dict(task_input),
+                "output_contract": _node_output_contract(invocation),
+            }
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _prepared_agent_input_digest(
+    prompt: CanonicalUserInput,
+    stored: StoredUserInput,
+) -> str:
+    try:
+        return canonical_sha256(
+            {
+                "prompt": task_prompt_draft(prompt),
+                "stored_user_input": stored.digest,
+            }
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _agent_task_request_identity(
+    invocation: TaskNodeInvocation,
+    task_input: AgentTaskInput,
+    prompt: CanonicalUserInput,
+    final_input_digest: str,
+    input_identity: str,
+    task_id: str,
+    task_revision: int,
+    binding_contract: Mapping[str, JsonValue],
+) -> str:
+    try:
+        return canonical_sha256(
+            {
+                "version": 1,
+                "graph_id": invocation.graph_id,
+                "node_id": invocation.node.node_id,
+                "task_id": task_id,
+                "task_revision": task_revision,
+                "agent_binding_contract": dict(binding_contract),
+                "principal": principal_identity_payload(invocation.principal),
+                "input_identity": input_identity,
+                "prompt": task_prompt_draft(prompt),
+                "final_input_digest": final_input_digest,
+                "session_id": task_input.session_id,
+                "memory_scope": task_input.memory_scope,
+                "planning": task_input.planning,
+                "thinking": task_input.thinking,
+                "output_contract": _node_output_contract(invocation),
+            }
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _agent_task_result(result: object, execution_id: str) -> TaskNodeRunResult:
+    status = getattr(result, "status", None)
+    output = getattr(result, "output", None)
+    if status is not ExecutionStatus.SUCCEEDED:
+        raw_code = getattr(result, "error_code", None)
+        try:
+            code = ErrorCode(raw_code) if isinstance(raw_code, str) else ErrorCode.TASK_NODE_FAILED
+        except ValueError:
+            code = ErrorCode.TASK_NODE_FAILED
+        details = getattr(result, "safe_error_details", {})
+        raise TaskNodeRunError(code, execution_id, safe_details=details)
+    try:
+        output = normalize_json_value(output)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    return TaskNodeRunResult(canonical_sha256(output), execution_id)
 _AGENT_TASK_ID = "linktools.ai.agent"
 _AGENT_TASK_REVISION = 1
 _AGENT_BODY_FIELDS = frozenset(
@@ -240,18 +633,11 @@ class _AgentTaskNodeHandler:
         control: TaskNodeRunControl,
         dependency_states: Mapping[str, TaskDependencyState] | None = None,
     ) -> tuple[JsonValue, str]:
-        dependency_values = await self._read_dependencies(
-            dependencies,
-            dependency_reader,
-        )
         prepared = await self._prepare_request(
             node,
             graph_id=graph_id,
             principal=principal,
             correlation=correlation,
-            dependencies=dependencies,
-            dependency_values=dependency_values,
-            dependency_states={} if dependency_states is None else dependency_states,
         )
         binding_digest, request = prepared[:2]
         agent_id = prepared[2] if len(prepared) > 2 else ""
@@ -389,10 +775,6 @@ class _AgentTaskNodeHandler:
                 if handle is not None and handle.execution_id:
                     execution_id = handle.execution_id
         if execution_id is None:
-            dependency_values = await self._read_dependencies(
-                dependencies,
-                dependency_reader,
-            )
             (
                 binding_digest,
                 request,
@@ -404,9 +786,6 @@ class _AgentTaskNodeHandler:
                 graph_id=graph_id,
                 principal=principal,
                 correlation=correlation,
-                dependencies=dependencies,
-                dependency_values=dependency_values,
-                dependency_states={} if dependency_states is None else dependency_states,
             )
             try:
                 handle = await self._execution.resolve_existing(
@@ -441,19 +820,6 @@ class _AgentTaskNodeHandler:
         )
         self._background_failures.pop(key, None)
 
-    async def _read_dependencies(
-        self,
-        dependencies: Mapping[str, TaskDependency],
-        reader: Callable[[TaskDependency], Awaitable[JsonValue]],
-    ) -> dict[str, JsonValue]:
-        values: dict[str, JsonValue] = {}
-        for name in sorted(dependencies):
-            value = await reader(dependencies[name])
-            if canonical_sha256(value) != dependencies[name].result_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values[name] = value
-        return values
-
     async def _prepare_request(
         self,
         node: TaskNode,
@@ -461,9 +827,6 @@ class _AgentTaskNodeHandler:
         graph_id: str,
         principal: Principal,
         correlation: CorrelationData,
-        dependencies: Mapping[str, TaskDependency],
-        dependency_values: Mapping[str, JsonValue],
-        dependency_states: Mapping[str, TaskDependencyState],
     ) -> tuple[
         str,
         ExecutionRequest,
@@ -510,36 +873,7 @@ class _AgentTaskNodeHandler:
             base_user_prompt = await self._input_materializer.restore(stored)
         else:
             base_user_prompt = decode_task_prompt_draft(raw_user_prompt)
-        if set(dependency_values) != set(dependencies):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        dependency_payload = {
-            dependency_id: dependency_values[dependency_id]
-            for dependency_id in sorted(dependencies)
-        }
-        if dependency_payload:
-            dependency_text = (
-                "\n\nUpstream task results (JSON, keyed by task id):\n"
-                + _canonical_json(dependency_payload)
-            )
-            effective_user_prompt = append_user_input_text(
-                base_user_prompt, dependency_text,
-            )
-        else:
-            effective_user_prompt = base_user_prompt
-        if node.dependency_policy == "all_terminal" and dependency_states:
-            state_payload = {
-                dependency_id: _dependency_state_payload(
-                    dependency_states[dependency_id]
-                )
-                for dependency_id in sorted(dependency_states)
-            }
-            state_text = (
-                "\n\nUpstream task states (JSON, keyed by task id):\n"
-                + _canonical_json(state_payload)
-            )
-            effective_user_prompt = append_user_input_text(
-                effective_user_prompt, state_text,
-            )
+        effective_user_prompt = base_user_prompt
         if isinstance(effective_user_prompt, str):
             validate_user_prompt(effective_user_prompt)
         idempotency_key = canonical_sha256(
@@ -549,11 +883,6 @@ class _AgentTaskNodeHandler:
                 "node_id": node.node_id,
                 "binding_digest": binding.binding_digest,
                 "input": node.input,
-                "dependencies": _dependency_identity_payload(
-                    node,
-                    dependencies,
-                    dependency_states,
-                ),
                 "principal": principal_identity_payload(principal),
             }
         )
@@ -845,20 +1174,6 @@ def _dependency_identity_payload(
             }
         )
     return result
-
-
-def _dependency_state_payload(state: TaskDependencyState) -> dict[str, JsonValue]:
-    return state.to_payload()
-
-
-def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
 
 
 async def _cancel_execution(

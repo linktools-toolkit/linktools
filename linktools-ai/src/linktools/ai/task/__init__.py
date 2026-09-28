@@ -3,6 +3,13 @@
 """Generic TaskGraph contracts and local scheduling."""
 
 from ._api import open_local_task_graph_service
+from ._definitions import (
+    Task,
+    TaskExpansionContext,
+    TaskExpander,
+    TaskExpanderRef,
+    TaskRef,
+)
 from ._event import TaskEvent, TaskEventType
 from ._graph import (
     CancelGraphRequest,
@@ -22,7 +29,6 @@ from ._graph import (
     TaskLease,
     TaskNode,
     TaskNodeInfo,
-    TaskExpanderRef,
     TaskNodeResult,
     TaskNodeView,
     TaskResultRecord,
@@ -39,9 +45,7 @@ from ._handler import (
     TaskDependency,
     TaskDependencyState,
     TaskEffectResolution,
-    TaskFunction,
     TaskNodeContext,
-    TaskNodeHandler,
 )
 from ._local import LocalTaskGraphLauncher
 from ._runner import (
@@ -69,11 +73,15 @@ __all__ = [
     "TaskDependencyState",
     "TaskArtifactPublisher",
     "TaskEffectResolution",
+    "Task",
+    "TaskRef",
+    "TaskExpander",
+    "TaskExpansionContext",
+    "TaskExpanderRef",
     "TaskEffectResolutionRequest",
     "TaskDependencyResult",
     "TaskEvent",
     "TaskEventType",
-    "TaskFunction",
     "TaskGraph",
     "TaskGraphAdmission",
     "TaskGraphHandle",
@@ -91,9 +99,7 @@ __all__ = [
     "TaskLease",
     "TaskNode",
     "TaskNodeInfo",
-    "TaskExpanderRef",
     "TaskNodeContext",
-    "TaskNodeHandler",
     "TaskNodeInvocation",
     "TaskNodeResult",
     "TaskNodeRunControl",

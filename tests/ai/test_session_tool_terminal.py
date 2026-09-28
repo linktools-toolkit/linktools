@@ -158,8 +158,8 @@ async def test_session_tool_turn_commits_terminal_and_history(
             storage=state,
             capabilities=(application,),
         ) as runtime:
-            await runtime.agent("default").create_session("session")
-            session = runtime.agent("default").session("session")
+            await runtime.agents.get("default").create_session("session")
+            session = runtime.agents.get("default").session("session")
             execution = await session.start(
                 "inspect",
                 idempotency_key="turn-1",
@@ -296,9 +296,9 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
             storage=state,
             capabilities=(application,),
         ) as runtime:
-            await runtime.agent("default").create_session("session")
+            await runtime.agents.get("default").create_session("session")
             execution = (
-                await runtime.agent("default")
+                await runtime.agents.get("default")
                 .session("session")
                 .start(
                     "inspect",
@@ -379,8 +379,8 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
         storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
-        await runtime.agent("default").create_session("session")
-        session = runtime.agent("default").session("session")
+        await runtime.agents.get("default").create_session("session")
+        session = runtime.agents.get("default").session("session")
         execution = await session.start("inspect", idempotency_key="turn-1")
         watched = [
             item
@@ -589,9 +589,9 @@ def _crash_session_process(
             capabilities=(application,),
         ) as runtime:
             if phase != "recovered_before_terminal":
-                await runtime.agent("default").create_session("session")
+                await runtime.agents.get("default").create_session("session")
             execution = (
-                await runtime.agent("default")
+                await runtime.agents.get("default")
                 .session("session")
                 .start("inspect", idempotency_key="turn-1")
             )
@@ -659,7 +659,7 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
             storage=state,
             capabilities=(application,),
         ) as runtime:
-            session = runtime.agent("default").session("session")
+            session = runtime.agents.get("default").session("session")
             same = await session.start("inspect", idempotency_key="turn-1")
             result = await same.wait(timeout_seconds=15)
             assert same.execution_id == execution_id
@@ -949,7 +949,7 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
             _application(calls, effect_policy="non_replay_safe", effect_log=effect_log),
         ),
     ) as runtime:
-        session = runtime.agent("default").session("session")
+        session = runtime.agents.get("default").session("session")
         if phase == "effect_unconfirmed":
             with pytest.raises(AIError) as raised:
                 same = await session.start("inspect", idempotency_key="turn-1")
@@ -1003,9 +1003,9 @@ async def test_tool_effect_waits_for_durable_response_checkpoint(
             storage=RuntimeStorage.in_memory(),
             capabilities=(_application(calls),),
         ) as runtime:
-            await runtime.agent("default").create_session("session")
+            await runtime.agents.get("default").create_session("session")
             execution = (
-                await runtime.agent("default")
+                await runtime.agents.get("default")
                 .session("session")
                 .start("inspect", idempotency_key="turn-1")
             )
@@ -1049,8 +1049,8 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
             storage=state,
             capabilities=(_application(calls),),
         ) as runtime:
-            await runtime.agent("default").create_session("session")
-            session = runtime.agent("default").session("session")
+            await runtime.agents.get("default").create_session("session")
+            session = runtime.agents.get("default").session("session")
             execution = await session.start("inspect", idempotency_key="turn-1")
             result = await execution.wait(timeout_seconds=10)
             assert injected

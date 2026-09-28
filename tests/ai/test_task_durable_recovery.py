@@ -55,6 +55,7 @@ def _expected_request_digest(request: TaskGraphRequest) -> str:
                     "dependencies": sorted(node.dependencies),
                     "input": node.input,
                     "budget_cost": node.budget_cost,
+                    "task": None,
                     "expander": None,
                 }
                 for node in sorted(request.graph.nodes, key=lambda item: item.node_id)

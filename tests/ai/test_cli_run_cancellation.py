@@ -66,7 +66,11 @@ async def test_ai_run_json_interrupt_cancels_owned_execution() -> None:
             return execution
 
     class Runtime:
-        def agent(self):
+        @property
+        def agents(self):
+            return self
+
+        def get(self):
             return Agent()
 
     from linktools.commands.ai.run import _emit_result

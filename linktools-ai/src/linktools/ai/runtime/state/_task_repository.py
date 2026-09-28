@@ -12,6 +12,7 @@ from typing import TypeVar
 from linktools.core import environ
 
 from ...core import (
+    JsonValue,
     Page,
     ResourceKind,
     ResourceRef,
@@ -35,6 +36,7 @@ from ...task import (
     TaskTerminalRecord,
 )
 from ._plan import RuntimeDomain
+from ._contracts import TaskPreparedInputRecord
 from ._repositories import (
     RepositoryBase,
     projected_record,
@@ -124,6 +126,29 @@ def _require_live_task_lease(
         or node.lease_expires_at <= now
     ):
         raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+
+def _reuse_prepared_input(
+    existing: TaskPreparedInputRecord,
+    candidate: TaskPreparedInputRecord,
+) -> TaskPreparedInputRecord:
+    if (
+        existing.graph_id != candidate.graph_id
+        or existing.node_id != candidate.node_id
+        or existing.tenant_id != candidate.tenant_id
+        or existing.admission_digest != candidate.admission_digest
+        or existing.task_ref != candidate.task_ref
+        or existing.input_identity != candidate.input_identity
+        or existing.source_refs != candidate.source_refs
+        or existing.final_input_digest != candidate.final_input_digest
+        or existing.request_identity != candidate.request_identity
+        or existing.stored_user_input.digest != candidate.stored_user_input.digest
+    ):
+        raise AIError(
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+            safe_details={"reason": "input_projection_nondeterministic"},
+        )
+    return existing
 
 
 def _validate_task_lease_scope(lease: TaskLease, tenant_id: str) -> None:
@@ -393,6 +418,12 @@ class TaskRepositoryImpl(RepositoryBase):
     def _result_key(self, graph_id: str, node_id: str) -> bytes:
         return self._key("task_result", [graph_id, node_id])
 
+    def _prepared_input_key(self, graph_id: str, node_id: str) -> bytes:
+        return self._key("task_prepared_input", [graph_id, node_id])
+
+    def _prepared_input_parent(self, graph_id: str) -> bytes:
+        return self._parent("task_prepared_input", "graph", graph_id)
+
     def _result_scope(self, graph_id: str) -> bytes:
         return self._scope("task_result", "graph", graph_id)
 
@@ -488,6 +519,146 @@ class TaskRepositoryImpl(RepositoryBase):
             return result
 
         return await self._store.read(read)
+
+    async def get_prepared_input(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskPreparedInputRecord | None:
+        if tenant_id != self._tenant_id:
+            return None
+        record = await self._record(self._prepared_input_key(graph_id, node_id))
+        if record is None:
+            return None
+        self._validate_prepared_input_record(record, graph_id, node_id)
+        value = await self._decode(record, TaskPreparedInputRecord)
+        if (
+            value.graph_id != graph_id
+            or value.node_id != node_id
+            or value.tenant_id != tenant_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
+
+    async def publish_prepared_input(
+        self,
+        lease: TaskLease,
+        record: TaskPreparedInputRecord,
+        *,
+        tenant_id: str,
+    ) -> TaskPreparedInputRecord:
+        _validate_task_lease_scope(lease, tenant_id)
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if (
+            record.graph_id != lease.graph_id
+            or record.node_id != lease.node_id
+            or record.tenant_id != tenant_id
+            or record.published_fence != lease.fence
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        async def mutate(transaction: StateTransaction) -> TaskPreparedInputRecord:
+            graph_key = self._graph_key(lease.graph_id)
+            node_key = self._state_key(lease.graph_id, lease.node_id)
+            definition_key = self._definition_key(lease.graph_id, lease.node_id)
+            admission_key = self._admission_key(lease.graph_id)
+            prepared_key = self._prepared_input_key(lease.graph_id, lease.node_id)
+            records = await transaction.get_records(
+                (graph_key, node_key, definition_key, admission_key, prepared_key)
+            )
+            graph_record = records.get(graph_key)
+            state_record = records.get(node_key)
+            definition_record = records.get(definition_key)
+            admission_record = records.get(admission_key)
+            if (
+                graph_record is None
+                or state_record is None
+                or definition_record is None
+                or admission_record is None
+            ):
+                raise AIError(ErrorCode.TASK_FENCE_STALE)
+            self._validate_graph_record(graph_record, lease.graph_id)
+            self._validate_state_record(state_record, lease.graph_id, lease.node_id)
+            self._validate_definition_record(
+                definition_record, lease.graph_id, lease.node_id
+            )
+            self._validate_admission_record(admission_record, lease.graph_id)
+            admission = await self._decode(admission_record, TaskGraphAdmission)
+            definition = await self._decode(definition_record, TaskNode)
+            node = await self._decode(state_record, TaskNodeView)
+            if (
+                admission.graph_id != record.graph_id
+                or admission.initial_request_digest != record.admission_digest
+                or definition.task != record.task_ref
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            now = await transaction.now()
+            _require_live_task_lease(node, lease, now)
+
+            existing_record = records.get(prepared_key)
+            if existing_record is not None:
+                self._validate_prepared_input_record(
+                    existing_record, lease.graph_id, lease.node_id
+                )
+                existing = await self._decode(
+                    existing_record, TaskPreparedInputRecord
+                )
+                return _reuse_prepared_input(existing, record)
+
+            if (
+                await transaction.guard_record(
+                    graph_key,
+                    expected_storage_version=graph_record.storage_version,
+                )
+                is None
+                or await transaction.guard_record(
+                    node_key,
+                    expected_storage_version=state_record.storage_version,
+                )
+                is None
+            ):
+                raise AIError(ErrorCode.TASK_FENCE_STALE)
+            await transaction.insert_record(
+                self._stored(
+                    "task_prepared_input",
+                    [lease.graph_id, lease.node_id],
+                    record,
+                    parent=self._prepared_input_parent(lease.graph_id),
+                )
+            )
+            return record
+
+        try:
+            return await self._store.mutate(mutate)
+        except AIError as error:
+            if error.code not in _COMMIT_READBACK_CODES:
+                raise
+            existing = await self.get_prepared_input(
+                lease.graph_id,
+                lease.node_id,
+                tenant_id=tenant_id,
+            )
+            if existing is not None:
+                return _reuse_prepared_input(existing, record)
+            raise
+
+    def _validate_prepared_input_record(
+        self,
+        record: StoredRecord,
+        graph_id: str,
+        node_id: str,
+    ) -> None:
+        if (
+            record.kind != "task_prepared_input"
+            or record.key_digest != self._prepared_input_key(graph_id, node_id)
+            or record.scope_digest is not None
+            or record.parent_digest != self._prepared_input_parent(graph_id)
+            or record.sort_key != sortable_identity([graph_id, node_id])
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def renew(
         self, lease: TaskLease, *, tenant_id: str, lease_seconds: int
@@ -2477,6 +2648,8 @@ class TaskRepositoryImpl(RepositoryBase):
         tenant_id: str,
         error_code: str,
         error_digest: str,
+        error_origin: str = "node",
+        safe_error_details: Mapping[str, JsonValue] | None = None,
         execution_id: str | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
@@ -2489,6 +2662,11 @@ class TaskRepositoryImpl(RepositoryBase):
             or not isinstance(expected_fence, int)
             or expected_fence < 1
         ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if error_origin not in {"node", "execution"}:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        details = {} if safe_error_details is None else dict(safe_error_details)
+        if error_origin == "execution" and details:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if lease is None:
             if (
@@ -2545,6 +2723,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 if (
                     node.error_code != error_code
                     or node.error_digest != error_digest
+                    or node.error_origin != error_origin
+                    or dict(node.safe_error_details) != details
                     or (execution_id is not None and node.execution_id != execution_id)
                 ):
                     raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
@@ -2592,6 +2772,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 error_code=error_code,
                 error_digest=error_digest,
                 execution_id=resolved_execution_id,
+                error_origin=error_origin,
+                safe_error_details=details,
                 next_attempt_at=None,
                 occupies_concurrency=False,
             )
@@ -2666,6 +2848,8 @@ class TaskRepositoryImpl(RepositoryBase):
                     and current.execution_id == execution_id
                     and current.error_code == error_code
                     and current.error_digest == error_digest
+                    and current.error_origin == error_origin
+                    and dict(current.safe_error_details) == details
                     and (
                         expected_fence is None
                         or current.fence == expected_fence

@@ -9,13 +9,12 @@ from types import MappingProxyType
 from typing import Callable, cast
 
 from ..agent import AgentBindingContract, AgentCompiler
-from ..capability import CapabilityContribution
 from ..core import ImmutableJsonMapping, JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
-from ..task import TaskGraph, TaskGraphAdmission, TaskNode
+from ..task import Task, TaskExpander, TaskGraph, TaskGraphAdmission, TaskNode, TaskRef
 from ._agent_binding_resolver import _AgentBindingResolver
-from ._runtime_identity import task_capability_capture_key
+from ._runtime_identity import task_capture_key
 from .state._task_capability_capture import (
     TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
     read_task_capability_capture_declarations,
@@ -23,7 +22,7 @@ from .state._task_capability_capture import (
     task_expander_declaration_identity,
 )
 
-_KIND = "task-capability-capture"
+_KIND = "task-definition-capture"
 _VERSION = TASK_CAPABILITY_CAPTURE_FORMAT_VERSION
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _BUILTIN_TASKS: dict[tuple[str, int], dict[str, JsonValue]] = {
@@ -31,14 +30,17 @@ _BUILTIN_TASKS: dict[tuple[str, int], dict[str, JsonValue]] = {
         "version": 1,
         "id": "linktools.ai.agent",
         "revision": 1,
+        "type": "agent",
         "effect_policy": "none",
         "output_contract": {"kind": "json"},
         "reconcile": False,
+        "config": {"input_mode": "literal"},
     },
     ("linktools.ai.input", 1): {
         "version": 1,
         "id": "linktools.ai.input",
         "revision": 1,
+        "type": "input",
         "effect_policy": "none",
         "output_contract": {"kind": "json"},
         "reconcile": False,
@@ -127,8 +129,8 @@ class TaskCapabilityCaptureStore:
         admission: TaskGraphAdmission,
         graph: TaskGraph,
         *,
-        task_contributions: Sequence[CapabilityContribution[object]] = (),
-        expander_contributions: Sequence[CapabilityContribution[object]] = (),
+        tasks: Sequence[Task[object]] = (),
+        expanders: Sequence[TaskExpander] = (),
     ) -> TaskCapabilityCapture:
         key = self._key(admission)
         existing = await self._objects.stat(key)
@@ -145,13 +147,13 @@ class TaskCapabilityCaptureStore:
             _validate_required_declarations(
                 capture,
                 graph,
-                task_contributions,
-                expander_contributions,
+                tasks,
+                expanders,
             )
             return capture
 
-        task_declarations = _task_declarations(task_contributions)
-        expander_declarations = _expander_declarations(expander_contributions)
+        task_declarations = _task_declarations(tasks)
+        expander_declarations = _expander_declarations(expanders)
         if any(node.expander is not None for node in graph.nodes):
             captured_tasks = task_declarations
             captured_expanders = expander_declarations
@@ -172,8 +174,22 @@ class TaskCapabilityCaptureStore:
         node_bindings = tuple(
             binding_contract
             for node in graph.nodes
-            if (binding_contract := self._node_binding(node)) is not None
+            if (binding_contract := self._node_binding(node, tasks)) is not None
         )
+        captured_task_ids = set(captured_tasks)
+        for task in tasks:
+            if (task.id, task.revision) not in captured_task_ids:
+                continue
+            contract = task.contract
+            if contract.get("type") != "agent":
+                continue
+            config = contract.get("config")
+            if not isinstance(config, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            payload = config.get("binding_contract")
+            if not isinstance(payload, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            node_bindings += (AgentBindingContract.from_payload(payload),)
         unique_bindings = {
             binding_contract.binding_digest: binding_contract
             for binding_contract in node_bindings
@@ -243,8 +259,8 @@ class TaskCapabilityCaptureStore:
             _validate_required_declarations(
                 capture,
                 graph,
-                task_contributions,
-                expander_contributions,
+                tasks,
+                expanders,
             )
             return capture
         capture = await self._read(
@@ -259,8 +275,8 @@ class TaskCapabilityCaptureStore:
         _validate_required_declarations(
             capture,
             graph,
-            task_contributions,
-            expander_contributions,
+            tasks,
+            expanders,
         )
         return capture
 
@@ -291,10 +307,26 @@ class TaskCapabilityCaptureStore:
     def _node_binding(
         self,
         node: TaskNode,
+        tasks: Sequence[Task[object]],
     ) -> AgentBindingContract | None:
-        if node.input.get("task_id") != self._agent_task_id:
+        if node.task is None:
             return None
-        payload = node.input.get("binding_contract")
+        if (node.task.id, node.task.revision) != (self._agent_task_id, 1):
+            task = next(
+                (
+                    item
+                    for item in tasks
+                    if (item.id, item.revision)
+                    == (node.task.id, node.task.revision)
+                ),
+                None,
+            )
+            if task is None or task.contract.get("type") != "agent":
+                return None
+            config = task.contract.get("config")
+            payload = config.get("binding_contract") if isinstance(config, Mapping) else None
+        else:
+            payload = node.input.get("binding_contract")
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return AgentBindingContract.from_payload(payload)
@@ -377,7 +409,7 @@ class TaskCapabilityCaptureStore:
         return TaskCapabilityCapture(roots, bindings, tasks, expanders)
 
     def _key(self, admission: TaskGraphAdmission) -> str:
-        return task_capability_capture_key(
+        return task_capture_key(
             self._namespace,
             admission.principal.tenant_id,
             admission.graph_id,
@@ -386,18 +418,15 @@ class TaskCapabilityCaptureStore:
 
 
 def _task_declarations(
-    contributions: Sequence[CapabilityContribution[object]],
+    tasks: Sequence[Task[object]],
 ) -> dict[tuple[str, int], dict[str, JsonValue]]:
     declarations = dict(_BUILTIN_TASKS)
-    for contribution in contributions:
-        if (
-            not isinstance(contribution, CapabilityContribution)
-            or contribution.kind != "task"
-        ):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        contract = contribution.contract
+    for task in tasks:
+        if not isinstance(task, Task):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        contract = {"id": task.id, "revision": task.revision, **dict(task.contract)}
         identity = task_declaration_identity(contract)
-        if identity != (contribution.id, contribution.revision):
+        if identity != (task.id, task.revision):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if identity in declarations:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -406,18 +435,19 @@ def _task_declarations(
 
 
 def _expander_declarations(
-    contributions: Sequence[CapabilityContribution[object]],
+    expanders: Sequence[TaskExpander],
 ) -> dict[tuple[str, int], dict[str, JsonValue]]:
     declarations: dict[tuple[str, int], dict[str, JsonValue]] = {}
-    for contribution in contributions:
-        if (
-            not isinstance(contribution, CapabilityContribution)
-            or contribution.kind != "task_expander"
-        ):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        contract = contribution.contract
+    for expander in expanders:
+        if not isinstance(expander, TaskExpander):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        contract = {
+            "version": 1,
+            "id": expander.id,
+            "revision": expander.revision,
+        }
         identity = task_expander_declaration_identity(contract)
-        if identity != (contribution.id, contribution.revision):
+        if identity != (expander.id, expander.revision):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if identity in declarations:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -428,10 +458,12 @@ def _expander_declarations(
 def _required_task_identities(graph: TaskGraph) -> tuple[tuple[str, int], ...]:
     identities: set[tuple[str, int]] = set()
     for node in graph.nodes:
+        if node.task is None:
+            continue
         identities.add(
             _validate_task_identity(
-                node.input.get("task_id"),
-                node.input.get("task_revision"),
+                node.task.id,
+                node.task.revision,
             )
         )
     return tuple(sorted(identities))
@@ -454,11 +486,11 @@ def _required_expander_identities(
 def _validate_required_declarations(
     capture: TaskCapabilityCapture,
     graph: TaskGraph,
-    task_contributions: Sequence[CapabilityContribution[object]],
-    expander_contributions: Sequence[CapabilityContribution[object]],
+    tasks: Sequence[Task[object]],
+    expanders: Sequence[TaskExpander],
 ) -> None:
-    current_tasks = _task_declarations(task_contributions)
-    current_expanders = _expander_declarations(expander_contributions)
+    current_tasks = _task_declarations(tasks)
+    current_expanders = _expander_declarations(expanders)
     for identity in _required_task_identities(graph):
         captured = capture.tasks.get(identity)
         current = current_tasks.get(identity)
@@ -535,8 +567,10 @@ def _validate_task_identity(
         or revision < 1
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if task_id.startswith("linktools.ai.") and (task_id, revision) not in _BUILTIN_TASKS:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        TaskRef(task_id, revision)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     return task_id, revision
 
 
