@@ -188,6 +188,32 @@ ct-cntr doctor --runtime      # 额外对实际 docker/compose 运行时校验 c
 
 cntr 只读取仓库自己本地文件里的 `requires.linktools-cntr`——用户级文件、`ct-cntr config set` 持久化值、运行时覆盖都不能放宽或覆盖仓库自身声明的兼容性要求。不满足（或 specifier 非法）时，`repo add`/`repo update`/加载都会在该仓库的 `container.py` 被导入前拒绝；`requires` 中的其他 key（如未来的 `linktools-ai`）cntr 完全忽略。
 
+### Compose 渲染后 Hook
+
+在容器的 `on_init()` 中通过 `self.hooks.register(HookPhase.AFTER_COMPOSE_RENDER, ...)` 注册 Hook。模板解析及服务、网络默认值补全后，Hook 按 `order`、依赖关系和注册顺序执行；接收渲染后的 Compose 字典，可原地修改。每个容器实例首次渲染时执行一次；没有 Compose 模板时不执行。
+
+```python
+from typing import TYPE_CHECKING
+from linktools.cntr import BaseContainer
+from linktools.cntr.lifecycle import HookPhase
+
+if TYPE_CHECKING:
+    from typing import Any
+
+class Container(BaseContainer):
+    def on_init(self) -> None:
+        self.hooks.register(
+            HookPhase.AFTER_COMPOSE_RENDER,
+            self._add_compose_labels,
+            key="compose-labels",
+        )
+
+    def _add_compose_labels(self, compose: "dict[str, Any]") -> None:
+        compose["services"]["app"].setdefault("labels", {})["example.enabled"] = "true"
+```
+
+修改会体现在后续缓存、Compose 文件和执行计划中。`ct-cntr doctor`、执行计划等只读操作也可能触发渲染，因此此 Hook 只应修改传入的内存字典，不应写文件或执行其他外部操作。
+
 迁移表：
 
 - `ct-cntr plan up` → `ct-cntr up --dry-run`
@@ -239,6 +265,7 @@ sequenceDiagram
         loop 每个容器（正序）
             ContainerManager->>Container: docker_file（渲染 Dockerfile 模板）
             ContainerManager->>Container: docker_compose（渲染 docker-compose.yml 模板）
+            ContainerManager->>Container: hooks.call(AFTER_COMPOSE_RENDER, compose)
             ContainerManager->>Container: exposes（加载对外服务链接）
         end
     end

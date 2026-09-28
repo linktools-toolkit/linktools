@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 
 class HookPhase(str, Enum):
+    AFTER_COMPOSE_RENDER = "after-compose-render"
     CHECK = "check"
     BEFORE_START = "before-start"
     AFTER_START = "after-start"

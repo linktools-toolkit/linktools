@@ -18,11 +18,11 @@ if TYPE_CHECKING:
 
 
 def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
-    # A plain read -- no write happens in this function -- so it needs no
-    # transaction of its own. Rendering may resolve settings from another
-    # container; holding a store-wide transaction open for the whole render
-    # would collide with that container's own transaction (CacheStore's
-    # nesting guard is store-wide, not per-namespace).
+    # Rendering and post-render hooks must remain read-only. This
+    # needs no transaction of its own: rendering may resolve settings from
+    # another container, and a store-wide transaction would collide with
+    # that container's own transaction (CacheStore's nesting guard is
+    # store-wide, not per-namespace).
     mount_paths = container.settings.get("mount_paths", {})
     for name in container.manager.docker_compose_names:
         path = container.get_source_path(name)
@@ -96,6 +96,8 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
                 if not isinstance(network, dict):
                     continue
                 network.setdefault("name", container.get_service_name(name))
+        from ..lifecycle.hooks import HookPhase
+        container.hooks.call(HookPhase.AFTER_COMPOSE_RENDER, data)
         return data
     return None
 
