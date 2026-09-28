@@ -151,8 +151,6 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
             callback = self._build_input
             if callback is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if task_input.files:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             input_identity = _agent_task_input_identity(
                 invocation,
                 task_input,
@@ -218,8 +216,10 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
                     ) from error
                 stored = await self._store_prepared_prompt(
                     prompt,
+                    files=task_input.files,
                     tenant_id=invocation.principal.tenant_id,
                 )
+                prompt = await self._restore_prepared_prompt(stored)
                 final_input_digest = _prepared_agent_input_digest(prompt, stored)
                 request_identity = _agent_task_request_identity(
                     invocation,
@@ -417,6 +417,7 @@ def _agent_task_request_identity(
                 "principal": principal_identity_payload(invocation.principal),
                 "input_identity": input_identity,
                 "prompt": task_prompt_draft(prompt),
+                "files": list(task_input.files),
                 "final_input_digest": final_input_digest,
                 "session_id": task_input.session_id,
                 "memory_scope": task_input.memory_scope,

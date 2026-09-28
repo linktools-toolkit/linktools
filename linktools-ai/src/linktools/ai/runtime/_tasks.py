@@ -104,11 +104,6 @@ class TaskEngine(Generic[AppT]):
         runtime._ensure_open()
         if not isinstance(graph, TaskGraph):
             raise TypeError("graph must be TaskGraph")
-        await runtime._require_task_node_runtime().activate_graph(
-            graph,
-            tuple(self._tasks.values()),
-            tuple(self._expanders.values()),
-        )
         request = await runtime._admit_graph(
             graph,
             principal=principal,
@@ -116,7 +111,30 @@ class TaskEngine(Generic[AppT]):
             limits=limits,
             correlation=correlation,
         )
-        await self._graph_service.start(request)
+        task_runtime = runtime._require_task_node_runtime()
+        activation = await task_runtime.activate_graph(
+            graph,
+            tuple(self._tasks.values()),
+            tuple(self._expanders.values()),
+            track_pre_admission=True,
+        )
+        assert activation is not None
+        try:
+            await self._graph_service.start(request)
+        except BaseException:
+            await task_runtime.finish_graph_activation(
+                graph.graph_id,
+                request.principal.tenant_id,
+                activation,
+                admitted=False,
+            )
+            raise
+        await task_runtime.finish_graph_activation(
+            graph.graph_id,
+            request.principal.tenant_id,
+            activation,
+            admitted=True,
+        )
         return TaskGraphRun(
             runtime,
             self._graph_service,

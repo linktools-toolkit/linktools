@@ -145,8 +145,8 @@ class _TaskRunnerAdapter:
         self.task = task
         self.runner = runner
         self.effect_policy = task.effect_policy
-        self.output_type = None
-        self.reconcile = task.contract.get("reconcile")
+        self.output_type = task.output_type
+        self.reconcile = task.contract["reconcile"]
 
     def normalize(self, input: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         if isinstance(self.runner, RuntimeAgentTaskRunner):
@@ -382,6 +382,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 Mapping[tuple[str, int], TaskExpander],
             ],
         ] = {}
+        self._pending_definition_activations: dict[str, int] = {}
         self._agent = _AgentTaskNodeHandler(
             execution,
             catalog,
@@ -430,58 +431,96 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         graph: TaskGraph,
         tasks: Sequence[Task[AppT]],
         expanders: Sequence[TaskExpander],
-    ) -> None:
+        *,
+        track_pre_admission: bool = False,
+    ) -> object | None:
         proposed = self._definition_maps(tasks, expanders)
         task_map, expander_map = proposed
         async with self._definition_lock:
             active = self._active_definitions.get(graph.graph_id)
             if active is None:
                 self._active_definitions[graph.graph_id] = proposed
-                return
-            current_tasks, current_expanders = active
-            required_tasks = {
-                (node.task.id, node.task.revision)
-                for node in graph.nodes
-                if node.task is not None
-            }
-            required_expanders = {
-                (node.expander.id, node.expander.revision)
-                for node in graph.nodes
-                if node.expander is not None
-            }
-            for identity in required_tasks:
-                previous = current_tasks.get(identity)
-                replacement = task_map.get(identity)
-                if previous is None and identity == (_DEFERRED_INPUT_ID, 1):
-                    continue
-                if (
-                    previous is None
-                    or replacement is None
-                    or dict(previous.contract) != dict(replacement.contract)
-                ):
-                    raise AIError(
-                        ErrorCode.BINDING_NOT_REGISTERED,
-                        safe_details={
-                            "graph_id": graph.graph_id,
-                            "task_id": identity[0],
-                            "task_revision": identity[1],
-                        },
-                    )
-            for identity in required_expanders:
-                previous = current_expanders.get(identity)
-                replacement = expander_map.get(identity)
-                if (
-                    previous is None
-                    or replacement is None
-                ):
-                    raise AIError(
-                        ErrorCode.BINDING_NOT_REGISTERED,
-                        safe_details={
-                            "graph_id": graph.graph_id,
-                            "expander_id": identity[0],
-                            "expander_revision": identity[1],
-                        },
-                    )
+                active = proposed
+            else:
+                current_tasks, current_expanders = active
+                required_tasks = {
+                    (node.task.id, node.task.revision)
+                    for node in graph.nodes
+                    if node.task is not None
+                }
+                required_expanders = {
+                    (node.expander.id, node.expander.revision)
+                    for node in graph.nodes
+                    if node.expander is not None
+                }
+                for identity in required_tasks:
+                    previous = current_tasks.get(identity)
+                    replacement = task_map.get(identity)
+                    if previous is None and identity == (_DEFERRED_INPUT_ID, 1):
+                        continue
+                    if (
+                        previous is None
+                        or replacement is None
+                        or dict(previous.contract) != dict(replacement.contract)
+                    ):
+                        raise AIError(
+                            ErrorCode.BINDING_NOT_REGISTERED,
+                            safe_details={
+                                "graph_id": graph.graph_id,
+                                "task_id": identity[0],
+                                "task_revision": identity[1],
+                            },
+                        )
+                for identity in required_expanders:
+                    previous = current_expanders.get(identity)
+                    replacement = expander_map.get(identity)
+                    if previous is None or replacement is None:
+                        raise AIError(
+                            ErrorCode.BINDING_NOT_REGISTERED,
+                            safe_details={
+                                "graph_id": graph.graph_id,
+                                "expander_id": identity[0],
+                                "expander_revision": identity[1],
+                            },
+                        )
+            if track_pre_admission:
+                self._pending_definition_activations[graph.graph_id] = (
+                    self._pending_definition_activations.get(graph.graph_id, 0) + 1
+                )
+                return active
+            return None
+
+    async def finish_graph_activation(
+        self,
+        graph_id: str,
+        tenant_id: str,
+        activation: object,
+        *,
+        admitted: bool,
+    ) -> None:
+        persisted = admitted
+        if not persisted:
+            persisted = (
+                await self._task_admissions.get(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
+            ) is not None
+        async with self._definition_lock:
+            pending = self._pending_definition_activations.get(graph_id)
+            if pending is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if pending == 1:
+                del self._pending_definition_activations[graph_id]
+            else:
+                self._pending_definition_activations[graph_id] = pending - 1
+            if (
+                not persisted
+                and pending == 1
+                and self._active_definitions.get(graph_id) is activation
+            ):
+                self._active_definitions.pop(graph_id, None)
+                self._admitted_capabilities.pop(graph_id, None)
 
     def _definitions_for(
         self,
@@ -553,8 +592,34 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         task_input = AgentTaskInput.from_mapping(node.input)
         config = task.contract.get("config")
         input_mode = config.get("input_mode") if isinstance(config, Mapping) else None
-        if input_mode == "projected" or task_input.stored_prompt is not None:
+        if task_input.stored_prompt is not None:
             return node
+        if input_mode == "projected":
+            if not task_input.files:
+                return node
+            materializer = self._input_materializer
+            if materializer is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            body = dict(task_input)
+            body["files"] = list(
+                await materializer.canonicalize_files(task_input.files)
+            )
+            return TaskNode(
+                node.node_id,
+                node.dependencies,
+                task=node.task,
+                input=body,
+                budget_cost=node.budget_cost,
+                expander=node.expander,
+                input_refs=node.input_refs,
+                timeout_seconds=node.timeout_seconds,
+                max_attempts=node.max_attempts,
+                retry_delay_seconds=node.retry_delay_seconds,
+                output_contract=node.output_contract,
+                effect_policy=node.effect_policy,
+                reconcile=node.reconcile,
+                dependency_policy=node.dependency_policy,
+            )
         if not task_input.files and isinstance(task_input.prompt, str):
             return node
         materializer = self._input_materializer
@@ -601,13 +666,14 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self,
         value: CanonicalUserInput,
         *,
+        files: Sequence[str],
         tenant_id: str,
     ) -> StoredUserInput:
         materializer = self._input_materializer
         if materializer is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         canonical = await materializer.canonicalize_input(value)
-        materialized = await materializer.materialize(canonical, ())
+        materialized = await materializer.materialize(canonical, files)
         return await materializer.store(materialized, tenant_id=tenant_id)
 
     async def get_prepared_agent_input(
@@ -1099,7 +1165,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             retry_delay_seconds=node.retry_delay_seconds,
             output_contract=_output_contract(handler, node.output_type),
             effect_policy=_handler_effect_policy(handler),
-            reconcile=getattr(handler, "reconcile", None) is not None,
+            reconcile=_handler_has_reconcile(handler),
             dependency_policy=node.dependency_policy,
         )
 
@@ -1234,9 +1300,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                             "reason": "task_node_output_contract_invalid",
                         },
                     ) from error
-            if node.reconcile != (
-                getattr(handler, "reconcile", None) is not None
-            ):
+            if node.reconcile != _handler_has_reconcile(handler):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     safe_details={
@@ -2940,6 +3004,23 @@ def _output_contract(
     handler: object,
     output_type: object | None,
 ) -> dict[str, JsonValue] | None:
+    if isinstance(handler, _TaskRunnerAdapter):
+        declared = handler.task.contract.get("output_contract")
+        if isinstance(declared, Mapping) and declared.get("kind") == "schema":
+            schema = declared.get("schema")
+            if not isinstance(schema, Mapping):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            contract: dict[str, JsonValue] = {
+                "mode": "structured",
+                "schema": dict(schema),
+            }
+            _restore_output_contract(contract)
+            if (
+                output_type is not None
+                and _output_contract(None, output_type) != contract
+            ):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            return contract
     handler_output_type = getattr(handler, "output_type", None)
     output = output_type if handler_output_type is None else handler_output_type
     if output is None:
@@ -2949,6 +3030,12 @@ def _output_contract(
         "mode": binding.mode,
         "schema": binding.schema_definition,
     }
+
+
+def _handler_has_reconcile(handler: object) -> bool:
+    if isinstance(handler, _TaskRunnerAdapter):
+        return handler.task.contract["reconcile"] is True
+    return getattr(handler, "reconcile", None) is not None
 
 
 def _restore_output_contract(

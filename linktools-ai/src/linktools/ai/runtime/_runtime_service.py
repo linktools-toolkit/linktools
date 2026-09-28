@@ -125,6 +125,17 @@ class _TaskNodeRuntimePort(Protocol):
         graph: TaskGraph,
         tasks: Sequence[Task[AppT]],
         expanders: Sequence[TaskExpander],
+        *,
+        track_pre_admission: bool = False,
+    ) -> object | None: ...
+
+    async def finish_graph_activation(
+        self,
+        graph_id: str,
+        tenant_id: str,
+        activation: object,
+        *,
+        admitted: bool,
     ) -> None: ...
 
     async def load_admission(self, admission: TaskGraphAdmission) -> None: ...
@@ -189,6 +200,7 @@ class _TaskNodeRuntimePort(Protocol):
         self,
         value: CanonicalUserInput,
         *,
+        files: Sequence[str],
         tenant_id: str,
     ) -> "StoredUserInput": ...
 
