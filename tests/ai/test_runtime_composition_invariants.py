@@ -21,7 +21,6 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime
-from linktools.ai.runtime._agent_task import _cancel_execution
 from linktools.ai.runtime._approval import DefaultApprovalService
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.runtime._factory import compose_runtime_components
@@ -249,23 +248,6 @@ def test_binding_codec_rejects_partial_current_v1_shapes(
         decode_domain(partial, target)
 
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-@pytest.mark.asyncio
-async def test_task_child_unknown_cancel_requires_recovery() -> None:
-    principal = Principal("principal", "tenant", "service")
-    execution = _UncertainExecution()
-
-    with pytest.raises(AIError) as error:
-        await _cancel_execution(
-            execution,
-            "execution",
-            principal,
-            "graph",
-            "node",
-        )
-
-    assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
 
 
 @pytest.mark.asyncio

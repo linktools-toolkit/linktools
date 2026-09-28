@@ -2,13 +2,10 @@
 # -*- coding: utf-8 -*-
 """Plural Runtime domain entry points."""
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from ..core import JsonValue, Principal
-from ..errors import AIError
-from ..task import TaskBindingContract, TaskEffectResolution
-from ..agent import AgentBindingContract
+from ..core import Principal
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -31,7 +28,6 @@ from .service_api import (
     ExecutionEvent,
     ExecutionHandle,
     ExecutionHistoryItem,
-    ExecutionRequest,
     ExecutionResult,
     ExecutionTraceItem,
     ExecutionTreeEvent,
@@ -47,7 +43,6 @@ from .service_api import (
     ModelInteractionItem,
     Page,
     ReplayEvaluationRequest,
-    ResumeSessionRequest,
     RetryExecutionRequest,
     SessionHistoryItem,
     SessionTurn,
@@ -94,54 +89,6 @@ class RuntimeExecutions(Generic[AppT]):
     ) -> "Execution[AppT]":
         return await self._get_execution(execution_id, principal)
 
-    async def acquire_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> bool:
-        return await self._service.acquire_dependency_hold(execution_id, tenant_id=tenant_id, hold_id=hold_id)
-
-    async def release_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
-        await self._service.release_dependency_hold(execution_id, tenant_id=tenant_id, hold_id=hold_id)
-
-    async def request_terminal_handoff(self, execution_id: str, *, tenant_id: str) -> None:
-        await self._service.request_terminal_handoff(execution_id, tenant_id=tenant_id)
-
-    async def start(self, binding_digest: str, request: ExecutionRequest, *, dependency_hold_id: str | None = None, binding_contract: AgentBindingContract | None = None) -> ExecutionHandle:
-        return await self._service.start(binding_digest, request, dependency_hold_id=dependency_hold_id, binding_contract=binding_contract)
-
-    async def start_task(self, binding: "TaskBindingContract", *, principal: Principal, input: Mapping[str, JsonValue], idempotency_key: str, correlation: Mapping[str, str | int]) -> ExecutionHandle:
-        return await self._service.start_task(binding, principal=principal, input=input, idempotency_key=idempotency_key, correlation=correlation)
-
-    async def claim_task_attempt(self, execution_id: str, *, principal: Principal) -> ExecutionView:
-        return await self._service.claim_task_attempt(execution_id, principal=principal)
-
-    async def schedule_task_retry(self, execution_id: str, *, principal: Principal, error_code: str) -> ExecutionView:
-        return await self._service.schedule_task_retry(execution_id, principal=principal, error_code=error_code)
-
-    async def defer_task_input(self, execution_id: str, *, principal: Principal, wait_id: str) -> ExecutionView:
-        return await self._service.defer_task_input(execution_id, principal=principal, wait_id=wait_id)
-
-    async def supply_task_input(self, execution_id: str, *, principal: Principal, value: JsonValue) -> ExecutionView:
-        return await self._service.supply_task_input(execution_id, principal=principal, value=value)
-
-    async def resume_task_not_applied(self, execution_id: str, *, principal: Principal) -> ExecutionView:
-        return await self._service.resume_task_not_applied(execution_id, principal=principal)
-
-    async def resolve_task_effect(self, execution_id: str, *, principal: Principal, resolution: TaskEffectResolution) -> ExecutionView:
-        return await self._service.resolve_task_effect(execution_id, principal=principal, resolution=resolution)
-
-    async def complete_task(self, execution_id: str, *, principal: Principal, output: JsonValue) -> ExecutionResult:
-        return await self._service.complete_task(execution_id, principal=principal, output=output)
-
-    async def fail_task(self, execution_id: str, *, principal: Principal, error: "AIError") -> ExecutionResult:
-        return await self._service.fail_task(execution_id, principal=principal, error=error)
-
-    async def require_task_recovery(self, execution_id: str, *, principal: Principal, error_code: str) -> ExecutionView:
-        return await self._service.require_task_recovery(execution_id, principal=principal, error_code=error_code)
-
-    async def cancel_task(self, execution_id: str, *, principal: Principal) -> CancelExecutionResult:
-        return await self._service.cancel_task(execution_id, principal=principal)
-
-    async def resolve_existing(self, binding_digest: str, request: ExecutionRequest, *, binding_contract: AgentBindingContract | None = None) -> ExecutionHandle | None:
-        return await self._service.resolve_existing(binding_digest, request, binding_contract=binding_contract)
-
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         return await self._service.inspect(execution_id, principal=principal)
 
@@ -154,22 +101,8 @@ class RuntimeExecutions(Generic[AppT]):
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         return await self._service.result(execution_id, principal=principal)
 
-    async def result_payload_size(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-    ) -> int:
-        return await self._service.result_payload_size(
-            execution_id,
-            principal=principal,
-        )
-
     async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: float | None = None) -> ExecutionResult:
         return await self._service.wait(execution_id, principal=principal, timeout_seconds=timeout_seconds)
-
-    async def run(self, binding_digest: str, request: ExecutionRequest, *, timeout_seconds: float | None = None, binding_contract: AgentBindingContract | None = None) -> ExecutionResult:
-        return await self._service.run(binding_digest, request, timeout_seconds=timeout_seconds, binding_contract=binding_contract)
 
     async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
         return await self._service.retry(execution_id, request)
@@ -178,9 +111,6 @@ class RuntimeExecutions(Generic[AppT]):
         return await self._service.fork(execution_id, request)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
-        return await self._service.cancel(execution_id, request)
-
-    async def cancel_handle(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         return await self._service.cancel(execution_id, request)
 
     async def recovery_effects(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionRecoveryEffect, ...]:
@@ -230,9 +160,6 @@ class RuntimeSessions(Generic[AppT]):
 
     async def timeline(self, session_id: str, *, principal: Principal, cursor: str | None = None, limit: int = 100) -> Page[SessionTurn]:
         return await self._service.timeline(session_id, principal=principal, cursor=cursor, limit=limit)
-
-    async def resume(self, agent_id: str, binding_digest: str, session_id: str, request: ResumeSessionRequest, *, binding_contract: AgentBindingContract | None = None) -> ExecutionHandle:
-        return await self._service.resume(agent_id, binding_digest, session_id, request, binding_contract=binding_contract)
 
     async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> SessionView:
         return await self._service.fork(agent_id, session_id, request)

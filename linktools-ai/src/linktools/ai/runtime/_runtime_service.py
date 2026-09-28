@@ -317,6 +317,7 @@ class Runtime(Generic[AppT]):
             raise TypeError("context must be RuntimeContext")
         self._catalog = catalog
         self._compiler = compiler
+        self._task_owner_token = object()
         self._execution_service = execution
         self.executions = RuntimeExecutions(execution, self._get_execution)
         self._session_service = session
@@ -644,7 +645,7 @@ class Runtime(Generic[AppT]):
             files=resolved_files,
         )
         if session_id is None:
-            handle = await self.executions.start(
+            handle = await self._execution_service.start(
                 binding.binding_digest,
                 request,
                 binding_contract=binding.binding_contract,
@@ -664,7 +665,7 @@ class Runtime(Generic[AppT]):
                 correlation=effective_correlation,
                 files=request.files,
             )
-            handle = await self.sessions.resume(
+            handle = await self._session_service.resume(
                 compiled_agent.spec.id,
                 binding.binding_digest,
                 session_id,
@@ -952,6 +953,9 @@ class Runtime(Generic[AppT]):
         runner = RuntimeAgentTaskRunner[AppT](
             id=task_id,
             revision=revision,
+            runtime_owner=self._task_owner_token,
+            agent_id=compiled.spec.id,
+            agent_revision=compiled.spec.revision,
             input_mode=input_mode,
             planning_default=compiled.spec.planning,
             thinking_default=compiled.spec.thinking,
@@ -1026,7 +1030,7 @@ class Runtime(Generic[AppT]):
         key = idempotency_key or secrets.token_urlsafe(32)
         try:
             if view.binding_kind == "task":
-                cancelled = await self.executions.cancel_task(
+                cancelled = await self._execution_service.cancel_task(
                     execution_id,
                     principal=principal,
                 )
@@ -1144,6 +1148,15 @@ class Runtime(Generic[AppT]):
         if self._closed or self._closing:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
+    def validate_task_bindings(self, tasks: Sequence[Task[AppT]]) -> None:
+        self._ensure_open()
+        for task in tasks:
+            runner = task.runner
+            if isinstance(runner, RuntimeAgentTaskRunner):
+                runner.validate_binding(self._task_owner_token, task)
+            elif task.contract.get("type") == "agent":
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
     def _resolve_principal(self, principal: "Principal | None") -> Principal:
         if principal is not None:
             return principal
@@ -1173,11 +1186,22 @@ class Runtime(Generic[AppT]):
             cursor=cursor,
             limit=limit,
         )
-        recovered: list[TaskGraphResult] = []
-        for launch in page.items:
+        launches = tuple(page.items)
+        for launch in launches:
             if launch.principal.tenant_id != resolved_principal.tenant_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await engine._activate_graph(launch.graph_id, resolved_principal)
+            recovery_nodes = await self._graph_service.recovery_nodes(
+                launch.graph_id,
+                principal=resolved_principal,
+            )
+            await engine._activate_graph(
+                launch.graph_id,
+                launch.principal,
+                recovery_nodes=recovery_nodes,
+                recovery_principal=resolved_principal,
+            )
+        recovered: list[TaskGraphResult] = []
+        for launch in launches:
             idempotency_key = "recover-pending-" + canonical_sha256(
                 {
                     "namespace": self.namespace,

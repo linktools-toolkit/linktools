@@ -65,7 +65,7 @@ from ._metrics import _MetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
-from ._task_capability_capture import TaskCapabilityCaptureStore
+from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from ._runtime_identity import token_seed
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
@@ -637,18 +637,12 @@ async def _build_local_components(
             release_terminal=storage.retention.release_session,
             workspace_access=input_materializer.access,
         )
-        task_capability_captures = TaskCapabilityCaptureStore(
+        task_graph_binding_captures = TaskGraphBindingCaptureStore(
             namespace,
-            compiler,
-            binding_resolver,
             storage.object_store(RuntimeDomain.TASK),
-            agent_task_id="linktools.ai.agent",
         )
         task_runner = RuntimeTaskNodeRunner(
             execution,
-            catalog,
-            compiler,
-            session=session,
             namespace=namespace,
             app=app,
             authorization=authorization,
@@ -658,7 +652,7 @@ async def _build_local_components(
             artifact_state=storage.artifact,
             artifact_objects=storage.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
-            capability_captures=task_capability_captures,
+            binding_captures=task_graph_binding_captures,
             input_materializer=ExecutionInputMaterializer(
                 input_materializer.access,
                 limits,
@@ -667,7 +661,6 @@ async def _build_local_components(
                 payload_policy=PayloadPolicy(inline_limit_bytes=0),
                 object_domain=RuntimeDomain.TASK,
             ),
-            release_dependency_hold=execution.release_dependency_hold,
             task_durable=(
                 storage.plan.route(RuntimeDomain.TASK).retention
                 is RuntimeRetentionMode.DURABLE

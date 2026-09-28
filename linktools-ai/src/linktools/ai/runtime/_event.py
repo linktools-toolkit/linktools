@@ -22,7 +22,11 @@ from ..core import (
     Principal,
 )
 from ..errors import AIError, ErrorCode
-from .service_api import ExecutionEvent, ExecutionStreamEvent
+from .service_api import (
+    ExecutionEvent,
+    ExecutionStreamEvent,
+    _ExecutionStreamFailure,
+)
 from .state._contracts import EventRepository, ExecutionRepository
 
 _logger = environ.get_logger("ai.runtime.event")
@@ -554,6 +558,44 @@ class _ExecutionWorkerFailureProbe(Protocol):
     def __call__(self, execution_id: str, *, tenant_id: str) -> AIError | None: ...
 
 
+async def _iterate_live(
+    subscription: _LiveSubscription,
+) -> AsyncIterator[_OrderedItem]:
+    try:
+        async for item in subscription:
+            yield item
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        raise _ExecutionStreamFailure(error) from error
+
+
+async def _close_live(subscription: _LiveSubscription) -> None:
+    try:
+        await subscription.close()
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        raise _ExecutionStreamFailure(error) from error
+
+
+async def _wait_live_activity(
+    broker: LiveExecutionEventBroker,
+    execution_id: str,
+    *,
+    timeout: float,
+) -> None:
+    try:
+        await asyncio.wait_for(
+            broker.wait_for_activity(execution_id),
+            timeout=timeout,
+        )
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        raise
+    except Exception as error:
+        raise _ExecutionStreamFailure(error) from error
+
+
 class DefaultEventService:
     """Read durable events and merge them with ephemeral live deltas."""
 
@@ -603,7 +645,14 @@ class DefaultEventService:
         after_sequence: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         await self._authorize_stream(execution_id, principal)
-        live = self._live.claim_local_producer(execution_id)
+        try:
+            live = self._live.claim_local_producer(execution_id)
+        except AIError as error:
+            if error.code is ErrorCode.EXECUTION_NOT_READY:
+                raise
+            raise _ExecutionStreamFailure(error) from error
+        except Exception as error:
+            raise _ExecutionStreamFailure(error) from error
         async for event in self._stream_with_live(
             execution_id,
             principal=principal,
@@ -625,7 +674,11 @@ class DefaultEventService:
     ) -> AsyncIterator[ExecutionStreamEvent]:
         if not authorized:
             await self._authorize_stream(execution_id, principal)
-        if not self._live.is_local_producer(execution_id):
+        try:
+            is_local_producer = self._live.is_local_producer(execution_id)
+        except Exception as error:
+            raise _ExecutionStreamFailure(error) from error
+        if not is_local_producer:
             async for event in self._stream_durable(
                 execution_id,
                 tenant_id=principal.tenant_id,
@@ -634,11 +687,20 @@ class DefaultEventService:
                 yield event
             return
 
-        base_sequence = self._live.base_sequence(execution_id)
+        try:
+            base_sequence = self._live.base_sequence(execution_id)
+        except Exception as error:
+            raise _ExecutionStreamFailure(error) from error
         if base_sequence is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        live = self._live.subscribe(execution_id) if live is None else live
+            error = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise _ExecutionStreamFailure(error) from error
+        if live is None:
+            try:
+                live = self._live.subscribe(execution_id)
+            except Exception as error:
+                raise _ExecutionStreamFailure(error) from error
         cursor = after_sequence
+        stream_error: BaseException | None = None
         try:
             while cursor < base_sequence:
                 page = await self._read_durable(
@@ -666,9 +728,9 @@ class DefaultEventService:
             replay_cursor = after_sequence if after_sequence > base_sequence else None
             ephemeral_semantic_count = 0
             poll_backoff = 1.0
-            async for item in live:
+            async for item in _iterate_live(live):
                 if isinstance(item, _LiveReplayRequired):
-                    await live.close()
+                    await _close_live(live)
                     skipped = 0
                     async for event in self._stream_durable(
                         execution_id,
@@ -688,7 +750,7 @@ class DefaultEventService:
                         continue
                     while item.durable_sequence is None:
                         if live.replay_required:
-                            await live.close()
+                            await _close_live(live)
                             async for event in self._stream_durable(
                                 execution_id,
                                 tenant_id=principal.tenant_id,
@@ -697,7 +759,7 @@ class DefaultEventService:
                                 yield event
                             return
                         if self._live.is_completed(execution_id):
-                            await live.close()
+                            await _close_live(live)
                             async for event in self._stream_durable(
                                 execution_id,
                                 tenant_id=principal.tenant_id,
@@ -706,8 +768,9 @@ class DefaultEventService:
                                 yield event
                             return
                         try:
-                            await asyncio.wait_for(
-                                self._live.wait_for_activity(execution_id),
+                            await _wait_live_activity(
+                                self._live,
+                                execution_id,
                                 timeout=poll_backoff,
                             )
                         except asyncio.TimeoutError:
@@ -758,8 +821,17 @@ class DefaultEventService:
                 )
                 if item.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
                     return
+        except BaseException as error:
+            stream_error = error
+            raise
         finally:
-            await live.close()
+            if stream_error is None:
+                await _close_live(live)
+            else:
+                try:
+                    await live.close()
+                except Exception:
+                    pass
 
         failure = self._worker_failure(execution_id, tenant_id=principal.tenant_id)
         if failure is not None:
@@ -860,10 +932,15 @@ class DefaultEventService:
                 if cursor >= execution.event_sequence:
                     return
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if self._live.is_local_producer(execution_id):
+            try:
+                is_local_producer = self._live.is_local_producer(execution_id)
+            except Exception as error:
+                raise _ExecutionStreamFailure(error) from error
+            if is_local_producer:
                 try:
-                    await asyncio.wait_for(
-                        self._live.wait_for_activity(execution_id),
+                    await _wait_live_activity(
+                        self._live,
+                        execution_id,
                         timeout=poll_backoff,
                     )
                 except asyncio.TimeoutError:

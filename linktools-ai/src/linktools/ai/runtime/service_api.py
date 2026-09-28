@@ -40,6 +40,14 @@ from .recovery import (
 )
 
 
+class _ExecutionStreamFailure(Exception):
+    """Marks a live stream or pure tree projection failure for TaskGraph views."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(type(cause).__name__)
+        self.cause = cause
+
+
 def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
     try:
         return normalize_correlation(value)

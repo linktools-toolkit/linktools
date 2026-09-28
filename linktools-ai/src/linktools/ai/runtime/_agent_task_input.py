@@ -84,19 +84,40 @@ class AgentTaskInput(Mapping[str, JsonValue]):
     @classmethod
     def from_mapping(cls, value: Mapping[str, JsonValue]) -> "AgentTaskInput":
         if not isinstance(value, Mapping):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        version = value.get("version")
-        if version != 1 or isinstance(version, bool):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if "version" not in value:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        version = value["version"]
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if value.get("kind") != "agent-task-input":
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        prompt = value.get("prompt", {"kind": "text", "text": ""})
-        parameters = value.get("parameters", {})
-        files = value.get("files", [])
-        if not isinstance(prompt, Mapping) or not isinstance(parameters, Mapping):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if not isinstance(files, list):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        required = {
+            "kind",
+            "version",
+            "prompt",
+            "parameters",
+            "files",
+            "session_id",
+            "memory_scope",
+            "planning",
+            "thinking",
+        }
+        if not required.issubset(value) or value.get("kind") != "agent-task-input":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prompt = value["prompt"]
+        parameters = value["parameters"]
+        files = value["files"]
+        planning = value["planning"]
+        thinking = value["thinking"]
+        if (
+            not isinstance(prompt, Mapping)
+            or not isinstance(parameters, Mapping)
+            or not isinstance(files, list)
+            or not isinstance(planning, bool)
+            or not isinstance(thinking, (bool, str))
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             stored_prompt = None
             if prompt.get("kind") == "stored-user-content-v1":
@@ -129,23 +150,115 @@ class AgentTaskInput(Mapping[str, JsonValue]):
                 decoded_prompt,
                 parameters=parameters,
                 files=files,
+                session_id=value["session_id"],
+                memory_scope=value["memory_scope"],
+                planning=planning,
+                thinking=thinking,
+            )
+            normalized_values = dict(result._values)
+            if stored_prompt is not None:
+                normalized_values["prompt"] = dict(prompt)
+                object.__setattr__(result, "_stored_prompt", stored_prompt)
+            for key, item in value.items():
+                if key not in required:
+                    normalized_values[key] = normalize_json_value(item)
+            object.__setattr__(result, "_values", ImmutableJsonMapping(normalized_values))
+            return result
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+                raise
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    @classmethod
+    def from_authoring(
+        cls,
+        value: Mapping[str, JsonValue] | None,
+    ) -> "AgentTaskInput":
+        if value is None or (isinstance(value, Mapping) and not value):
+            return cls()
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        declared_fields = {
+            "kind",
+            "version",
+            "prompt",
+            "parameters",
+            "files",
+            "session_id",
+            "memory_scope",
+            "planning",
+            "thinking",
+        }
+        if ("kind" in value or "version" in value) and not declared_fields.issubset(value):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if "kind" in value and value.get("kind") != "agent-task-input":
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if "version" in value:
+            version = value.get("version")
+            if (
+                isinstance(version, bool)
+                or not isinstance(version, int)
+                or version != 1
+            ):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        try:
+            prompt_value = value.get("prompt", "")
+            prompt = (
+                decode_task_prompt_draft(prompt_value)
+                if isinstance(prompt_value, Mapping)
+                else prompt_value
+            )
+            result = cls(
+                prompt,
+                parameters=value.get("parameters", {}),
+                files=value.get("files", ()),
                 session_id=value.get("session_id"),
                 memory_scope=value.get("memory_scope"),
                 planning=value.get("planning"),
                 thinking=value.get("thinking"),
             )
-            if stored_prompt is not None:
-                normalized_values = dict(result._values)
-                normalized_values["prompt"] = dict(prompt)
-                object.__setattr__(
-                    result,
-                    "_values",
-                    ImmutableJsonMapping(normalized_values),
-                )
-                object.__setattr__(result, "_stored_prompt", stored_prompt)
+            normalized_values = dict(result._values)
+            for key, item in value.items():
+                if key not in {
+                    "kind",
+                    "version",
+                    "prompt",
+                    "parameters",
+                    "files",
+                    "session_id",
+                    "memory_scope",
+                    "planning",
+                    "thinking",
+                }:
+                    normalized_values[key] = normalize_json_value(item)
+            object.__setattr__(result, "_values", ImmutableJsonMapping(normalized_values))
             return result
+        except AIError as error:
+            if error.code is ErrorCode.REQUEST_FIELD_INVALID:
+                raise
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+    def execution_payload(self) -> Mapping[str, JsonValue]:
+        return ImmutableJsonMapping(
+            {
+                key: self._values[key]
+                for key in (
+                    "kind",
+                    "version",
+                    "prompt",
+                    "parameters",
+                    "files",
+                    "session_id",
+                    "memory_scope",
+                    "planning",
+                    "thinking",
+                )
+            }
+        )
 
     @property
     def prompt(self) -> CanonicalUserInput:
@@ -188,7 +301,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
     @property
     def thinking(self) -> ThinkingValue | None:
         value = self._values["thinking"]
-        return value if isinstance(value, str) else None
+        return normalize_thinking(value) if isinstance(value, (bool, str)) else None
 
     @property
     def stored_prompt(self) -> "StoredUserInput | None":

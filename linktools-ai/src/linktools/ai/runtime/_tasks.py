@@ -14,6 +14,8 @@ from ..task import (
     TaskGraph,
     TaskGraphLimits,
     TaskGraphResult,
+    TaskNode,
+    TaskNodeInfo,
     TaskRef,
     TaskGraphService,
 )
@@ -86,6 +88,7 @@ class TaskEngine(Generic[AppT]):
         tasks: Mapping[tuple[str, int], Task[AppT]],
         expanders: Mapping[tuple[str, int], TaskExpander],
     ) -> None:
+        runtime.validate_task_bindings(tuple(tasks.values()))
         self._runtime = runtime
         self._graph_service = graph_service
         self._tasks = MappingProxyType(dict(sorted(tasks.items())))
@@ -185,26 +188,69 @@ class TaskEngine(Generic[AppT]):
             principal=principal,
         )
 
-    async def _activate_graph(self, graph_id: str, principal: Principal) -> None:
+    async def _activate_graph(
+        self,
+        graph_id: str,
+        principal: Principal,
+        *,
+        recovery_nodes: tuple[TaskNodeInfo, ...] | None = None,
+        recovery_principal: Principal | None = None,
+    ) -> None:
         runtime = self._runtime
         runtime._ensure_open()
         admissions = runtime._task_admissions
         if admissions is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        authorization_principal = (
+            principal if recovery_principal is None else recovery_principal
+        )
+        nodes = recovery_nodes
+        if nodes is None:
+            nodes = await self._graph_service.recovery_nodes(
+                graph_id,
+                principal=authorization_principal,
+            )
         admission = await admissions.get(
             graph_id,
             tenant_id=principal.tenant_id,
         )
-        if admission is None:
+        if (
+            admission is None
+            or admission.graph_id != graph_id
+            or admission.principal.tenant_id != principal.tenant_id
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         task_runtime = runtime._require_task_node_runtime()
         await task_runtime.load_admission(admission)
-        state = await self._graph_service.state(graph_id, principal=principal)
-        graph = TaskGraph(graph_id, state.nodes)
+        graph = TaskGraph(
+            graph_id,
+            tuple(
+                TaskNode(
+                    node.node_id,
+                    node.dependencies,
+                    task=node.task,
+                    budget_cost=node.budget_cost,
+                    expander=node.expander,
+                    input_refs=node.input_refs,
+                    timeout_seconds=node.timeout_seconds,
+                    max_attempts=node.max_attempts,
+                    retry_delay_seconds=node.retry_delay_seconds,
+                    output_contract=node.output_contract,
+                    effect_policy=node.effect_policy,
+                    reconcile=node.reconcile,
+                    dependency_policy=node.dependency_policy,
+                )
+                for node in nodes
+            ),
+        )
         await task_runtime.activate_graph(
             graph,
             tuple(self._tasks.values()),
             tuple(self._expanders.values()),
+        )
+        await self._graph_service.preflight_recovery(
+            graph_id,
+            principal=authorization_principal,
         )
 
     @property

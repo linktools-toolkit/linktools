@@ -1088,6 +1088,123 @@ class TaskRepositoryImpl(RepositoryBase):
             )
         )
 
+    async def result_header(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[TaskGraph, int] | None:
+        if tenant_id != self._tenant_id:
+            return None
+
+        async def read(
+            transaction: StateTransaction,
+        ) -> tuple[TaskGraph, int] | None:
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
+            if graph_record is None:
+                return None
+            self._validate_graph_record(graph_record, graph_id)
+            graph_header = await self._decode(graph_record, TaskGraphView)
+            if graph_header.graph_id != graph_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            _require_canonical_graph_status(graph_header.status)
+            definition_records = await transaction.list_records(
+                RecordQuery(
+                    parent_digest=self._definition_parent(graph_id),
+                    kind="task_node_definition",
+                )
+            )
+            definitions: list[TaskNode] = []
+            for record in definition_records:
+                definition = await self._decode(record, TaskNode)
+                self._validate_definition_record(
+                    record,
+                    graph_id,
+                    definition.node_id,
+                )
+                definitions.append(definition)
+            definitions.sort(key=lambda value: value.node_id)
+            graph = TaskGraph(graph_id, tuple(definitions))
+            stream = _task_event_stream(
+                self._namespace,
+                self._tenant_id,
+                self._domain.value,
+                graph_id,
+            )
+            owner = self._graph_key(graph_id)
+            facts = await transaction.list_facts(
+                FactQuery(stream, latest=True, limit=1)
+            )
+            if not facts:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            latest = facts[0]
+            if (
+                latest.stream_digest != stream
+                or latest.owner_key_digest != owner
+                or latest.subject_digest is not None
+                or latest.state is not None
+                or latest.sequence < 1
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            _decode_task_event(graph_id, latest)
+            return graph, latest.sequence
+
+        return await self.state_store.read(read)
+
+    async def get_node_states(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> tuple[TaskNodeView, ...]:
+        if tenant_id != self._tenant_id:
+            return ()
+        if not isinstance(node_ids, tuple):
+            raise TypeError("node_ids must be a tuple")
+        if any(not isinstance(node_id, str) or not node_id for node_id in node_ids):
+            raise ValueError("node_ids must contain non-empty strings")
+        if len(set(node_ids)) != len(node_ids):
+            raise ValueError("node_ids must not contain duplicates")
+        if not node_ids:
+            return ()
+        state_keys = tuple(self._state_key(graph_id, node_id) for node_id in node_ids)
+        definition_keys = tuple(
+            self._definition_key(graph_id, node_id) for node_id in node_ids
+        )
+
+        async def read(transaction: StateTransaction) -> tuple[TaskNodeView, ...]:
+            records = await transaction.get_records(state_keys + definition_keys)
+            states: list[TaskNodeView] = []
+            for node_id, state_key, definition_key in zip(
+                node_ids,
+                state_keys,
+                definition_keys,
+                strict=True,
+            ):
+                state_record = records.get(state_key)
+                definition_record = records.get(definition_key)
+                if state_record is None or definition_record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._validate_state_record(state_record, graph_id, node_id)
+                self._validate_definition_record(
+                    definition_record,
+                    graph_id,
+                    node_id,
+                )
+                state = await self._decode(state_record, TaskNodeView)
+                definition = await self._decode(definition_record, TaskNode)
+                if (
+                    state.graph_id != graph_id
+                    or state.node_id != node_id
+                    or definition.node_id != node_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                states.append(replace(state, dependencies=definition.dependencies))
+            return tuple(states)
+
+        return await self.state_store.read(read)
+
     async def list_events(
         self,
         graph_id: str,

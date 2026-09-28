@@ -32,10 +32,12 @@ from linktools.ai.task import (
 class _Launcher:
     def __init__(self) -> None:
         self.started: list[str] = []
+        self.launches: list[TaskGraphLaunch] = []
         self.cancelled: list[str] = []
 
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:
         self.started.append(launch.graph_id)
+        self.launches.append(launch)
         return TaskGraphHandle(launch.graph_id)
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
@@ -45,6 +47,21 @@ class _Launcher:
             TaskStatus.RECOVERY_REQUIRED,
             (),
         )
+
+
+class _RecoveryPreflight:
+    def __init__(self) -> None:
+        self.prepared_principals: list[Principal] = []
+
+    async def load_admission(self, admission: TaskGraphAdmission) -> None:
+        assert admission.graph_id
+
+    def validate_recovery(self, state: object) -> None:
+        del state
+
+    async def prepare_graph(self, state: object, *, principal: Principal) -> None:
+        del state
+        self.prepared_principals.append(principal)
 
 
 def _request(graph_id: str) -> TaskGraphRequest:
@@ -142,6 +159,34 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
         assert operation is not None
         assert operation.operation_kind is OperationKind.TASK_RECOVER
         assert operation.status is OperationStatus.SUCCEEDED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_actor_does_not_replace_admitted_execution_principal() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
+    try:
+        request = await _recovery_graph(state, "principal-recovery")
+        actor = Principal("operator", "tenant")
+        launcher = _Launcher()
+        preflight = _RecoveryPreflight()
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            launcher,
+            preflight=preflight,  # type: ignore[arg-type]
+        )
+
+        result = await service.recover(
+            "principal-recovery",
+            RecoverGraphRequest(actor, "recover:principal-recovery"),
+        )
+
+        assert result.status is TaskStatus.RUNNING
+        assert preflight.prepared_principals == [request.principal]
+        assert launcher.launches[0].principal == request.principal
     finally:
         await state.close()
 

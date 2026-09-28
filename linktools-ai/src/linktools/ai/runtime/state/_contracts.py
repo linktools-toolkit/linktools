@@ -2195,6 +2195,16 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def graph_state(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskGraphState | None: ...
+    async def result_header(
+        self, graph_id: str, *, tenant_id: str
+    ) -> tuple[TaskGraph, int] | None: ...
+    async def get_node_states(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> tuple[TaskNodeView, ...]: ...
     async def get_results(
         self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str
     ) -> Mapping[str, TaskResultRecord]: ...

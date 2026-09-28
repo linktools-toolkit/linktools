@@ -14,14 +14,16 @@ from linktools.ai.core import (
     Principal,
     TaskStatus,
 )
-from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.errors import AIError, ErrorCode, TaskObservationError
 from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
+from linktools.ai.runtime._domains import RuntimeExecutions, RuntimeSessions
 from linktools.ai.runtime.service_api import (
     ExecutionEvent,
     ExecutionStreamEvent,
     ExecutionTreeEvent,
     ExecutionView,
 )
+from linktools.ai.runtime.service_api import _ExecutionStreamFailure
 from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphResult
 
 
@@ -983,6 +985,84 @@ async def test_task_graph_observer_error_does_not_start_graph_wait() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -> None:
+    cause = AIError(
+        ErrorCode.STORAGE_INTEGRITY_ERROR,
+        safe_details={"execution_id": "execution"},
+    )
+
+    def failed_watch_tree(
+        execution_id,
+        *,
+        principal,
+        after_sequences=None,
+        include_content=False,
+    ):
+        del execution_id, principal, after_sequences, include_content
+
+        async def values():
+            if False:
+                yield None
+            raise _ExecutionStreamFailure(cause)
+
+        return values()
+
+    run = _task_graph_run(
+        _Runtime(),
+        "graph",
+        Principal("owner", "tenant"),
+        failed_watch_tree,
+    )
+    stream = run.watch()
+    delivered: list[TaskGraphRunEvent] = []
+    with pytest.raises(TaskObservationError) as raised:
+        while True:
+            delivered.append(await anext(stream))
+
+    assert raised.value.origin == "stream"
+    assert raised.value.cause_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
+    assert raised.value.safe_details == {"execution_id": "execution"}
+    assert delivered
+    assert raised.value.cursor == delivered[-1].cursor
+    assert raised.value.__cause__ is cause
+
+
+@pytest.mark.asyncio
+async def test_task_graph_durable_stream_integrity_error_remains_raw() -> None:
+    class BrokenGraphService(_TaskGraphService):
+        def stream_events(
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+        ):
+            del graph_id, principal, after_sequence
+
+            async def values():
+                if False:
+                    yield None
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+            return values()
+
+    runtime = _Runtime()
+    runtime.graph = BrokenGraphService()
+    run = _task_graph_run(
+        runtime,
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+
+    with pytest.raises(AIError) as raised:
+        await anext(run.watch())
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert not isinstance(raised.value, TaskObservationError)
+
+
+@pytest.mark.asyncio
 async def test_task_graph_wait_outer_cancel_cleans_waiter() -> None:
     service = _WaitGraphService("block")
     run = _task_graph_run(
@@ -1009,6 +1089,49 @@ async def test_task_graph_wait_outer_cancel_cleans_waiter() -> None:
 
 def test_runtime_does_not_expose_stream_tree() -> None:
     assert not hasattr(Runtime, "stream_tree")
+
+
+def test_runtime_domain_facades_match_the_supported_method_sets() -> None:
+    execution_methods = {
+        name
+        for name, value in vars(RuntimeExecutions).items()
+        if callable(value) and not name.startswith("_")
+    }
+    session_methods = {
+        name
+        for name, value in vars(RuntimeSessions).items()
+        if callable(value) and not name.startswith("_")
+    }
+
+    assert execution_methods == {
+        "get",
+        "inspect",
+        "list",
+        "list_children",
+        "result",
+        "wait",
+        "retry",
+        "fork",
+        "cancel",
+        "recovery_effects",
+        "resolve_tool_effect",
+        "recover",
+        "trace",
+        "transcript",
+        "history",
+        "model_interactions",
+    }
+    assert session_methods == {
+        "get",
+        "create",
+        "reconcile",
+        "list",
+        "history",
+        "timeline",
+        "fork",
+        "update",
+        "close",
+    }
 
 
 def test_task_run_event_rejects_execution_without_node() -> None:

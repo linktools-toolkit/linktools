@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -43,7 +44,10 @@ from linktools.ai.runtime import (
     Runtime,
     RuntimeStorage,
 )
-from linktools.ai.runtime._agent_task import _dependency_identity_payload
+from linktools.ai.runtime._agent_task import (
+    _agent_task_input_identity,
+    _dependency_identity_payload,
+)
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
@@ -61,10 +65,12 @@ from linktools.ai.task import (
     TaskGraphLaunch,
     TaskGraphLimits,
     TaskGraphRequest,
+    TaskGraphState,
     TaskNode,
     TaskNodeContext,
     TaskNodeInvocation,
     Task,
+    TaskRef,
     TaskEffectResolution,
     TaskInputSupplyRequest,
     TaskExpansionContext,
@@ -276,6 +282,35 @@ class _TaskTestModels:
         return _TaskTestModelBinding()
 
 
+class _ThinkingTaskTestModelBinding(_TaskTestModelBinding):
+    def materialize(self) -> TestModel:
+        return TestModel(
+            profile={
+                "supports_thinking": True,
+                "thinking_always_enabled": False,
+            }
+        )
+
+
+class _ThinkingTaskTestModels(_TaskTestModels):
+    def resolve(self, route_id: str) -> _ThinkingTaskTestModelBinding:
+        if route_id != "default":
+            raise AssertionError(f"unexpected model route: {route_id}")
+        return _ThinkingTaskTestModelBinding()
+
+    def restore(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        route_id: str | None = None,
+    ) -> _ThinkingTaskTestModelBinding:
+        if route_id not in {None, "default"}:
+            raise AssertionError(f"unexpected model route: {route_id}")
+        if dict(payload) != _TaskTestModelBinding.contract:
+            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
+        return _ThinkingTaskTestModelBinding()
+
+
 class _StructuredTaskTestModelBinding(_TaskTestModelBinding):
     def materialize(self) -> TestModel:
         return TestModel(
@@ -359,15 +394,441 @@ def test_task_definitions_keep_explicit_identity_and_contract() -> None:
     assert TaskNode("node", task=definition).task == definition.ref
 
 
-def test_agent_task_input_ignores_unknown_non_execution_fields() -> None:
-    value = dict(AgentTaskInput("prompt", parameters={"task_id": "business"}))
+def test_agent_task_input_keeps_but_excludes_unknown_additive_fields() -> None:
+    value = dict(
+        AgentTaskInput(
+            "prompt",
+            parameters={"task_id": "business"},
+            planning=False,
+            thinking=False,
+        )
+    )
     value["metadata"] = {"source": "host"}
 
     restored = AgentTaskInput.from_mapping(value)
 
     assert restored.prompt == "prompt"
     assert restored.parameters == {"task_id": "business"}
-    assert "metadata" not in restored
+    assert restored["metadata"] == {"source": "host"}
+    assert "metadata" not in restored.execution_payload()
+
+
+def test_agent_task_input_authoring_defaults_and_durable_required_fields() -> None:
+    authored = AgentTaskInput.from_authoring({"prompt": "prompt"})
+    assert set(authored) == {
+        "kind",
+        "version",
+        "prompt",
+        "parameters",
+        "files",
+        "session_id",
+        "memory_scope",
+        "planning",
+        "thinking",
+    }
+    assert authored.planning is None
+    assert authored.thinking is None
+
+    durable = dict(
+        AgentTaskInput("prompt", planning=False, thinking=False)
+    )
+    assert AgentTaskInput.from_mapping(durable).thinking is False
+    assert AgentTaskInput.from_mapping(durable).planning is False
+    for field in durable:
+        missing = dict(durable)
+        del missing[field]
+        with pytest.raises(AIError) as error:
+            AgentTaskInput.from_mapping(missing)
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("kind", 1),
+        ("version", "1"),
+        ("prompt", []),
+        ("parameters", []),
+        ("files", "file.txt"),
+        ("session_id", 1),
+        ("memory_scope", 1),
+        ("planning", None),
+        ("thinking", None),
+    ),
+)
+def test_agent_task_input_durable_known_fields_fail_closed(
+    field: str,
+    value: JsonValue,
+) -> None:
+    durable = dict(AgentTaskInput("prompt", planning=False, thinking=False))
+    durable[field] = value
+
+    with pytest.raises(AIError) as error:
+        AgentTaskInput.from_mapping(durable)
+
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_agent_task_input_unknown_durable_version_is_unsupported() -> None:
+    durable = dict(AgentTaskInput("prompt", planning=False, thinking=False))
+    durable["version"] = 2
+
+    with pytest.raises(AIError) as error:
+        AgentTaskInput.from_mapping(durable)
+
+    assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_recovery_preflight_preserves_unknown_agent_input_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        entered.set()
+        await release.wait()
+        return {"ready": True}
+
+    application = CapabilityGroup[None]("application")
+    gate = TaskFunction[None]("test.recovery-version-gate", 1, hold)
+    application.task(gate, effect_policy="none")
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+
+    async with Runtime.open(
+        "recovery-version",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+        capabilities=(application,),
+    ) as runtime:
+        agent_task = runtime.tasks.from_agent(
+            "test.recovery-version-agent",
+            runtime.agents.get("default"),
+        )
+        agent_node = TaskNode(
+            "agent",
+            ("gate",),
+            task=agent_task,
+            input=AgentTaskInput("prompt"),
+        )
+        engine = runtime.tasks.bind(gate, agent_task)
+        graph = TaskGraph(
+            "recovery-version",
+            (gate.node("gate"), agent_node),
+        )
+        run = await engine.start(
+            graph,
+            idempotency_key="recovery-version-run-0001",
+        )
+        await asyncio.wait_for(entered.wait(), 10)
+
+        preflight = runtime._graph_service._preflight
+        original_validate_recovery = preflight.validate_recovery
+
+        def corrupting_validate_recovery(state: TaskGraphState) -> None:
+            nodes = []
+            for node in state.nodes:
+                if node.node_id == "agent":
+                    input_value = dict(node.input)
+                    input_value["version"] = 2
+                    node = TaskNode(
+                        node.node_id,
+                        node.dependencies,
+                        task=node.task,
+                        input=input_value,
+                        budget_cost=node.budget_cost,
+                        expander=node.expander,
+                        input_refs=node.input_refs,
+                        timeout_seconds=node.timeout_seconds,
+                        max_attempts=node.max_attempts,
+                        retry_delay_seconds=node.retry_delay_seconds,
+                        output_type=node.output_type,
+                        output_contract=node.output_contract,
+                        effect_policy=node.effect_policy,
+                        reconcile=node.reconcile,
+                        dependency_policy=node.dependency_policy,
+                    )
+                nodes.append(node)
+            original_validate_recovery(replace(state, nodes=tuple(nodes)))
+
+        monkeypatch.setattr(
+            preflight,
+            "validate_recovery",
+            corrupting_validate_recovery,
+        )
+        with pytest.raises(AIError) as unsupported:
+            await runtime.tasks.bind(gate, agent_task).recover_pending()
+        assert unsupported.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+        release.set()
+        result = await run.wait(timeout_seconds=10)
+        assert result.status is TaskStatus.SUCCEEDED
+
+
+def test_agent_task_input_identity_excludes_additive_fields() -> None:
+    authored = dict(
+        AgentTaskInput("prompt", planning=False, thinking=False)
+    )
+    plain = AgentTaskInput.from_mapping(authored)
+    authored["metadata"] = {"source": "host"}
+    extended = AgentTaskInput.from_mapping(authored)
+    invocation = TaskNodeInvocation(
+        TaskNode("node", task=TaskRef("example.agent", 1)),
+        "graph",
+        Principal("principal", "tenant"),
+        {},
+        {},
+    )
+
+    assert _agent_task_input_identity(
+        invocation,
+        plain,
+        task_id="example.agent",
+        task_revision=1,
+        binding_digest="a" * 64,
+    ) == _agent_task_input_identity(
+        invocation,
+        extended,
+        task_id="example.agent",
+        task_revision=1,
+        binding_digest="a" * 64,
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_agent_task_binding_is_owned_by_its_runtime() -> None:
+    first_capabilities = CapabilityGroup[None]("runtime-owner-first")
+    first_capabilities.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+    second_capabilities = CapabilityGroup[None]("runtime-owner-second")
+    second_capabilities.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+    async with Runtime.open(
+        "runtime-owner-first",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+        capabilities=(first_capabilities,),
+    ) as first_runtime:
+        async with Runtime.open(
+            "runtime-owner-second",
+            models=_TaskTestModels(),  # type: ignore[arg-type]
+            storage=RuntimeStorage.in_memory(),
+            capabilities=(second_capabilities,),
+        ) as second_runtime:
+            agent = first_runtime.agents.get("default")
+            first_task = first_runtime.tasks.from_agent("example.agent.first", agent)
+            second_task = first_runtime.tasks.from_agent("example.agent.second", agent)
+            first_runtime.tasks.bind(first_task, second_task)
+
+            with pytest.raises(AIError) as foreign_runtime:
+                second_runtime.tasks.bind(first_task)
+            assert foreign_runtime.value.code is ErrorCode.RUNTIME_SERVICE_MISMATCH
+
+            changed_contract = dict(first_task.contract)
+            changed_config = dict(changed_contract["config"])
+            changed_config["agent_id"] = "edited"
+            changed_contract["config"] = changed_config
+            edited_task = Task.from_runner(
+                first_task.id,
+                first_task.runner,  # type: ignore[arg-type]
+                contract=changed_contract,
+            )
+            with pytest.raises(AIError) as edited_declaration:
+                first_runtime.tasks.bind(edited_task)
+            assert edited_declaration.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+            class FakeAgentRunner:
+                pass
+
+            fake_agent_task = Task.from_runner(
+                "example.agent.fake",
+                FakeAgentRunner(),  # type: ignore[arg-type]
+                contract={
+                    "version": 1,
+                    "type": "agent",
+                    "effect_policy": "none",
+                    "output_contract": {"kind": "json"},
+                    "reconcile": False,
+                    "config": {"agent_id": "default", "agent_revision": 1},
+                },
+            )
+            with pytest.raises(AIError) as fake_runner:
+                first_runtime.tasks.bind(fake_agent_task)
+            assert fake_runner.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+            incomplete_input_graph = TaskGraph(
+                "incomplete-agent-task-input",
+                (
+                    TaskNode(
+                        "node",
+                        task=first_task,
+                        input={"kind": "agent-task-input", "version": 1},
+                    ),
+                ),
+            )
+            with pytest.raises(AIError) as invalid_input:
+                await first_runtime.tasks.bind(first_task).start(
+                    incomplete_input_graph,
+                    idempotency_key="incomplete-agent-input-run-0001",
+                )
+            assert invalid_input.value.code is ErrorCode.REQUEST_FIELD_INVALID
+            assert await first_runtime._task_admissions.get(
+                incomplete_input_graph.graph_id,
+                tenant_id=first_runtime.tenant_id,
+            ) is None
+
+
+@pytest.mark.asyncio
+async def test_task_results_page_reads_only_page_states_and_preserves_null(
+    monkeypatch,
+) -> None:
+    async def return_null(_context: TaskNodeContext[None]) -> JsonValue:
+        return None
+
+    tasks = tuple(
+        Task(f"example.result-{name}", return_null, effect_policy="none")
+        for name in ("a", "b", "c")
+    )
+    graph = TaskGraph(
+        "bounded-task-results",
+        tuple(
+            TaskNode(f"node-{name}", task=task)
+            for name, task in zip(("c", "a", "b"), tasks)
+        ),
+    )
+    state = RuntimeStorage.in_memory()
+    async with Runtime.open(
+        "bounded-task-results",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+    ) as runtime:
+        run = await runtime.tasks.bind(*tasks).start(
+            graph,
+            idempotency_key="bounded-task-results-run-0001",
+        )
+        completed = await run.wait(timeout_seconds=10)
+        assert completed.status is TaskStatus.SUCCEEDED
+
+        repository = state.task.tasks
+        original_get_node_states = repository.get_node_states
+        page_reads: list[tuple[str, ...]] = []
+
+        async def get_node_states(
+            graph_id: str,
+            node_ids: tuple[str, ...],
+            *,
+            tenant_id: str,
+        ):
+            page_reads.append(node_ids)
+            return await original_get_node_states(
+                graph_id,
+                node_ids,
+                tenant_id=tenant_id,
+            )
+
+        async def reject_full_state(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("results() must not load full graph state")
+
+        monkeypatch.setattr(repository, "get_node_states", get_node_states)
+        monkeypatch.setattr(repository, "graph_state", reject_full_state)
+
+        first = await run.results(limit=2)
+        assert first.next_cursor is not None
+        assert [item.node_id for item in first.items] == ["node-a", "node-b"]
+        assert all(item.output is None and not item.content_included for item in first.items)
+
+        second = await run.results(cursor=first.next_cursor, limit=2)
+        assert second.next_cursor is None
+        assert [item.node_id for item in second.items] == ["node-c"]
+        assert page_reads == [("node-a", "node-b"), ("node-c",)]
+
+        content_page = await run.results(limit=1, include_content=True)
+        assert content_page.items[0].output is None
+        assert content_page.items[0].content_included is True
+        assert page_reads[-1] == ("node-a",)
+
+
+@pytest.mark.asyncio
+async def test_agent_task_thinking_false_and_none_resolve_before_model_calls() -> None:
+    application = CapabilityGroup[None]("thinking-agent")
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+        thinking="high",
+    )
+    state = RuntimeStorage.in_memory()
+    async with Runtime.open(
+        "agent-task-thinking",
+        models=_ThinkingTaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(application,),
+    ) as runtime:
+        task = runtime.tasks.from_agent("example.thinking-worker", runtime.agents.get())
+        graph = TaskGraph(
+            "agent-task-thinking-graph",
+            (
+                TaskNode(
+                    "explicit-false",
+                    task=task,
+                    input=AgentTaskInput("false request", thinking=False),
+                ),
+                TaskNode(
+                    "default-thinking",
+                    task=task,
+                    input=AgentTaskInput("default request"),
+                ),
+            ),
+        )
+        run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key="agent-task-thinking-run-0001",
+        )
+        result = await run.wait(timeout_seconds=10)
+
+        assert result.status is TaskStatus.SUCCEEDED, result.node_results
+        state_view = await run.state(include_content=True)
+        inputs = {node.node_id: node.input for node in state_view.nodes}
+        assert inputs["explicit-false"]["thinking"] is False
+        assert inputs["default-thinking"]["thinking"] == "high"
+
+        for node_id, expected in (("explicit-false", False), ("default-thinking", "high")):
+            node_result = next(item for item in result.node_results if item.node_id == node_id)
+            assert node_result.execution_id is not None
+            execution = await state.execution.executions.get(
+                node_result.execution_id,
+                tenant_id=runtime.tenant_id,
+            )
+            assert execution.thinking == expected
+            interactions = await runtime.history.model_interactions(
+                node_result.execution_id,
+                principal=runtime.default_principal,
+                include_content=True,
+                limit=10,
+            )
+            assert len(interactions.items) == 1
+            assert interactions.items[0].status == "SUCCEEDED"
 
 
 @pytest.mark.asyncio
@@ -825,6 +1286,7 @@ async def test_projected_agent_input_persists_only_declared_source_and_final_inp
                     input=AgentTaskInput(
                         "base prompt",
                         parameters={"request": "review"},
+                        thinking=False,
                     ),
                 ),
             ),
@@ -859,6 +1321,16 @@ async def test_projected_agent_input_persists_only_declared_source_and_final_inp
             consumer_result.execution_id,
             tenant_id=runtime.tenant_id,
         )
+        persisted_graph = await state.task.tasks.graph_state(
+            graph.graph_id,
+            tenant_id=runtime.tenant_id,
+        )
+        assert persisted_graph is not None
+        persisted_consumer = next(
+            node for node in persisted_graph.nodes if node.node_id == "consumer"
+        )
+        assert persisted_consumer.input["thinking"] is False
+        assert execution.thinking is False
         assert execution.stored_user_input is not None
         assert execution.stored_user_input.codec == "text"
         assert execution.stored_user_input.payload.decode() == "base prompt: accepted"
@@ -2127,21 +2599,6 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
 
         replay = await run.resume("input", request)
         assert replay.status is TaskStatus.SUCCEEDED
-
-        same = await runtime.executions.supply_task_input(
-            node_result.execution_id,
-            principal=runtime.default_principal,
-            value=None,
-        )
-        assert same.status.value == "SUCCEEDED"
-
-        with pytest.raises(AIError) as raised:
-            await runtime.executions.supply_task_input(
-                node_result.execution_id,
-                principal=runtime.default_principal,
-                value={"different": True},
-            )
-        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
 
 
 class _BindingRunner:

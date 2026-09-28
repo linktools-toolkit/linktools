@@ -1,96 +1,113 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Cancellation contracts for Task-to-Execution handoff ownership."""
+"""Cancellation behavior for Runtime-owned Agent Task runners."""
 
 import asyncio
-from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.runtime._planner import _AgentTaskNodeHandler
+from linktools.ai.agent import AgentBindingContract
+from linktools.ai.core import Principal
+from linktools.ai.runtime._agent_task import RuntimeAgentTaskRunner
+from linktools.ai.runtime._agent_task_input import AgentTaskInput
+from linktools.ai.spec import AgentSpec
+from linktools.ai.task import TaskNode, TaskNodeInvocation
 
 
 @pytest.mark.asyncio
-async def test_cancelled_handoff_continuation_releases_start_hold_after_commit() -> None:
-    released: list[tuple[str, str, str]] = []
+async def test_cancelled_wait_leaves_handed_off_execution_for_graph_recovery() -> None:
+    class Execution:
+        def __init__(self) -> None:
+            self.wait_started = asyncio.Event()
+            self.wait_cancelled = asyncio.Event()
+            self.cancel_called = False
+            self.execution_id = "execution"
 
-    async def release_hold(
-        execution_id: str,
-        *,
-        tenant_id: str,
-        hold_id: str,
-    ) -> None:
-        released.append((execution_id, tenant_id, hold_id))
+        async def wait(self) -> object:
+            self.wait_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.wait_cancelled.set()
+                raise
 
-    handler = _AgentTaskNodeHandler(
-        object(),
-        object(),
-        object(),
-        release_dependency_hold=release_hold,
-    )
-    entered = asyncio.Event()
-    finish = asyncio.Event()
+        async def cancel(self) -> None:
+            self.cancel_called = True
 
     class Control:
-        async def handoff_execution(self, execution_id: str) -> None:
-            assert execution_id == "execution"
-            entered.set()
-            await finish.wait()
+        def __init__(self) -> None:
+            self.execution_id: str | None = None
+            self.handed_off: list[str] = []
 
-    caller = asyncio.create_task(
-        handler._handoff_execution(
-            Control(),
-            "execution",
-            key=("tenant", "graph", "node"),
-        )
+        async def bind_execution(self, execution_id: str) -> None:
+            self.execution_id = execution_id
+
+        async def handoff_execution(
+            self,
+            execution_id: str,
+            *,
+            occupies_concurrency: bool = True,
+        ) -> None:
+            assert occupies_concurrency is True
+            self.handed_off.append(execution_id)
+
+    async def unused(*args: object, **kwargs: object) -> object:
+        raise AssertionError("literal Agent Task does not use this callback")
+
+    execution = Execution()
+
+    async def start_execution(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        return execution
+
+    binding = AgentBindingContract(
+        agent_spec=AgentSpec("agent", model="model"),
+        model_contract={"route_id": "model", "model_identity": "test:model"},
+        selected=(),
+        subagents=(),
+        output_mode="text",
+        output_schema={},
     )
-    await entered.wait()
-    caller.cancel()
+    runner = RuntimeAgentTaskRunner(
+        id="agent-task",
+        revision=1,
+        runtime_owner=object(),
+        agent_id="agent",
+        agent_revision=1,
+        input_mode="literal",
+        planning_default=False,
+        thinking_default=False,
+        binding_contract=binding.to_payload(),
+        build_input=None,
+        start_execution=start_execution,
+        get_execution=unused,
+        result_reader=unused,
+        result_ref_reader=unused,
+        get_prepared_input=unused,
+        publish_prepared_input=unused,
+        store_prepared_prompt=unused,
+        restore_prepared_prompt=unused,
+    )
+    invocation = TaskNodeInvocation(
+        node=TaskNode(
+            "node",
+            input=dict(AgentTaskInput("prompt", planning=False, thinking=False)),
+        ),
+        graph_id="graph",
+        principal=Principal("principal", "tenant", "service"),
+        correlation={},
+        dependency_results={},
+    )
+    control = Control()
+    running = asyncio.create_task(runner.run(invocation, control=control))
+
+    await asyncio.wait_for(execution.wait_started.wait(), 1)
+    assert control.execution_id == "execution"
+    assert control.handed_off == ["execution"]
+
+    running.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await caller
+        await running
 
-    finish.set()
-    pending = handler.pending_background_tasks
-    assert pending
-    await asyncio.gather(*pending)
-
-    assert released == [("execution", "tenant", "task:graph:node")]
-    assert handler.background_failure is None
-
-
-@pytest.mark.asyncio
-async def test_cancelled_launch_continuation_releases_start_hold_after_handoff() -> None:
-    released: list[tuple[str, str, str]] = []
-    handed_off: list[str] = []
-
-    async def release_hold(
-        execution_id: str,
-        *,
-        tenant_id: str,
-        hold_id: str,
-    ) -> None:
-        released.append((execution_id, tenant_id, hold_id))
-
-    handler = _AgentTaskNodeHandler(
-        object(),
-        object(),
-        object(),
-        release_dependency_hold=release_hold,
-    )
-
-    async def launched() -> object:
-        return SimpleNamespace(execution_id="execution")
-
-    class Control:
-        async def handoff_execution(self, execution_id: str) -> None:
-            handed_off.append(execution_id)
-
-    await handler._handoff_after_launch(
-        asyncio.create_task(launched()),
-        ("tenant", "graph", "node"),
-        Control(),
-    )
-
-    assert handed_off == ["execution"]
-    assert released == [("execution", "tenant", "task:graph:node")]
-    assert handler.background_failure is None
+    assert execution.wait_cancelled.is_set()
+    assert not execution.cancel_called

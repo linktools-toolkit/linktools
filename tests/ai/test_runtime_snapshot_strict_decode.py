@@ -148,44 +148,49 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
     ("format_version", "corruption", "expected_code"),
     (
         (
-            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION + 1,
+            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION + 1,
             "valid",
             ErrorCode.STORAGE_VERSION_UNSUPPORTED,
         ),
         (True, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (2.0, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (
-            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "missing_array",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "wrong_kind",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+            "unexpected_field",
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ),
+        (
+            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "invalid_task",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "invalid_schema",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "duplicate_task",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "duplicate_expander",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
         (
-            runtime_storage_codec.TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+            runtime_storage_codec.TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
             "invalid_expander",
             ErrorCode.STORAGE_INTEGRITY_ERROR,
         ),
@@ -239,13 +244,13 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
         "tenant_id": "tenant",
         "graph_id": "graph",
         "request_digest": "a" * 64,
-        "roots": {},
-        "bindings": {},
         "tasks": task_declarations,
         "expanders": expander_declarations,
     }
     if corruption == "missing_array":
         del manifest["expanders"]
+    elif corruption == "unexpected_field":
+        manifest["roots"] = {}
     payload = canonical_json_bytes(manifest)
     reference = ObjectRef(
         "runtime",

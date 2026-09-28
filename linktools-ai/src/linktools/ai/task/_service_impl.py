@@ -43,6 +43,7 @@ from ._graph import (
     TaskGraphView,
     TaskInputSupplyRequest,
     TaskNode,
+    TaskNodeInfo,
     TaskNodeResult,
     TaskNodeView,
 )
@@ -149,6 +150,21 @@ class _TaskRepository(Protocol):
         *,
         tenant_id: str,
     ) -> TaskGraphState | None: ...
+
+    async def result_header(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[TaskGraph, int] | None: ...
+
+    async def get_node_states(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> tuple[TaskNodeView, ...]: ...
 
     async def list_events(
         self,
@@ -498,17 +514,7 @@ class DefaultTaskGraphService(TaskGraphService):
         request: RecoverGraphRequest,
     ) -> TaskGraphResult:
         tenant_id = request.principal.tenant_id
-        header = await self._persistence.tasks.get_header(
-            graph_id,
-            tenant_id=tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            request.principal,
-            AuthorizationAction.TASK_RUN,
-            header,
-        )
+        await self.authorize_recovery(graph_id, principal=request.principal)
         initial = await self._persistence.tasks.get_graph(
             graph_id,
             tenant_id=tenant_id,
@@ -586,8 +592,13 @@ class DefaultTaskGraphService(TaskGraphService):
                 graph_id,
                 tenant_id=tenant_id,
             )
-            if admission is None:
+            if (
+                admission is None
+                or admission.graph_id != graph_id
+                or admission.principal.tenant_id != tenant_id
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            launch = admission.launch()
             state = await self._persistence.tasks.scheduler_state(
                 graph_id,
                 tenant_id=tenant_id,
@@ -597,7 +608,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 self._preflight.validate_recovery(state)
                 await self._preflight.prepare_graph(
                     state,
-                    principal=request.principal,
+                    principal=launch.principal,
                 )
             await self._arm_graph(admission.launch())
 
@@ -616,6 +627,67 @@ class DefaultTaskGraphService(TaskGraphService):
             view.status.value,
         )
         return await self._result(view, tenant_id)
+
+    async def authorize_recovery(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> None:
+        header = await self._persistence.tasks.get_header(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            principal,
+            AuthorizationAction.TASK_RUN,
+            header,
+        )
+
+    async def recovery_nodes(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[TaskNodeInfo, ...]:
+        await self.authorize_recovery(graph_id, principal=principal)
+        state = await self._persistence.tasks.graph_state(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if state is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return tuple(TaskNodeInfo.from_node(node) for node in state.nodes)
+
+    async def preflight_recovery(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> None:
+        await self.authorize_recovery(graph_id, principal=principal)
+        if self._preflight is None:
+            return
+        admission = await self._persistence.admissions.get(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if (
+            admission is None
+            or admission.graph_id != graph_id
+            or admission.principal.tenant_id != principal.tenant_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._preflight.load_admission(admission)
+        state = await self._persistence.tasks.graph_state(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if state is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._preflight.validate_recovery(state)
 
     async def resume(
         self,
@@ -1155,6 +1227,58 @@ class DefaultTaskGraphService(TaskGraphService):
         if state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return state
+
+    async def result_header(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[TaskGraph, int]:
+        resource = await self._persistence.tasks.get_header(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if resource is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            principal,
+            AuthorizationAction.TASK_READ,
+            resource,
+        )
+        result_header = await self._persistence.tasks.result_header(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if result_header is None or result_header[0].graph_id != graph_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result_header
+
+    async def result_node_states(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        principal: Principal,
+    ) -> tuple[TaskNodeView, ...]:
+        resource = await self._persistence.tasks.get_header(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if resource is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            principal,
+            AuthorizationAction.TASK_READ,
+            resource,
+        )
+        states = await self._persistence.tasks.get_node_states(
+            graph_id,
+            node_ids,
+            tenant_id=principal.tenant_id,
+        )
+        if tuple(state.node_id for state in states) != node_ids:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return states
 
     async def list_events(
         self,

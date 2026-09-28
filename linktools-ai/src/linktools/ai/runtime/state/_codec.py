@@ -133,9 +133,10 @@ from ._contracts import (
     TranscriptSeekRecord,
     TranscriptSpanRef,
 )
-from ._task_capability_capture import (
-    TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
-    read_task_capability_capture_declarations,
+from ._task_graph_binding_capture import (
+    TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+    TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS,
+    read_task_graph_binding_capture_declarations,
 )
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._step_contracts import (
@@ -1764,20 +1765,28 @@ def iter_runtime_object_dependencies(
             or format_version < 1
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if format_version != TASK_CAPABILITY_CAPTURE_FORMAT_VERSION:
+        if format_version != TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if (
-            manifest.get("kind") != "task-definition-capture"
-            or not isinstance(manifest.get("roots"), Mapping)
-            or not isinstance(manifest.get("bindings"), Mapping)
+            set(manifest) != TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS
+            or manifest.get("kind") != "task-definition-capture"
+            or not isinstance(manifest.get("namespace"), str)
+            or not manifest.get("namespace")
+            or not isinstance(manifest.get("tenant_id"), str)
+            or not manifest.get("tenant_id")
+            or not isinstance(manifest.get("graph_id"), str)
+            or not manifest.get("graph_id")
+            or not isinstance(manifest.get("request_digest"), str)
+            or len(manifest.get("request_digest", "")) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in manifest.get("request_digest", "")
+            )
             or not isinstance(manifest.get("tasks"), list)
             or not isinstance(manifest.get("expanders"), list)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for values in (manifest["roots"], manifest["bindings"]):
-            for raw in cast("Mapping[object, object]", values).values():
-                AgentBindingContract.from_payload(raw)
-        read_task_capability_capture_declarations(
+        read_task_graph_binding_capture_declarations(
             manifest["tasks"],
             manifest["expanders"],
         )

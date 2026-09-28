@@ -38,6 +38,7 @@ from .service_api import (
     StartEvaluationRequest,
     TranscriptItem,
     UsageReadCutoff,
+    _ExecutionStreamFailure,
 )
 
 if TYPE_CHECKING:
@@ -117,23 +118,26 @@ class Execution(Generic[AppT]):
         include_content: bool,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         sequences = dict(after_sequences or {})
-        async for event in stream:
-            durable_sequence = event.event.durable_sequence
-            if durable_sequence is not None:
-                previous = sequences.get(event.execution_id, 0)
-                if durable_sequence <= previous:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                sequences[event.execution_id] = durable_sequence
-            yield replace(
-                event,
-                cursor=encode_execution_watch_cursor(
-                    self._runtime.namespace,
-                    self._principal.tenant_id,
-                    self.execution_id,
-                    include_content=include_content,
-                    sequences=sequences,
-                ),
-            )
+        try:
+            async for event in stream:
+                durable_sequence = event.event.durable_sequence
+                if durable_sequence is not None:
+                    previous = sequences.get(event.execution_id, 0)
+                    if durable_sequence <= previous:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    sequences[event.execution_id] = durable_sequence
+                yield replace(
+                    event,
+                    cursor=encode_execution_watch_cursor(
+                        self._runtime.namespace,
+                        self._principal.tenant_id,
+                        self.execution_id,
+                        include_content=include_content,
+                        sequences=sequences,
+                    ),
+                )
+        except _ExecutionStreamFailure as failure:
+            raise failure.cause from failure
 
     async def cancel(
         self,
