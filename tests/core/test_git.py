@@ -4,12 +4,13 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from dulwich import porcelain
 from dulwich.errors import NotGitRepository
 from dulwich.repo import Repo as DulwichRepo
 
-from linktools.errors import GitError
+from linktools.errors import GitDivergedError, GitError
 from linktools.git import GitRepository, GitSyncPolicy
 from linktools.core import environ
 
@@ -215,6 +216,29 @@ class TestGit(unittest.TestCase):
 
         self.assertEqual(self._read(self.clone_path, "b.txt"), "world")
 
+    def test_sync_shallow_false_divergence_recovers(self) -> None:
+        GitRepository.clone(environ, self.remote_path, self.clone_path)
+        repo = GitRepository(environ, self.clone_path)
+        self.addCleanup(repo.close)
+
+        self.assertTrue(repo._repo.get_shallow())
+        self._commit(self.remote_path, "b.txt", "world", "second")
+        original_pull = porcelain.pull
+        attempts = []
+
+        def pull_with_false_divergence(*args, **kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise porcelain.DivergedBranches(b"local", b"remote")
+            return original_pull(*args, **kwargs)
+
+        with mock.patch("linktools.git._repository.porcelain.pull", side_effect=pull_with_false_divergence):
+            repo.sync(policy=GitSyncPolicy.STASH_AND_RESTORE)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self._read(self.clone_path, "b.txt"), "world")
+        self.assertFalse(repo._repo.get_shallow())
+
     def test_sync_stash_and_restore_policy(self):
         GitRepository.clone(environ, self.remote_path, self.clone_path)
         repo = GitRepository(environ, self.clone_path)
@@ -239,8 +263,10 @@ class TestGit(unittest.TestCase):
         self._commit(self.remote_path, "b.txt", "remote change", "remote second")
         self._commit(self.clone_path, "c.txt", "local change", "local second")
 
-        with self.assertRaises(GitError):
+        local_head = repo.head_sha()
+        with self.assertRaises(GitDivergedError):
             repo.sync(policy=GitSyncPolicy.FAST_FORWARD_ONLY)
+        self.assertEqual(repo.head_sha(), local_head)
 
     def test_create_head_from_remote_branch(self):
         porcelain.branch_create(self.remote_path, "feature")

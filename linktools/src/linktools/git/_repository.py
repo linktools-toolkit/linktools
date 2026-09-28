@@ -45,6 +45,7 @@ dulwich_version = ".".join(str(part) for part in _dulwich_version_tuple)
 # them once at import time instead of re-inspecting on every call.
 _COMMIT_SUPPORTS_ALL = "all" in inspect.signature(porcelain.commit).parameters
 _FETCH_SUPPORTS_QUIET = "quiet" in inspect.signature(porcelain.fetch).parameters
+_FETCH_SUPPORTS_UNSHALLOW = "unshallow" in inspect.signature(porcelain.fetch).parameters
 _STASH_POP_REQUIRES_INDEX = "index" in inspect.signature(porcelain.stash_pop).parameters
 
 
@@ -330,21 +331,40 @@ class GitRepository(object):
     def _fast_forward(self):
         branch_ref = self._current_branch_ref()
         with create_progress("message") as progress:
-            try:
-                with self._wrap_protocol_errors():
-                    porcelain.pull(
-                        self._path,
-                        refspecs=branch_ref,
-                        errstream=GitProgressStream(progress),
-                    )
-            except porcelain.DivergedBranches:
-                raise GitDivergedError(
-                    "Local branch has diverged from the remote and cannot be fast-forwarded."
-                )
+            for attempt in range(2):
+                try:
+                    with self._wrap_protocol_errors():
+                        porcelain.pull(
+                            self._path,
+                            refspecs=branch_ref,
+                            errstream=GitProgressStream(progress),
+                        )
+                    return
+                except porcelain.DivergedBranches:
+                    if attempt or not self._repo.get_shallow():
+                        raise GitDivergedError(
+                            "Local branch has diverged from the remote and cannot be fast-forwarded."
+                        ) from None
+                    _logger.info("Fetch full history for shallow repository `%s` to verify fast-forward", self._path)
+                    self._unshallow(progress)
+
+    def _unshallow(self, progress) -> None:
+        # A depth-one clone can be a real ancestor of the remote while
+        # Dulwich's pull cannot prove it from its incomplete history.
+        # Older Dulwich versions use a maximal depth in place of unshallow.
+        kwargs = {"unshallow": True} if _FETCH_SUPPORTS_UNSHALLOW else {"depth": 2147483647}
+        if _FETCH_SUPPORTS_QUIET:
+            kwargs["quiet"] = True
+        with self._wrap_protocol_errors():
+            porcelain.fetch(
+                self._path,
+                errstream=GitProgressStream(progress),
+                **kwargs,
+            )
 
     def _force_update(self):
-        # These repos are shallow (depth=1) clones, so dulwich cannot merge or
-        # rebase a diverged branch. Fetch remote objects and hard-reset.
+        # Shallow clones may have no merge base, so reset directly to the
+        # fetched remote revision without attempting a merge or rebase.
         branch_ref = self._current_branch_ref()
         with create_progress("message") as progress, self._wrap_protocol_errors():
             result = porcelain.fetch(
