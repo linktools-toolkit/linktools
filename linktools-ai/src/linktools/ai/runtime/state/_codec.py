@@ -131,6 +131,10 @@ from ._contracts import (
     TranscriptSeekRecord,
     TranscriptSpanRef,
 )
+from ._task_capability_capture import (
+    TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
+    read_task_capability_capture_declarations,
+)
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._step_contracts import (
     AgentRunRecord,
@@ -1688,16 +1692,30 @@ def iter_runtime_object_dependencies(
         return
 
     if reference.key.startswith("v1/task-capability-capture/"):
+        format_version = manifest.get("format_version")
+        if (
+            isinstance(format_version, bool)
+            or not isinstance(format_version, int)
+            or format_version < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if format_version != TASK_CAPABILITY_CAPTURE_FORMAT_VERSION:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if (
             manifest.get("kind") != "task-capability-capture"
-            or manifest.get("format_version") != 1
             or not isinstance(manifest.get("roots"), Mapping)
             or not isinstance(manifest.get("bindings"), Mapping)
+            or not isinstance(manifest.get("tasks"), list)
+            or not isinstance(manifest.get("expanders"), list)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for values in (manifest["roots"], manifest["bindings"]):
             for raw in cast("Mapping[object, object]", values).values():
                 AgentBindingContract.from_payload(raw)
+        read_task_capability_capture_declarations(
+            manifest["tasks"],
+            manifest["expanders"],
+        )
         return
 
     return

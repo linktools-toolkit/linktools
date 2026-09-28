@@ -23,6 +23,7 @@ from linktools.ai.runtime import RuntimeSnapshot, RuntimeStorage
 from linktools.ai.runtime import _snapshot as runtime_snapshot_module
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
 from linktools.ai.runtime.state import _root as runtime_storage_root_module
+from linktools.ai.runtime.state import _codec as runtime_storage_codec
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
     encode_envelope,
@@ -141,6 +142,95 @@ async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
             limits=limits,
         )
     assert runtime_error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("format_version", "corruption", "expected_code"),
+    (
+        (2, "valid", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        (True, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1.0, "valid", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_schema", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "duplicate_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
+    ),
+)
+def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
+    format_version: object,
+    corruption: str,
+    expected_code: ErrorCode,
+) -> None:
+    task_declaration: dict[str, object] = {
+        "version": 1,
+        "id": "test.capture",
+        "revision": 1,
+        "effect_policy": "none",
+        "output_contract": {"kind": "json"},
+        "reconcile": False,
+    }
+    expander_declaration: dict[str, object] = {
+        "version": 1,
+        "id": "test.expander",
+        "revision": 1,
+    }
+    task_declarations: list[dict[str, object]] = [task_declaration]
+    if corruption == "duplicate_task":
+        task_declarations = [task_declaration, task_declaration]
+    elif corruption == "invalid_task":
+        task_declarations = [{**task_declaration, "effect_policy": []}]
+    elif corruption == "invalid_schema":
+        task_declarations = [
+            {
+                **task_declaration,
+                "output_contract": {
+                    "kind": "schema",
+                    "schema": {"type": 42},
+                },
+            }
+        ]
+    expander_declarations: list[dict[str, object]] = []
+    if corruption == "duplicate_expander":
+        expander_declarations = [expander_declaration, expander_declaration]
+    elif corruption == "invalid_expander":
+        expander_declarations = [
+            {**expander_declaration, "version": 1.0}
+        ]
+    manifest: dict[str, object] = {
+        "kind": (
+            "invalid-kind"
+            if corruption == "wrong_kind"
+            else "task-capability-capture"
+        ),
+        "format_version": format_version,
+        "roots": {},
+        "bindings": {},
+        "tasks": task_declarations,
+        "expanders": expander_declarations,
+    }
+    if corruption == "missing_array":
+        del manifest["expanders"]
+    payload = canonical_json_bytes(manifest)
+    reference = ObjectRef(
+        "runtime",
+        "v1/task-capability-capture/capture",
+        "a" * 64,
+        len(payload),
+    )
+
+    with pytest.raises(AIError) as raised:
+        tuple(
+            runtime_storage_codec.iter_runtime_object_dependencies(
+                reference,
+                payload,
+                default_domain=RuntimeDomain.TASK,
+            )
+        )
+
+    assert raised.value.code is expected_code
 
 
 @pytest.mark.asyncio

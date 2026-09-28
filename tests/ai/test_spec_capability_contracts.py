@@ -766,6 +766,45 @@ def test_mcp_execution_resource_contract_rejects_missing_versions() -> None:
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+@pytest.mark.parametrize("field", ("resource_versions", "asset_source_id"))
+def test_mcp_binding_rejects_resource_fields_without_a_resource(
+    field: str,
+) -> None:
+    codec = MCPServerSpecCodec()
+    server = MCPServerSpec("server", "command")
+    payload = codec.to_contract_payload(server)
+    if field == "resource_versions":
+        payload[field] = []
+    else:
+        payload[field] = None
+
+    with pytest.raises(AIError) as error:
+        codec.decode_binding_payload(payload, declaration=server)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize("field", ("resource_versions", "asset_source_id"))
+def test_mcp_resource_binding_requires_both_source_and_versions(
+    field: str,
+) -> None:
+    codec = MCPServerSpecCodec()
+    server = MCPServerSpec(
+        "server",
+        "python",
+        ("resource:script.py",),
+        AssetKey("mcp", "server"),
+    )
+    payload = codec.to_contract_payload(server)
+    if field == "resource_versions":
+        payload[field] = []
+    else:
+        payload[field] = "application"
+
+    with pytest.raises(AIError) as error:
+        codec.decode_binding_payload(payload, declaration=server)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
     codec = MCPServerSpecCodec()
     server = MCPServerSpec(

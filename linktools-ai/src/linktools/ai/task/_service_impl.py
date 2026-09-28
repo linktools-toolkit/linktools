@@ -367,6 +367,8 @@ class DefaultTaskGraphService(TaskGraphService):
             graph_id,
             tenant_id=tenant_id,
         )
+        if self._preflight is not None:
+            self._preflight.validate_recovery(state)
         if _terminal(view.status):
             await self._observe_metric_history(state, tenant_id=tenant_id)
         else:

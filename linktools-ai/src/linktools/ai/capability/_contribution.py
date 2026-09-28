@@ -60,19 +60,13 @@ _RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
 @dataclass(frozen=True, slots=True)
 class _TaskHandlerAdapter(Generic[AppT]):
     handler: TaskNodeHandler[AppT]
+    id: str
+    revision: int
     effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
     output_type: "type[BaseModel] | None"
     reconcile: (
         Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None
     ) = field(default=None, repr=False, compare=False)
-
-    @property
-    def id(self) -> str:
-        return self.handler.id
-
-    @property
-    def revision(self) -> int:
-        return self.handler.revision
 
     def normalize(
         self,
@@ -228,13 +222,15 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if reconcile is not None and not callable(reconcile):
             raise TypeError("reconcile must be callable")
+        identity, task_revision = _task_identity(value)
         adapted = _TaskHandlerAdapter(
             value,
+            identity,
+            task_revision,
             effect_policy,
             output_type,
             reconcile,
         )
-        identity, _revision = _task_identity(adapted)
         return _ContractContribution(
             "task",
             identity,

@@ -545,8 +545,9 @@ def _decode_mcp_binding_contract(
         semantic["resource"] = {"kind": resource.kind, "id": resource.id}
 
     resource_versions: tuple[AssetVersionRef, ...] | None = None
+    has_resource_versions = "resource_versions" in raw
     raw_versions = raw.get("resource_versions")
-    if raw_versions is not None:
+    if has_resource_versions:
         if not isinstance(raw_versions, list):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
@@ -559,9 +560,14 @@ def _decode_mcp_binding_contract(
         resource_versions = tuple(sorted(parsed, key=lambda item: (item.key.kind, item.key.id)))
     asset_source_id = raw.get("asset_source_id")
     if resource is None:
-        if resource_versions is not None or asset_source_id is not None:
+        if has_resource_versions or "asset_source_id" in raw:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    elif resource_versions is None or not isinstance(asset_source_id, str) or not asset_source_id:
+    elif (
+        not has_resource_versions
+        or resource_versions is None
+        or not isinstance(asset_source_id, str)
+        or not asset_source_id
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if "execution_policy" in raw:
         _execution_policy_payload(raw["execution_policy"])

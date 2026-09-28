@@ -22,7 +22,7 @@ from ..agent import (
     bind_output,
     restore_output,
 )
-from ..capability import TaskExpander, TaskExpansionContext
+from ..capability import CapabilityContribution, TaskExpander, TaskExpansionContext
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -80,6 +80,7 @@ from ._object import RuntimeObjectKeyFactory
 from ._task_capability_capture import (
     TaskCapabilityCapture,
     TaskCapabilityCaptureStore,
+    builtin_task_declaration,
 )
 from .service_api import ExecutionService, SessionService
 from .state import ArtifactRecord, ArtifactRepositories, RuntimeDomain
@@ -87,7 +88,6 @@ from .state import ArtifactRecord, ArtifactRepositories, RuntimeDomain
 _logger = environ.get_logger("ai.runtime.planner")
 AppT = TypeVar("AppT")
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
-_RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
 _DEFERRED_INPUT_ID = "linktools.ai.input"
 _DEFERRED_INPUT_REVISION = 1
 
@@ -323,8 +323,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         artifact_objects: ObjectStore | None = None,
         object_key_factory: RuntimeObjectKeyFactory,
         capability_captures: TaskCapabilityCaptureStore,
-        handlers: Sequence[TaskNodeHandler[AppT]] = (),
-        expanders: Sequence[TaskExpander] = (),
+        task_contributions: Sequence[CapabilityContribution[AppT]] = (),
+        expander_contributions: Sequence[CapabilityContribution[AppT]] = (),
         release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
         task_durable: bool = False,
         execution_durable: bool = True,
@@ -356,20 +356,30 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             input_materializer=input_materializer,
         )
         self._deferred_input = _DeferredInputHandler()
-        values: dict[tuple[str, int], TaskNodeHandler[AppT]] = {}
-        for handler in handlers:
-            key = _external_handler_identity(handler)
-            if key in values:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            values[key] = handler
-        self._handlers = MappingProxyType(values)
-        expander_values: dict[tuple[str, int], TaskExpander] = {}
-        for expander in expanders:
-            key = _external_expander_identity(expander)
-            if key in expander_values:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            expander_values[key] = expander
-        self._expanders = MappingProxyType(expander_values)
+        self._task_contributions = MappingProxyType(
+            {
+                (contribution.id, contribution.revision): contribution
+                for contribution in task_contributions
+            }
+        )
+        self._handlers = MappingProxyType(
+            {
+                identity: cast("TaskNodeHandler[AppT]", contribution.value)
+                for identity, contribution in self._task_contributions.items()
+            }
+        )
+        self._expander_contributions = MappingProxyType(
+            {
+                (contribution.id, contribution.revision): contribution
+                for contribution in expander_contributions
+            }
+        )
+        self._expanders = MappingProxyType(
+            {
+                identity: cast("TaskExpander", contribution.value)
+                for identity, contribution in self._expander_contributions.items()
+            }
+        )
         self._task_durable = task_durable
         self._execution_durable = execution_durable
         self._recovery_durable = recovery_durable
@@ -401,6 +411,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         capability_capture = await self._capability_capture_store.capture(
             admission,
             graph,
+            task_contributions=tuple(self._task_contributions.values()),
+            expander_contributions=tuple(
+                self._expander_contributions.values()
+            ),
         )
         self._admitted_capabilities[admission.graph_id] = capability_capture
         return TaskGraph(
@@ -470,6 +484,85 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 },
             )
         return capability_capture
+
+    def _validate_task_declaration(
+        self,
+        task_id: str,
+        task_revision: int,
+        *,
+        graph_id: str,
+    ) -> Mapping[str, JsonValue]:
+        identity = (task_id, task_revision)
+        capture = self._require_capability_capture(graph_id)
+        declared = capture.tasks.get(identity)
+        contribution = self._task_contributions.get(identity)
+        current = (
+            contribution.contract
+            if contribution is not None
+            else builtin_task_declaration(task_id, task_revision)
+        )
+        if declared is None or current is None:
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={
+                    "kind": "task",
+                    "task_id": task_id,
+                    "task_revision": task_revision,
+                    "graph_id": graph_id,
+                },
+            )
+        if dict(declared) != current:
+            reason = "task_declaration_changed"
+            if declared.get("effect_policy") != current.get("effect_policy"):
+                reason = "task_effect_changed"
+            elif declared.get("output_contract") != current.get("output_contract"):
+                reason = "task_output_contract_changed"
+            elif declared.get("reconcile") != current.get("reconcile"):
+                reason = "task_reconcile_changed"
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                safe_details={
+                    "kind": "task",
+                    "task_id": task_id,
+                    "task_revision": task_revision,
+                    "graph_id": graph_id,
+                    "reason": reason,
+                },
+            )
+        return declared
+
+    def _validate_expander_declaration(
+        self,
+        reference: TaskExpanderRef,
+        *,
+        graph_id: str,
+    ) -> Mapping[str, JsonValue]:
+        identity = (reference.id, reference.revision)
+        capture = self._require_capability_capture(graph_id)
+        declared = capture.expanders.get(identity)
+        contribution = self._expander_contributions.get(identity)
+        if declared is None or contribution is None:
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={
+                    "kind": "task_expander",
+                    "expander_id": reference.id,
+                    "expander_revision": reference.revision,
+                    "graph_id": graph_id,
+                },
+            )
+        if dict(declared) != contribution.contract:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                safe_details={
+                    "kind": "task_expander",
+                    "expander_id": reference.id,
+                    "expander_revision": reference.revision,
+                    "graph_id": graph_id,
+                    "reason": "task_expander_declaration_changed",
+                },
+            )
+        return declared
 
     def _resolved_agent_binding(
         self,
@@ -859,7 +952,16 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         "node_id": node.node_id,
                     },
                 ) from error
+            task_declaration = self._validate_task_declaration(
+                task_id,
+                task_revision,
+                graph_id=graph_state.graph_id,
+            )
             if node.expander is not None:
+                self._validate_expander_declaration(
+                    node.expander,
+                    graph_id=graph_state.graph_id,
+                )
                 self._resolve_expander(node.expander, request=False)
             if node.effect_policy != _handler_effect_policy(handler):
                 raise AIError(
@@ -870,9 +972,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         "reason": "task_effect_changed",
                     },
                 )
-            if node.output_contract != _output_contract(
-                handler,
-                None,
+            declared_output = task_declaration["output_contract"]
+            if (
+                isinstance(declared_output, Mapping)
+                and declared_output.get("kind") == "schema"
+                and node.output_contract != _output_contract(handler, None)
             ):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
@@ -882,6 +986,22 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         "reason": "task_output_contract_changed",
                     },
                 )
+            if (
+                isinstance(declared_output, Mapping)
+                and declared_output.get("kind") == "json"
+                and node.output_contract is not None
+            ):
+                try:
+                    _restore_output_contract(node.output_contract)
+                except AIError as error:
+                    raise AIError(
+                        ErrorCode.STORAGE_INTEGRITY_ERROR,
+                        safe_details={
+                            "graph_id": graph_state.graph_id,
+                            "node_id": node.node_id,
+                            "reason": "task_node_output_contract_invalid",
+                        },
+                    ) from error
             if node.reconcile != (
                 getattr(handler, "reconcile", None) is not None
             ):
@@ -1889,6 +2009,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
     ) -> tuple[TaskNode, ...]:
         if source_node.expander is None:
             return ()
+        self._validate_expander_declaration(
+            source_node.expander,
+            graph_id=graph_id,
+        )
         expander = self._resolve_expander(source_node.expander, request=False)
         context_impl = _TaskExpansionContext(
             principal,
@@ -1953,6 +2077,28 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         reason="agent_task_builder_required",
                         conflict=raw_node.node_id,
                     )
+            try:
+                task_id, task_revision, _body = _parse_node(
+                    raw_node,
+                    request=True,
+                )
+            except AIError as error:
+                raise _expansion_error(
+                    graph_id,
+                    source_node.node_id,
+                    reason="node_admission_invalid",
+                    conflict=raw_node.node_id,
+                ) from error
+            self._validate_task_declaration(
+                task_id,
+                task_revision,
+                graph_id=graph_id,
+            )
+            if raw_node.expander is not None:
+                self._validate_expander_declaration(
+                    raw_node.expander,
+                    graph_id=graph_id,
+                )
             try:
                 admitted = self.admit_node(raw_node)
                 self._validate_durability(
@@ -2197,31 +2343,6 @@ def _parse_node(
         if key not in {"task_id", "task_revision"}
     }
     return task_id, task_revision, body
-
-
-def _external_handler_identity(handler: TaskNodeHandler[object]) -> tuple[str, int]:
-    task_id = handler.id
-    task_revision = handler.revision
-    if (
-        not isinstance(task_id, str)
-        or _TASK_ID.fullmatch(task_id) is None
-        or task_id.startswith("linktools.ai.")
-        or not isinstance(task_revision, int)
-        or isinstance(task_revision, bool)
-        or task_revision < 1
-    ):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return task_id, task_revision
-
-
-def _external_expander_identity(expander: TaskExpander) -> tuple[str, int]:
-    try:
-        reference = TaskExpanderRef(expander.id, expander.revision)
-    except (TypeError, ValueError, AttributeError) as error:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    if reference.id.startswith(_RESERVED_EXPANDER_ID_PREFIX):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return reference.id, reference.revision
 
 
 def _expansion_error(
