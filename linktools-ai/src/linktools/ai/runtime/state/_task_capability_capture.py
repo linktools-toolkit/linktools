@@ -11,12 +11,6 @@ from ...spec import canonicalize_json_schema
 
 TASK_CAPABILITY_CAPTURE_FORMAT_VERSION = 1
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
-_BUILTIN_TASK_IDENTITIES = {
-    ("linktools.ai.agent", 1),
-    ("linktools.ai.input", 1),
-}
-
-
 def read_task_capability_capture_declarations(
     tasks: object,
     expanders: object,
@@ -70,8 +64,6 @@ def task_declaration_identity(value: object) -> tuple[str, int]:
         except AIError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     else:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if identity[0].startswith("linktools.ai.") and identity not in _BUILTIN_TASK_IDENTITIES:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return identity
 

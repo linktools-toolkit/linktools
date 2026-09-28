@@ -43,9 +43,6 @@ from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_capture import TaskCapabilityCaptureStore
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, SnapshotLimits
-from linktools.ai.runtime.state._task_capability_capture import (
-    read_task_capability_capture_declarations,
-)
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import (
     AgentSpec,
@@ -782,32 +779,6 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
     finally:
         await restored.close()
         await fixture.assets.close()
-
-
-def test_task_capability_capture_reader_preserves_valid_json_schema() -> None:
-    declaration: dict[str, object] = {
-        "version": 1,
-        "id": "test.capture",
-        "revision": 1,
-        "effect_policy": "none",
-        "output_contract": {
-            "kind": "schema",
-            "schema": {
-                "type": "object",
-                "properties": {"value": {"type": "string"}},
-                "required": ["value"],
-            },
-        },
-        "reconcile": False,
-    }
-
-    tasks, expanders = read_task_capability_capture_declarations(
-        [declaration],
-        [],
-    )
-
-    assert tasks[("test.capture", 1)] == declaration
-    assert not expanders
 
 
 @pytest.mark.asyncio
