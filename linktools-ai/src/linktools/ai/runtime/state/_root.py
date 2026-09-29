@@ -485,7 +485,7 @@ class RuntimeStorage:
             if reference.key.startswith(
                 (
                     "v1/asset-snapshot/",
-                    "v2/task-capture/",
+                    "v1/task-graph-binding-capture/",
                 )
             ):
                 payload = await read_object(
@@ -861,7 +861,7 @@ class RuntimeStorage:
             if not source.key.startswith(
                 (
                     "v1/asset-snapshot/",
-                    "v2/task-capture/",
+                    "v1/task-graph-binding-capture/",
                 )
             ):
                 continue
