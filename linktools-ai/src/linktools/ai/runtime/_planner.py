@@ -1369,28 +1369,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         )
         if isinstance(handler, _TaskRunnerAdapter):
             runner_result = await handler.runner.run(invocation, control=control)
-            if not isinstance(runner_result, TaskNodeRunResult):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if isinstance(handler.runner, RuntimeAgentTaskRunner):
-                if runner_result.execution_id is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                result = await self._execution.result(
-                    runner_result.execution_id,
-                    principal=principal,
-                )
-                if (
-                    result.status is not ExecutionStatus.SUCCEEDED
-                    or canonical_sha256(result.output) != runner_result.result_digest
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return await self._complete_output(
-                    node,
-                    result.output,
-                    execution_id=runner_result.execution_id,
-                    principal=principal,
-                    graph_id=graph_id,
-                )
-            return runner_result
+            return await self._complete_runner_result(invocation, runner_result)
         dependencies = await self._dependencies(
             node,
             dependency_results=dependency_results,
@@ -1837,7 +1816,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             request=False,
         )
         if isinstance(handler, _TaskRunnerAdapter):
-            return await handler.runner.supply_input(invocation, execution_id, value)
+            runner_result = await handler.runner.supply_input(
+                invocation,
+                execution_id,
+                value,
+            )
+            return await self._complete_runner_result(invocation, runner_result)
         view = await self._execution.supply_task_input(
             execution_id,
             principal=invocation.principal,
@@ -1875,11 +1859,14 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             request=False,
         )
         if isinstance(handler, _TaskRunnerAdapter):
-            return await handler.runner.resolve_effect(
+            runner_result = await handler.runner.resolve_effect(
                 invocation,
                 execution_id,
                 resolution,
             )
+            if runner_result is None:
+                return None
+            return await self._complete_runner_result(invocation, runner_result)
         view = await self._execution.resolve_task_effect(
             execution_id,
             principal=invocation.principal,
@@ -1942,27 +1929,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             request=False,
         )
         if isinstance(handler, _TaskRunnerAdapter):
-            result = await handler.runner.wait_bound(invocation, execution_id)
-            if not isinstance(result, TaskNodeRunResult):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if isinstance(handler.runner, RuntimeAgentTaskRunner):
-                execution_result = await self._execution.result(
-                    execution_id,
-                    principal=invocation.principal,
-                )
-                if (
-                    execution_result.status is not ExecutionStatus.SUCCEEDED
-                    or canonical_sha256(execution_result.output) != result.result_digest
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return await self._complete_output(
-                    node,
-                    execution_result.output,
-                    execution_id=execution_id,
-                    principal=invocation.principal,
-                    graph_id=invocation.graph_id,
-                )
-            return result
+            runner_result = await handler.runner.wait_bound(
+                invocation,
+                execution_id,
+            )
+            return await self._complete_runner_result(invocation, runner_result)
         view = await self._execution.inspect(
             execution_id,
             principal=invocation.principal,
@@ -2252,6 +2223,38 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if canonical_sha256(output) != record.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return output
+
+    async def _complete_runner_result(
+        self,
+        invocation: TaskNodeInvocation,
+        result: TaskNodeRunResult,
+    ) -> TaskNodeRunResult:
+        if not isinstance(result, TaskNodeRunResult) or result.expanded_nodes:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if result.deferred or result.retry_at is not None:
+            return result
+        execution_id = result.execution_id
+        if execution_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            execution_result = await self._execution.result(
+                execution_id,
+                principal=invocation.principal,
+            )
+        except AIError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if (
+            execution_result.status is not ExecutionStatus.SUCCEEDED
+            or canonical_sha256(execution_result.output) != result.result_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await self._complete_output(
+            invocation.node,
+            execution_result.output,
+            execution_id=execution_id,
+            principal=invocation.principal,
+            graph_id=invocation.graph_id,
+        )
 
     async def _complete_output(
         self,
@@ -2576,9 +2579,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         )
         if (
             result.status is not ExecutionStatus.SUCCEEDED
-            or result.output is None
-            or canonical_sha256(result.output)
-            != dependency.result_digest
+            or canonical_sha256(result.output) != dependency.result_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result.output
