@@ -536,7 +536,7 @@ async def test_recovery_preflight_preserves_unknown_agent_input_version(
                 if node.node_id == "agent":
                     input_value = dict(node.input)
                     input_value["version"] = 2
-                    node = TaskNode(
+                    node = TaskNode.from_resolved(
                         node.node_id,
                         node.dependencies,
                         task=node.task,
@@ -547,7 +547,6 @@ async def test_recovery_preflight_preserves_unknown_agent_input_version(
                         timeout_seconds=node.timeout_seconds,
                         max_attempts=node.max_attempts,
                         retry_delay_seconds=node.retry_delay_seconds,
-                        output_type=node.output_type,
                         output_contract=node.output_contract,
                         effect_policy=node.effect_policy,
                         reconcile=node.reconcile,
