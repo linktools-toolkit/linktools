@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.core import (
+    JsonValue,
     OperationKind,
     OperationStatus,
     Principal,
@@ -27,6 +28,7 @@ from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphHandle,
+    TaskInputSupplyRequest,
     TaskGraphLaunch,
     TaskGraphRequest,
     TaskGraphView,
@@ -799,6 +801,124 @@ async def test_successful_effect_resolution_replay_completes_missing_arm() -> No
         assert result.status is TaskStatus.PENDING
         assert launcher.resolve_calls == 1
         assert launcher.started == ["effect-arm"]
+        assert arm_calls == 2
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_input_resume_replay_completes_missing_arm() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-input-arm", tenant_id="tenant")
+    try:
+        graph = TaskGraph(
+            "input-arm",
+            (TaskNode("input"), TaskNode("dependent", ("input",))),
+        )
+        request = TaskGraphRequest(
+            graph,
+            Principal("tester", "tenant"),
+            "submit:input-arm",
+        )
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            graph,
+        )
+        lease = await state.task.tasks.claim(
+            graph.graph_id,
+            "input",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        await state.task.tasks.handoff_execution(
+            lease,
+            tenant_id="tenant",
+            execution_id="input-arm-wait-id",
+            occupies_concurrency=False,
+        )
+
+        class _InputLauncher(_Launcher):
+            def __init__(self) -> None:
+                super().__init__()
+                self.supply_calls = 0
+
+            async def supply_input(
+                self,
+                launch: TaskGraphLaunch,
+                node_id: str,
+                execution_id: str,
+                value: JsonValue,
+            ) -> TaskGraphView:
+                assert node_id == "input"
+                assert execution_id == "input-arm-wait-id"
+                self.supply_calls += 1
+                await state.task.tasks.complete(
+                    None,
+                    tenant_id="tenant",
+                    graph_id=launch.graph_id,
+                    node_id=node_id,
+                    execution_id=execution_id,
+                    result_digest=canonical_sha256(value),
+                )
+                view = await state.task.tasks.get_graph(
+                    launch.graph_id,
+                    tenant_id="tenant",
+                )
+                assert view is not None
+                return view
+
+        launcher = _InputLauncher()
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            launcher,
+        )
+        original_arm = service._arm_graph
+        arm_calls = 0
+
+        async def fail_first_arm(launch: TaskGraphLaunch) -> None:
+            nonlocal arm_calls
+            arm_calls += 1
+            if arm_calls == 1:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            await original_arm(launch)
+
+        service._arm_graph = fail_first_arm  # type: ignore[method-assign]
+        resume_request = TaskInputSupplyRequest(
+            request.principal,
+            "input-arm-wait-id",
+            {"value": "accepted"},
+            "resume:input-arm",
+        )
+        with pytest.raises(AIError) as interrupted:
+            await service.resume("input-arm", "input", resume_request)
+        assert interrupted.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+
+        first_projection = await state.task.tasks.graph_state(
+            "input-arm",
+            tenant_id="tenant",
+        )
+        first_operation = await state.task.operations.get(
+            idempotency_key_digest("resume:input-arm"),
+            tenant_id="tenant",
+        )
+        assert first_projection is not None
+        assert first_operation is not None
+        first_input = next(
+            item for item in first_projection.node_states if item.node_id == "input"
+        )
+        assert first_input.status is TaskStatus.SUCCEEDED
+        assert first_input.execution_id == "input-arm-wait-id"
+        assert first_operation.operation_kind is OperationKind.TASK_NODE
+        assert first_operation.status is OperationStatus.SUCCEEDED
+        assert first_operation.result_digest == canonical_sha256({"value": "accepted"})
+
+        replay = await service.resume("input-arm", "input", resume_request)
+
+        assert replay.status is TaskStatus.PENDING
+        assert launcher.supply_calls == 1
+        assert launcher.started == ["input-arm"]
         assert arm_calls == 2
     finally:
         await state.close()

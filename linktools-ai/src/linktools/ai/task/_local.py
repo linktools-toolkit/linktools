@@ -1839,14 +1839,14 @@ class LocalTaskGraphLauncher:
                     )
                     return
                 if (
-                    control.handed_off_execution_id is not None
+                    control.execution_id is not None
                     and isinstance(error, AIError)
                     and error.code in _EXECUTION_RESULT_CONFLICT_CODES
                 ):
                     await self._settle_bound_node(
                         run,
                         node,
-                        control.handed_off_execution_id,
+                        control.execution_id,
                         lease_state.lease.fence,
                         wait_for_completion=False,
                     )

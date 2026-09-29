@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -31,13 +32,15 @@ from ._task_test_helpers import (
 from linktools.ai.agent import restore_output
 from linktools.ai.core import (
     JsonValue,
+    OperationKind,
     Principal,
     PrincipalKind,
     TaskStatus,
     WorkspaceFileInput,
     canonical_sha256,
+    idempotency_key_digest,
 )
-from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.errors import AIError, ErrorCode, TaskObservationError
 from linktools.ai.runtime import (
     AgentTaskInput,
     AgentTaskInputContext,
@@ -631,6 +634,263 @@ async def test_execution_cancel_winning_during_output_store_projects_cancelled_n
 
 
 @pytest.mark.asyncio
+async def test_function_task_cancel_winning_during_output_store_projects_cancelled_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    store_entered = asyncio.Event()
+    release_store = asyncio.Event()
+
+    async def run_task(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        return {"value": "old-output"}
+
+    task = Task("example.function-output-race", run_task, effect_policy="none")
+    graph = TaskGraph(
+        "function-output-race",
+        (TaskNode("node", task=task),),
+    )
+    async with Runtime.open(
+        "function-task-output-race",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+    ) as runtime:
+        original_store = runtime._execution_service._store_task_output
+
+        async def delayed_store(
+            output: JsonValue,
+            *,
+            tenant_id: str,
+        ) -> StoredPayload:
+            store_entered.set()
+            await release_store.wait()
+            return await original_store(output, tenant_id=tenant_id)
+
+        monkeypatch.setattr(
+            runtime._execution_service,
+            "_store_task_output",
+            delayed_store,
+        )
+        graph_run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key="function-output-race-graph-0001",
+        )
+        try:
+            await asyncio.wait_for(store_entered.wait(), 3)
+            graph_state = await state.task.tasks.graph_state(
+                graph.graph_id,
+                tenant_id=runtime.tenant_id,
+            )
+            assert graph_state is not None
+            execution_id = graph_state.node_states[0].execution_id
+            assert execution_id is not None
+            cancelled = await runtime._execution_service.cancel_task(
+                execution_id,
+                principal=runtime.default_principal,
+            )
+            assert cancelled.cancelled
+        finally:
+            release_store.set()
+
+        result = await graph_run.wait(timeout_seconds=5)
+        execution = await runtime._execution_service.inspect(
+            execution_id,
+            principal=runtime.default_principal,
+        )
+        graph_state = await state.task.tasks.graph_state(
+            graph.graph_id,
+            tenant_id=runtime.tenant_id,
+        )
+
+        assert result.status is TaskStatus.CANCELLED
+        assert execution.status.value == "CANCELLED"
+        assert graph_state is not None
+        assert graph_state.node_states[0].status is TaskStatus.CANCELLED
+        assert graph_state.node_states[0].result_digest is None
+
+
+@pytest.mark.asyncio
+async def test_pending_node_cancel_recovery_keeps_running_sibling_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = RuntimeStorage.in_memory()
+    target_started = asyncio.Event()
+    sibling_started = asyncio.Event()
+    release_sibling = asyncio.Event()
+    sibling_calls = 0
+
+    async def run_target(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        target_started.set()
+        await asyncio.Event().wait()
+        return {"target": "unreachable"}
+
+    async def run_sibling(context: TaskNodeContext[None]) -> JsonValue:
+        nonlocal sibling_calls
+        del context
+        sibling_calls += 1
+        sibling_started.set()
+        await release_sibling.wait()
+        return {"sibling": "completed"}
+
+    target = Task("example.node-cancel-target", run_target, effect_policy="none")
+    sibling = Task("example.node-cancel-sibling", run_sibling, effect_policy="none")
+    graph = TaskGraph(
+        "node-cancel-recovery",
+        (
+            TaskNode("target", task=target),
+            TaskNode("sibling", task=sibling),
+        ),
+    )
+    async with Runtime.open(
+        "node-cancel-recovery-runtime",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=storage,
+    ) as runtime:
+        graph_run = await runtime.tasks.bind(target, sibling).start(
+            graph,
+            idempotency_key="node-cancel-recovery-graph-0001",
+        )
+        await asyncio.wait_for(target_started.wait(), 3)
+        await asyncio.wait_for(sibling_started.wait(), 3)
+
+        original_record_success = runtime._graph_service._record_success
+        injected_ack_failure = False
+
+        async def fail_node_cancel_ack(operation, tenant_id, view, **kwargs):
+            nonlocal injected_ack_failure
+            if (
+                getattr(operation, "operation_kind", None) is OperationKind.TASK_CANCEL
+                and getattr(operation, "execution_id", None) is not None
+                and not injected_ack_failure
+            ):
+                injected_ack_failure = True
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            return await original_record_success(
+                operation,
+                tenant_id,
+                view,
+                **kwargs,
+            )
+
+        monkeypatch.setattr(
+            runtime._graph_service,
+            "_record_success",
+            fail_node_cancel_ack,
+        )
+        graph_state = await graph_run.state(include_content=True)
+        target_state = next(
+            item for item in graph_state.node_states if item.node_id == "target"
+        )
+        assert target_state.execution_id is not None
+        execution = await graph_run.execution("target")
+        with pytest.raises(AIError) as cancel_error:
+            await execution.cancel(idempotency_key="node-cancel-recovery-cancel-0001")
+        assert cancel_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+        assert injected_ack_failure
+
+        target_execution = await runtime.executions.inspect(
+            target_state.execution_id,
+            principal=runtime.default_principal,
+        )
+        cancelled_graph_state = await graph_run.state(include_content=True)
+        cancelled_target = next(
+            item
+            for item in cancelled_graph_state.node_states
+            if item.node_id == "target"
+        )
+        still_running_sibling = next(
+            item
+            for item in cancelled_graph_state.node_states
+            if item.node_id == "sibling"
+        )
+        assert target_execution.status.value == "CANCELLED"
+        assert cancelled_target.status is TaskStatus.CANCELLED
+        assert still_running_sibling.status is TaskStatus.RUNNING
+        pending_cancel = await storage.task.operations.get(
+            idempotency_key_digest("node-cancel-recovery-cancel-0001"),
+            tenant_id=runtime.tenant_id,
+        )
+        assert pending_cancel is not None
+        assert pending_cancel.status.value in {"RUNNING", "EFFECT_UNKNOWN"}
+        assert pending_cancel.execution_id == target_state.execution_id
+
+        recovered = await graph_run.recover(
+            idempotency_key="node-cancel-recovery-recover-0001",
+        )
+        assert recovered.status is TaskStatus.RUNNING
+        after_recovery = await graph_run.state(include_content=True)
+        after_recovery_sibling = next(
+            item for item in after_recovery.node_states if item.node_id == "sibling"
+        )
+        assert after_recovery_sibling.status is TaskStatus.RUNNING
+        assert sibling_calls == 1
+        settled_cancel = await storage.task.operations.get(
+            idempotency_key_digest("node-cancel-recovery-cancel-0001"),
+            tenant_id=runtime.tenant_id,
+        )
+        assert settled_cancel is not None
+        assert settled_cancel.status.value == "SUCCEEDED"
+
+        release_sibling.set()
+        completed = await graph_run.wait(timeout_seconds=5)
+        final_state = await graph_run.state(include_content=True)
+        completed_sibling = next(
+            item for item in final_state.node_states if item.node_id == "sibling"
+        )
+        assert completed.status is TaskStatus.CANCELLED
+        assert completed_sibling.status is TaskStatus.SUCCEEDED
+        assert sibling_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_task_observer_exception_is_visible_without_changing_graph_state() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_task(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        entered.set()
+        await release.wait()
+        return {"value": "finished"}
+
+    task = Task("example.observer-failure", hold_task, effect_policy="none")
+    graph = TaskGraph(
+        "observer-failure",
+        (TaskNode("node", task=task),),
+    )
+    async with Runtime.open(
+        "task-observer-failure",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+    ) as runtime:
+        graph_run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key="observer-failure-graph-0001",
+        )
+        await asyncio.wait_for(entered.wait(), 3)
+        observed = 0
+
+        async def observer(event: object) -> None:
+            nonlocal observed
+            del event
+            observed += 1
+            raise RuntimeError("observer callback failed")
+
+        with pytest.raises(TaskObservationError) as observer_error:
+            await graph_run.observe(observer)  # type: ignore[arg-type]
+        current = await graph_run.state(include_content=True)
+        assert observer_error.value.code is ErrorCode.TASK_OBSERVER_FAILED
+        assert observer_error.value.origin == "callback"
+        assert observed == 1
+        assert current.status is TaskStatus.RUNNING
+
+        release.set()
+        completed = await graph_run.wait(timeout_seconds=5)
+        assert completed.status is TaskStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
 async def test_task_execution_cancel_persists_node_intent_before_execution_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -920,7 +1180,7 @@ async def test_cancel_and_reopen_preserve_accepted_execution_before_task_binding
 
 
 @pytest.mark.asyncio
-async def test_stale_execution_attempt_token_cannot_settle_retried_execution() -> None:
+async def test_reconciled_attempt_rejects_late_callback_from_same_execution() -> None:
     state = RuntimeStorage.in_memory()
     async with Runtime.open(
         "task-attempt-fence-race",
@@ -931,7 +1191,7 @@ async def test_stale_execution_attempt_token_cannot_settle_retried_execution() -
         binding = TaskBindingContract(
             id="example.task-attempt-fence",
             revision=1,
-            effect_policy="none",
+            effect_policy="non_replay_safe",
             output_contract={"kind": "json"},
             timeout_seconds=None,
             max_attempts=3,
@@ -949,31 +1209,52 @@ async def test_stale_execution_attempt_token_cannot_settle_retried_execution() -
             principal=principal,
         )
         assert first.task_attempt == 1
-        await runtime._execution_service.schedule_task_retry(
-            execution.execution_id,
-            principal=principal,
-            error_code=ErrorCode.TASK_NODE_FAILED.value,
-            attempt=first,
-        )
-        second = await runtime._execution_service.claim_task_attempt(
-            execution.execution_id,
-            principal=principal,
-        )
-        assert second.task_attempt == 2
+        old_callback_entered = asyncio.Event()
+        release_old_callback = asyncio.Event()
+
+        async def old_callback() -> object:
+            old_callback_entered.set()
+            await release_old_callback.wait()
+            return await runtime._execution_service.complete_task(
+                execution.execution_id,
+                principal=principal,
+                output={"value": "late-old-attempt"},
+                attempt=first,
+            )
+
+        late_callback = asyncio.create_task(old_callback())
 
         async def assert_stale(action: object) -> None:
             with pytest.raises(AIError) as rejected:
                 await action()  # type: ignore[operator]
             assert rejected.value.code is ErrorCode.TASK_FENCE_STALE
 
-        await assert_stale(
-            lambda: runtime._execution_service.complete_task(
+        try:
+            await asyncio.wait_for(old_callback_entered.wait(), 1)
+            await runtime._execution_service.require_task_recovery(
                 execution.execution_id,
                 principal=principal,
-                output={"value": "old"},
+                error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
                 attempt=first,
             )
-        )
+            resolved = await runtime._execution_service.resolve_task_effect(
+                execution.execution_id,
+                principal=principal,
+                resolution=TaskEffectResolution("not_applied"),
+            )
+            assert resolved.status.value == "WAITING_RETRY"
+            second = await runtime._execution_service.claim_task_attempt(
+                execution.execution_id,
+                principal=principal,
+            )
+            assert second.task_attempt == 2
+
+            release_old_callback.set()
+            await assert_stale(lambda: late_callback)
+        finally:
+            release_old_callback.set()
+            await asyncio.gather(late_callback, return_exceptions=True)
+
         await assert_stale(
             lambda: runtime._execution_service.fail_task(
                 execution.execution_id,
@@ -2200,11 +2481,21 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
             idempotency_key="runner-contract-graph-0001",
         )
         wait_id = await _wait_for_input_execution(runtime, graph.graph_id)
+        deferred_execution = await runtime._execution_service.inspect(
+            wait_id,
+            principal=runtime.default_principal,
+        )
         initial = await state.task.tasks.graph_state(
             graph.graph_id,
             tenant_id=runtime.tenant_id,
         )
         assert initial is not None
+        input_state = next(
+            item for item in initial.node_states if item.node_id == "input"
+        )
+        assert deferred_execution.status.value == "WAITING_DEFERRED"
+        assert input_state.status is TaskStatus.WAITING
+        assert input_state.execution_id == wait_id
         runner_node = next(node for node in initial.nodes if node.node_id == "runner")
         assert runner_node.output_contract == {
             "mode": "structured",
@@ -2228,6 +2519,18 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
         engine = runtime.tasks.bind(task, expander)
         await engine.recover_pending()
         resumed = await engine.get(graph.graph_id)
+        reopened_input_state = next(
+            item
+            for item in (await resumed.state(include_content=True)).node_states
+            if item.node_id == "input"
+        )
+        reopened_execution = await runtime._execution_service.inspect(
+            wait_id,
+            principal=runtime.default_principal,
+        )
+        assert reopened_execution.status.value == "WAITING_DEFERRED"
+        assert reopened_input_state.status is TaskStatus.WAITING
+        assert reopened_input_state.execution_id == wait_id
         await resumed.resume(
             "input",
             TaskInputSupplyRequest(
@@ -3298,6 +3601,92 @@ async def test_not_applied_retries_same_execution_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reconcile_case", ("unknown", "exception", "invalid"))
+async def test_runtime_reconcile_unknown_exception_and_invalid_stay_recoverable(
+    reconcile_case: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    run_calls = 0
+    reconcile_calls = 0
+
+    async def run_task(context: TaskNodeContext[None]) -> JsonValue:
+        nonlocal run_calls
+        del context
+        run_calls += 1
+        raise RuntimeError("effect outcome is unknown")
+
+    async def reconcile(
+        context: TaskNodeContext[None],
+    ) -> TaskEffectResolution:
+        nonlocal reconcile_calls
+        del context
+        reconcile_calls += 1
+        if reconcile_case == "exception":
+            raise ValueError("reconciliation unavailable")
+        if reconcile_case == "invalid":
+            return {"kind": "unknown"}  # type: ignore[return-value]
+        return TaskEffectResolution("unknown")
+
+    task = Task(
+        f"example.reconcile-{reconcile_case}",
+        run_task,
+        effect_policy="non_replay_safe",
+        reconcile=reconcile,
+    )
+    graph = TaskGraph(
+        f"reconcile-{reconcile_case}",
+        (TaskNode("node", task=task),),
+    )
+    async with Runtime.open(
+        f"runtime-reconcile-{reconcile_case}",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+    ) as runtime:
+        graph_run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key=f"reconcile-{reconcile_case}-graph-0001",
+        )
+        initial = await graph_run.wait(timeout_seconds=10)
+        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        initial_state = await graph_run.state(include_content=True)
+        initial_node = initial_state.node_states[0]
+        assert initial_node.execution_id is not None
+        assert reconcile_calls == 0
+
+        await graph_run.recover(
+            idempotency_key=f"reconcile-{reconcile_case}-recover-0001",
+        )
+        recovered = await graph_run.wait(timeout_seconds=10)
+        recovered_state = await graph_run.state(include_content=True)
+        recovered_node = recovered_state.node_states[0]
+        execution = await runtime.executions.inspect(
+            initial_node.execution_id,
+            principal=runtime.default_principal,
+        )
+
+        assert recovered.status is TaskStatus.RECOVERY_REQUIRED
+        assert recovered_node.status is TaskStatus.RECOVERY_REQUIRED
+        assert recovered_node.execution_id == initial_node.execution_id
+        assert recovered_node.error_code == ErrorCode.TASK_EFFECT_UNKNOWN.value
+        assert run_calls == 1
+        assert reconcile_calls == 1
+        assert execution.status.value == "RECOVERY_REQUIRED"
+        messages = [record.getMessage() for record in caplog.records]
+        if reconcile_case == "exception":
+            assert any(
+                "task effect reconciliation failed" in message
+                and "type=ValueError" in message
+                for message in messages
+            )
+        elif reconcile_case == "invalid":
+            assert any(
+                "task effect reconciliation returned an invalid value" in message
+                and "type=dict" in message
+                for message in messages
+            )
+
+
+@pytest.mark.asyncio
 async def test_not_applied_after_attempt_budget_exhaustion_fails_execution_and_node(
     tmp_path: Path,
 ) -> None:
@@ -3789,6 +4178,150 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
     finally:
         if launcher is not None:
             await launcher.shutdown()
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ("unknown", "deferred", "retry"))
+async def test_bound_wait_outcome_preserves_its_waiting_classification(
+    outcome: str,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace=f"bound-wait-{outcome}", tenant_id="tenant")
+    principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
+    graph = TaskGraph(f"bound-wait-{outcome}", (TaskNode("node"),))
+    request = TaskGraphRequest(
+        graph,
+        principal,
+        f"bound-wait-{outcome}-submit-0001",
+    )
+    await state.task.admissions.admit(
+        TaskGraphAdmission.from_request(request),
+        graph,
+    )
+    lease = await state.task.tasks.claim(
+        graph.graph_id,
+        "node",
+        tenant_id="tenant",
+        owner="worker",
+        lease_seconds=30,
+    )
+    await state.task.tasks.handoff_execution(
+        lease,
+        tenant_id="tenant",
+        execution_id=f"execution-{outcome}",
+        occupies_concurrency=False,
+    )
+    retry_at = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    class BoundWaitRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.reentered = asyncio.Event()
+
+        async def run(
+            self,
+            invocation: TaskNodeInvocation,
+            *,
+            control: TaskNodeRunControl,
+        ) -> TaskNodeRunResult:
+            del invocation, control
+            raise AssertionError("bound recovery must not start another execution")
+
+        async def wait_bound(
+            self,
+            invocation: TaskNodeInvocation,
+            execution_id: str,
+        ) -> TaskNodeRunResult:
+            del invocation
+            self.calls += 1
+            if outcome == "unknown":
+                raise TaskNodeRunError(
+                    ErrorCode.TOOL_EFFECT_UNKNOWN,
+                    execution_id,
+                    safe_details={"bound_wait": "unknown"},
+                )
+            if outcome == "retry":
+                return TaskNodeRunResult(
+                    canonical_sha256({"retry_at": retry_at.isoformat()}),
+                    execution_id,
+                    retry_at=retry_at,
+                )
+            if self.calls > 1:
+                self.reentered.set()
+                await asyncio.Event().wait()
+            return TaskNodeRunResult(
+                canonical_sha256({"deferred": True}),
+                execution_id,
+                deferred=True,
+            )
+
+        async def supply_input(
+            self,
+            invocation: TaskNodeInvocation,
+            execution_id: str,
+            value: JsonValue,
+        ) -> TaskNodeRunResult:
+            del invocation, execution_id, value
+            raise AIError(ErrorCode.TASK_NOT_READY)
+
+        async def resolve_effect(
+            self,
+            invocation: TaskNodeInvocation,
+            execution_id: str,
+            resolution: TaskEffectResolution,
+        ) -> TaskNodeRunResult | None:
+            del invocation, execution_id, resolution
+            raise AIError(ErrorCode.TASK_NOT_READY)
+
+        async def cancel(self, invocation: TaskNodeInvocation) -> None:
+            del invocation
+
+    runner = BoundWaitRunner()
+    launcher = LocalTaskGraphLauncher(
+        state.task.tasks,
+        runner,
+        owner="worker",
+    )
+    try:
+        await launcher.start(
+            TaskGraphLaunch(graph.graph_id, principal, TaskGraphLimits())
+        )
+
+        async def projected_outcome():
+            while True:
+                snapshot = await state.task.tasks.graph_state(
+                    graph.graph_id,
+                    tenant_id="tenant",
+                )
+                assert snapshot is not None
+                node_state = snapshot.node_states[0]
+                if outcome == "unknown" and node_state.status is TaskStatus.RECOVERY_REQUIRED:
+                    return node_state
+                if outcome == "retry" and (
+                    node_state.status is TaskStatus.READY
+                    and node_state.next_attempt_at == retry_at
+                ):
+                    return node_state
+                if outcome == "deferred" and runner.calls >= 2:
+                    return node_state
+                await asyncio.sleep(0)
+
+        node_state = await asyncio.wait_for(projected_outcome(), timeout=2)
+        assert node_state.execution_id == f"execution-{outcome}"
+        if outcome == "unknown":
+            assert node_state.error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
+            assert node_state.safe_error_details["bound_wait"] == "unknown"
+            assert runner.calls == 1
+        elif outcome == "retry":
+            assert node_state.status is TaskStatus.READY
+            assert node_state.next_attempt_at == retry_at
+            assert runner.calls == 1
+        else:
+            assert node_state.status is TaskStatus.WAITING
+            assert runner.reentered.is_set()
+    finally:
+        await launcher.shutdown()
         await state.close()
 
 

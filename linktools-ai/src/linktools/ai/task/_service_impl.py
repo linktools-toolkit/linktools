@@ -460,7 +460,13 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         tenant_id: str,
     ) -> None:
-        if await self._pending_cancel_operations(graph_id, tenant_id=tenant_id):
+        if any(
+            operation.execution_id is None
+            for operation in await self._pending_cancel_operations(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+        ):
             return
         state = await self._persistence.tasks.graph_state(
             graph_id,
@@ -592,8 +598,18 @@ class DefaultTaskGraphService(TaskGraphService):
             graph_id,
             tenant_id=tenant_id,
         )
-        cancel_requested = bool(cancel_operations)
-        if cancel_operations:
+        graph_cancel_operations = tuple(
+            selected
+            for selected in cancel_operations
+            if selected.execution_id is None
+        )
+        node_cancel_operations = tuple(
+            selected
+            for selected in cancel_operations
+            if selected.execution_id is not None
+        )
+        cancel_requested = bool(graph_cancel_operations)
+        if graph_cancel_operations:
             if not _terminal(view.status):
                 await self._cleanup_graph_runtime(
                     view,
@@ -628,6 +644,81 @@ class DefaultTaskGraphService(TaskGraphService):
             if settled.status is not OperationStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return await self._result(view, tenant_id)
+
+        if node_cancel_operations:
+            graph_state = await self._persistence.tasks.graph_state(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if graph_state is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            view = TaskGraphView(
+                graph_state.graph_id,
+                graph_state.status,
+                graph_state.nodes,
+            )
+            for cancel_operation in node_cancel_operations:
+                execution_id = cancel_operation.execution_id
+                if execution_id is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                node_state = next(
+                    (
+                        selected
+                        for selected in graph_state.node_states
+                        if selected.execution_id == execution_id
+                    ),
+                    None,
+                )
+                if node_state is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if not _terminal(node_state.status) and self._launcher is not None:
+                    admission = await self._persistence.admissions.get(
+                        graph_id,
+                        tenant_id=tenant_id,
+                    )
+                    if admission is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    await self._launcher.cancel_node(
+                        admission.launch(),
+                        node_state.node_id,
+                        execution_id,
+                    )
+                    graph_state = await self._persistence.tasks.graph_state(
+                        graph_id,
+                        tenant_id=tenant_id,
+                    )
+                    if graph_state is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    view = TaskGraphView(
+                        graph_state.graph_id,
+                        graph_state.status,
+                        graph_state.nodes,
+                    )
+                    node_state = next(
+                        (
+                            selected
+                            for selected in graph_state.node_states
+                            if selected.execution_id == execution_id
+                        ),
+                        None,
+                    )
+                    if node_state is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if not _terminal(node_state.status):
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                settled_cancel = await self._record_success(
+                    cancel_operation,
+                    tenant_id,
+                    TaskGraphView(
+                        graph_state.graph_id,
+                        graph_state.status,
+                        graph_state.nodes,
+                    ),
+                    expected_status=cancel_operation.status,
+                )
+                if settled_cancel.status is not OperationStatus.SUCCEEDED:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+
         admission = None
         if (
             view.status
