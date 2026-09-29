@@ -152,9 +152,9 @@ from ._store import (
 )
 
 CURRENT_DATA_VERSION = 1
-_TASK_NODE_WIRE_ID = "task_node@2"
-_TASK_NODE_TERMINAL_WIRE_ID = "task_node_terminal@2"
-_TASK_NODE_VIEW_WIRE_ID = "task_node_view@2"
+_TASK_NODE_WIRE_ID = "task_node"
+_TASK_NODE_TERMINAL_WIRE_ID = "task_node_terminal"
+_TASK_NODE_VIEW_WIRE_ID = "task_node_view"
 DomainT = TypeVar("DomainT")
 _logger = environ.get_logger("ai.runtime.state.codec")
 
@@ -226,12 +226,12 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("task_graph_view", TaskGraphView),
     ("task_lease", TaskLease),
     (_TASK_NODE_WIRE_ID, TaskNode),
-    ("task_ref@2", TaskRef),
+    ("task_ref", TaskRef),
     ("task_expander_ref", TaskExpanderRef),
     (_TASK_NODE_VIEW_WIRE_ID, TaskNodeView),
     ("task_result", TaskResultRecord),
-    ("task_result_ref@1", TaskResultRef),
-    ("task_prepared_input@1", TaskPreparedInputRecord),
+    ("task_result_ref", TaskResultRef),
+    ("task_prepared_input", TaskPreparedInputRecord),
     ("task_terminal", TaskTerminalRecord),
     ("tool_operation", ToolOperationRecord),
     ("usage_metrics", UsageMetrics),
@@ -341,15 +341,15 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "task_graph_limits": ("max_concurrency", "max_depth", "max_nodes", "max_budget"),
         "task_lease": ("graph_id", "node_id", "tenant_id", "owner", "fence", "lease_expires_at", "execution_id"),
         "task_expander_ref": ("id", "revision"),
-        "task_ref@2": ("id", "revision"),
-        "task_result_ref@1": (
+        "task_ref": ("id", "revision"),
+        "task_result_ref": (
             "namespace",
             "tenant_id",
             "graph_id",
             "node_id",
             "result_digest",
         ),
-        "task_prepared_input@1": (
+        "task_prepared_input": (
             "graph_id",
             "node_id",
             "tenant_id",
