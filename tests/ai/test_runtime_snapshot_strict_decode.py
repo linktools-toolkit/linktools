@@ -238,7 +238,7 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
             {**expander_declaration, "version": 1.0}
         ]
     manifest: dict[str, object] = {
-        "kind": "invalid-kind" if corruption == "wrong_kind" else "task-definition-capture",
+        "kind": "invalid-kind" if corruption == "wrong_kind" else "task-graph-binding-capture",
         "format_version": format_version,
         "namespace": "runtime",
         "tenant_id": "tenant",
@@ -254,7 +254,7 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
     payload = canonical_json_bytes(manifest)
     reference = ObjectRef(
         "runtime",
-        "v2/task-capture/capture",
+        "v1/task-graph-binding-capture/capture",
         "a" * 64,
         len(payload),
     )
