@@ -68,6 +68,7 @@ from linktools.ai.task import (
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphState,
+    TaskGraphView,
     TaskNode,
     TaskNodeContext,
     TaskNodeInvocation,
@@ -841,6 +842,129 @@ async def test_pending_node_cancel_recovery_keeps_running_sibling_alive(
         assert completed.status is TaskStatus.CANCELLED
         assert completed_sibling.status is TaskStatus.SUCCEEDED
         assert sibling_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_node_cancel_recovery_settles_and_replays_same_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = RuntimeStorage.in_memory()
+    task_started = asyncio.Event()
+
+    async def hold_task(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        task_started.set()
+        await asyncio.Event().wait()
+        return {"unreachable": True}
+
+    task = Task("example.terminal-node-cancel-recovery", hold_task, effect_policy="none")
+    graph = TaskGraph(
+        "terminal-node-cancel-recovery",
+        (TaskNode("target", task=task),),
+    )
+    async with Runtime.open(
+        "terminal-node-cancel-recovery-runtime",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=storage,
+    ) as runtime:
+        graph_run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key="terminal-node-cancel-recovery-graph-0001",
+        )
+        await asyncio.wait_for(task_started.wait(), 3)
+        initial_state = await graph_run.state(include_content=True)
+        target = initial_state.node_states[0]
+        assert target.execution_id is not None
+
+        original_cancel_node = storage.task.tasks.cancel_node
+        interrupted_projection = False
+
+        async def fail_confirmed_projection(
+            graph_id: str,
+            node_id: str,
+            *,
+            tenant_id: str,
+            execution_id: str,
+            cancel_confirmed: bool = False,
+            expected_fence: int | None = None,
+        ) -> TaskGraphView:
+            nonlocal interrupted_projection
+            if cancel_confirmed and not interrupted_projection:
+                interrupted_projection = True
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            return await original_cancel_node(
+                graph_id,
+                node_id,
+                tenant_id=tenant_id,
+                execution_id=execution_id,
+                cancel_confirmed=cancel_confirmed,
+                expected_fence=expected_fence,
+            )
+
+        monkeypatch.setattr(
+            storage.task.tasks,
+            "cancel_node",
+            fail_confirmed_projection,
+        )
+        original_execution_cancel = runtime._execution_service.cancel_task
+        execution_cancel_calls = 0
+
+        async def count_execution_cancel(
+            execution_id: str,
+            *,
+            principal: Principal,
+        ):
+            nonlocal execution_cancel_calls
+            execution_cancel_calls += 1
+            return await original_execution_cancel(
+                execution_id,
+                principal=principal,
+            )
+
+        monkeypatch.setattr(
+            runtime._execution_service,
+            "cancel_task",
+            count_execution_cancel,
+        )
+        execution = await graph_run.execution("target")
+        with pytest.raises(AIError) as cancel_error:
+            await execution.cancel(
+                idempotency_key="terminal-node-cancel-recovery-cancel-0001"
+            )
+        assert cancel_error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+        assert interrupted_projection
+        assert execution_cancel_calls == 1
+
+        durable_execution = await runtime.executions.inspect(
+            target.execution_id,
+            principal=runtime.default_principal,
+        )
+        interrupted_state = await graph_run.state(include_content=True)
+        assert durable_execution.status.value == "CANCELLED"
+        assert interrupted_state.status is TaskStatus.RECOVERY_REQUIRED
+        assert interrupted_state.node_states[0].status is TaskStatus.RECOVERY_REQUIRED
+
+        recovery_key = "terminal-node-cancel-recovery-recover-0001"
+        recovered = await graph_run.recover(idempotency_key=recovery_key)
+        cancel_receipt = await storage.task.operations.get(
+            idempotency_key_digest("terminal-node-cancel-recovery-cancel-0001"),
+            tenant_id=runtime.tenant_id,
+        )
+        recovery_receipt = await storage.task.operations.get(
+            idempotency_key_digest(recovery_key),
+            tenant_id=runtime.tenant_id,
+        )
+        assert recovered.status is TaskStatus.CANCELLED
+        assert cancel_receipt is not None
+        assert cancel_receipt.status.value == "SUCCEEDED"
+        assert recovery_receipt is not None
+        assert recovery_receipt.status.value == "SUCCEEDED"
+        assert execution_cancel_calls == 1
+
+        replayed = await graph_run.recover(idempotency_key=recovery_key)
+        assert replayed.graph_id == recovered.graph_id
+        assert replayed.status is TaskStatus.CANCELLED
+        assert execution_cancel_calls == 1
 
 
 @pytest.mark.asyncio

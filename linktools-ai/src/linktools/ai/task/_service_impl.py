@@ -748,11 +748,6 @@ class DefaultTaskGraphService(TaskGraphService):
                 tenant_id=tenant_id,
                 cancel_requested=cancel_requested,
             )
-        elif existing is None and view.status not in {
-            TaskStatus.PENDING,
-            TaskStatus.RUNNING,
-        }:
-            raise AIError(ErrorCode.TASK_NOT_READY)
         if view.status is TaskStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
