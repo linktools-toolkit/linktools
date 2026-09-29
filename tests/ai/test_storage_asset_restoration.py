@@ -235,12 +235,15 @@ async def test_sql_dialect_upsert_uses_vendor_statement() -> None:
 
 @pytest.mark.asyncio
 async def test_sql_dialect_owns_consistent_read_setup() -> None:
+    sqlite = SQLiteDialect()
+    assert sqlite.single_writer is True
     sqlite_session = _DialectSession("sqlite")
-    await SQLiteDialect().begin_consistent_read(sqlite_session)
+    await sqlite.begin_consistent_read(sqlite_session)
     assert [str(statement) for statement in sqlite_session.statements] == ["BEGIN"]
     assert sqlite_session.connection_options == []
 
     for dialect in (PostgreSQLDialect(), MySQLDialect()):
+        assert dialect.single_writer is False
         session = _DialectSession(dialect.name)
         await dialect.begin_consistent_read(session)
         assert session.statements == []

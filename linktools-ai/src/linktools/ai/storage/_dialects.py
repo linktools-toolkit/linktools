@@ -91,6 +91,9 @@ class SqlAlchemyDialect(Protocol):
     @property
     def name(self) -> str: ...
 
+    @property
+    def single_writer(self) -> bool: ...
+
     async def configure_engine(self, engine: "AsyncEngine") -> None: ...
 
     async def begin_consistent_read(self, session: "AsyncSession") -> None: ...
@@ -184,12 +187,16 @@ class SQLiteDialect:
     def name(self) -> str:
         return "sqlite"
 
+    @property
+    def single_writer(self) -> bool:
+        return self.name == "sqlite"
+
     async def configure_engine(self, engine: "AsyncEngine") -> None:
-        if self.name == "sqlite":
+        if self.single_writer:
             await configure_sqlite_engine(engine)
 
     async def begin_consistent_read(self, session: "AsyncSession") -> None:
-        if self.name == "sqlite":
+        if self.single_writer:
             from sqlalchemy import text
 
             await session.execute(text("BEGIN"))

@@ -90,7 +90,7 @@ class SqlStateStorageGroup:
         self._owns_context = owns_context
         self._read_only = read_only
         self._mutation_lock = (
-            asyncio.Lock() if context.dialect.name == "sqlite" else None
+            asyncio.Lock() if context.dialect.single_writer else None
         )
         self._close_lock = asyncio.Lock()
         self._closed = False
