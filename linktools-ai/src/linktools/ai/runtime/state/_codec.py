@@ -552,7 +552,7 @@ def _decode_v1_task_node(
     reconcile = raw_fields.get("reconcile", False)
     if not isinstance(effect_policy, str) or not isinstance(reconcile, bool):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return TaskNode(
+    return TaskNode.from_resolved(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         tuple(
             _decode_domain(
@@ -623,7 +623,7 @@ def _decode_v1_terminal_task_node(
     persisted: bool,
 ) -> TaskNode:
     node = _decode_v1_task_node(raw_fields, codec, persisted)
-    return TaskNode(
+    return TaskNode.from_resolved(
         node.node_id,
         node.dependencies,
         task=node.task,
