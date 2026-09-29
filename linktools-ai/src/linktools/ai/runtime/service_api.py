@@ -191,6 +191,17 @@ class ExecutionView:
     event_sequence: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _TaskAttemptLease:
+    execution_id: str
+    revision: int
+    event_sequence: int
+    task_attempt: int
+    status: ExecutionStatus
+    task_deadline_at: datetime | None
+    task_next_attempt_at: datetime | None
+
+
 def project_execution_view(source: object) -> ExecutionView:
     """Project an internal execution source into the stable public view."""
     value = cast(_ExecutionViewSource, source)
@@ -1145,7 +1156,7 @@ class ExecutionService(Protocol):
         execution_id: str,
         *,
         principal: Principal,
-    ) -> ExecutionView: ...
+    ) -> _TaskAttemptLease: ...
 
     async def schedule_task_retry(
         self,
@@ -1153,6 +1164,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         error_code: str,
+        attempt: "_TaskAttemptLease | None" = None,
     ) -> ExecutionView: ...
 
     async def defer_task_input(
@@ -1192,6 +1204,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         output: JsonValue,
+        attempt: "_TaskAttemptLease | None" = None,
     ) -> ExecutionResult: ...
 
     async def fail_task(
@@ -1200,6 +1213,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         error: AIError,
+        attempt: "_TaskAttemptLease | None" = None,
     ) -> ExecutionResult: ...
 
     async def require_task_recovery(
@@ -1208,6 +1222,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         error_code: str,
+        attempt: "_TaskAttemptLease | None" = None,
     ) -> ExecutionView: ...
     async def cancel_task(
         self,

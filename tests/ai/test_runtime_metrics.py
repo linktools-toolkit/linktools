@@ -382,6 +382,14 @@ class _CommitUnknownTaskRepository:
             await self.list_nodes(graph_id, tenant_id=tenant_id),
         )
 
+    async def graph_state(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphState:
+        return await self.scheduler_state(graph_id, tenant_id=tenant_id)
+
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         return await self.reconcile_graph(graph_id, tenant_id=tenant_id)
 

@@ -150,9 +150,9 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
             RecoverGraphRequest(request.principal, "recover:resume"),
         )
 
-        assert result.status is TaskStatus.RUNNING
+        assert result.status is TaskStatus.PENDING
         assert launcher.started == ["resume"]
-        assert result.node_results[0].status is TaskStatus.WAITING
+        assert result.node_results[0].status is TaskStatus.READY
         assert result.node_results[0].execution_id == "execution"
         operation = await state.task.operations.get(
             idempotency_key_digest("recover:resume"),
@@ -186,7 +186,7 @@ async def test_recovery_actor_does_not_replace_admitted_execution_principal() ->
             RecoverGraphRequest(actor, "recover:principal-recovery"),
         )
 
-        assert result.status is TaskStatus.RUNNING
+        assert result.status is TaskStatus.PENDING
         assert preflight.prepared_principals == [request.principal]
         assert launcher.launches[0].principal == request.principal
     finally:
@@ -235,7 +235,7 @@ async def test_recovery_validation_fails_before_graph_state_transition() -> None
 
 
 @pytest.mark.asyncio
-async def test_cancel_intent_stays_pending_until_recovery_settles_it() -> None:
+async def test_cancel_intent_stays_unknown_until_execution_fact_is_available() -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
@@ -260,12 +260,19 @@ async def test_cancel_intent_stays_pending_until_recovery_settles_it() -> None:
             "cancel",
             tenant_id="tenant",
             limit=10,
+            states=frozenset(
+                {
+                    OperationStatus.PENDING,
+                    OperationStatus.RUNNING,
+                    OperationStatus.EFFECT_UNKNOWN,
+                }
+            ),
         )
 
         assert deferred.status is TaskStatus.RECOVERY_REQUIRED
         assert cancel_operation is not None
         assert cancel_operation.operation_kind is OperationKind.TASK_CANCEL
-        assert cancel_operation.status is OperationStatus.RUNNING
+        assert cancel_operation.status is OperationStatus.EFFECT_UNKNOWN
         assert any(item.operation_id == cancel_operation.operation_id for item in pending)
 
         result = await service.recover(
@@ -277,10 +284,67 @@ async def test_cancel_intent_stays_pending_until_recovery_settles_it() -> None:
             tenant_id="tenant",
         )
 
-        assert result.status is TaskStatus.CANCELLED
+        assert result.status is TaskStatus.RECOVERY_REQUIRED
         assert settled_cancel is not None
-        assert settled_cancel.status is OperationStatus.SUCCEEDED
+        assert settled_cancel.status is OperationStatus.EFFECT_UNKNOWN
         assert launcher.started == []
-        assert launcher.cancelled == ["cancel", "cancel"]
+        assert launcher.cancelled == ["cancel"]
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_node_cancel_requires_execution_confirmation_before_terminal_projection() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
+    try:
+        request = await _recovery_graph(state, "node-cancel")
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+        )
+        cancel_request = CancelGraphRequest(request.principal, "cancel:node")
+
+        unresolved = await service._settle_execution_cancellation(
+            "node-cancel",
+            "node",
+            "execution",
+            cancel_request,
+            cancel_confirmed=None,
+        )
+        unresolved_operation = await state.task.operations.get(
+            idempotency_key_digest("cancel:node"),
+            tenant_id="tenant",
+        )
+        graph_state = await state.task.tasks.graph_state(
+            "node-cancel",
+            tenant_id="tenant",
+        )
+        assert unresolved.status is TaskStatus.RECOVERY_REQUIRED
+        assert unresolved_operation is not None
+        assert unresolved_operation.status is OperationStatus.EFFECT_UNKNOWN
+        assert graph_state is not None
+        assert graph_state.node_states[0].status is TaskStatus.RECOVERY_REQUIRED
+
+        confirmed = await service._settle_execution_cancellation(
+            "node-cancel",
+            "node",
+            "execution",
+            cancel_request,
+            cancel_confirmed=True,
+        )
+        confirmed_operation = await state.task.operations.get(
+            idempotency_key_digest("cancel:node"),
+            tenant_id="tenant",
+        )
+        graph_state = await state.task.tasks.graph_state(
+            "node-cancel",
+            tenant_id="tenant",
+        )
+        assert confirmed.status is TaskStatus.CANCELLED
+        assert confirmed_operation is not None
+        assert confirmed_operation.status is OperationStatus.SUCCEEDED
+        assert graph_state is not None
+        assert graph_state.node_states[0].status is TaskStatus.CANCELLED
     finally:
         await state.close()

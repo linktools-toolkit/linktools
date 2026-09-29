@@ -12,7 +12,7 @@ from linktools.ai.task import TaskGraph, TaskNode
 
 
 @pytest.mark.asyncio
-async def test_explicit_cancel_preserves_terminal_nodes_and_cancels_active_work() -> None:
+async def test_cancel_preserves_terminal_nodes_and_unsettled_active_work() -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-cancel-semantics", tenant_id="tenant")
     try:
@@ -54,12 +54,12 @@ async def test_explicit_cancel_preserves_terminal_nodes_and_cancels_active_work(
         assert graph_state is not None
         states = {item.node_id: item.status for item in graph_state.node_states}
 
-        assert cancelled.status is TaskStatus.CANCELLED
-        assert graph_state.status is TaskStatus.CANCELLED
+        assert cancelled.status is TaskStatus.RUNNING
+        assert graph_state.status is TaskStatus.RUNNING
         assert states == {
             "failed": TaskStatus.FAILED,
             "blocked": TaskStatus.BLOCKED,
-            "active": TaskStatus.CANCELLED,
+            "active": TaskStatus.RUNNING,
         }
     finally:
         await state.close()

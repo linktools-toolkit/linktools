@@ -68,6 +68,100 @@ class _BlockingRunner:
         del node, graph_id, principal, correlation, dependency_results
 
 
+class _DrainBarrierRunner:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.run_cancelled = asyncio.Event()
+        self.release_run = asyncio.Event()
+        self.cancel_entered = asyncio.Event()
+        self.release_cancel = asyncio.Event()
+        self.cancel_calls = 0
+
+    async def run(
+        self,
+        invocation: TaskNodeInvocation,
+        *,
+        control: TaskNodeRunControl,
+    ) -> TaskNodeRunResult:
+        del invocation
+        await control.bind_execution("execution-quiesce")
+        await control.handoff_execution("execution-quiesce")
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.run_cancelled.set()
+            await self.release_run.wait()
+            raise
+        raise AssertionError("blocked task unexpectedly completed")
+
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        del invocation
+        self.cancel_calls += 1
+        self.cancel_entered.set()
+        await self.release_cancel.wait()
+
+
+@pytest.mark.asyncio
+async def test_quiesce_keeps_inflight_owned_through_caller_cancellation() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-quiesce-drain", tenant_id="tenant")
+    launcher: LocalTaskGraphLauncher | None = None
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("quiesce-drain", (TaskNode("node"),))
+        await admit_graph(state, graph)
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
+        runner = _DrainBarrierRunner()
+        launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
+        await launcher.start(
+            TaskGraphLaunch(graph.graph_id, principal, TaskGraphLimits())
+        )
+        await asyncio.wait_for(runner.entered.wait(), 1)
+        graph_state = await repository.graph_state(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert graph_state is not None
+        run = launcher._graphs[("tenant", graph.graph_id)]
+        inflight = run.inflight["node"]
+
+        interrupted_cleaner = asyncio.create_task(
+            launcher._quiesce_node(
+                run,
+                graph_state,
+                "node",
+                invoke_cancel=False,
+            )
+        )
+        await asyncio.wait_for(runner.run_cancelled.wait(), 1)
+        surviving_cleaner = asyncio.create_task(
+            launcher._quiesce_node(
+                run,
+                graph_state,
+                "node",
+                invoke_cancel=True,
+            )
+        )
+        interrupted_cleaner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await interrupted_cleaner
+
+        assert run.inflight.get("node") is inflight
+        runner.release_run.set()
+        await asyncio.wait_for(runner.cancel_entered.wait(), 1)
+        assert run.inflight.get("node") is inflight
+        assert runner.cancel_calls == 1
+
+        runner.release_cancel.set()
+        await asyncio.wait_for(surviving_cleaner, 1)
+        assert run.inflight.get("node") is not inflight
+    finally:
+        if launcher is not None:
+            await launcher.shutdown()
+        await state.close()
+
+
 @pytest.mark.asyncio
 async def test_scheduler_retries_transient_reconcile_conflict(
     monkeypatch: pytest.MonkeyPatch,
@@ -277,9 +371,8 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
         for stream in streams:
             await stream.aclose()
         if launcher is not None:
-            await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-            await asyncio.wait_for(runner.cancelled.wait(), 2)
             await launcher.shutdown()
+            assert runner.cancelled.is_set()
         await state.close()
 
 
@@ -354,7 +447,6 @@ async def test_local_event_stream_observes_foreign_update_via_scheduler_notifica
         if stream is not None:
             await stream.aclose()
         if launcher is not None:
-            await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-            await asyncio.wait_for(runner.cancelled.wait(), 2)
             await launcher.shutdown()
+            assert runner.cancelled.is_set()
         await state.close()
