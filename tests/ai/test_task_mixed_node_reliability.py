@@ -1602,7 +1602,7 @@ async def test_projected_agent_input_reads_json_null_dependency() -> None:
                     "consumer",
                     ("source",),
                     task=consumer,
-                    input=AgentTaskInput(parameters={"mode": "null"}),
+                    input=AgentTaskInput("base", parameters={"mode": "null"}),
                 ),
             ),
         )
