@@ -57,11 +57,7 @@ from ..task import (
     TaskResultRecord,
     TaskResultRef,
 )
-from ._agent_task import (
-    RuntimeAgentTaskRunner,
-    _dependency_identity_payload,
-    _execution_failure,
-)
+from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInput
 from ._input import (
     CanonicalUserInput,
@@ -2669,6 +2665,70 @@ def _copy_json_mappings(value: object) -> object:
     if isinstance(value, list):
         return [_copy_json_mappings(item) for item in value]
     return value
+
+
+def _execution_failure(result: ExecutionResult) -> TaskNodeRunError:
+    if result.status not in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if result.error_code is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        code = ErrorCode(result.error_code)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    return TaskNodeRunError(
+        code,
+        result.execution_id,
+        safe_details=result.safe_error_details,
+    )
+
+
+def _dependency_identity_payload(
+    node: TaskNode,
+    dependencies: Mapping[str, TaskDependency],
+    dependency_states: Mapping[str, TaskDependencyState],
+) -> list[dict[str, JsonValue]]:
+    if node.dependency_policy == "all_succeeded":
+        return [
+            {
+                "node_id": dependency_id,
+                "result_digest": dependencies[dependency_id].result_digest,
+            }
+            for dependency_id in sorted(dependencies)
+        ]
+    if node.dependency_policy != "all_terminal":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if set(dependency_states) != set(node.dependencies):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    node_dependencies = set(node.dependencies)
+    result: list[dict[str, JsonValue]] = []
+    for dependency_id in sorted(node_dependencies | set(dependencies)):
+        if dependency_id not in node_dependencies:
+            result.append(
+                {
+                    "node_id": dependency_id,
+                    "result_digest": dependencies[dependency_id].result_digest,
+                }
+            )
+            continue
+        state = dependency_states[dependency_id]
+        if state.status is TaskStatus.SUCCEEDED:
+            dependency = dependencies.get(dependency_id)
+            if (
+                dependency is None
+                or dependency.result_digest != state.result_digest
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        elif dependency_id in dependencies:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result.append(
+            {
+                "node_id": dependency_id,
+                **state.to_payload(),
+            }
+        )
+    return result
 
 
 def _task_dependency_hold_id(
