@@ -514,7 +514,7 @@ class DefaultTaskGraphService(TaskGraphService):
         request: RecoverGraphRequest,
     ) -> TaskGraphResult:
         tenant_id = request.principal.tenant_id
-        await self.authorize_recovery(graph_id, principal=request.principal)
+        await self._authorize_recovery(graph_id, principal=request.principal)
         initial = await self._persistence.tasks.get_graph(
             graph_id,
             tenant_id=tenant_id,
@@ -560,6 +560,37 @@ class DefaultTaskGraphService(TaskGraphService):
             tenant_id=tenant_id,
         )
         cancel_requested = bool(cancel_operations)
+        admission = None
+        if (
+            view.status
+            in {
+                TaskStatus.RECOVERY_REQUIRED,
+                TaskStatus.PENDING,
+                TaskStatus.RUNNING,
+            }
+            and not (
+                view.status is TaskStatus.RECOVERY_REQUIRED
+                and cancel_requested
+            )
+        ):
+            admission = await self._persistence.admissions.get(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if (
+                admission is None
+                or admission.graph_id != graph_id
+                or admission.principal.tenant_id != tenant_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if self._preflight is not None:
+                state = await self._persistence.tasks.scheduler_state(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
+                await self._preflight.load_admission(admission)
+                self._preflight.validate_recovery(state)
+
         if view.status is TaskStatus.RECOVERY_REQUIRED:
             view = await self._persistence.tasks.recover_graph(
                 graph_id,
@@ -588,29 +619,19 @@ class DefaultTaskGraphService(TaskGraphService):
         elif _terminal(view.status):
             await self._observe_metric_history(view, tenant_id=tenant_id)
         else:
-            admission = await self._persistence.admissions.get(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            if (
-                admission is None
-                or admission.graph_id != graph_id
-                or admission.principal.tenant_id != tenant_id
-            ):
+            if admission is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             launch = admission.launch()
-            state = await self._persistence.tasks.scheduler_state(
-                graph_id,
-                tenant_id=tenant_id,
-            )
             if self._preflight is not None:
-                await self._preflight.load_admission(admission)
-                self._preflight.validate_recovery(state)
+                state = await self._persistence.tasks.scheduler_state(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
                 await self._preflight.prepare_graph(
                     state,
                     principal=launch.principal,
                 )
-            await self._arm_graph(admission.launch())
+            await self._arm_graph(launch)
 
         settled = await self._record_success(
             operation,
@@ -628,7 +649,7 @@ class DefaultTaskGraphService(TaskGraphService):
         )
         return await self._result(view, tenant_id)
 
-    async def authorize_recovery(
+    async def _authorize_recovery(
         self,
         graph_id: str,
         *,
@@ -652,7 +673,7 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         principal: Principal,
     ) -> tuple[TaskNodeInfo, ...]:
-        await self.authorize_recovery(graph_id, principal=principal)
+        await self._authorize_recovery(graph_id, principal=principal)
         state = await self._persistence.tasks.graph_state(
             graph_id,
             tenant_id=principal.tenant_id,
@@ -660,34 +681,6 @@ class DefaultTaskGraphService(TaskGraphService):
         if state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(TaskNodeInfo.from_node(node) for node in state.nodes)
-
-    async def preflight_recovery(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> None:
-        await self.authorize_recovery(graph_id, principal=principal)
-        if self._preflight is None:
-            return
-        admission = await self._persistence.admissions.get(
-            graph_id,
-            tenant_id=principal.tenant_id,
-        )
-        if (
-            admission is None
-            or admission.graph_id != graph_id
-            or admission.principal.tenant_id != principal.tenant_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._preflight.load_admission(admission)
-        state = await self._persistence.tasks.graph_state(
-            graph_id,
-            tenant_id=principal.tenant_id,
-        )
-        if state is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._preflight.validate_recovery(state)
 
     async def resume(
         self,

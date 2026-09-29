@@ -110,26 +110,12 @@ class TaskGraphService(TaskGraphQueryService, Protocol):
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult: ...
 
-    async def authorize_recovery(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> None: ...
-
     async def recovery_nodes(
         self,
         graph_id: str,
         *,
         principal: Principal,
     ) -> tuple[TaskNodeInfo, ...]: ...
-
-    async def preflight_recovery(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> None: ...
 
     async def recover(
         self,

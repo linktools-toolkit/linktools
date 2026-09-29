@@ -13,7 +13,7 @@ from linktools.ai.core import (
     canonical_sha256,
     idempotency_key_digest,
 )
-from linktools.ai.errors import ErrorCode
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state import RuntimeStorage
 from linktools.ai.task import (
     CancelGraphRequest,
@@ -52,12 +52,14 @@ class _Launcher:
 class _RecoveryPreflight:
     def __init__(self) -> None:
         self.prepared_principals: list[Principal] = []
+        self.validated = 0
 
     async def load_admission(self, admission: TaskGraphAdmission) -> None:
         assert admission.graph_id
 
     def validate_recovery(self, state: object) -> None:
         del state
+        self.validated += 1
 
     async def prepare_graph(self, state: object, *, principal: Principal) -> None:
         del state
@@ -187,6 +189,47 @@ async def test_recovery_actor_does_not_replace_admitted_execution_principal() ->
         assert result.status is TaskStatus.RUNNING
         assert preflight.prepared_principals == [request.principal]
         assert launcher.launches[0].principal == request.principal
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_validation_fails_before_graph_state_transition() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
+    try:
+        request = await _recovery_graph(state, "validate-before-recover")
+        launcher = _Launcher()
+
+        class RejectingPreflight(_RecoveryPreflight):
+            def validate_recovery(self, state: object) -> None:
+                super().validate_recovery(state)
+                raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
+
+        preflight = RejectingPreflight()
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            launcher,
+            preflight=preflight,  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(AIError) as raised:
+            await service.recover(
+                "validate-before-recover",
+                RecoverGraphRequest(request.principal, "recover:validate-before-recover"),
+            )
+
+        assert raised.value.code is ErrorCode.BINDING_NOT_REGISTERED
+        persisted = await state.task.tasks.get_graph(
+            "validate-before-recover",
+            tenant_id="tenant",
+        )
+        assert persisted is not None
+        assert persisted.status is TaskStatus.RECOVERY_REQUIRED
+        assert preflight.validated == 1
+        assert preflight.prepared_principals == []
+        assert launcher.started == []
     finally:
         await state.close()
 

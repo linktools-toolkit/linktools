@@ -88,7 +88,7 @@ class TaskEngine(Generic[AppT]):
         tasks: Mapping[tuple[str, int], Task[AppT]],
         expanders: Mapping[tuple[str, int], TaskExpander],
     ) -> None:
-        runtime.validate_task_bindings(tuple(tasks.values()))
+        runtime._validate_task_bindings(tuple(tasks.values()))
         self._runtime = runtime
         self._graph_service = graph_service
         self._tasks = MappingProxyType(dict(sorted(tasks.items())))
@@ -247,10 +247,6 @@ class TaskEngine(Generic[AppT]):
             graph,
             tuple(self._tasks.values()),
             tuple(self._expanders.values()),
-        )
-        await self._graph_service.preflight_recovery(
-            graph_id,
-            principal=authorization_principal,
         )
 
     @property

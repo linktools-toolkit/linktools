@@ -1177,7 +1177,7 @@ class Runtime(Generic[AppT]):
         if self._closed or self._closing:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-    def validate_task_bindings(self, tasks: Sequence[Task[AppT]]) -> None:
+    def _validate_task_bindings(self, tasks: Sequence[Task[AppT]]) -> None:
         self._ensure_open()
         for task in tasks:
             runner = task.runner
