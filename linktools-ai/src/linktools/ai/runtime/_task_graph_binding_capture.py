@@ -16,7 +16,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
-from ..task import Task, TaskExpander, TaskGraph, TaskGraphAdmission, TaskNode
+from ..task import Task, TaskExpander, TaskGraph, TaskGraphAdmission, TaskNode, TaskRef
 from ._runtime_identity import task_graph_binding_capture_key
 from .state._task_graph_binding_capture import (
     TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
@@ -29,19 +29,18 @@ from .state._task_graph_binding_capture import (
 _KIND = "task-graph-binding-capture"
 _VERSION = TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
-_BUILTIN_INPUT_TASK_ID = "linktools.ai.input"
-_BUILTIN_INPUT_TASK_REVISION = 1
+_BUILTIN_INPUT_TASK_REF = TaskRef.deferred_input()
 _BUILTIN_INPUT_TASK_DECLARATION = {
     "version": 1,
-    "id": _BUILTIN_INPUT_TASK_ID,
-    "revision": _BUILTIN_INPUT_TASK_REVISION,
+    "id": _BUILTIN_INPUT_TASK_REF.id,
+    "revision": _BUILTIN_INPUT_TASK_REF.revision,
     "type": "input",
     "effect_policy": "none",
     "output_contract": {"kind": "json"},
     "reconcile": False,
 }
 _BUILTIN_TASKS: dict[tuple[str, int], dict[str, JsonValue]] = {
-    (_BUILTIN_INPUT_TASK_ID, _BUILTIN_INPUT_TASK_REVISION): (
+    (_BUILTIN_INPUT_TASK_REF.id, _BUILTIN_INPUT_TASK_REF.revision): (
         _BUILTIN_INPUT_TASK_DECLARATION
     ),
 }
