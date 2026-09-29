@@ -603,6 +603,108 @@ async def test_recover_settles_cancel_receipt_after_graph_is_terminal(
 
 
 @pytest.mark.asyncio
+async def test_recover_settles_cancel_receipt_when_business_success_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-cancel-success-race", tenant_id="tenant")
+    release_cancel = asyncio.Event()
+    cancel_entered = asyncio.Event()
+    try:
+        request = _request("cancel-success-race")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            request.graph,
+        )
+        lease = await state.task.tasks.claim(
+            request.graph.graph_id,
+            "node",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+        )
+        original_cancel_graph = state.task.tasks.cancel_graph
+        original_record_success = service._record_success
+        interrupted = False
+
+        async def pause_cancel_projection(
+            graph_id: str,
+            *,
+            tenant_id: str,
+        ) -> TaskGraphView:
+            cancel_entered.set()
+            await release_cancel.wait()
+            return await original_cancel_graph(graph_id, tenant_id=tenant_id)
+
+        async def interrupt_cancel_receipt(
+            operation,
+            tenant_id,
+            view,
+            *,
+            expected_status=OperationStatus.RUNNING,
+        ):
+            nonlocal interrupted
+            if operation.operation_kind is OperationKind.TASK_CANCEL and not interrupted:
+                interrupted = True
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            return await original_record_success(
+                operation,
+                tenant_id,
+                view,
+                expected_status=expected_status,
+            )
+
+        monkeypatch.setattr(state.task.tasks, "cancel_graph", pause_cancel_projection)
+        monkeypatch.setattr(service, "_record_success", interrupt_cancel_receipt)
+        cancellation = asyncio.create_task(
+            service.cancel(
+                request.graph.graph_id,
+                CancelGraphRequest(request.principal, "cancel:success-race"),
+            )
+        )
+        await asyncio.wait_for(cancel_entered.wait(), 1)
+
+        await state.task.tasks.complete(
+            lease,
+            tenant_id="tenant",
+            execution_id="execution-success-race",
+            result_digest="a" * 64,
+        )
+        release_cancel.set()
+        with pytest.raises(AIError) as raised:
+            await asyncio.wait_for(cancellation, 2)
+        assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+
+        operation_id = idempotency_key_digest("cancel:success-race")
+        pending = await state.task.operations.get(operation_id, tenant_id="tenant")
+        terminal = await state.task.tasks.get_graph(
+            request.graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert pending is not None
+        assert pending.status is OperationStatus.RUNNING
+        assert terminal is not None
+        assert terminal.status is TaskStatus.SUCCEEDED
+
+        monkeypatch.setattr(service, "_record_success", original_record_success)
+        recovered = await service.recover(
+            request.graph.graph_id,
+            RecoverGraphRequest(request.principal, "recover:success-race"),
+        )
+        settled = await state.task.operations.get(operation_id, tenant_id="tenant")
+        assert recovered.status is TaskStatus.SUCCEEDED
+        assert settled is not None
+        assert settled.status is OperationStatus.SUCCEEDED
+    finally:
+        release_cancel.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_running_cancel_replay_reapplies_durable_graph_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
