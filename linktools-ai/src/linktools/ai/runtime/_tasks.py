@@ -221,7 +221,6 @@ class TaskEngine(Generic[AppT]):
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         task_runtime = runtime._require_task_node_runtime()
-        await task_runtime.load_admission(admission)
         graph = TaskGraph(
             graph_id,
             tuple(

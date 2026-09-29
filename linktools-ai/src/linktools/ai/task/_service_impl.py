@@ -573,23 +573,15 @@ class DefaultTaskGraphService(TaskGraphService):
                 and cancel_requested
             )
         ):
-            admission = await self._persistence.admissions.get(
+            state = await self._persistence.tasks.scheduler_state(
                 graph_id,
                 tenant_id=tenant_id,
             )
-            if (
-                admission is None
-                or admission.graph_id != graph_id
-                or admission.principal.tenant_id != tenant_id
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if self._preflight is not None:
-                state = await self._persistence.tasks.scheduler_state(
-                    graph_id,
-                    tenant_id=tenant_id,
-                )
-                await self._preflight.load_admission(admission)
-                self._preflight.validate_recovery(state)
+            admission = await self._validated_recovery_admission(
+                graph_id,
+                tenant_id,
+                state,
+            )
 
         if view.status is TaskStatus.RECOVERY_REQUIRED:
             view = await self._persistence.tasks.recover_graph(
@@ -648,6 +640,27 @@ class DefaultTaskGraphService(TaskGraphService):
             view.status.value,
         )
         return await self._result(view, tenant_id)
+
+    async def _validated_recovery_admission(
+        self,
+        graph_id: str,
+        tenant_id: str,
+        state: TaskGraphState,
+    ) -> TaskGraphAdmission:
+        admission = await self._persistence.admissions.get(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if (
+            admission is None
+            or admission.graph_id != graph_id
+            or admission.principal.tenant_id != tenant_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._preflight is not None:
+            await self._preflight.load_admission(admission)
+            self._preflight.validate_recovery(state)
+        return admission
 
     async def _authorize_recovery(
         self,
@@ -716,6 +729,11 @@ class DefaultTaskGraphService(TaskGraphService):
         )
         if state is None or node is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        admission = await self._validated_recovery_admission(
+            graph_id,
+            tenant_id,
+            graph_state,
+        )
         if self._preflight is not None:
             self._preflight.validate_input(node, request.value)
 
@@ -811,12 +829,6 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
 
-        admission = await self._persistence.admissions.get(
-            graph_id,
-            tenant_id=tenant_id,
-        )
-        if admission is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if state.status is TaskStatus.SUCCEEDED:
             if state.result_digest != value_digest:
                 await self._record_failure(
@@ -917,6 +929,11 @@ class DefaultTaskGraphService(TaskGraphService):
         )
         if state is None or node is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        admission = await self._validated_recovery_admission(
+            graph_id,
+            tenant_id,
+            graph_state,
+        )
         if self._preflight is not None:
             self._preflight.validate_effect_resolution(
                 node,
@@ -1016,13 +1033,6 @@ class DefaultTaskGraphService(TaskGraphService):
             raise AIError(ErrorCode.TASK_FENCE_STALE)
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        admission = await self._persistence.admissions.get(
-            graph_id,
-            tenant_id=tenant_id,
-        )
-        if admission is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
         view = await self._launcher.resolve_effect(
             admission.launch(),
             node_id,
