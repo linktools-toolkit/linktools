@@ -809,6 +809,7 @@ class LocalTaskGraphLauncher:
                 TaskStatus.RUNNING,
                 TaskStatus.WAITING,
                 TaskStatus.READY,
+                TaskStatus.RECOVERY_REQUIRED,
             }
         ):
             try:
