@@ -9,7 +9,7 @@ from ...core import ImmutableJsonMapping, JsonValue
 from ...errors import AIError, ErrorCode
 from ...spec import canonicalize_json_schema
 
-TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION = 2
+TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION = 1
 TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS = frozenset(
     {
         "kind",
