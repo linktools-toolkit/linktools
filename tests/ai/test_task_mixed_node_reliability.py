@@ -874,9 +874,9 @@ def test_all_terminal_uses_a_distinct_persisted_task_node_wire() -> None:
     default_wire = _encode_persisted_domain(default_node)
     terminal_wire = _encode_persisted_domain(terminal_node)
 
-    assert default_wire["$dataclass"] == "task_node@2"
+    assert default_wire["$dataclass"] == "task_node"
     assert "dependency_policy" not in default_wire["fields"]
-    assert terminal_wire["$dataclass"] == "task_node_terminal@2"
+    assert terminal_wire["$dataclass"] == "task_node_terminal"
     assert "dependency_policy" not in terminal_wire["fields"]
 
 
