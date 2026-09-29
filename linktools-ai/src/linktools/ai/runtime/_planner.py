@@ -56,6 +56,7 @@ from ..task import (
     TaskNodeRunResult,
     TaskResultRecord,
     TaskResultRef,
+    TaskRef,
 )
 from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInput
@@ -76,8 +77,6 @@ from ._object import RuntimeObjectKeyFactory
 from ._task_graph_binding_capture import (
     TaskGraphBindingCapture,
     TaskGraphBindingCaptureStore,
-    _BUILTIN_INPUT_TASK_ID,
-    _BUILTIN_INPUT_TASK_REVISION,
     builtin_task_declaration,
     task_declaration_semantics,
 )
@@ -149,8 +148,9 @@ class _TaskRunnerAdapter:
 
 
 class _DeferredInputHandler:
-    id = _BUILTIN_INPUT_TASK_ID
-    revision = _BUILTIN_INPUT_TASK_REVISION
+    _ref = TaskRef.deferred_input()
+    id = _ref.id
+    revision = _ref.revision
     effect_policy = "none"
     output_type = None
     reconcile = None
@@ -437,8 +437,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     previous = current_tasks.get(identity)
                     replacement = task_map.get(identity)
                     if previous is None and identity == (
-                        _BUILTIN_INPUT_TASK_ID,
-                        _BUILTIN_INPUT_TASK_REVISION,
+                        self._deferred_input.id,
+                        self._deferred_input.revision,
                     ):
                         continue
                     if (
