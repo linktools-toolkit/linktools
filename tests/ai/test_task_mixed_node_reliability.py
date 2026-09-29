@@ -1101,7 +1101,7 @@ async def test_cancel_recovery_required_execution_preserves_recovery_boundary() 
             await execution.cancel(
                 idempotency_key="cancel-recovery-required-operation-0001"
             )
-        assert raised.value.code is ErrorCode.TASK_EFFECT_UNKNOWN
+        assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
 
         current = await graph_run.state(include_content=True)
         assert current.status is TaskStatus.RECOVERY_REQUIRED

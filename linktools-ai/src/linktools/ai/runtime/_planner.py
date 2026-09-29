@@ -2209,9 +2209,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if execution_view.status in {
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
         }:
             return
+        execution_cancelled = execution_view.status is ExecutionStatus.CANCELLED
         if execution_view.status is ExecutionStatus.RECOVERY_REQUIRED:
             raise TaskNodeRunError(
                 ErrorCode.TASK_EFFECT_UNKNOWN,
@@ -2219,7 +2219,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             )
 
         if (
-            node.effect_policy == "non_replay_safe"
+            not execution_cancelled
+            and node.effect_policy == "non_replay_safe"
             and execution_view.task_attempt > 0
         ):
             await self._execution.cancel_task(
@@ -2277,10 +2278,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             dependency_states=dependency_states,
         )
         await handler.cancel(context)
-        await self._execution.cancel_task(
-            execution_id,
-            principal=principal,
-        )
+        if not execution_cancelled:
+            await self._execution.cancel_task(
+                execution_id,
+                principal=principal,
+            )
 
 
     async def get_result_record(

@@ -688,7 +688,7 @@ class LocalTaskGraphLauncher:
                 invoke_cancel=invoke_effects,
             )
             await self._notify(run)
-        elif invoke_effects and state.status not in _TERMINAL:
+        elif invoke_effects:
             dependency_results, dependency_states = await self._dependency_context(
                 graph_id,
                 node,
@@ -810,6 +810,7 @@ class LocalTaskGraphLauncher:
                 TaskStatus.WAITING,
                 TaskStatus.READY,
                 TaskStatus.RECOVERY_REQUIRED,
+                TaskStatus.CANCELLED,
             }
         ):
             try:

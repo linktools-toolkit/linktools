@@ -25,7 +25,6 @@ from ..capability import CapabilityGroup, CapabilityGroupCapture
 from ..core import (
     CorrelationData,
     ExecutionMode,
-    ExecutionStatus,
     JsonValue,
     Principal,
     PrincipalKind,
@@ -1058,46 +1057,58 @@ class Runtime(Generic[AppT]):
             principal=principal,
         )
         key = idempotency_key or secrets.token_urlsafe(32)
-        if view.binding_kind != "task":
-            return await self.executions.cancel(
+        request = CancelGraphRequest(principal, key, force)
+        if view.binding_kind == "task":
+            await self._graph_service.settle_execution_cancellation(
+                graph_id,
+                node_id,
                 execution_id,
-                CancelExecutionRequest(
-                    principal,
-                    key,
-                    force,
-                ),
+                request,
+                cancel_confirmed=None,
             )
+        try:
+            if view.binding_kind == "task":
+                cancelled = await self._execution_service.cancel_task(
+                    execution_id,
+                    principal=principal,
+                )
+            else:
+                cancelled = await self.executions.cancel(
+                    execution_id,
+                    CancelExecutionRequest(
+                        principal,
+                        key,
+                        force,
+                    ),
+                )
+        except AIError as error:
+            if error.code is ErrorCode.TASK_EFFECT_UNKNOWN:
+                await self._graph_service.settle_execution_cancellation(
+                    graph_id,
+                    node_id,
+                    execution_id,
+                    request,
+                    cancel_confirmed=None,
+                )
+            raise
 
-        await self._graph_service.cancel_node(
-            graph_id,
-            node_id,
-            execution_id,
-            CancelGraphRequest(
-                principal,
-                key,
-                force,
-            ),
-        )
-        settled = await self.executions.inspect(
-            execution_id,
-            principal=principal,
-        )
-        if settled.status is ExecutionStatus.CANCELLED:
-            return CancelExecutionResult(execution_id, True)
-        if settled.status in {
-            ExecutionStatus.SUCCEEDED,
-            ExecutionStatus.FAILED,
-        }:
-            return CancelExecutionResult(execution_id, False)
-        if settled.status is ExecutionStatus.RECOVERY_REQUIRED:
-            raise AIError(
-                ErrorCode.TASK_EFFECT_UNKNOWN,
-                safe_details={"graph_id": graph_id, "node_id": node_id},
+        if cancelled.cancelled:
+            await self._graph_service.settle_execution_cancellation(
+                graph_id,
+                node_id,
+                execution_id,
+                request,
+                cancel_confirmed=True,
             )
-        raise AIError(
-            ErrorCode.STORAGE_RECOVERY_REQUIRED,
-            safe_details={"graph_id": graph_id, "node_id": node_id},
-        )
+        else:
+            await self._graph_service.settle_execution_cancellation(
+                graph_id,
+                node_id,
+                execution_id,
+                request,
+                cancel_confirmed=False,
+            )
+        return cancelled
 
 
     async def _admit_graph(

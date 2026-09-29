@@ -151,6 +151,16 @@ class TaskGraphService(TaskGraphQueryService, Protocol):
         request: CancelGraphRequest,
     ) -> TaskGraphView: ...
 
+    async def settle_execution_cancellation(
+        self,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+        request: CancelGraphRequest,
+        *,
+        cancel_confirmed: bool | None,
+    ) -> TaskGraphView: ...
+
     async def preflight_close(self) -> None: ...
 
 

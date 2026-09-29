@@ -1723,19 +1723,22 @@ class DefaultTaskGraphService(TaskGraphService):
         execution_id: str,
         request: CancelGraphRequest,
     ) -> TaskGraphView:
-        return await self._settle_execution_cancellation(
+        return await self.settle_execution_cancellation(
             graph_id,
             node_id,
             execution_id,
             request,
+            cancel_confirmed=None,
         )
 
-    async def _settle_execution_cancellation(
+    async def settle_execution_cancellation(
         self,
         graph_id: str,
         node_id: str,
         execution_id: str,
         request: CancelGraphRequest,
+        *,
+        cancel_confirmed: bool | None,
     ) -> TaskGraphView:
         tenant_id = request.principal.tenant_id
         header = await self._persistence.tasks.get_header(
@@ -1795,13 +1798,19 @@ class DefaultTaskGraphService(TaskGraphService):
         if operation.status is OperationStatus.SUCCEEDED:
             return view
 
-        if not _terminal(state.status):
+        if cancel_confirmed is False:
+            view = TaskGraphView(
+                graph_state.graph_id,
+                graph_state.status,
+                graph_state.nodes,
+            )
+        elif not _terminal(state.status):
             view = await self._persistence.tasks.cancel_node(
                 graph_id,
                 node_id,
                 tenant_id=tenant_id,
                 execution_id=execution_id,
-                cancel_confirmed=False,
+                cancel_confirmed=cancel_confirmed is True,
                 expected_fence=state.fence,
             )
             graph_state = await self._persistence.tasks.graph_state(
@@ -1817,34 +1826,26 @@ class DefaultTaskGraphService(TaskGraphService):
             if state is None or state.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        if self._launcher is not None and not _terminal(state.status):
+        if self._launcher is not None and (
+            state.status
+            in {
+                TaskStatus.CANCELLED,
+                TaskStatus.RECOVERY_REQUIRED,
+            }
+            or cancel_confirmed is False
+        ):
             admission = await self._persistence.admissions.get(
                 graph_id,
                 tenant_id=tenant_id,
             )
             if admission is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                await self._launcher.cancel_node(
-                    admission.launch(),
-                    node_id,
-                    execution_id,
-                    invoke_effects=claimed,
-                )
-            except BaseException as error:  # noqa: BLE001
-                if isinstance(error, asyncio.CancelledError):
-                    raise
-                await self._record_effect_unknown(operation, tenant_id)
-                if isinstance(error, AIError):
-                    raise
-                raise AIError(
-                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                    safe_details={
-                        "phase": "task_node_cancel",
-                        "graph_id": graph_id,
-                        "node_id": node_id,
-                    },
-                ) from error
+            await self._launcher.cancel_node(
+                admission.launch(),
+                node_id,
+                execution_id,
+                invoke_effects=cancel_confirmed is True,
+            )
             graph_state = await self._persistence.tasks.graph_state(
                 graph_id,
                 tenant_id=tenant_id,
