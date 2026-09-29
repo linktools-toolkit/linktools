@@ -26,7 +26,7 @@ from .state._task_graph_binding_capture import (
     task_expander_declaration_identity,
 )
 
-_KIND = "task-graph-binding-capture"
+_KIND = "task-definition-capture"
 _VERSION = TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _BUILTIN_INPUT_TASK_ID = "linktools.ai.input"
