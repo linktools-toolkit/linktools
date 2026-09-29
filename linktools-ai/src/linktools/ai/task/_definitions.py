@@ -37,6 +37,10 @@ class TaskRef:
         ):
             raise ValueError("task reference is invalid")
 
+    @classmethod
+    def deferred_input(cls) -> "TaskRef":
+        return cls("linktools.ai.input", 1)
+
 
 @dataclass(frozen=True, slots=True)
 class TaskExpanderRef:
