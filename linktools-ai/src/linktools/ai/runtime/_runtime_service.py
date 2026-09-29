@@ -1057,6 +1057,15 @@ class Runtime(Generic[AppT]):
             principal=principal,
         )
         key = idempotency_key or secrets.token_urlsafe(32)
+        request = CancelGraphRequest(principal, key, force)
+        if view.binding_kind == "task":
+            await self._graph_service.settle_execution_cancellation(
+                graph_id,
+                node_id,
+                execution_id,
+                request,
+                cancel_confirmed=None,
+            )
         try:
             if view.binding_kind == "task":
                 cancelled = await self._execution_service.cancel_task(
@@ -1074,66 +1083,32 @@ class Runtime(Generic[AppT]):
                 )
         except AIError as error:
             if error.code is ErrorCode.TASK_EFFECT_UNKNOWN:
-                await self._settle_task_node_cancellation(
+                await self._graph_service.settle_execution_cancellation(
                     graph_id,
                     node_id,
                     execution_id,
-                    CancelGraphRequest(principal, key, force),
+                    request,
                     cancel_confirmed=None,
                 )
             raise
 
         if cancelled.cancelled:
-            await self._settle_task_node_cancellation(
-                graph_id,
-                node_id,
-                execution_id,
-                CancelGraphRequest(
-                    principal,
-                    key,
-                    force,
-                ),
-                cancel_confirmed=True,
-            )
-        else:
-            await self._settle_task_node_cancellation(
-                graph_id,
-                node_id,
-                execution_id,
-                CancelGraphRequest(principal, key, force),
-                cancel_confirmed=False,
-            )
-        return cancelled
-
-    async def _settle_task_node_cancellation(
-        self,
-        graph_id: str,
-        node_id: str,
-        execution_id: str,
-        request: CancelGraphRequest,
-        *,
-        cancel_confirmed: bool | None,
-    ) -> None:
-        settle = getattr(
-            self._graph_service,
-            "_settle_execution_cancellation",
-            None,
-        )
-        if settle is None:
-            await self._graph_service.cancel_node(
+            await self._graph_service.settle_execution_cancellation(
                 graph_id,
                 node_id,
                 execution_id,
                 request,
+                cancel_confirmed=True,
             )
-            return
-        await settle(
-            graph_id,
-            node_id,
-            execution_id,
-            request,
-            cancel_confirmed=cancel_confirmed,
-        )
+        else:
+            await self._graph_service.settle_execution_cancellation(
+                graph_id,
+                node_id,
+                execution_id,
+                request,
+                cancel_confirmed=False,
+            )
+        return cancelled
 
 
     async def _admit_graph(

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import asyncio
+
 import pytest
 
 from linktools.ai.core import (
@@ -19,6 +21,8 @@ from linktools.ai.task import (
     CancelGraphRequest,
     DefaultTaskGraphService,
     RecoverGraphRequest,
+    TaskEffectResolution,
+    TaskEffectResolutionRequest,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphHandle,
@@ -42,6 +46,20 @@ class _Launcher:
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
         self.cancelled.append(launch.graph_id)
+        return TaskGraphView(
+            launch.graph_id,
+            TaskStatus.RECOVERY_REQUIRED,
+            (),
+        )
+
+    async def settle_cancel(
+        self,
+        launch: TaskGraphLaunch,
+        *,
+        invoke_effects: bool,
+    ) -> TaskGraphView:
+        if invoke_effects:
+            return await self.cancel(launch)
         return TaskGraphView(
             launch.graph_id,
             TaskStatus.RECOVERY_REQUIRED,
@@ -294,6 +312,285 @@ async def test_cancel_intent_stays_unknown_until_execution_fact_is_available() -
 
 
 @pytest.mark.asyncio
+async def test_running_cancel_replay_reapplies_durable_graph_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-cancel-replay", tenant_id="tenant")
+    try:
+        request = _request("cancel-replay")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            request.graph,
+        )
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+        )
+        original_cancel_graph = state.task.tasks.cancel_graph
+        calls = 0
+
+        async def interrupt_before_projection(
+            graph_id: str,
+            *,
+            tenant_id: str,
+        ) -> TaskGraphView:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            return await original_cancel_graph(graph_id, tenant_id=tenant_id)
+
+        monkeypatch.setattr(
+            state.task.tasks,
+            "cancel_graph",
+            interrupt_before_projection,
+        )
+        cancel_request = CancelGraphRequest(request.principal, "cancel:replay")
+        with pytest.raises(AIError) as interrupted:
+            await service.cancel("cancel-replay", cancel_request)
+        assert interrupted.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+
+        result = await service.cancel("cancel-replay", cancel_request)
+        operation = await state.task.operations.get(
+            idempotency_key_digest("cancel:replay"),
+            tenant_id="tenant",
+        )
+
+        assert calls == 2
+        assert result.status is TaskStatus.CANCELLED
+        assert operation is not None
+        assert operation.status is OperationStatus.SUCCEEDED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_registration_wins_claim_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-cancel-claim-race", tenant_id="tenant")
+    release_registration = asyncio.Event()
+    registered = asyncio.Event()
+    try:
+        request = _request("cancel-claim-race")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            request.graph,
+        )
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+        )
+        original_register = state.task.tasks.register_cancel_request
+
+        async def register_then_pause(operation: object):
+            result = await original_register(operation)  # type: ignore[arg-type]
+            registered.set()
+            await release_registration.wait()
+            return result
+
+        monkeypatch.setattr(
+            state.task.tasks,
+            "register_cancel_request",
+            register_then_pause,
+        )
+        cancel_request = CancelGraphRequest(request.principal, "cancel:claim-race")
+        cancellation = asyncio.create_task(
+            service.cancel("cancel-claim-race", cancel_request)
+        )
+        await asyncio.wait_for(registered.wait(), 1)
+
+        with pytest.raises(AIError) as rejected_claim:
+            await state.task.tasks.claim(
+                "cancel-claim-race",
+                "node",
+                tenant_id="tenant",
+                owner="racing-worker",
+                lease_seconds=30,
+            )
+        assert rejected_claim.value.code is ErrorCode.TASK_NOT_READY
+
+        release_registration.set()
+        result = await asyncio.wait_for(cancellation, 2)
+        assert result.status is TaskStatus.CANCELLED
+    finally:
+        release_registration.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_intent_blocks_claim_after_not_applied_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-cancel-resolution-race", tenant_id="tenant")
+    release_cancel = asyncio.Event()
+    cancel_entered = asyncio.Event()
+    try:
+        request = await _recovery_graph(state, "cancel-resolution-race")
+
+        class _ResolutionLauncher(_Launcher):
+            async def resolve_effect(
+                self,
+                launch: TaskGraphLaunch,
+                node_id: str,
+                execution_id: str,
+                expected_fence: int,
+                resolution: TaskEffectResolution,
+            ) -> TaskGraphView:
+                assert resolution.kind == "not_applied"
+                await state.task.tasks.requeue_recovery(
+                    launch.graph_id,
+                    node_id,
+                    tenant_id="tenant",
+                    expected_fence=expected_fence,
+                    execution_id=execution_id,
+                )
+                view = await state.task.tasks.get_graph(
+                    launch.graph_id,
+                    tenant_id="tenant",
+                )
+                assert view is not None
+                return view
+
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            _ResolutionLauncher(),
+        )
+        original_cancel_graph = state.task.tasks.cancel_graph
+
+        async def pause_cancel_graph(
+            graph_id: str,
+            *,
+            tenant_id: str,
+        ) -> TaskGraphView:
+            cancel_entered.set()
+            await release_cancel.wait()
+            return await original_cancel_graph(graph_id, tenant_id=tenant_id)
+
+        monkeypatch.setattr(
+            state.task.tasks,
+            "cancel_graph",
+            pause_cancel_graph,
+        )
+        cancel_request = CancelGraphRequest(request.principal, "cancel:resolution-race")
+        cancellation = asyncio.create_task(
+            service.cancel("cancel-resolution-race", cancel_request)
+        )
+        await asyncio.wait_for(cancel_entered.wait(), 1)
+
+        result = await service.resolve_effect(
+            "cancel-resolution-race",
+            "node",
+            TaskEffectResolutionRequest(
+                request.principal,
+                1,
+                TaskEffectResolution("not_applied"),
+                "resolve:cancel-resolution-race",
+            ),
+        )
+        assert result.status is TaskStatus.PENDING
+        with pytest.raises(AIError) as rejected_claim:
+            await state.task.tasks.claim(
+                "cancel-resolution-race",
+                "node",
+                tenant_id="tenant",
+                owner="racing-worker",
+                lease_seconds=30,
+            )
+        assert rejected_claim.value.code is ErrorCode.TASK_NOT_READY
+
+        release_cancel.set()
+        cancellation_result = await asyncio.wait_for(cancellation, 2)
+        assert cancellation_result.status is TaskStatus.PENDING
+        operation = await state.task.operations.get(
+            idempotency_key_digest("cancel:resolution-race"),
+            tenant_id="tenant",
+        )
+        assert operation is not None
+        assert operation.status is OperationStatus.RUNNING
+    finally:
+        release_cancel.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_successful_effect_resolution_replay_completes_missing_arm() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-effect-arm", tenant_id="tenant")
+    try:
+        request = await _recovery_graph(state, "effect-arm")
+
+        class _ResolutionLauncher(_Launcher):
+            def __init__(self) -> None:
+                super().__init__()
+                self.resolve_calls = 0
+
+            async def resolve_effect(
+                self,
+                launch: TaskGraphLaunch,
+                node_id: str,
+                execution_id: str,
+                expected_fence: int,
+                resolution: TaskEffectResolution,
+            ) -> TaskGraphView:
+                assert resolution.kind == "not_applied"
+                self.resolve_calls += 1
+                await state.task.tasks.requeue_recovery(
+                    launch.graph_id,
+                    node_id,
+                    tenant_id="tenant",
+                    expected_fence=expected_fence,
+                    execution_id=execution_id,
+                )
+                view = await state.task.tasks.get_graph(
+                    launch.graph_id,
+                    tenant_id="tenant",
+                )
+                assert view is not None
+                return view
+
+        launcher = _ResolutionLauncher()
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            launcher,
+        )
+        original_arm = service._arm_graph
+        arm_calls = 0
+
+        async def fail_first_arm(launch: TaskGraphLaunch) -> None:
+            nonlocal arm_calls
+            arm_calls += 1
+            if arm_calls == 1:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            await original_arm(launch)
+
+        service._arm_graph = fail_first_arm  # type: ignore[method-assign]
+        resolution_request = TaskEffectResolutionRequest(
+            request.principal,
+            1,
+            TaskEffectResolution("not_applied"),
+            "resolve:effect-arm",
+        )
+        with pytest.raises(AIError) as interrupted:
+            await service.resolve_effect("effect-arm", "node", resolution_request)
+        assert interrupted.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+
+        result = await service.resolve_effect("effect-arm", "node", resolution_request)
+
+        assert result.status is TaskStatus.PENDING
+        assert launcher.resolve_calls == 1
+        assert launcher.started == ["effect-arm"]
+        assert arm_calls == 2
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_node_cancel_requires_execution_confirmation_before_terminal_projection() -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
@@ -305,7 +602,7 @@ async def test_node_cancel_requires_execution_confirmation_before_terminal_proje
         )
         cancel_request = CancelGraphRequest(request.principal, "cancel:node")
 
-        unresolved = await service._settle_execution_cancellation(
+        unresolved = await service.settle_execution_cancellation(
             "node-cancel",
             "node",
             "execution",
@@ -326,7 +623,7 @@ async def test_node_cancel_requires_execution_confirmation_before_terminal_proje
         assert graph_state is not None
         assert graph_state.node_states[0].status is TaskStatus.RECOVERY_REQUIRED
 
-        confirmed = await service._settle_execution_cancellation(
+        confirmed = await service.settle_execution_cancellation(
             "node-cancel",
             "node",
             "execution",
@@ -346,5 +643,73 @@ async def test_node_cancel_requires_execution_confirmation_before_terminal_proje
         assert confirmed_operation.status is OperationStatus.SUCCEEDED
         assert graph_state is not None
         assert graph_state.node_states[0].status is TaskStatus.CANCELLED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_node_cancel_scope_and_execution_identity_are_preserved() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-node-cancel-scope", tenant_id="tenant")
+    try:
+        request = TaskGraphRequest(
+            TaskGraph(
+                "node-cancel-scope",
+                (TaskNode("target"), TaskNode("sibling")),
+            ),
+            Principal("tester", "tenant"),
+            "node-cancel-scope-submit",
+        )
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            request.graph,
+        )
+        lease = await state.task.tasks.claim(
+            request.graph.graph_id,
+            "target",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        await state.task.tasks.mark_recovery_required(
+            lease,
+            tenant_id="tenant",
+            error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+            error_digest=canonical_sha256({"code": ErrorCode.TOOL_EFFECT_UNKNOWN.value}),
+            execution_id="target-execution",
+        )
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+        )
+        cancel_request = CancelGraphRequest(request.principal, "cancel:node-scope")
+        result = await service.settle_execution_cancellation(
+            request.graph.graph_id,
+            "target",
+            "target-execution",
+            cancel_request,
+            cancel_confirmed=True,
+        )
+        snapshot = await state.task.tasks.graph_state(
+            request.graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert snapshot is not None
+        statuses = {node.node_id: node.status for node in snapshot.node_states}
+        assert statuses == {
+            "target": TaskStatus.CANCELLED,
+            "sibling": TaskStatus.READY,
+        }
+        assert result.status is TaskStatus.PENDING
+
+        with pytest.raises(AIError) as conflicting_replay:
+            await service.settle_execution_cancellation(
+                request.graph.graph_id,
+                "target",
+                "different-execution",
+                cancel_request,
+                cancel_confirmed=True,
+            )
+        assert conflicting_replay.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
     finally:
         await state.close()

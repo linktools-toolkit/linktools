@@ -98,6 +98,12 @@ class TaskNodeRunner(Protocol, Generic[AppT]):
         execution_id: str,
     ) -> TaskNodeRunResult: ...
 
+    async def inspect_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> "TaskNodeRunResult | None": ...
+
     async def supply_input(
         self,
         invocation: TaskNodeInvocation,

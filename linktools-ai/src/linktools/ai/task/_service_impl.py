@@ -454,6 +454,29 @@ class DefaultTaskGraphService(TaskGraphService):
                 durable_admitted=True,
             ) from error
 
+    async def _arm_committed_graph_if_runnable(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> None:
+        if await self._pending_cancel_operations(graph_id, tenant_id=tenant_id):
+            return
+        state = await self._persistence.tasks.graph_state(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if state is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if state.status not in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            return
+        admission = await self._validated_recovery_admission(
+            graph_id,
+            tenant_id,
+            state,
+        )
+        await self._arm_graph(admission.launch())
+
     async def recover_pending(self) -> None:
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -560,6 +583,10 @@ class DefaultTaskGraphService(TaskGraphService):
         if view is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if operation.status is OperationStatus.SUCCEEDED:
+            await self._arm_committed_graph_if_runnable(
+                graph_id,
+                tenant_id=tenant_id,
+            )
             return await self._result(view, tenant_id)
         cancel_operations = await self._pending_cancel_operations(
             graph_id,
@@ -844,6 +871,10 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             if view is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._arm_committed_graph_if_runnable(
+                graph_id,
+                tenant_id=tenant_id,
+            )
             return await self._result(view, tenant_id)
         if operation.status is OperationStatus.FAILED:
             raise _stable_operation_error(operation.error_code)
@@ -1050,6 +1081,10 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             if view is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._arm_committed_graph_if_runnable(
+                graph_id,
+                tenant_id=tenant_id,
+            )
             return await self._result(view, tenant_id)
         if operation.status is OperationStatus.FAILED:
             raise _stable_operation_error(operation.error_code)
@@ -1594,7 +1629,7 @@ class DefaultTaskGraphService(TaskGraphService):
         execution_id: str,
         request: CancelGraphRequest,
     ) -> TaskGraphView:
-        return await self._settle_execution_cancellation(
+        return await self.settle_execution_cancellation(
             graph_id,
             node_id,
             execution_id,
@@ -1602,7 +1637,7 @@ class DefaultTaskGraphService(TaskGraphService):
             cancel_confirmed=None,
         )
 
-    async def _settle_execution_cancellation(
+    async def settle_execution_cancellation(
         self,
         graph_id: str,
         node_id: str,
@@ -1935,7 +1970,10 @@ class DefaultTaskGraphService(TaskGraphService):
                     AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
                 )
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if claimed:
+        if claimed or operation.status in {
+            OperationStatus.RUNNING,
+            OperationStatus.EFFECT_UNKNOWN,
+        }:
             try:
                 view = await self._persistence.tasks.cancel_graph(
                     graph_id,
@@ -2171,11 +2209,10 @@ class DefaultTaskGraphService(TaskGraphService):
             launch = admission.launch()
             if launch.principal.tenant_id != tenant_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            settle = getattr(self._launcher, "_settle_cancel", None)
-            if settle is not None:
-                await settle(launch, invoke_effects=invoke_effects)
-            elif invoke_effects:
-                await self._launcher.cancel(launch)
+            await self._launcher.settle_cancel(
+                launch,
+                invoke_effects=invoke_effects,
+            )
         except asyncio.CancelledError:
             raise
         except AIError:

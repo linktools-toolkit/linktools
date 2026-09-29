@@ -76,6 +76,7 @@ from linktools.ai.task import (
     TaskExpander,
     TaskExpanderRef,
     TaskNodeRunControl,
+    TaskNodeRunError,
     TaskNodeRunResult,
     TaskNodeRunner,
     TaskResultRef,
@@ -473,6 +474,379 @@ def test_task_definitions_keep_explicit_identity_and_contract() -> None:
     assert definition.contract["type"] == "function"
     assert definition.contract["effect_policy"] == "none"
     assert TaskNode("node", task=definition).task == definition.ref
+
+
+@pytest.mark.asyncio
+async def test_execution_cancel_winning_during_output_store_projects_cancelled_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    store_entered = asyncio.Event()
+    release_store = asyncio.Event()
+    async with Runtime.open(
+        "execution-task-output-race",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+    ) as runtime:
+        class _OutputRaceRunner:
+            execution_id: str | None = None
+
+            async def run(
+                self,
+                invocation: TaskNodeInvocation,
+                *,
+                control: TaskNodeRunControl,
+            ) -> TaskNodeRunResult:
+                binding = TaskBindingContract(
+                    id="example.execution-output-race",
+                    revision=1,
+                    effect_policy="none",
+                    output_contract={"kind": "json"},
+                    timeout_seconds=None,
+                    max_attempts=1,
+                    retry_delay_seconds=0,
+                )
+                handle = await runtime._execution_service.start_task(
+                    binding,
+                    principal=invocation.principal,
+                    input=invocation.node.input,
+                    idempotency_key="execution-output-race-start-0001",
+                    correlation=invocation.correlation,
+                )
+                self.execution_id = handle.execution_id
+                await control.bind_execution(handle.execution_id)
+                await control.handoff_execution(handle.execution_id)
+                result = await runtime._execution_service.complete_task(
+                    handle.execution_id,
+                    principal=invocation.principal,
+                    output={"value": "old-output"},
+                )
+                return TaskNodeRunResult(
+                    canonical_sha256(result.output),
+                    handle.execution_id,
+                )
+
+            async def wait_bound(
+                self,
+                invocation: TaskNodeInvocation,
+                execution_id: str,
+            ) -> TaskNodeRunResult:
+                result = await runtime._execution_service.result(
+                    execution_id,
+                    principal=invocation.principal,
+                )
+                if result.status.value != "SUCCEEDED":
+                    raise TaskNodeRunError(
+                        ErrorCode.EXECUTION_CANCELLED,
+                        execution_id,
+                    )
+                return TaskNodeRunResult(
+                    canonical_sha256(result.output),
+                    execution_id,
+                )
+
+            async def supply_input(
+                self,
+                invocation: TaskNodeInvocation,
+                execution_id: str,
+                value: JsonValue,
+            ) -> TaskNodeRunResult:
+                del invocation, execution_id, value
+                raise AIError(ErrorCode.TASK_NOT_READY)
+
+            async def resolve_effect(
+                self,
+                invocation: TaskNodeInvocation,
+                execution_id: str,
+                resolution: TaskEffectResolution,
+            ) -> TaskNodeRunResult | None:
+                del invocation, execution_id, resolution
+                raise AIError(ErrorCode.TASK_NOT_READY)
+
+            async def cancel(self, invocation: TaskNodeInvocation) -> None:
+                del invocation
+
+        runner = _OutputRaceRunner()
+        original_store = runtime._execution_service._store_task_output
+
+        async def delayed_store(
+            output: JsonValue,
+            *,
+            tenant_id: str,
+        ) -> StoredPayload:
+            store_entered.set()
+            await release_store.wait()
+            return await original_store(output, tenant_id=tenant_id)
+
+        monkeypatch.setattr(
+            runtime._execution_service,
+            "_store_task_output",
+            delayed_store,
+        )
+        task = Task.from_runner(
+            "example.execution-output-race",
+            runner,
+            contract={
+                "version": 1,
+                "type": "example.execution-output-race",
+                "effect_policy": "none",
+                "output_contract": {"kind": "json"},
+                "reconcile": False,
+            },
+        )
+        graph = TaskGraph(
+            "execution-output-race",
+            (TaskNode("node", task=task),),
+        )
+        graph_run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key="execution-output-race-graph-0001",
+        )
+        try:
+            await asyncio.wait_for(store_entered.wait(), 3)
+            assert runner.execution_id is not None
+            cancelled = await runtime._execution_service.cancel_task(
+                runner.execution_id,
+                principal=runtime.default_principal,
+            )
+            assert cancelled.cancelled
+        finally:
+            release_store.set()
+
+        result = await graph_run.wait(timeout_seconds=5)
+        execution = await runtime._execution_service.inspect(
+            runner.execution_id,
+            principal=runtime.default_principal,
+        )
+        graph_state = await state.task.tasks.graph_state(
+            graph.graph_id,
+            tenant_id=runtime.tenant_id,
+        )
+
+        assert result.status is TaskStatus.CANCELLED
+        assert execution.status.value == "CANCELLED"
+        assert graph_state is not None
+        assert graph_state.node_states[0].status is TaskStatus.CANCELLED
+        assert graph_state.node_states[0].result_digest is None
+
+
+@pytest.mark.asyncio
+async def test_task_execution_cancel_persists_node_intent_before_execution_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    async with Runtime.open(
+        "task-execution-cancel-order",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+    ) as runtime:
+        class _WaitingExecutionRunner:
+            def __init__(self) -> None:
+                self.execution_id: str | None = None
+                self.entered = asyncio.Event()
+
+            async def run(
+                self,
+                invocation: TaskNodeInvocation,
+                *,
+                control: TaskNodeRunControl,
+            ) -> TaskNodeRunResult:
+                binding = TaskBindingContract(
+                    id="example.execution-cancel-order",
+                    revision=1,
+                    effect_policy="none",
+                    output_contract={"kind": "json"},
+                    timeout_seconds=None,
+                    max_attempts=1,
+                    retry_delay_seconds=0,
+                )
+                handle = await runtime._execution_service.start_task(
+                    binding,
+                    principal=invocation.principal,
+                    input=invocation.node.input,
+                    idempotency_key="execution-cancel-order-start-0001",
+                    correlation=invocation.correlation,
+                )
+                self.execution_id = handle.execution_id
+                await control.bind_execution(handle.execution_id)
+                await control.handoff_execution(handle.execution_id)
+                self.entered.set()
+                await asyncio.Event().wait()
+                raise AssertionError("cancelled runner unexpectedly resumed")
+
+            async def wait_bound(
+                self,
+                invocation: TaskNodeInvocation,
+                execution_id: str,
+            ) -> TaskNodeRunResult:
+                del invocation
+                raise TaskNodeRunError(ErrorCode.EXECUTION_CANCELLED, execution_id)
+
+            async def supply_input(
+                self,
+                invocation: TaskNodeInvocation,
+                execution_id: str,
+                value: JsonValue,
+            ) -> TaskNodeRunResult:
+                del invocation, execution_id, value
+                raise AIError(ErrorCode.TASK_NOT_READY)
+
+            async def resolve_effect(
+                self,
+                invocation: TaskNodeInvocation,
+                execution_id: str,
+                resolution: TaskEffectResolution,
+            ) -> TaskNodeRunResult | None:
+                del invocation, execution_id, resolution
+                raise AIError(ErrorCode.TASK_NOT_READY)
+
+            async def cancel(self, invocation: TaskNodeInvocation) -> None:
+                del invocation
+
+        runner = _WaitingExecutionRunner()
+        original_cancel = runtime._execution_service.cancel_task
+        observed_intent = asyncio.Event()
+
+        async def verify_intent_before_cancel(
+            execution_id: str,
+            *,
+            principal: Principal,
+        ):
+            graph_state = await state.task.tasks.graph_state(
+                "task-execution-cancel-order",
+                tenant_id=principal.tenant_id,
+            )
+            assert graph_state is not None
+            node_state = graph_state.node_states[0]
+            assert node_state.execution_id == execution_id
+            assert node_state.status is TaskStatus.RECOVERY_REQUIRED
+            observed_intent.set()
+            return await original_cancel(execution_id, principal=principal)
+
+        monkeypatch.setattr(
+            runtime._execution_service,
+            "cancel_task",
+            verify_intent_before_cancel,
+        )
+        task = Task.from_runner(
+            "example.execution-cancel-order",
+            runner,
+            contract={
+                "version": 1,
+                "type": "example.execution-cancel-order",
+                "effect_policy": "none",
+                "output_contract": {"kind": "json"},
+                "reconcile": False,
+            },
+        )
+        graph = TaskGraph(
+            "task-execution-cancel-order",
+            (TaskNode("node", task=task),),
+        )
+        graph_run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key="task-execution-cancel-order-graph-0001",
+        )
+        await asyncio.wait_for(runner.entered.wait(), 3)
+        assert runner.execution_id is not None
+        execution = await graph_run.execution("node")
+        cancelled = await execution.cancel(
+            idempotency_key="task-execution-cancel-order-cancel-0001"
+        )
+
+        result = await graph_run.wait(timeout_seconds=5)
+        assert cancelled.cancelled
+        assert observed_intent.is_set()
+        assert result.status is TaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_stale_execution_attempt_token_cannot_settle_retried_execution() -> None:
+    state = RuntimeStorage.in_memory()
+    async with Runtime.open(
+        "task-attempt-fence-race",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+    ) as runtime:
+        principal = runtime.default_principal
+        binding = TaskBindingContract(
+            id="example.task-attempt-fence",
+            revision=1,
+            effect_policy="none",
+            output_contract={"kind": "json"},
+            timeout_seconds=None,
+            max_attempts=3,
+            retry_delay_seconds=0,
+        )
+        execution = await runtime._execution_service.start_task(
+            binding,
+            principal=principal,
+            input={},
+            idempotency_key="task-attempt-fence-start-0001",
+            correlation={},
+        )
+        first = await runtime._execution_service.claim_task_attempt(
+            execution.execution_id,
+            principal=principal,
+        )
+        assert first.task_attempt == 1
+        await runtime._execution_service.schedule_task_retry(
+            execution.execution_id,
+            principal=principal,
+            error_code=ErrorCode.TASK_NODE_FAILED.value,
+            attempt=first,
+        )
+        second = await runtime._execution_service.claim_task_attempt(
+            execution.execution_id,
+            principal=principal,
+        )
+        assert second.task_attempt == 2
+
+        async def assert_stale(action: object) -> None:
+            with pytest.raises(AIError) as rejected:
+                await action()  # type: ignore[operator]
+            assert rejected.value.code is ErrorCode.TASK_FENCE_STALE
+
+        await assert_stale(
+            lambda: runtime._execution_service.complete_task(
+                execution.execution_id,
+                principal=principal,
+                output={"value": "old"},
+                attempt=first,
+            )
+        )
+        await assert_stale(
+            lambda: runtime._execution_service.fail_task(
+                execution.execution_id,
+                principal=principal,
+                error=AIError(ErrorCode.TASK_NODE_FAILED),
+                attempt=first,
+            )
+        )
+        await assert_stale(
+            lambda: runtime._execution_service.schedule_task_retry(
+                execution.execution_id,
+                principal=principal,
+                error_code=ErrorCode.TASK_NODE_FAILED.value,
+                attempt=first,
+            )
+        )
+        await assert_stale(
+            lambda: runtime._execution_service.require_task_recovery(
+                execution.execution_id,
+                principal=principal,
+                error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+                attempt=first,
+            )
+        )
+
+        current = await runtime._execution_service.inspect(
+            execution.execution_id,
+            principal=principal,
+        )
+        assert current.status.value == "STARTED"
+        assert current.task_attempt == 2
+
 
 
 def test_task_node_separates_authoring_from_resolved_contract() -> None:
@@ -2837,6 +3211,14 @@ class _BindingRunner:
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
         del invocation
 
+    async def inspect_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult | None:
+        del invocation, execution_id
+        return None
+
 
 @pytest.mark.asyncio
 async def test_local_activity_generation_does_not_lose_pre_wait_handoff_signal() -> None:
@@ -2941,6 +3323,14 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
                     payload.digest,
                     execution_id=execution_id,
                 )
+
+            async def inspect_bound(
+                self,
+                invocation: TaskNodeInvocation,
+                execution_id: str,
+            ) -> TaskNodeRunResult | None:
+                del invocation, execution_id
+                return None
 
             async def cancel(self, invocation: TaskNodeInvocation) -> None:
                 del invocation

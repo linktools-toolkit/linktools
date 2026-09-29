@@ -1899,7 +1899,17 @@ class TaskRepositoryImpl(RepositoryBase):
                         error_origin=None,
                         safe_error_details={},
                     )
-                    if node.status is TaskStatus.RECOVERY_REQUIRED
+                    if (
+                        node.status is TaskStatus.RECOVERY_REQUIRED
+                        and not (
+                            node.error_code
+                            == ErrorCode.EXECUTION_START_UNKNOWN.value
+                            and node.error_origin == "execution"
+                            and node.execution_id is None
+                            and node.safe_error_details.get("reason")
+                            == "claimed_execution_unbound"
+                        )
+                    )
                     else node
                 )
                 for node in before.node_states
@@ -2316,16 +2326,43 @@ class TaskRepositoryImpl(RepositoryBase):
                     node.status in {TaskStatus.PENDING, TaskStatus.READY}
                     and node.execution_id is None
                 ):
-                    next_values.append(
-                        replace(
-                            node,
-                            status=TaskStatus.CANCELLED,
-                            owner=None,
-                            lease_expires_at=None,
-                            next_attempt_at=None,
-                            occupies_concurrency=False,
+                    if node.fence == 0:
+                        next_values.append(
+                            replace(
+                                node,
+                                status=TaskStatus.CANCELLED,
+                                owner=None,
+                                lease_expires_at=None,
+                                next_attempt_at=None,
+                                occupies_concurrency=False,
+                            )
                         )
-                    )
+                    else:
+                        code = ErrorCode.EXECUTION_START_UNKNOWN.value
+                        next_values.append(
+                            replace(
+                                node,
+                                status=TaskStatus.RECOVERY_REQUIRED,
+                                owner=None,
+                                lease_expires_at=None,
+                                next_attempt_at=None,
+                                occupies_concurrency=False,
+                                result_digest=None,
+                                error_code=code,
+                                error_digest=canonical_sha256(
+                                    {
+                                        "graph_id": graph_id,
+                                        "node_id": node.node_id,
+                                        "code": code,
+                                    }
+                                ),
+                                error_origin="execution",
+                                safe_error_details={
+                                    "phase": "task_cancel",
+                                    "reason": "claimed_execution_unbound",
+                                },
+                            )
+                        )
                     continue
                 next_values.append(node)
             next_nodes = tuple(next_values)

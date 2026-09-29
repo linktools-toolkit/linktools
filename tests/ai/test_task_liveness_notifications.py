@@ -20,6 +20,7 @@ from linktools.ai.task import (
     TaskNode,
     TaskNodeInvocation,
     TaskNodeRunControl,
+    TaskNodeRunError,
     TaskNodeRunResult,
 )
 from linktools.ai.core import Principal, PrincipalKind
@@ -67,6 +68,14 @@ class _BlockingRunner:
         dependency_results = invocation.dependency_results
         del node, graph_id, principal, correlation, dependency_results
 
+    async def inspect_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult | None:
+        del invocation, execution_id
+        return None
+
 
 class _DrainBarrierRunner:
     def __init__(self) -> None:
@@ -100,6 +109,95 @@ class _DrainBarrierRunner:
         self.cancel_calls += 1
         self.cancel_entered.set()
         await self.release_cancel.wait()
+
+    async def inspect_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult | None:
+        del invocation, execution_id
+        return None
+
+
+class _ExecutionConflictRunner:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(
+        self,
+        invocation: TaskNodeInvocation,
+        *,
+        control: TaskNodeRunControl,
+    ) -> TaskNodeRunResult:
+        del invocation
+        await control.bind_execution("execution-race")
+        await control.handoff_execution("execution-race")
+        self.entered.set()
+        await self.release.wait()
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def wait_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult:
+        del invocation
+        raise TaskNodeRunError(ErrorCode.EXECUTION_CANCELLED, execution_id)
+
+    async def inspect_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult | None:
+        del invocation
+        raise TaskNodeRunError(ErrorCode.EXECUTION_CANCELLED, execution_id)
+
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        del invocation
+
+
+class _FenceRaceRunner:
+    def __init__(self) -> None:
+        self.old_entered = asyncio.Event()
+        self.release_old = asyncio.Event()
+        self.new_wait_entered = asyncio.Event()
+        self.release_new = asyncio.Event()
+
+    async def run(
+        self,
+        invocation: TaskNodeInvocation,
+        *,
+        control: TaskNodeRunControl,
+    ) -> TaskNodeRunResult:
+        del invocation
+        await control.bind_execution("execution-fence")
+        await control.handoff_execution("execution-fence")
+        self.old_entered.set()
+        await self.release_old.wait()
+        return TaskNodeRunResult("a" * 64, execution_id="execution-fence")
+
+    async def wait_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult:
+        del invocation
+        assert execution_id == "execution-fence"
+        self.new_wait_entered.set()
+        await self.release_new.wait()
+        return TaskNodeRunResult("b" * 64, execution_id=execution_id)
+
+    async def inspect_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult | None:
+        del invocation, execution_id
+        return None
+
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        del invocation
 
 
 @pytest.mark.asyncio
@@ -157,6 +255,137 @@ async def test_quiesce_keeps_inflight_owned_through_caller_cancellation() -> Non
         await asyncio.wait_for(surviving_cleaner, 1)
         assert run.inflight.get("node") is not inflight
     finally:
+        if launcher is not None:
+            await launcher.shutdown()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_result_conflict_reads_cancel_fact_instead_of_failing_node() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-execution-conflict", tenant_id="tenant")
+    launcher: LocalTaskGraphLauncher | None = None
+    runner = _ExecutionConflictRunner()
+    try:
+        graph = TaskGraph("execution-conflict", (TaskNode("node"),))
+        await admit_graph(state, graph)
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
+        launcher = LocalTaskGraphLauncher(
+            state.task.tasks,
+            runner,
+            owner="local-worker",
+        )
+        await launcher.start(
+            TaskGraphLaunch(graph.graph_id, principal, TaskGraphLimits())
+        )
+        await asyncio.wait_for(runner.entered.wait(), 1)
+        runner.release.set()
+
+        async def wait_for_cancelled() -> None:
+            while True:
+                snapshot = await state.task.tasks.graph_state(
+                    graph.graph_id,
+                    tenant_id="tenant",
+                )
+                assert snapshot is not None
+                if snapshot.status is TaskStatus.CANCELLED:
+                    return
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_cancelled(), 2)
+        snapshot = await state.task.tasks.graph_state(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert snapshot is not None
+        assert snapshot.node_states[0].status is TaskStatus.CANCELLED
+        assert snapshot.node_states[0].error_code is None
+    finally:
+        if launcher is not None:
+            await launcher.shutdown()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_old_handoff_result_cannot_commit_after_new_fence_handoff() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-handoff-fence-race", tenant_id="tenant")
+    launcher: LocalTaskGraphLauncher | None = None
+    runner = _FenceRaceRunner()
+    try:
+        graph = TaskGraph("handoff-fence-race", (TaskNode("node"),))
+        await admit_graph(state, graph)
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
+        repository = state.task.tasks
+        launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
+        await launcher.start(
+            TaskGraphLaunch(graph.graph_id, principal, TaskGraphLimits())
+        )
+        await asyncio.wait_for(runner.old_entered.wait(), 1)
+
+        original_state = await repository.graph_state(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert original_state is not None
+        old_fence = original_state.node_states[0].fence
+        await repository.mark_recovery_required(
+            None,
+            tenant_id="tenant",
+            graph_id=graph.graph_id,
+            node_id="node",
+            execution_id="execution-fence",
+            expected_fence=old_fence,
+            error_code=ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
+            error_digest="c" * 64,
+        )
+        await repository.recover_graph(graph.graph_id, tenant_id="tenant")
+        replacement = await repository.claim(
+            graph.graph_id,
+            "node",
+            tenant_id="tenant",
+            owner="replacement-worker",
+            lease_seconds=30,
+        )
+        await repository.handoff_execution(
+            replacement,
+            tenant_id="tenant",
+            execution_id="execution-fence",
+        )
+        runner.release_old.set()
+        await asyncio.wait_for(runner.new_wait_entered.wait(), 2)
+
+        current = await repository.graph_state(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert current is not None
+        assert current.node_states[0].status is TaskStatus.WAITING
+        assert current.node_states[0].fence == replacement.fence
+        assert current.node_states[0].result_digest is None
+
+        runner.release_new.set()
+        async def wait_for_success() -> None:
+            while True:
+                snapshot = await repository.graph_state(
+                    graph.graph_id,
+                    tenant_id="tenant",
+                )
+                assert snapshot is not None
+                if snapshot.status is TaskStatus.SUCCEEDED:
+                    return
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_success(), 2)
+        completed = await repository.graph_state(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert completed is not None
+        assert completed.node_states[0].result_digest == "b" * 64
+    finally:
+        runner.release_old.set()
+        runner.release_new.set()
         if launcher is not None:
             await launcher.shutdown()
         await state.close()

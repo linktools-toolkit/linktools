@@ -527,9 +527,11 @@ class _CommitUnknownTaskRepository:
         graph_id: str | None = None,
         node_id: str | None = None,
         expanded_nodes: tuple[TaskNode, ...] = (),
+        expected_fence: int | None = None,
     ) -> None:
         del graph_id, node_id, expanded_nodes
         assert lease.fence == 1
+        assert expected_fence is None
         assert tenant_id == "tenant"
         assert execution_id == "execution"
         assert result_digest == "a" * 64

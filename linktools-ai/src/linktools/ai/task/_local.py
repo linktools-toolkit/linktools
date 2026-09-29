@@ -53,6 +53,15 @@ _RECOVERY_UNKNOWN_CODES = frozenset(
         ErrorCode.TASK_EFFECT_UNKNOWN,
     }
 )
+_EXECUTION_RESULT_CONFLICT_CODES = frozenset(
+    {
+        ErrorCode.STORAGE_CONFLICT,
+        ErrorCode.EXECUTION_RESULT_CONFLICT,
+        ErrorCode.TASK_RESULT_CONFLICT,
+        ErrorCode.TASK_TERMINAL_CONFLICT,
+        ErrorCode.TASK_FENCE_STALE,
+    }
+)
 _TERMINAL = frozenset(
     {
         TaskStatus.SUCCEEDED,
@@ -660,15 +669,15 @@ class LocalTaskGraphLauncher:
             run = self._graphs.get(key)
         if run is not None and run.request != launch:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if run is not None and node_id in run.inflight:
+            await self._quiesce_node(
+                run,
+                graph_state,
+                node_id,
+                invoke_cancel=False,
+            )
+            await self._notify(run)
         if state.status not in _TERMINAL:
-            if run is not None and node_id in run.inflight:
-                await self._quiesce_node(
-                    run,
-                    graph_state,
-                    node_id,
-                    invoke_cancel=False,
-                )
-                await self._notify(run)
             node = next(
                 (item for item in graph_state.nodes if item.node_id == node_id),
                 None,
@@ -830,7 +839,7 @@ class LocalTaskGraphLauncher:
                 invoke_cancel=False,
             )
 
-    async def _settle_cancel(
+    async def settle_cancel(
         self,
         launch: TaskGraphLaunch,
         *,
@@ -1061,7 +1070,7 @@ class LocalTaskGraphLauncher:
 
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
-        return await self._settle_cancel(launch, invoke_effects=True)
+        return await self.settle_cancel(launch, invoke_effects=True)
 
     async def shutdown(self) -> None:
         cleanup = asyncio.create_task(
@@ -1494,10 +1503,10 @@ class LocalTaskGraphLauncher:
             if wait_for_completion:
                 completion = await self._runner.wait_bound(invocation, execution_id)
             else:
-                inspect_bound = getattr(self._runner, "inspect_bound", None)
-                if inspect_bound is None:
-                    return
-                completion = await inspect_bound(invocation, execution_id)
+                completion = await self._runner.inspect_bound(
+                    invocation,
+                    execution_id,
+                )
                 if completion is None:
                     return
         except asyncio.CancelledError:
@@ -1527,6 +1536,21 @@ class LocalTaskGraphLauncher:
                         expected_fence=expected_fence,
                     )
                     await self._notify(run)
+                    return
+                if error.code in _EXECUTION_RESULT_CONFLICT_CODES:
+                    await self._defer_waiting_recovery(
+                        run,
+                        node,
+                        execution_id,
+                        expected_fence=expected_fence,
+                        cause=AIError(
+                            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                            safe_details={
+                                "phase": "execution_result_settlement",
+                                "cause": error.code.value,
+                            },
+                        ),
+                    )
                     return
                 await self._repository.fail(
                     None,
@@ -1607,14 +1631,26 @@ class LocalTaskGraphLauncher:
                     expected_fence=expected_fence,
                 )
         except AIError as error:
-            if error.code not in _RECOVERY_UNKNOWN_CODES:
+            if error.code not in (
+                _RECOVERY_UNKNOWN_CODES | _EXECUTION_RESULT_CONFLICT_CODES
+            ):
                 raise
             await self._defer_waiting_recovery(
                 run,
                 node,
                 execution_id,
                 expected_fence=expected_fence,
-                cause=error,
+                cause=(
+                    error
+                    if error.code in _RECOVERY_UNKNOWN_CODES
+                    else AIError(
+                        ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                        safe_details={
+                            "phase": "task_result_settlement",
+                            "cause": error.code.value,
+                        },
+                    )
+                ),
             )
             return
         await self._notify(run)
@@ -1644,8 +1680,16 @@ class LocalTaskGraphLauncher:
             ),
             None,
         )
-        if current_node is None or current_node.execution_id != execution_id:
+        if current_node is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            current_node.execution_id != execution_id
+            or current_node.fence != expected_fence
+            or current_node.status in _TERMINAL
+            or current_node.status is not TaskStatus.WAITING
+        ):
+            await self._notify(run)
+            return
         if current_node.status is TaskStatus.RECOVERY_REQUIRED:
             await self._notify(run)
             return
@@ -1794,6 +1838,19 @@ class LocalTaskGraphLauncher:
                         waiting_execution_id=control.handed_off_execution_id,
                     )
                     return
+                if (
+                    control.handed_off_execution_id is not None
+                    and isinstance(error, AIError)
+                    and error.code in _EXECUTION_RESULT_CONFLICT_CODES
+                ):
+                    await self._settle_bound_node(
+                        run,
+                        node,
+                        control.handed_off_execution_id,
+                        lease_state.lease.fence,
+                        wait_for_completion=False,
+                    )
+                    return
                 if isinstance(error, AIError) and error.code in {
                     ErrorCode.TASK_FENCE_STALE,
                     ErrorCode.TASK_OWNER_CONFLICT,
@@ -1841,6 +1898,11 @@ class LocalTaskGraphLauncher:
                             ),
                             node_id=(
                                 node.node_id
+                                if control.handed_off_execution_id is not None
+                                else None
+                            ),
+                            expected_fence=(
+                                lease_state.lease.fence
                                 if control.handed_off_execution_id is not None
                                 else None
                             ),
@@ -1917,16 +1979,24 @@ class LocalTaskGraphLauncher:
                             else None
                         ),
                         expanded_nodes=completion.expanded_nodes,
+                        expected_fence=(
+                            lease_state.lease.fence
+                            if control.handed_off_execution_id is not None
+                            else None
+                        ),
                     )
                     return
                 except AIError as error:
-                    if error.code not in _RECOVERY_UNKNOWN_CODES:
+                    if error.code not in (
+                        _RECOVERY_UNKNOWN_CODES | _EXECUTION_RESULT_CONFLICT_CODES
+                    ):
                         raise
                     if await self._completion_committed(
                         graph_id,
                         node.node_id,
                         completion,
                         tenant_id=tenant_id,
+                        expected_fence=lease_state.lease.fence,
                     ):
                         return
                     recovery_error = error
@@ -1967,9 +2037,18 @@ class LocalTaskGraphLauncher:
         completion: TaskNodeRunResult,
         *,
         tenant_id: str,
+        expected_fence: int,
     ) -> bool:
-        states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)
-        state = next((value for value in states if value.node_id == node_id), None)
+        graph_state = await self._repository.graph_state(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if graph_state is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        state = next(
+            (value for value in graph_state.node_states if value.node_id == node_id),
+            None,
+        )
         if state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if state.status is TaskStatus.SUCCEEDED:
@@ -1979,8 +2058,12 @@ class LocalTaskGraphLauncher:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return True
-        if state.status in _TERMINAL or state.status is TaskStatus.RECOVERY_REQUIRED:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            state.fence != expected_fence
+            or state.status in _TERMINAL
+            or state.status is TaskStatus.RECOVERY_REQUIRED
+        ):
+            return True
         return False
 
     async def _defer_recovery(
@@ -2026,6 +2109,7 @@ class LocalTaskGraphLauncher:
                     error_code=recovery_code.value,
                     error_digest=digest,
                     execution_id=waiting_execution_id,
+                    expected_fence=lease_state.lease.fence,
                 )
         _logger.warning(
             "task graph requires recovery: graph=%s node=%s code=%s fence=%s",
