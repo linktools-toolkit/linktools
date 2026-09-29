@@ -909,15 +909,15 @@ async def test_recover_pending_preflights_all_subjects_before_dispatch() -> None
 @pytest.mark.parametrize(
     ("format_version", "corruption", "expected_code"),
     (
-        (2, "duplicate_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "invalid_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "invalid_schema", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, "unexpected_field", ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (3, "unknown_format", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        (1, "duplicate_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "duplicate_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "missing_array", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_task", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_schema", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "unexpected_field", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2, "unknown_format", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
     ),
 )
 async def test_task_binding_capture_reader_rejects_invalid_declaration_manifests(
@@ -977,7 +977,7 @@ async def test_task_binding_capture_reader_rejects_invalid_declaration_manifests
             {**expander_declaration, "version": 1.0}
         ]
     manifest: dict[str, object] = {
-        "kind": "task-definition-capture",
+        "kind": "task-graph-binding-capture",
         "format_version": format_version,
         "namespace": "namespace",
         "tenant_id": "tenant",
