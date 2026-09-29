@@ -3,6 +3,7 @@
 """Regression coverage for TaskGraph optimistic CAS convergence."""
 
 import asyncio
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
+from linktools.ai.runtime.state._sql import _SqlTransaction
 from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
 from linktools.ai.task import (
@@ -37,6 +39,7 @@ from linktools.ai.task import (
     TaskGraphState,
     TaskGraphView,
     TaskLease,
+    TaskExpanderRef,
     TaskNode,
     TaskNodeInvocation,
     TaskNodeRunControl,
@@ -183,6 +186,106 @@ async def test_sqlite_state_group_serializes_mutation_callbacks(
         assert second_entered.is_set()
     finally:
         release_first.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "dynamic-state.sqlite"
+    await _provision_sqlite(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+    finally:
+        connection.close()
+
+    state = RuntimeStorage.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
+    await state.initialize(namespace="sqlite-dynamic-state", tenant_id="default")
+    repository = state.task.tasks
+    graph = TaskGraph(
+        "dynamic-state",
+        (TaskNode("expand", expander=TaskExpanderRef("application.expand", 1)),),
+    )
+    request = TaskGraphRequest(
+        graph,
+        Principal("tester", "default"),
+        "submit:dynamic-state",
+        TaskGraphLimits(max_concurrency=1),
+    )
+    definition_read = asyncio.Event()
+    continue_read = asyncio.Event()
+    original_list_records = _SqlTransaction.list_records
+
+    async def gated_list_records(self, query):
+        records = await original_list_records(self, query)
+        if query.kind == "task_node_definition" and not definition_read.is_set():
+            definition_read.set()
+            await continue_read.wait()
+        return records
+
+    try:
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            graph,
+        )
+        lease = await repository.claim(
+            graph.graph_id,
+            "expand",
+            tenant_id="default",
+            owner="expander",
+            lease_seconds=60,
+        )
+        monkeypatch.setattr(_SqlTransaction, "list_records", gated_list_records)
+        state_read = asyncio.create_task(
+            repository.graph_state(graph.graph_id, tenant_id="default")
+        )
+        await asyncio.wait_for(definition_read.wait(), timeout=1)
+        await asyncio.wait_for(
+            repository.complete(
+                lease,
+                tenant_id="default",
+                execution_id="execution-expand",
+                result_digest="b" * 64,
+                expanded_nodes=(TaskNode("child", dependencies=("expand",)),),
+            ),
+            timeout=5,
+        )
+        continue_read.set()
+        before_expansion = await asyncio.wait_for(state_read, timeout=5)
+
+        assert before_expansion is not None
+        assert {node.node_id for node in before_expansion.nodes} == {"expand"}
+        assert {node.node_id for node in before_expansion.node_states} == {"expand"}
+
+        after_expansion = await repository.graph_state(
+            graph.graph_id,
+            tenant_id="default",
+        )
+        assert after_expansion is not None
+        definitions = {node.node_id: node for node in after_expansion.nodes}
+        statuses = {node.node_id: node for node in after_expansion.node_states}
+        assert set(definitions) == set(statuses) == {"child", "expand"}
+        assert statuses["child"].dependencies == definitions["child"].dependencies
+        assert statuses["child"].dependencies == ("expand",)
+
+        state_store = state.task.tasks.state_store
+        child_state_key = repository._state_key(graph.graph_id, "child")
+
+        async def remove_child_state(transaction) -> None:
+            assert await transaction.delete_record(child_state_key)
+
+        await state_store.mutate(remove_child_state)
+        with pytest.raises(AIError) as raised:
+            await repository.graph_state(graph.graph_id, tenant_id="default")
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        continue_read.set()
         await state.close()
 
 

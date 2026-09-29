@@ -137,24 +137,37 @@ class SqlStateStorageGroup:
         if active is not None:
             return await fn(active)
         async with self._session() as session:
-            transaction = _SqlTransaction(
-                session,
-                self._metadata,
-                self._context,
-                store.store_digest,
-            )
-            token = bind_state_scope(
-                self,
-                {store: transaction},
-                writable=False,
-            )
-            try:
-                readonly = active_state_transaction(store)
-                if readonly is None:
-                    raise RuntimeError("read-only StateTransaction scope was not bound")
-                return await fn(readonly)
-            finally:
-                reset_state_transaction(token)
+            async with session.begin():
+                if self._context.dialect.name == "sqlite":
+                    from sqlalchemy import text
+
+                    await session.execute(text("BEGIN"))
+                else:
+                    await session.connection(
+                        execution_options={
+                            "isolation_level": "REPEATABLE READ",
+                        }
+                    )
+                transaction = _SqlTransaction(
+                    session,
+                    self._metadata,
+                    self._context,
+                    store.store_digest,
+                )
+                token = bind_state_scope(
+                    self,
+                    {store: transaction},
+                    writable=False,
+                )
+                try:
+                    readonly = active_state_transaction(store)
+                    if readonly is None:
+                        raise RuntimeError(
+                            "read-only StateTransaction scope was not bound"
+                        )
+                    return await fn(readonly)
+                finally:
+                    reset_state_transaction(token)
 
     async def mutate(
         self,

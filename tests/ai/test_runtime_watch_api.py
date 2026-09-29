@@ -289,6 +289,269 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
 
 
 @pytest.mark.asyncio
+async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> None:
+    graph_id = "dynamic-watch"
+    principal = Principal("owner", "tenant")
+    expand = asyncio.Event()
+
+    class DynamicGraphService:
+        expanded = False
+
+        def snapshot(self):
+            node_ids = ["expand"]
+            state_ids = [("expand", None)]
+            if self.expanded:
+                node_ids.extend(("child-failed", "child-succeeded"))
+                state_ids.extend(
+                    (
+                        ("child-failed", "execution-failed"),
+                        ("child-succeeded", "execution-succeeded"),
+                    )
+                )
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "node_states": tuple(
+                        type(
+                            "NodeState",
+                            (),
+                            {"node_id": node_id, "execution_id": execution_id},
+                        )()
+                        for node_id, execution_id in state_ids
+                    ),
+                    "nodes": tuple(
+                        type("Node", (), {"node_id": node_id, "task": None})()
+                        for node_id in node_ids
+                    ),
+                },
+            )()
+
+        async def state(self, requested_graph_id: str, *, principal: Principal):
+            assert requested_graph_id == graph_id
+            assert principal == principal_arg
+            return self.snapshot()
+
+        def stream_events(
+            self,
+            requested_graph_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+        ):
+            assert requested_graph_id == graph_id
+            assert principal == principal_arg
+
+            async def values():
+                now = datetime.now(timezone.utc)
+                events = (
+                    TaskEvent(
+                        1,
+                        graph_id,
+                        1,
+                        TaskEventType.GRAPH_ADMITTED,
+                        now,
+                        TaskStatus.PENDING,
+                    ),
+                    TaskEvent(
+                        1,
+                        graph_id,
+                        2,
+                        TaskEventType.NODE_CHANGED,
+                        now,
+                        TaskStatus.RUNNING,
+                        TaskStatus.READY,
+                        "child-succeeded",
+                        "worker",
+                        1,
+                        "execution-succeeded",
+                    ),
+                    TaskEvent(
+                        1,
+                        graph_id,
+                        3,
+                        TaskEventType.NODE_CHANGED,
+                        now,
+                        TaskStatus.RUNNING,
+                        TaskStatus.READY,
+                        "child-failed",
+                        "worker",
+                        1,
+                        "execution-failed",
+                    ),
+                )
+                for event in events:
+                    if event.sequence == 2:
+                        await expand.wait()
+                        self.expanded = True
+                    if event.sequence > after_sequence:
+                        yield event
+
+            return values()
+
+    principal_arg = principal
+    graph = DynamicGraphService()
+
+    class DynamicExecutions:
+        async def inspect(self, execution_id: str, *, principal: Principal):
+            assert principal == principal_arg
+            assert execution_id in {"execution-succeeded", "execution-failed"}
+            return type("Execution", (), {"binding_kind": "agent"})()
+
+    class DynamicRuntime:
+        namespace = "watch-test"
+
+        def __init__(self, graph_service: DynamicGraphService) -> None:
+            self.graph = graph_service
+            self.executions = DynamicExecutions()
+
+    def watch_tree(
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences=None,
+        include_content: bool = False,
+    ):
+        del after_sequences, include_content
+        assert principal == principal_arg
+        event_type = (
+            ExecutionEventType.EXECUTION_FAILED.value
+            if execution_id == "execution-failed"
+            else ExecutionEventType.EXECUTION_SUCCEEDED.value
+        )
+
+        async def values():
+            yield ExecutionTreeEvent(
+                execution_id,
+                "agent",
+                ExecutionLineageKind.RUN,
+                None,
+                execution_id,
+                None,
+                0,
+                ExecutionStreamEvent(execution_id, 1, event_type, {}),
+            )
+
+        return values()
+
+    runtime = DynamicRuntime(graph)
+    run = _task_graph_run(runtime, graph_id, principal, watch_tree)
+    first_watch = run.watch()
+    try:
+        first = await anext(first_watch)
+        assert isinstance(first.event, TaskEvent)
+        assert first.event.sequence == 1
+        expand.set()
+        observed = [first]
+        observed.extend([item async for item in first_watch])
+    finally:
+        await first_watch.aclose()
+
+    task_events = [item for item in observed if isinstance(item.event, TaskEvent)]
+    assert [item.event.sequence for item in task_events] == [1, 2, 3]
+    execution_events = [
+        item.event.event
+        for item in observed
+        if isinstance(item.event, ExecutionTreeEvent)
+    ]
+    assert {
+        (item.execution_id, item.event_type)
+        for item in execution_events
+    } == {
+        ("execution-succeeded", ExecutionEventType.EXECUTION_SUCCEEDED.value),
+        ("execution-failed", ExecutionEventType.EXECUTION_FAILED.value),
+    }
+
+    success_binding = next(
+        item
+        for item in task_events
+        if item.event.node_id == "child-succeeded"
+    )
+    assert success_binding.cursor is not None
+    resumed = [item async for item in run.watch(cursor=success_binding.cursor)]
+    assert {
+        item.event.execution_id
+        for item in resumed
+        if isinstance(item.event, ExecutionTreeEvent)
+    } == {"execution-succeeded", "execution-failed"}
+
+    reopened_run = _task_graph_run(
+        DynamicRuntime(graph),
+        graph_id,
+        principal,
+        watch_tree,
+    )
+    reopened = [item async for item in reopened_run.watch(cursor=success_binding.cursor)]
+    assert {
+        item.event.execution_id
+        for item in reopened
+        if isinstance(item.event, ExecutionTreeEvent)
+    } == {"execution-succeeded", "execution-failed"}
+
+
+@pytest.mark.asyncio
+async def test_task_graph_watch_classifies_missing_dynamic_node_as_stream_error() -> None:
+    cause_details = {"graph_id": "graph", "node_id": "late-node"}
+
+    class MissingNodeGraphService:
+        async def state(self, graph_id: str, *, principal: Principal):
+            del principal
+            state = type(
+                "State",
+                (),
+                {"node_id": "existing", "execution_id": None},
+            )()
+            node = type("Node", (), {"node_id": "existing", "task": None})()
+            return type(
+                "Snapshot",
+                (),
+                {"node_states": (state,), "nodes": (node,)},
+            )()
+
+        def stream_events(self, graph_id: str, *, principal: Principal, after_sequence: int = 0):
+            del principal, after_sequence
+
+            async def values():
+                yield TaskEvent(
+                    1,
+                    graph_id,
+                    1,
+                    TaskEventType.NODE_CHANGED,
+                    datetime.now(timezone.utc),
+                    TaskStatus.RUNNING,
+                    TaskStatus.READY,
+                    "late-node",
+                    "worker",
+                    1,
+                    "late-execution",
+                )
+
+            return values()
+
+    class MissingNodeRuntime:
+        namespace = "watch-test"
+        graph = MissingNodeGraphService()
+        executions = _ExecutionService()
+
+    run = _task_graph_run(
+        MissingNodeRuntime(),
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+
+    with pytest.raises(TaskObservationError) as raised:
+        await anext(run.watch())
+
+    assert raised.value.origin == "stream"
+    assert raised.value.cause_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
+    assert raised.value.safe_details == cause_details
+    assert isinstance(raised.value.__cause__, AIError)
+    assert raised.value.__cause__.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert raised.value.__cause__.safe_details == cause_details
+
+
+@pytest.mark.asyncio
 async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
     run = _task_graph_run(
         _Runtime(),
@@ -977,6 +1240,8 @@ async def test_task_graph_observer_error_does_not_start_graph_wait() -> None:
 
     with pytest.raises(AIError) as raised:
         await run.observe(observer)
+    assert isinstance(raised.value, TaskObservationError)
+    assert raised.value.origin == "callback"
     assert raised.value.code is ErrorCode.TASK_OBSERVER_FAILED
 
     assert not service.wait_started.is_set()

@@ -18,6 +18,40 @@ from ._codec import (
 )
 from ._contract import AgentSpec, MCPServerSpec, SkillSpec
 
+_AGENT_AUTHOR_FIELDS = frozenset(
+    {
+        "version",
+        "id",
+        "revision",
+        "model",
+        "system_prompt",
+        "instructions",
+        "allow_tools",
+        "allow_skills",
+        "allow_subagents",
+        "description",
+        "metadata",
+    }
+)
+_MCP_AUTHOR_FIELDS = frozenset(
+    {
+        "version",
+        "id",
+        "revision",
+        "type",
+        "transport",
+        "command",
+        "args",
+        "env",
+        "url",
+        "headers",
+        "resource",
+    }
+)
+_MCP_CONFIG_FIELDS = frozenset(
+    {"type", "transport", "command", "args", "env", "url", "headers"}
+)
+
 
 class AgentSpecAdapter:
     """Adapt AGENT.md authoring input to AgentSpec."""
@@ -59,19 +93,21 @@ class AgentSpecAdapter:
         validate_logical_id(logical_id)
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if "id" in payload:
-            declared_id = payload["id"]
+        canonical_payload = _canonicalize_agent_fields(payload)
+        _reject_unknown_author_fields(canonical_payload, _AGENT_AUTHOR_FIELDS)
+        if "id" in canonical_payload:
+            declared_id = canonical_payload["id"]
             try:
                 validate_logical_id(declared_id)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
             if declared_id != logical_id:
                 raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        system_prompt = payload.get("system_prompt", "")
+        system_prompt = canonical_payload.get("system_prompt", "")
         if not isinstance(system_prompt, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         merged = _validated_agent_defaults(defaults, logical_id)
-        merged.update(payload)
+        merged.update(canonical_payload)
         merged["id"] = logical_id
         merged["system_prompt"] = system_prompt
         return _decode_agent_mapping(merged)
@@ -211,6 +247,7 @@ class MCPServerSpecAdapter:
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         raw = decode_author_json_mapping(data)
+        _reject_unknown_author_fields(raw, {"mcpServers"})
         servers = raw.get("mcpServers")
         if not isinstance(servers, Mapping):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
@@ -223,6 +260,11 @@ class MCPServerSpecAdapter:
                 or not isinstance(value, Mapping)
             ):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            _reject_unknown_author_fields(
+                value,
+                _MCP_CONFIG_FIELDS,
+                path=f"mcpServers.{identity}",
+            )
             result.append(
                 _decode_mcp_author_server(
                     value,
@@ -239,6 +281,14 @@ class MCPServerSpecAdapter:
         *,
         package_id: "str | None",
     ) -> MCPServerSpec:
+        _reject_unknown_author_fields(raw, _MCP_AUTHOR_FIELDS)
+        version = raw.get("version", 1)
+        if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                "unsupported MCP author version",
+                safe_details={"field": "version"},
+            )
         identity = raw.get("id")
         if package_id is None:
             if not isinstance(identity, str) or not identity.strip():
@@ -287,11 +337,14 @@ def _validated_agent_defaults(
     if not isinstance(defaults, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     try:
-        normalized = normalize_json_value(dict(defaults))
+        normalized = _canonicalize_agent_fields(defaults)
+    except AIError:
+        raise
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     if not isinstance(normalized, dict):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    _reject_unknown_author_fields(normalized, _AGENT_AUTHOR_FIELDS)
     if {"id", "version", "system_prompt"}.intersection(normalized):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     _decode_agent_mapping(
@@ -347,6 +400,29 @@ def _canonicalize_agent_fields(
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         result[canonical] = value
     return normalize_json_value(result)
+
+
+def _reject_unknown_author_fields(
+    payload: Mapping[str, object],
+    allowed: "set[str] | frozenset[str]",
+    *,
+    path: "str | None" = None,
+) -> None:
+    for key in payload:
+        if not isinstance(key, str):
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                "author field names must be strings",
+            )
+        if key not in allowed:
+            details: dict[str, str] = {"field": key}
+            if path is not None:
+                details["path"] = path
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                f"unsupported author field: {key}",
+                safe_details=details,
+            )
 
 
 def _without_line_ending(value: str) -> str:

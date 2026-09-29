@@ -137,7 +137,6 @@ def test_mcp_shared_config_normalizes_supported_transports() -> None:
                         "command": "python",
                         "args": ["-m", "server"],
                         "env": {"MODE": "readonly"},
-                        "future": {"kept-open": True},
                     },
                     "remote": {
                         "url": "https://example.test/mcp",
@@ -156,6 +155,39 @@ def test_mcp_shared_config_normalizes_supported_transports() -> None:
     assert dict(by_id["local"].env) == {"MODE": "readonly"}
     assert by_id["remote"].transport == "streamable-http"
     assert by_id["legacy"].transport == "sse"
+
+
+def test_mcp_author_decoders_report_unknown_server_fields() -> None:
+    adapter = MCPServerSpecAdapter()
+    documents = (
+        (
+            b'{"id":"server","command":"echo","commmand":"typo"}',
+            adapter.decode_json,
+        ),
+        (
+            b"id: server\ncommand: echo\ncommmand: typo\n",
+            adapter.decode_yaml,
+        ),
+    )
+
+    for document, decode in documents:
+        with pytest.raises(AIError) as error:
+            decode(document)
+        assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+        assert error.value.safe_details == {"field": "commmand"}
+
+
+def test_mcp_shared_config_reports_unknown_server_fields() -> None:
+    with pytest.raises(AIError) as error:
+        MCPServerSpecAdapter().decode_config(
+            b'{"mcpServers":{"worker":{"command":"echo","commmand":"typo"}}}'
+        )
+
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert error.value.safe_details == {
+        "field": "commmand",
+        "path": "mcpServers.worker",
+    }
 
 
 @pytest.mark.parametrize(
@@ -620,19 +652,19 @@ def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
-    agent = AgentSpecAdapter().from_mapping(
-        {
-            "version": 1,
-            "id": "agent",
-            "model": "route",
-            "planning": True,
-            "future_metadata": {"future": True},
-        },
-        logical_id="agent",
-    )
-    assert agent.model == "route"
-    assert agent.planning is False
+def test_authoring_adapters_reject_unrecognized_top_level_fields() -> None:
+    with pytest.raises(AIError) as agent_error:
+        AgentSpecAdapter().from_mapping(
+            {
+                "version": 1,
+                "id": "agent",
+                "model": "route",
+                "planning": True,
+            },
+            logical_id="agent",
+        )
+    assert agent_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert agent_error.value.safe_details == {"field": "planning"}
 
     skill = SkillSpecAdapter().from_mapping(
         {
@@ -644,30 +676,27 @@ def test_declaration_codecs_ignore_unrelated_author_fields() -> None:
     )
     assert skill == SkillSpec("skill", "skill content")
 
-    server = MCPServerSpecAdapter().decode_json(
-        json.dumps(
-            {
-                "version": 1,
-                "id": "mcp",
-                "command": "echo",
-                "future_metadata": {"future": True},
-            }
-        ).encode(),
-    )
-    assert server == MCPServerSpec("mcp", "echo")
+    with pytest.raises(AIError) as mcp_error:
+        MCPServerSpecAdapter().decode_json(
+            json.dumps(
+                {
+                    "version": 1,
+                    "id": "mcp",
+                    "command": "echo",
+                    "future_metadata": {"future": True},
+                }
+            ).encode(),
+        )
+    assert mcp_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert mcp_error.value.safe_details == {"field": "future_metadata"}
 
 
-def test_mcp_package_resource_ignores_unrelated_fields() -> None:
+def test_mcp_package_resource_uses_package_identity() -> None:
     server = MCPServerSpecAdapter().decode_json(
         json.dumps(
             {
                 "version": 1,
                 "command": "python",
-                "resource": {
-                    "kind": "mcp",
-                    "id": "server",
-                    "future": {"enabled": True},
-                },
             }
         ).encode(),
         package_id="server",
@@ -676,18 +705,14 @@ def test_mcp_package_resource_ignores_unrelated_fields() -> None:
     assert server.resource == AssetKey("mcp", "server")
 
 
-def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> None:
+def test_mcp_author_resource_field_does_not_override_host_identity() -> None:
     server = MCPServerSpecAdapter().decode_json(
         json.dumps(
             {
                 "version": 1,
                 "id": "server",
                 "command": "python",
-                "resource": {
-                    "kind": "mcp",
-                    "id": "server/assets",
-                    "future": {"enabled": True},
-                },
+                "resource": {"kind": "mcp", "id": "server/assets"},
             }
         ).encode(),
     )
@@ -1149,19 +1174,22 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
         await store.close()
 
 
-def test_agent_authoring_ignores_runtime_only_usage_limits() -> None:
-    spec = AgentSpecAdapter().from_mapping(
-        {
-            "version": 1,
-            "id": "agent",
-            "usage_limits": {
-                "model_requests": 1,
-                "future_limit": {"unit": "request"},
+def test_agent_authoring_rejects_usage_limits_and_host_registration_accepts_them() -> None:
+    with pytest.raises(AIError) as raised:
+        AgentSpecAdapter().from_mapping(
+            {
+                "version": 1,
+                "id": "agent",
+                "usage_limits": {"model_requests": 1},
             },
-        },
-        logical_id="agent",
-    )
-    assert spec.usage_limits is None
+            logical_id="agent",
+        )
+    assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert raised.value.safe_details == {"field": "usage_limits"}
+
+    limits = AgentUsageLimits(model_requests=1)
+    spec = CapabilityGroup("application").agent("agent", usage_limits=limits)
+    assert spec.usage_limits == limits
 
 
 def test_durable_usage_limits_ignore_additive_fields() -> None:
