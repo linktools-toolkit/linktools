@@ -41,6 +41,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     AgentTaskInput,
     AgentTaskInputContext,
+    ExecutionService,
     Runtime,
     RuntimeStorage,
 )
@@ -55,6 +56,7 @@ from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload, read_object
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
+    TaskBindingContract,
     TaskDependency,
     TaskDependencyState,
     TaskGraph,
@@ -382,6 +384,88 @@ class _ContractTaskRunner:
         del invocation
 
 
+class _ExecutionBackedContractRunner:
+    def __init__(self, execution: ExecutionService) -> None:
+        self._execution = execution
+        self.calls = 0
+
+    async def run(
+        self,
+        invocation: TaskNodeInvocation,
+        *,
+        control: TaskNodeRunControl,
+    ) -> TaskNodeRunResult:
+        self.calls += 1
+        binding = TaskBindingContract(
+            id="example.contract-runner.execution",
+            revision=1,
+            effect_policy="none",
+            output_contract={"kind": "json"},
+            timeout_seconds=None,
+            max_attempts=1,
+            retry_delay_seconds=0,
+        )
+        handle = await self._execution.start_task(
+            binding,
+            principal=invocation.principal,
+            input=invocation.node.input,
+            idempotency_key=(
+                f"runner:{invocation.graph_id}:{invocation.node.node_id}"
+            ),
+            correlation=invocation.correlation,
+        )
+        await control.bind_execution(handle.execution_id)
+        result = await self._execution.complete_task(
+            handle.execution_id,
+            principal=invocation.principal,
+            output={"value": "accepted"},
+        )
+        return TaskNodeRunResult(
+            canonical_sha256(result.output),
+            handle.execution_id,
+        )
+
+    async def wait_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult:
+        result = await self._execution.result(
+            execution_id,
+            principal=invocation.principal,
+        )
+        return TaskNodeRunResult(
+            canonical_sha256(result.output),
+            execution_id,
+        )
+
+    async def supply_input(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        value: JsonValue,
+    ) -> TaskNodeRunResult:
+        del invocation, execution_id, value
+        raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def resolve_effect(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        resolution: TaskEffectResolution,
+    ) -> TaskNodeRunResult | None:
+        del invocation, execution_id, resolution
+        raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        if invocation.execution_id is None:
+            return
+        await self._execution.cancel_task(
+            invocation.execution_id,
+            principal=invocation.principal,
+        )
+
+
 def test_task_definitions_keep_explicit_identity_and_contract() -> None:
     definition = Task("example.direct", _echo_task, effect_policy="none")
 
@@ -409,6 +493,84 @@ def test_task_node_separates_authoring_from_resolved_contract() -> None:
         "mode": "structured",
         "schema": {"type": "object"},
     }
+
+
+def test_runner_task_contract_matches_durable_capture_shape() -> None:
+    runner = _ContractTaskRunner()
+    contract: dict[str, JsonValue] = {
+        "version": 1,
+        "type": "example.runner",
+        "effect_policy": "none",
+        "output_contract": {"kind": "json"},
+        "reconcile": False,
+    }
+
+    with pytest.raises(ValueError):
+        Task.from_runner(
+            "example.runner.extra",
+            runner,
+            contract={**contract, "unexpected": True},
+        )
+
+    with pytest.raises(ValueError):
+        Task.from_runner(
+            "example.runner.schema",
+            runner,
+            contract={
+                **contract,
+                "output_contract": {
+                    "kind": "schema",
+                    "schema": {"type": "not-a-json-schema-type"},
+                },
+            },
+        )
+
+    configured = Task.from_runner(
+        "example.runner.configured",
+        runner,
+        contract={**contract, "config": {"owner": {"mode": "custom"}}},
+    )
+    assert configured.contract["config"] == {"owner": {"mode": "custom"}}
+
+
+@pytest.mark.asyncio
+async def test_runtime_runner_cannot_commit_unreadable_success() -> None:
+    runner = _ContractTaskRunner()
+    task = Task.from_runner(
+        "example.unreadable-runner",
+        runner,
+        contract={
+            "version": 1,
+            "type": "example.runner",
+            "effect_policy": "none",
+            "output_contract": {"kind": "json"},
+            "reconcile": False,
+        },
+    )
+    state = RuntimeStorage.in_memory()
+    async with Runtime.open(
+        "unreadable-runner",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+    ) as runtime:
+        run = await runtime.tasks.bind(task).start(
+            TaskGraph(
+                "unreadable-runner-graph",
+                (TaskNode("runner", task=task),),
+            ),
+            idempotency_key="unreadable-runner-run-0001",
+        )
+        completed = await run.wait(timeout_seconds=10)
+
+        assert completed.status is TaskStatus.FAILED
+        assert completed.node_results[0].error_code == (
+            ErrorCode.STORAGE_INTEGRITY_ERROR.value
+        )
+        with pytest.raises(AIError) as result_error:
+            await run.result("runner")
+        assert result_error.value.code is ErrorCode.TASK_NODE_FAILED
+
+    assert runner.calls == 1
 
 
 def test_agent_task_input_keeps_but_excludes_unknown_additive_fields() -> None:
@@ -1400,37 +1562,107 @@ async def test_duplicate_graph_start_keeps_the_original_task_definition_owner() 
 
 
 @pytest.mark.asyncio
+async def test_projected_agent_input_reads_json_null_dependency() -> None:
+    async def return_null(_context: TaskNodeContext[None]) -> JsonValue:
+        return None
+
+    source = Task("example.projected-null-source", return_null, effect_policy="none")
+    application = CapabilityGroup[None]("projected-null-agent")
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+    projected_values: list[JsonValue] = []
+
+    async def build_input(context: AgentTaskInputContext) -> str:
+        value = await context.result("source")
+        projected_values.append(value)
+        return "source is null"
+
+    state = RuntimeStorage.in_memory()
+    async with Runtime.open(
+        "projected-null-input",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=state,
+        capabilities=(application,),
+    ) as runtime:
+        consumer = runtime.tasks.from_agent(
+            "example.projected-null-consumer",
+            runtime.agents.get("default"),
+            build_input=build_input,
+        )
+        graph = TaskGraph(
+            "projected-null-input-graph",
+            (
+                TaskNode("source", task=source),
+                TaskNode(
+                    "consumer",
+                    ("source",),
+                    task=consumer,
+                    input=AgentTaskInput(parameters={"mode": "null"}),
+                ),
+            ),
+        )
+        run = await runtime.tasks.bind(source, consumer).start(
+            graph,
+            idempotency_key="projected-null-input-run-0001",
+        )
+        completed = await run.wait(timeout_seconds=10)
+
+        assert completed.status is TaskStatus.SUCCEEDED
+        assert await run.result("source") is None
+
+    assert projected_values == [None]
+
+
+@pytest.mark.asyncio
 async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
     tmp_path: Path,
 ) -> None:
     storage_root = tmp_path / "runner-contract-state"
-    runner = _ContractTaskRunner()
     schema = _EffectOutput.model_json_schema()
-    task = Task.from_runner(
-        "example.contract-runner",
-        runner,  # type: ignore[arg-type]
-        contract={
-            "version": 1,
-            "type": "example.runner",
-            "effect_policy": "none",
-            "output_contract": {"kind": "schema", "schema": schema},
-            "reconcile": False,
-        },
-    )
-    graph = TaskGraph(
-        "runner-contract-graph",
-        (
-            TaskNode.wait("input"),
-            TaskNode("runner", ("input",), task=task),
-        ),
-    )
+    contract: dict[str, JsonValue] = {
+        "version": 1,
+        "type": "example.runner",
+        "effect_policy": "none",
+        "output_contract": {"kind": "schema", "schema": schema},
+        "reconcile": False,
+    }
+    expanded_outputs: list[JsonValue] = []
+
+    def expand(context: TaskExpansionContext) -> tuple[TaskNode, ...]:
+        expanded_outputs.append(context.output)
+        return ()
+
+    expander = TaskExpander("example.contract-runner.expander", expand)
     state = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
         "runner-contract",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=state,
     ) as runtime:
-        await runtime.tasks.bind(task).start(
+        runner = _ExecutionBackedContractRunner(runtime._execution_service)
+        task = Task.from_runner(
+            "example.contract-runner",
+            runner,
+            contract=contract,
+        )
+        graph = TaskGraph(
+            "runner-contract-graph",
+            (
+                TaskNode.wait("input"),
+                TaskNode(
+                    "runner",
+                    ("input",),
+                    task=task,
+                    expander=expander,
+                ),
+            ),
+        )
+        await runtime.tasks.bind(task, expander).start(
             graph,
             idempotency_key="runner-contract-graph-0001",
         )
@@ -1446,6 +1678,7 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
             "schema": schema,
         }
         assert runner_node.reconcile is False
+        assert runner.calls == 0
 
     recovered_storage = RuntimeStorage.filesystem(storage_root)
     async with Runtime.open(
@@ -1453,7 +1686,13 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
         models=_TaskTestModels(),  # type: ignore[arg-type]
         storage=recovered_storage,
     ) as runtime:
-        engine = runtime.tasks.bind(task)
+        runner = _ExecutionBackedContractRunner(runtime._execution_service)
+        task = Task.from_runner(
+            "example.contract-runner",
+            runner,
+            contract=contract,
+        )
+        engine = runtime.tasks.bind(task, expander)
         await engine.recover_pending()
         resumed = await engine.get(graph.graph_id)
         await resumed.resume(
@@ -1466,6 +1705,10 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
             ),
         )
         completed = await resumed.wait(timeout_seconds=10)
+        assert await resumed.result("runner") == {"value": "accepted"}
+        result_ref = await resumed.result_ref("runner")
+        assert result_ref.result_digest == canonical_sha256({"value": "accepted"})
+
         recovered_state = await recovered_storage.task.tasks.graph_state(
             graph.graph_id,
             tenant_id=runtime.tenant_id,
@@ -1479,9 +1722,10 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
             "schema": schema,
         }
         assert runner_node.reconcile is False
+        assert runner.calls == 1
 
     assert completed.status is TaskStatus.SUCCEEDED
-    assert runner.calls == 1
+    assert expanded_outputs == [{"value": "accepted"}]
 
 
 @pytest.mark.asyncio
