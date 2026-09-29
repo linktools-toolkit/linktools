@@ -74,8 +74,8 @@ async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
             graph,
         )
         snapshot_manifest: dict[str, JsonValue] = {
-            "kind": "task-definition-capture",
-            "format_version": 2,
+            "kind": "task-graph-binding-capture",
+            "format_version": 1,
             "namespace": "default",
             "tenant_id": admission.principal.tenant_id,
             "graph_id": admission.graph_id,
@@ -96,10 +96,10 @@ async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
         snapshot_payload = canonical_json_bytes(snapshot_manifest)
         snapshot_digest = canonical_sha256(snapshot_manifest)
         snapshot_key = (
-            "v2/task-capture/"
+            "v1/task-graph-binding-capture/"
             + canonical_sha256(
                 {
-                    "version": 2,
+                    "version": 1,
                     "namespace": "default",
                     "tenant_id": admission.principal.tenant_id,
                     "graph_id": admission.graph_id,
