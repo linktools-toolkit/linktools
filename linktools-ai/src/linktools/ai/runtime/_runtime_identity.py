@@ -26,14 +26,14 @@ def task_graph_binding_capture_key(
     """Return the key for one graph's admitted Task and expander declarations."""
     digest = canonical_sha256(
         {
-            "version": 2,
+            "version": 1,
             "namespace": namespace,
             "tenant_id": tenant_id,
             "graph_id": graph_id,
             "request_digest": request_digest,
         }
     )
-    return f"v2/task-capture/{digest}"
+    return f"v1/task-graph-binding-capture/{digest}"
 
 
 __all__ = ["task_graph_binding_capture_key", "token_seed"]
