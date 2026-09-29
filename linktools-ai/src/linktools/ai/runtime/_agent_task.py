@@ -328,33 +328,17 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         thinking: ThinkingValue,
         idempotency_key: str,
     ) -> tuple[object, str]:
-        task = asyncio.create_task(
-            self._start_and_handoff(
-                invocation,
-                control,
-                prompt,
-                files=files,
-                session_id=session_id,
-                memory_scope=memory_scope,
-                planning=planning,
-                thinking=thinking,
-                idempotency_key=idempotency_key,
-            ),
-            name=f"agent-task-handoff-{invocation.graph_id}-{invocation.node.node_id}",
+        return await self._start_and_handoff(
+            invocation,
+            control,
+            prompt,
+            files=files,
+            session_id=session_id,
+            memory_scope=memory_scope,
+            planning=planning,
+            thinking=thinking,
+            idempotency_key=idempotency_key,
         )
-        cancelled = False
-        while True:
-            try:
-                result = await asyncio.shield(task)
-                break
-            except asyncio.CancelledError:
-                cancelled = True
-                if task.done():
-                    break
-        result = task.result()
-        if cancelled:
-            raise asyncio.CancelledError
-        return result
 
     async def _start_and_handoff(
         self,
@@ -396,20 +380,12 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
                 invocation.principal,
                 hold_id,
             )
-        try:
-            current = control.execution_id
-            if current is None:
-                await control.bind_execution(execution_id)
-            elif current != execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await control.handoff_execution(execution_id)
-        except BaseException:
-            await self._release_execution_hold(
-                execution_id,
-                invocation.principal,
-                hold_id,
-            )
-            raise
+        current = control.execution_id
+        if current is None:
+            await control.bind_execution(execution_id)
+        elif current != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await control.handoff_execution(execution_id)
         await self._release_execution_hold(
             execution_id,
             invocation.principal,
