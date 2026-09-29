@@ -195,9 +195,7 @@ class SqlMetricStore:
                     return None
                 # Verification and reduction must see the same immutable records,
                 # including when the borrowed engine normally uses READ COMMITTED.
-                await session.connection(
-                    execution_options={"isolation_level": "REPEATABLE READ"}
-                )
+                await self._context.dialect.begin_consistent_read(session)
                 if not await _sql_features_available(session, dialect_name, plan):
                     return None
                 scanned_count = await self._verify_query_records(

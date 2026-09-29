@@ -138,16 +138,7 @@ class SqlStateStorageGroup:
             return await fn(active)
         async with self._session() as session:
             async with session.begin():
-                if self._context.dialect.name == "sqlite":
-                    from sqlalchemy import text
-
-                    await session.execute(text("BEGIN"))
-                else:
-                    await session.connection(
-                        execution_options={
-                            "isolation_level": "REPEATABLE READ",
-                        }
-                    )
+                await self._context.dialect.begin_consistent_read(session)
                 transaction = _SqlTransaction(
                     session,
                     self._metadata,

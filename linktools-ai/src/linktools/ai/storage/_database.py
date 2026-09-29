@@ -17,7 +17,6 @@ from ._dialects import (
     SqlTransactionDisposition,
     SqlTransactionPhase,
     column_type_matches,
-    configure_sqlite_engine,
     dialect_for_name,
 )
 
@@ -41,16 +40,16 @@ class SqlStorageContext:
     owns_engine: bool = False
     _closed: bool = field(default=False, init=False, repr=False)
     _initialize_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _sqlite_configured: bool = field(default=False, init=False, repr=False)
+    _engine_configured: bool = field(default=False, init=False, repr=False)
     _validated_metadata: "MetaData | None" = field(default=None, init=False, repr=False)
 
     async def initialize(self, *, metadata: "MetaData | None" = None) -> None:
         async with self._initialize_lock:
             if self._closed:
                 raise AIError(ErrorCode.STORAGE_CLOSED)
-            if self.engine.dialect.name == "sqlite" and not self._sqlite_configured:
-                await configure_sqlite_engine(self.engine)
-                self._sqlite_configured = True
+            if not self._engine_configured:
+                await self.dialect.configure_engine(self.engine)
+                self._engine_configured = True
             if metadata is not None and metadata is not self._validated_metadata:
                 await _validate_sql_schema(self.engine, metadata)
                 self._validated_metadata = metadata
@@ -171,9 +170,8 @@ def create_sql_storage_context(engine: "AsyncEngine", *, owns_engine: bool = Fal
 async def provision_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
     """Create the explicitly requested metadata without a global schema."""
 
-    dialect_for_name(engine.dialect.name)
-    if engine.dialect.name == "sqlite":
-        await configure_sqlite_engine(engine)
+    dialect = dialect_for_name(engine.dialect.name)
+    await dialect.configure_engine(engine)
     if not metadata.tables:
         return
     async with engine.begin() as connection:
@@ -185,9 +183,8 @@ async def provision_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
 async def validate_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
     """Validate that required metadata is a compatible subset of the database."""
 
-    dialect_for_name(engine.dialect.name)
-    if engine.dialect.name == "sqlite":
-        await configure_sqlite_engine(engine)
+    dialect = dialect_for_name(engine.dialect.name)
+    await dialect.configure_engine(engine)
     await _validate_sql_schema(engine, metadata)
     _logger.debug("SQL metadata validated: dialect=%s tables=%s", engine.dialect.name, len(metadata.tables))
 

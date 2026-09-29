@@ -41,9 +41,18 @@ class _DialectSession:
     def __init__(self, name: str) -> None:
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name=name))
         self.statements = []
+        self.connection_options = []
 
     def get_bind(self) -> object:
         return self.bind
+
+    async def connection(
+        self,
+        *,
+        execution_options: "dict[str, str] | None" = None,
+    ) -> object:
+        self.connection_options.append(execution_options)
+        return object()
 
     async def execute(self, statement: object) -> "_DialectResult":
         self.statements.append(statement)
@@ -222,6 +231,22 @@ async def test_sql_dialect_upsert_uses_vendor_statement() -> None:
             index_elements=("path",),
         ) == 1
         assert marker in str(session.statements[0].compile(dialect=compiler_dialect))
+
+
+@pytest.mark.asyncio
+async def test_sql_dialect_owns_consistent_read_setup() -> None:
+    sqlite_session = _DialectSession("sqlite")
+    await SQLiteDialect().begin_consistent_read(sqlite_session)
+    assert [str(statement) for statement in sqlite_session.statements] == ["BEGIN"]
+    assert sqlite_session.connection_options == []
+
+    for dialect in (PostgreSQLDialect(), MySQLDialect()):
+        session = _DialectSession(dialect.name)
+        await dialect.begin_consistent_read(session)
+        assert session.statements == []
+        assert session.connection_options == [
+            {"isolation_level": "REPEATABLE READ"}
+        ]
 
 
 @pytest.mark.asyncio
