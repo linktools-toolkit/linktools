@@ -1794,8 +1794,6 @@ class DefaultTaskGraphService(TaskGraphService):
 
         if operation.status is OperationStatus.SUCCEEDED:
             return view
-        if not claimed and operation.status is OperationStatus.RUNNING:
-            return view
 
         if not _terminal(state.status):
             view = await self._persistence.tasks.cancel_node(
@@ -1866,7 +1864,8 @@ class DefaultTaskGraphService(TaskGraphService):
             )
 
         if state.status is TaskStatus.RECOVERY_REQUIRED:
-            operation = await self._record_effect_unknown(operation, tenant_id)
+            if claimed or operation.status is OperationStatus.EFFECT_UNKNOWN:
+                operation = await self._record_effect_unknown(operation, tenant_id)
         elif _terminal(state.status):
             operation = await self._record_success(
                 operation,
