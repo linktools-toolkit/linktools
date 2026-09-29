@@ -91,6 +91,7 @@ class _SessionExecutionService(ExecutionService, Protocol):
         request: ExecutionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle: ...
 
 
