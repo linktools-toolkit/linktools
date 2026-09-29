@@ -632,7 +632,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             body["files"] = list(
                 await materializer.canonicalize_files(task_input.files)
             )
-            return TaskNode(
+            return TaskNode.from_resolved(
                 node.node_id,
                 node.dependencies,
                 task=node.task,
@@ -664,7 +664,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             "value": encode_domain(stored),
         }
         _logger.info("task input resolved: node=%s", node.node_id)
-        return TaskNode(
+        return TaskNode.from_resolved(
             node.node_id,
             node.dependencies,
             task=node.task,
@@ -1155,7 +1155,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             != _output_contract(None, node.output_type)
         ):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        return TaskNode(
+        return TaskNode.from_resolved(
             node.node_id,
             node.dependencies,
             task=node.task,
@@ -1320,7 +1320,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         "task_revision": task_revision,
                     },
                 ) from error
-            canonical = TaskNode(
+            canonical = TaskNode.from_resolved(
                 node.node_id,
                 node.dependencies,
                 task=node.task,
