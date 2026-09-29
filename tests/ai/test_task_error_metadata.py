@@ -4,11 +4,9 @@
 
 import asyncio
 from types import SimpleNamespace
-
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
-from linktools.ai.runtime._planner import _AgentTaskNodeHandler, RuntimeTaskNodeRunner
 from linktools.ai.task._local import LocalTaskGraphLauncher, _scheduler_failure
 
 
@@ -30,40 +28,6 @@ def _assert_source_metadata(error: AIError) -> None:
     assert error.retryable is True
     assert error.operation_id == "provider-operation"
     assert error.diagnostics == _source_error().diagnostics
-
-
-def test_agent_task_background_failure_preserves_metadata() -> None:
-    handler = object.__new__(_AgentTaskNodeHandler)
-    handler._background_failures = {}
-    source = _source_error()
-
-    stored = handler._record_background_failure(
-        ("tenant", "graph", "node"),
-        source,
-        phase="task_execution_bind",
-    )
-    _assert_source_metadata(stored)
-    assert stored.safe_details == {
-        "status_code": 503,
-        "phase": "task_execution_bind",
-        "graph_id": "graph",
-        "node_id": "node",
-    }
-
-    replayed = handler.background_failure
-    assert replayed is not None
-    _assert_source_metadata(replayed)
-    assert replayed.safe_details == stored.safe_details
-
-
-def test_runtime_task_runner_background_failure_preserves_metadata() -> None:
-    runner = object.__new__(RuntimeTaskNodeRunner)
-    runner._agent = SimpleNamespace(background_failure=_source_error())
-
-    failure = runner.background_failure
-    assert failure is not None
-    _assert_source_metadata(failure)
-    assert failure.safe_details == {"status_code": 503}
 
 
 def test_task_scheduler_failure_preserves_metadata() -> None:

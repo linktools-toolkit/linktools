@@ -15,10 +15,13 @@ from ._graph import (
     TaskInputSupplyRequest,
     TaskGraphHandle,
     TaskGraphLaunch,
+    TaskGraph,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphState,
     TaskGraphView,
+    TaskNodeInfo,
+    TaskNodeView,
 )
 
 
@@ -56,6 +59,21 @@ class TaskGraphQueryService(Protocol):
         principal: Principal,
     ) -> TaskGraphState: ...
 
+    async def result_header(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[TaskGraph, int]: ...
+
+    async def result_node_states(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        principal: Principal,
+    ) -> tuple[TaskNodeView, ...]: ...
+
     async def list_events(
         self,
         graph_id: str,
@@ -91,6 +109,13 @@ class TaskGraphService(TaskGraphQueryService, Protocol):
         *,
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult: ...
+
+    async def recovery_nodes(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[TaskNodeInfo, ...]: ...
 
     async def recover(
         self,

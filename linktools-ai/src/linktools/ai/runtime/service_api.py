@@ -40,6 +40,14 @@ from .recovery import (
 )
 
 
+class _ExecutionStreamFailure(Exception):
+    """Marks a live stream or pure tree projection failure for TaskGraph views."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(type(cause).__name__)
+        self.cause = cause
+
+
 def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
     try:
         return normalize_correlation(value)
@@ -1231,6 +1239,9 @@ class ExecutionService(Protocol):
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...
+    async def result_payload_size(
+        self, execution_id: str, *, principal: Principal
+    ) -> int: ...
     async def wait(
         self,
         execution_id: str,
@@ -1347,6 +1358,7 @@ class SessionService(Protocol):
         request: ResumeSessionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle: ...
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest

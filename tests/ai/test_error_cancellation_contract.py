@@ -27,7 +27,6 @@ from linktools.ai.runtime._mcp import (
     materialize_mcp_capabilities,
     prepare_mcp_projections,
 )
-from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import MCPServerSpec, mcp_server_selector
 from linktools.ai.task import (
@@ -38,10 +37,6 @@ from linktools.ai.task import (
 from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.core import Principal, PrincipalKind
 from linktools.ai.workspace import BubblewrapSandbox
-
-
-async def _no_dependency_body(_dependency: object) -> object:
-    raise AssertionError("test does not declare task dependencies")
 
 
 def test_subagent_delegate_contract_requires_mapping_result() -> None:
@@ -337,198 +332,6 @@ async def test_immediate_terminal_execution_waits_for_task_dependency_hold() -> 
 
 
 @pytest.mark.asyncio
-async def test_task_runner_cancellation_does_not_business_cancel_running_execution() -> (
-    None
-):
-    class Execution:
-        def __init__(self) -> None:
-            self.wait_started = asyncio.Event()
-            self.wait_cancelled = asyncio.Event()
-            self.cancel_called = asyncio.Event()
-
-        async def start(self, *args, **kwargs):
-            del args, kwargs
-            return SimpleNamespace(execution_id="execution")
-
-        async def wait(self, *args, **kwargs):
-            del args, kwargs
-            self.wait_started.set()
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                self.wait_cancelled.set()
-                raise
-
-        async def cancel(self, *args, **kwargs):
-            del args, kwargs
-            self.cancel_called.set()
-            return SimpleNamespace(cancelled=True)
-
-    class Control:
-        def __init__(self) -> None:
-            self.bound: list[str] = []
-
-        async def handoff_execution(self, execution_id: str) -> None:
-            self.bound.append(execution_id)
-
-    execution = Execution()
-    handler = _AgentTaskNodeHandler(execution, object(), object())
-    handler._prepare_request = AsyncMock(return_value=("binding", object()))
-    control = Control()
-    task = asyncio.create_task(
-        handler.run_node(
-            SimpleNamespace(node_id="node"),
-            graph_id="graph",
-            principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
-            correlation={},
-            dependencies={},
-            dependency_reader=_no_dependency_body,
-            control=control,
-        )
-    )
-    await execution.wait_started.wait()
-    assert control.bound == ["execution"]
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    await asyncio.wait_for(execution.wait_cancelled.wait(), 1)
-    await asyncio.sleep(0)
-    assert not execution.cancel_called.is_set()
-    assert handler.background_failure is None
-
-
-@pytest.mark.asyncio
-async def test_task_runner_binds_execution_that_finishes_launch_after_caller_cancel() -> (
-    None
-):
-    class Execution:
-        def __init__(self) -> None:
-            self.launch_started = asyncio.Event()
-            self.release_launch = asyncio.Event()
-            self.cancel_called = asyncio.Event()
-
-        async def start(self, *args, **kwargs):
-            del args, kwargs
-            self.launch_started.set()
-            await self.release_launch.wait()
-            return SimpleNamespace(execution_id="execution")
-
-        async def wait(self, *args, **kwargs):
-            del args, kwargs
-            raise AssertionError("wait must not start after caller cancellation")
-
-        async def cancel(self, *args, **kwargs):
-            del args, kwargs
-            self.cancel_called.set()
-            return SimpleNamespace(cancelled=True)
-
-    class Control:
-        def __init__(self) -> None:
-            self.bound = asyncio.Event()
-            self.execution_id: str | None = None
-
-        async def handoff_execution(self, execution_id: str) -> None:
-            self.execution_id = execution_id
-            self.bound.set()
-
-    execution = Execution()
-    handler = _AgentTaskNodeHandler(execution, object(), object())
-    handler._prepare_request = AsyncMock(return_value=("binding", object()))
-    control = Control()
-    task = asyncio.create_task(
-        handler.run_node(
-            SimpleNamespace(node_id="node"),
-            graph_id="graph",
-            principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
-            correlation={},
-            dependencies={},
-            dependency_reader=_no_dependency_body,
-            control=control,
-        )
-    )
-    await execution.launch_started.wait()
-    task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert handler.pending_background_tasks
-    execution.release_launch.set()
-    await asyncio.wait_for(control.bound.wait(), 1)
-    pending = handler.pending_background_tasks
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-    await asyncio.sleep(0)
-    assert control.execution_id == "execution"
-    assert not execution.cancel_called.is_set()
-    assert handler.pending_background_tasks == ()
-    assert handler.background_failure is None
-
-
-@pytest.mark.asyncio
-async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -> None:
-    class Execution:
-        def __init__(self) -> None:
-            self.launch_started = asyncio.Event()
-            self.release_launch = asyncio.Event()
-
-        async def start(self, *args, **kwargs):
-            del args, kwargs
-            self.launch_started.set()
-            await self.release_launch.wait()
-            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-
-        async def wait(self, *args, **kwargs):
-            del args, kwargs
-            raise AssertionError("wait must not start after unknown launch")
-
-    class Control:
-        async def handoff_execution(self, execution_id: str) -> None:
-            del execution_id
-            raise AssertionError("unknown launch must not bind execution")
-
-    execution = Execution()
-    handler = _AgentTaskNodeHandler(execution, object(), object())
-    handler._prepare_request = AsyncMock(return_value=("binding", object()))
-    task = asyncio.create_task(
-        handler.run_node(
-            SimpleNamespace(node_id="node"),
-            graph_id="graph",
-            principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
-            correlation={},
-            dependencies={},
-            dependency_reader=_no_dependency_body,
-            control=Control(),
-        )
-    )
-    await execution.launch_started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    execution.release_launch.set()
-    pending = handler.pending_background_tasks
-    assert pending
-    await asyncio.gather(*pending, return_exceptions=True)
-    await asyncio.sleep(0)
-    assert handler.pending_background_tasks == ()
-    failure = handler.background_failure
-    assert failure is not None
-    assert failure.code is ErrorCode.EXECUTION_START_UNKNOWN
-
-    launcher = object.__new__(LocalTaskGraphLauncher)
-    launcher._accepting = True
-    launcher._graphs = {}
-    launcher._lock = asyncio.Lock()
-    launcher._runner = handler
-    with pytest.raises(AIError) as shutdown_error:
-        await launcher.shutdown()
-    assert shutdown_error.value.code is ErrorCode.EXECUTION_START_UNKNOWN
-
-
-@pytest.mark.asyncio
 async def test_task_scheduler_arm_cancellation_detaches_pending_launcher() -> None:
     class Launcher:
         def __init__(self) -> None:
@@ -709,9 +512,14 @@ async def test_task_heartbeat_loss_waits_for_cancellation_resistant_runner(
         failure=None,
         closed=False,
     )
-    node = SimpleNamespace(node_id="node", dependencies=())
+    node = SimpleNamespace(node_id="node", dependencies=(), task=None)
     lease_state = SimpleNamespace(
-        lease=SimpleNamespace(graph_id="graph", node_id="node", fence=1),
+        lease=SimpleNamespace(
+            graph_id="graph",
+            node_id="node",
+            execution_id="execution",
+            fence=1,
+        ),
         lock=asyncio.Lock(),
     )
 

@@ -13,6 +13,7 @@ from linktools.ai.runtime.state._codec import (
     _decode_step_envelope,
     _encode_persisted_domain,
     wire_type_id,
+    wire_type_id,
 )
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import (
@@ -191,7 +192,7 @@ def test_persisted_task_node_rejects_unknown_field() -> None:
 
     with pytest.raises(AIError) as error:
         _decode_enveloped_domain(
-            _envelope(payload, wire_id="task_node"),
+            _envelope(payload, wire_id=wire_type_id(node)),
             TaskNode,
         )
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

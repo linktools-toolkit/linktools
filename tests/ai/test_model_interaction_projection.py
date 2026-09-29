@@ -698,7 +698,7 @@ async def test_compaction_request_uses_explicit_source_not_stale_projection() ->
 
 
 async def _assert_public_interaction(runtime: Runtime[object]) -> None:
-    execution = await runtime.agent("default").start("hello")
+    execution = await runtime.agents.get("default").start("hello")
     result = await execution.wait()
     page = await execution.model_interactions(include_content=True)
     assert result.status == "SUCCEEDED"

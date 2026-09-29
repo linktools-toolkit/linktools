@@ -26,6 +26,10 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
   proof that its owned process tree is quiescent.
 - Architecture and release gates encode long-lived invariants only. Do not encode current package names, module depth, class names, or layout as policy.
 - Build/release tooling must not become a second owner of Runtime semantic truth.
+- Keep Runtime's root API limited to lifecycle, metadata, and domain entry points. Domain-specific actions belong to the owning domain facade; cross-domain adapters belong to the target domain rather than the Runtime root.
+- Keep Task definition identity, TaskGraph invocation data, and scheduling dependencies separate. A scheduling dependency constrains execution order only; it becomes model-visible input only through an explicit, versioned input contract that reads the durable result.
+- Recovery authorization and recovered execution identity are separate facts. The recovery actor authorizes the control operation; resumed execution keeps the principal admitted with the durable graph.
+- An execution referenced by a TaskGraph must retain terminal data until the graph has durably established its execution binding/handoff. Caller cancellation must not reopen that gap.
 
 ### Durable contracts and identity
 
@@ -36,6 +40,7 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 
 - Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation. A local SQLite state backend is the explicit exception and may initialize its own local schema when that state store is created or opened.
 - Durable wire formats and named behavior identities are explicit LinkTools contracts. Honor published or explicitly committed compatibility obligations. Without such an obligation, remove obsolete pre-release readers, aliases, defaults and migrations while updating current writers, readers and verification together. Do not prebuild compatibility paths for hypothetical versions.
+- Before a real compatibility commitment exists, evolve the current wire/schema contract in place. Do not increment its format version merely to distinguish superseded development shapes; update the current writer, reader, fixtures and verification together instead.
 - Named behavior identity is the explicit `(kind, id, revision)` reference. Do not hash it or maintain a second identity representation. Agent, Tool, Skill, MCP, generic Capability, Task, TaskExpander, and named Metric definitions keep full contracts for restore and validation; any behavior change under the same named contract requires an explicit revision bump.
 - Digests are reserved for anonymous/composite values, byte integrity, and request/idempotency contracts. Define each digest from one explicit minimal projection owned by that contract. Non-contract additions and default fields must not change it; whole-object reflection, incidental wire payloads and dependency serialization must not define it.
 - Separate named identity from contract validation, byte integrity, and storage addressing. Physical locators, credentials, transport tuning and pure display/diagnostic data do not enter named identity. Complete stored bytes still require complete integrity checks. Preserve logical scope, effect policy, model-visible instructions/schema and provenance when the specific contract needs them.

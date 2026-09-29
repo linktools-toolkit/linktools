@@ -3,9 +3,11 @@
 """Regression coverage for execution-owned Asset version bindings."""
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,13 +25,12 @@ from linktools.ai.capability import (
     SkillDefinition,
     SkillResource,
     SkillSourceRef,
-    TaskExpander,
-    TaskExpansionContext,
 )
 from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     JsonValue,
+    Page,
     Principal,
     canonical_json_bytes,
     canonical_sha256,
@@ -38,9 +39,9 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._agent_binding_resolver import _AgentBindingResolver
 from linktools.ai.runtime._context import RuntimeContext
-from linktools.ai.runtime._runtime_identity import task_capability_capture_key
+from linktools.ai.runtime._runtime_identity import task_graph_binding_capture_key
 from linktools.ai.runtime._runtime_service import Runtime
-from linktools.ai.runtime._task_capability_capture import TaskCapabilityCaptureStore
+from linktools.ai.runtime._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, SnapshotLimits
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
@@ -58,14 +59,19 @@ from linktools.ai.storage import (
     StoredPayload,
 )
 from linktools.ai.task import (
+    Task,
+    TaskExpansionContext,
+    TaskExpander,
+    TaskExpanderRef,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLimits,
+    TaskGraphLaunch,
     TaskGraphRequest,
-    TaskFunction,
+    RecoverGraphRequest,
     TaskNode,
     TaskNodeContext,
-    TaskExpanderRef,
+    TaskRef,
 )
 from linktools.ai.workspace import BubblewrapSandbox
 
@@ -211,20 +217,33 @@ async def test_binding_resolution_preserves_direct_child_asset_versions() -> Non
 
 
 @pytest.mark.asyncio
-async def test_task_capture_does_not_build_static_root_closure() -> None:
+async def test_task_binding_capture_keeps_agent_binding_in_task_declaration() -> None:
     fixture = await _fixture()
     try:
+        class CaptureRunner:
+            pass
+
+        task = Task.from_runner(
+            "test.capture-agent",
+            CaptureRunner(),  # type: ignore[arg-type]
+            contract={
+                "version": 1,
+                "type": "agent",
+                "effect_policy": "none",
+                "output_contract": {"kind": "json"},
+                "reconcile": False,
+                "config": {
+                    "agent_id": "parent",
+                    "agent_revision": 1,
+                    "binding_contract": fixture.binding.binding_contract.to_payload(),
+                    "input_mode": "literal",
+                },
+            },
+        )
         graph = TaskGraph(
             "graph",
             (
-                TaskNode(
-                    "root",
-                    input={
-                        "task_id": "linktools.ai.agent",
-                        "task_revision": 1,
-                        "binding_contract": fixture.binding.binding_contract.to_payload(),
-                    },
-                ),
+                TaskNode("root", task=task),
             ),
         )
         admission = TaskGraphAdmission.from_request(
@@ -235,20 +254,19 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
                 TaskGraphLimits(),
             )
         )
-        captures = TaskCapabilityCaptureStore(
+        captures = TaskGraphBindingCaptureStore(
             "namespace",
-            fixture.compiler,
-            fixture.resolver,
             InMemoryObjectStore("task"),
-            agent_task_id="linktools.ai.agent",
         )
 
-        capability_capture = await captures.capture(admission, graph)
+        capture = await captures.capture(admission, graph, tasks=(task,))
 
-        assert capability_capture.roots == {}
-        resolved_binding = capability_capture.bindings[fixture.binding.binding_digest]
-        assert resolved_binding.binding_digest != fixture.binding.binding_digest
-        assert _skill_ref(_resolved_child(resolved_binding)).resources
+        assert set(capture.tasks) == {(task.id, task.revision)}
+        declaration = capture.tasks[(task.id, task.revision)]
+        config = declaration["config"]
+        assert isinstance(config, Mapping)
+        assert config["binding_contract"] == fixture.binding.binding_contract.to_payload()
+        assert not capture.expanders
     finally:
         await fixture.assets.close()
 
@@ -287,28 +305,16 @@ async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
             ) -> tuple[TaskNode, ...]:
                 return ()
 
-        required_handler = TaskFunction[None]("test.capture-required", 1, run_task)
-        unused_a_handler = TaskFunction[None]("test.capture-unused-a", 1, run_task)
-        unused_b_handler = TaskFunction[None]("test.capture-unused-b", 1, run_task)
-        required = CapabilityContribution.from_task(
-            required_handler,
-            effect_policy="none",
-        )
-        unused_a = CapabilityContribution.from_task(
-            unused_a_handler,
-            effect_policy="none",
-        )
-        unused_b = CapabilityContribution.from_task(
-            unused_b_handler,
-            effect_policy="none",
-        )
-        expander: TaskExpander = Expander()
-        expander_contribution = CapabilityContribution.from_task_expander(expander)
+        required = Task("test.capture-required", run_task, effect_policy="none")
+        unused_a = Task("test.capture-unused-a", run_task, effect_policy="none")
+        unused_b = Task("test.capture-unused-b", run_task, effect_policy="none")
+        expander = TaskExpander("test.capture-expander", Expander().expand)
         graph = TaskGraph(
             "capture-race",
             (
-                required_handler.node(
+                TaskNode(
                     "root",
+                    task=required,
                     expander=TaskExpanderRef(expander.id, expander.revision),
                 ),
             ),
@@ -321,33 +327,27 @@ async def test_concurrent_task_capture_keeps_the_first_manifest() -> None:
                 TaskGraphLimits(),
             )
         )
-        key = task_capability_capture_key(
+        key = task_graph_binding_capture_key(
             "namespace",
             "tenant",
             admission.graph_id,
             admission.initial_request_digest,
         )
         objects = _ConcurrentCaptureObjectStore(key)
-        captures = TaskCapabilityCaptureStore(
-            "namespace",
-            fixture.compiler,
-            fixture.resolver,
-            objects,
-            agent_task_id="linktools.ai.agent",
-        )
+        captures = TaskGraphBindingCaptureStore("namespace", objects)
 
         first, second = await asyncio.gather(
             captures.capture(
                 admission,
                 graph,
-                task_contributions=(required, unused_a),
-                expander_contributions=(expander_contribution,),
+                tasks=(required, unused_a),
+                expanders=(expander,),
             ),
             captures.capture(
                 admission,
                 graph,
-                task_contributions=(required, unused_b),
-                expander_contributions=(expander_contribution,),
+                tasks=(required, unused_b),
+                expanders=(expander,),
             ),
         )
 
@@ -687,24 +687,37 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
 
 
 @pytest.mark.asyncio
-async def test_runtime_storage_snapshot_restores_task_capability_manifest(
+async def test_runtime_storage_snapshot_restores_task_binding_capture(
     tmp_path: Path,
 ) -> None:
     fixture = await _fixture()
+    class CaptureRunner:
+        pass
+
+    task = Task.from_runner(
+        "test.capture-agent",
+        CaptureRunner(),  # type: ignore[arg-type]
+        contract={
+            "version": 1,
+            "type": "agent",
+            "effect_policy": "none",
+            "output_contract": {"kind": "json"},
+            "reconcile": False,
+            "config": {
+                "agent_id": "parent",
+                "agent_revision": 1,
+                "binding_contract": fixture.binding.binding_contract.to_payload(),
+                "input_mode": "literal",
+            },
+        },
+    )
     storage_root = tmp_path / "task-state"
     state = RuntimeStorage.filesystem(storage_root)
     await state.initialize(namespace="namespace", tenant_id="tenant")
     graph = TaskGraph(
         "graph",
         (
-            TaskNode(
-                "root",
-                input={
-                    "task_id": "linktools.ai.agent",
-                    "task_revision": 1,
-                    "binding_contract": fixture.binding.binding_contract.to_payload(),
-                },
-            ),
+            TaskNode("root", task=task),
         ),
     )
     admission = TaskGraphAdmission.from_request(
@@ -716,20 +729,16 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
         )
     )
     try:
-        capabilities = TaskCapabilityCaptureStore(
+        captures = TaskGraphBindingCaptureStore(
             "namespace",
-            fixture.compiler,
-            fixture.resolver,
             state.object_store(RuntimeDomain.TASK),
-            agent_task_id="linktools.ai.agent",
         )
-        await capabilities.capture(admission, graph)
+        await captures.capture(admission, graph, tasks=(task,))
         await state.task.admissions.admit(admission, graph)
-        loaded = await capabilities.load(admission)
-        assert set(loaded.tasks) == {("linktools.ai.agent", 1)}
+        loaded = await captures.load(admission)
+        assert set(loaded.tasks) == {("test.capture-agent", 1)}
         assert not loaded.expanders
-        binding = loaded.bindings[fixture.binding.binding_digest]
-        resolved_ref = _skill_ref(_resolved_child(binding))
+        captured_declaration = loaded.tasks[("test.capture-agent", 1)]
     finally:
         await state.close()
 
@@ -762,23 +771,138 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
         read_only=True,
     )
     try:
-        restored_capabilities = TaskCapabilityCaptureStore(
+        restored_captures = TaskGraphBindingCaptureStore(
             "namespace",
-            fixture.compiler,
-            fixture.resolver,
             restored.object_store(RuntimeDomain.TASK),
-            agent_task_id="linktools.ai.agent",
         )
-        loaded = await restored_capabilities.load(admission)
-        assert set(loaded.tasks) == {("linktools.ai.agent", 1)}
+        loaded = await restored_captures.load(admission)
+        assert set(loaded.tasks) == {("test.capture-agent", 1)}
         assert not loaded.expanders
-        binding = loaded.bindings[fixture.binding.binding_digest]
-        restored_ref = _skill_ref(_resolved_child(binding))
-        assert restored_ref == resolved_ref
-        assert await _read_skill(fixture, restored_ref) == b"original"
+        assert loaded.tasks[("test.capture-agent", 1)] == captured_declaration
     finally:
         await restored.close()
         await fixture.assets.close()
+
+
+@pytest.mark.asyncio
+async def test_recover_pending_preflights_all_subjects_before_dispatch() -> None:
+    actor = Principal("operator", "tenant")
+    launches = (
+        TaskGraphLaunch("graph-a", Principal("admitted-a", "tenant"), TaskGraphLimits()),
+        TaskGraphLaunch("graph-b", Principal("admitted-b", "tenant"), TaskGraphLimits()),
+    )
+
+    class Admissions:
+        async def list_recoverable_page(
+            self,
+            *,
+            cursor: str | None,
+            limit: int,
+        ) -> Page[TaskGraphLaunch]:
+            assert cursor is None
+            assert limit == 10
+            return Page(launches)
+
+    admissions = Admissions()
+    events: list[tuple[str, str, Principal]] = []
+
+    class Engine:
+        def __init__(self, *, fail_on: str | None = None) -> None:
+            self.fail_on = fail_on
+
+        async def _activate_graph(
+            self,
+            graph_id: str,
+            principal: Principal,
+            *,
+            recovery_nodes: object,
+            recovery_principal: Principal,
+        ) -> None:
+            del recovery_nodes, recovery_principal
+            events.append(("preflight", graph_id, principal))
+            if graph_id == self.fail_on:
+                raise AIError(ErrorCode.BINDING_NOT_REGISTERED)
+
+    class GraphService:
+        def __init__(self, *, fail_authorize_on: str | None = None) -> None:
+            self.fail_authorize_on = fail_authorize_on
+
+        async def recovery_nodes(
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
+        ) -> object:
+            events.append(("authorize", graph_id, principal))
+            if graph_id == self.fail_authorize_on:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            return object()
+
+        async def recover(
+            self,
+            graph_id: str,
+            request: RecoverGraphRequest,
+        ) -> str:
+            events.append(("recover", graph_id, request.principal))
+            return graph_id
+
+    runtime = object.__new__(Runtime)
+    runtime._closed = False
+    runtime._closing = False
+    runtime._task_admissions = admissions
+    runtime._default_principal = actor
+    runtime._context = SimpleNamespace(tenant_id="tenant")
+    runtime._namespace = "runtime"
+    runtime._graph_service = GraphService()
+
+    page = await runtime._recover_pending_tasks(
+        Engine(),
+        cursor=None,
+        limit=10,
+        principal=actor,
+    )
+
+    assert page.items == ("graph-a", "graph-b")
+    assert events == [
+        ("authorize", "graph-a", actor),
+        ("preflight", "graph-a", launches[0].principal),
+        ("authorize", "graph-b", actor),
+        ("preflight", "graph-b", launches[1].principal),
+        ("recover", "graph-a", actor),
+        ("recover", "graph-b", actor),
+    ]
+
+    events.clear()
+    with pytest.raises(AIError) as missing_definition:
+        await runtime._recover_pending_tasks(
+            Engine(fail_on="graph-b"),
+            cursor=None,
+            limit=10,
+            principal=actor,
+        )
+    assert missing_definition.value.code is ErrorCode.BINDING_NOT_REGISTERED
+    assert [event[0] for event in events] == [
+        "authorize",
+        "preflight",
+        "authorize",
+        "preflight",
+    ]
+
+    events.clear()
+    runtime._graph_service = GraphService(fail_authorize_on="graph-b")
+    with pytest.raises(AIError) as denied:
+        await runtime._recover_pending_tasks(
+            Engine(),
+            cursor=None,
+            limit=10,
+            principal=actor,
+        )
+    assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+    assert [event[0] for event in events] == [
+        "authorize",
+        "preflight",
+        "authorize",
+    ]
 
 
 @pytest.mark.asyncio
@@ -792,25 +916,20 @@ async def test_runtime_storage_snapshot_restores_task_capability_manifest(
         (1, "invalid_schema", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "invalid_expander", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (1, "wrong_kind", ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1, "unexpected_field", ErrorCode.STORAGE_INTEGRITY_ERROR),
         (2, "unknown_format", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
     ),
 )
-async def test_task_capability_capture_reader_rejects_invalid_declaration_manifests(
-    tmp_path: Path,
+async def test_task_binding_capture_reader_rejects_invalid_declaration_manifests(
     format_version: object,
     corruption: str,
     expected_code: ErrorCode,
 ) -> None:
-    fixture = await _fixture()
-    state = RuntimeStorage.filesystem(tmp_path / "state")
-    await state.initialize(namespace="namespace", tenant_id="tenant")
+    objects = InMemoryObjectStore("task-capture-reader")
     graph = TaskGraph(
         "capture-reader",
         (
-            TaskNode(
-                "root",
-                input={"task_id": "test.capture", "task_revision": 1},
-            ),
+            TaskNode("root", task=TaskRef("test.capture", 1)),
         ),
     )
     admission = TaskGraphAdmission.from_request(
@@ -825,6 +944,7 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
         "version": 1,
         "id": "test.capture",
         "revision": 1,
+        "type": "function",
         "effect_policy": "none",
         "output_contract": {"kind": "json"},
         "reconcile": False,
@@ -857,29 +977,27 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
             {**expander_declaration, "version": 1.0}
         ]
     manifest: dict[str, object] = {
-        "kind": "task-capability-capture",
+        "kind": "task-graph-binding-capture",
         "format_version": format_version,
         "namespace": "namespace",
         "tenant_id": "tenant",
         "graph_id": admission.graph_id,
         "request_digest": admission.initial_request_digest,
-        "roots": {},
-        "bindings": {},
         "tasks": task_declarations,
         "expanders": expander_declarations,
     }
     if corruption == "wrong_kind":
         manifest["kind"] = "invalid-kind"
+    if corruption == "unexpected_field":
+        manifest["roots"] = {}
     if corruption == "missing_array":
         del manifest["expanders"]
     payload = canonical_json_bytes(manifest)
-    objects = state.object_store(RuntimeDomain.TASK)
-
     async def chunks():
         yield payload
 
     await objects.put(
-        task_capability_capture_key(
+        task_graph_binding_capture_key(
             "namespace",
             "tenant",
             admission.graph_id,
@@ -889,17 +1007,7 @@ async def test_task_capability_capture_reader_rejects_invalid_declaration_manife
         expected_size=len(payload),
         expected_digest=canonical_sha256(manifest),
     )
-    reader = TaskCapabilityCaptureStore(
-        "namespace",
-        fixture.compiler,
-        fixture.resolver,
-        objects,
-        agent_task_id="linktools.ai.agent",
-    )
-    try:
-        with pytest.raises(AIError) as error:
-            await reader.load(admission)
-        assert error.value.code is expected_code
-    finally:
-        await state.close()
-        await fixture.assets.close()
+    reader = TaskGraphBindingCaptureStore("namespace", objects)
+    with pytest.raises(AIError) as error:
+        await reader.load(admission)
+    assert error.value.code is expected_code

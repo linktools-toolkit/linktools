@@ -14,18 +14,25 @@ from linktools.ai.core import (
     Principal,
     TaskStatus,
 )
-from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.errors import AIError, ErrorCode, TaskObservationError
 from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
+from linktools.ai.runtime._domains import RuntimeExecutions, RuntimeSessions
 from linktools.ai.runtime.service_api import (
     ExecutionEvent,
     ExecutionStreamEvent,
     ExecutionTreeEvent,
     ExecutionView,
 )
+from linktools.ai.runtime.service_api import _ExecutionStreamFailure
 from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphResult
 
 
 class _ExecutionService:
+    async def inspect(self, execution_id: str, *, principal: Principal):
+        del principal
+        assert execution_id == "execution"
+        return type("Execution", (), {"binding_kind": "agent"})()
+
     def stream(
         self,
         execution_id: str,
@@ -69,6 +76,7 @@ class _TaskGraphService:
 
         class Snapshot:
             node_states = (State(),)
+            nodes = (type("Node", (), {"node_id": "node", "task": None})(),)
 
         assert graph_id == "graph"
         return Snapshot()
@@ -168,8 +176,24 @@ class _Runtime:
 
     def __init__(self) -> None:
         self.execution = _ExecutionService()
+        self.executions = self.execution
         self.graph = _TaskGraphService()
         self.history = _HistoryService()
+
+
+def _task_graph_run(
+    runtime,
+    graph_id: str,
+    principal: Principal,
+    watch_tree,
+) -> TaskGraphRun:
+    return TaskGraphRun(
+        runtime,
+        runtime.graph,
+        graph_id,
+        principal,
+        watch_tree,
+    )
 
 
 def _watch_tree(
@@ -244,7 +268,7 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
 
         return values()
 
-    run = TaskGraphRun(
+    run = _task_graph_run(
         _Runtime(),
         "graph",
         Principal("owner", "tenant"),
@@ -266,7 +290,7 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
 
 @pytest.mark.asyncio
 async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
-    run = TaskGraphRun(
+    run = _task_graph_run(
         _Runtime(),
         "graph",
         Principal("owner", "tenant"),
@@ -308,7 +332,16 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
                 (),
                 {"node_id": "node", "execution_id": None},
             )()
-            return type("Snapshot", (), {"node_states": (state,)})()
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "node_states": (state,),
+                    "nodes": (
+                        type("Node", (), {"node_id": "node", "task": None})(),
+                    ),
+                },
+            )()
 
         def stream_events(
             self,
@@ -333,7 +366,7 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
         (),
         {"namespace": "watch-test", "graph": service},
     )()
-    run = TaskGraphRun(
+    run = _task_graph_run(
         runtime,
         "graph",
         Principal("owner", "tenant"),
@@ -368,6 +401,7 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
                     "status": TaskStatus.RUNNING,
                     "event_sequence": 2,
                     "node_states": (),
+                    "nodes": (),
                 },
             )()
 
@@ -419,7 +453,7 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
             "event": object(),
         },
     )()
-    run = TaskGraphRun(
+    run = _task_graph_run(
         runtime,
         "graph",
         Principal("owner", "tenant"),
@@ -465,6 +499,9 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                                 "error_digest": None,
                             },
                         )(),
+                    ),
+                    "nodes": (
+                        type("Node", (), {"node_id": "node", "task": None})(),
                     ),
                 },
             )()
@@ -556,17 +593,21 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
             )
             return Page(tuple(value for value in values if value.sequence > after_sequence))
 
+    replay_execution = ReplayExecutionService()
+    replay_events = ReplayEventService()
     runtime = type(
         "ReplayRuntime",
         (),
         {
             "namespace": "watch-test",
             "graph": ReplayGraphService(),
-            "execution": ReplayExecutionService(),
-            "event": ReplayEventService(),
+            "execution": replay_execution,
+            "executions": replay_execution,
+            "event": replay_events,
+            "events": replay_events,
         },
     )()
-    run = TaskGraphRun(
+    run = _task_graph_run(
         runtime,
         "graph",
         Principal("owner", "tenant"),
@@ -629,6 +670,9 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
                                 "error_digest": None,
                             },
                         )(),
+                    ),
+                    "nodes": (
+                        type("Node", (), {"node_id": "node", "task": None})(),
                     ),
                 },
             )()
@@ -718,17 +762,21 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
             )
             return Page(tuple(value for value in values if value.sequence > after_sequence))
 
+    replay_execution = ExecutionService()
+    replay_events = EventService()
     runtime = type(
         "ReplayRuntime",
         (),
         {
             "namespace": "watch-test",
             "graph": GraphService(),
-            "execution": ExecutionService(),
-            "event": EventService(),
+            "execution": replay_execution,
+            "executions": replay_execution,
+            "event": replay_events,
+            "events": replay_events,
         },
     )()
-    run = TaskGraphRun(
+    run = _task_graph_run(
         runtime,
         "graph",
         Principal("owner", "tenant"),
@@ -766,7 +814,7 @@ class _WaitGraphService:
     async def state(self, graph_id: str, *, principal: Principal):
         del principal
         assert graph_id == "graph"
-        return type("Snapshot", (), {"node_states": ()})()
+        return type("Snapshot", (), {"node_states": (), "nodes": ()})()
 
     def stream_events(
         self,
@@ -856,28 +904,25 @@ async def _assert_no_graph_observer_tasks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_graph_wait_cleans_observer_on_stable_waiting() -> None:
+async def test_task_graph_wait_does_not_start_observer_on_stable_waiting() -> None:
     service = _WaitGraphService("waiting")
-    run = TaskGraphRun(
+    run = _task_graph_run(
         _wait_runtime(service),
         "graph",
         Principal("owner", "tenant"),
         _watch_tree,
     )
 
-    async def observer(_event: TaskGraphRunEvent) -> None:
-        raise AssertionError("idle observer should be cancelled before an event")
-
-    result = await run.wait(observer=observer)
+    result = await run.wait()
 
     assert result.status is TaskStatus.WAITING
     await _assert_no_graph_observer_tasks()
 
 
 @pytest.mark.asyncio
-async def test_task_graph_wait_delivers_recovery_required_boundary() -> None:
+async def test_task_graph_wait_and_observe_are_independent_at_recovery_boundary() -> None:
     service = _WaitGraphService("recovery")
-    run = TaskGraphRun(
+    run = _task_graph_run(
         _wait_runtime(service),
         "graph",
         Principal("owner", "tenant"),
@@ -888,9 +933,11 @@ async def test_task_graph_wait_delivers_recovery_required_boundary() -> None:
     async def observer(event: TaskGraphRunEvent) -> None:
         observed.append(event)
 
-    result = await run.wait(observer=observer)
+    result = await run.wait()
 
     assert result.status is TaskStatus.RECOVERY_REQUIRED
+    assert not observed
+    await run.observe(observer)
     assert len(observed) == 1
     assert isinstance(observed[0].event, TaskEvent)
     assert observed[0].event.status is TaskStatus.RECOVERY_REQUIRED
@@ -899,29 +946,26 @@ async def test_task_graph_wait_delivers_recovery_required_boundary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_graph_wait_cleans_observer_on_timeout() -> None:
+async def test_task_graph_wait_cleans_up_on_timeout() -> None:
     service = _WaitGraphService("timeout")
-    run = TaskGraphRun(
+    run = _task_graph_run(
         _wait_runtime(service),
         "graph",
         Principal("owner", "tenant"),
         _watch_tree,
     )
 
-    async def observer(_event: TaskGraphRunEvent) -> None:
-        return None
-
     with pytest.raises(AIError) as raised:
-        await run.wait(observer=observer)
+        await run.wait()
 
     assert raised.value.code is ErrorCode.TASK_WAIT_TIMEOUT
     await _assert_no_graph_observer_tasks()
 
 
 @pytest.mark.asyncio
-async def test_task_graph_observer_error_cleans_waiter_without_cancelling_graph() -> None:
+async def test_task_graph_observer_error_does_not_start_graph_wait() -> None:
     service = _WaitGraphService("observer_error")
-    run = TaskGraphRun(
+    run = _task_graph_run(
         _wait_runtime(service),
         "graph",
         Principal("owner", "tenant"),
@@ -932,28 +976,104 @@ async def test_task_graph_observer_error_cleans_waiter_without_cancelling_graph(
         raise RuntimeError("observer failed")
 
     with pytest.raises(AIError) as raised:
-        await run.wait(observer=observer)
+        await run.observe(observer)
     assert raised.value.code is ErrorCode.TASK_OBSERVER_FAILED
 
-    await asyncio.wait_for(service.wait_cancelled.wait(), 1)
+    assert not service.wait_started.is_set()
+    assert not service.wait_cancelled.is_set()
     await _assert_no_graph_observer_tasks()
 
 
 @pytest.mark.asyncio
-async def test_task_graph_wait_outer_cancel_cleans_waiter_and_observer() -> None:
+async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -> None:
+    cause = AIError(
+        ErrorCode.STORAGE_INTEGRITY_ERROR,
+        safe_details={"execution_id": "execution"},
+    )
+
+    def failed_watch_tree(
+        execution_id,
+        *,
+        principal,
+        after_sequences=None,
+        include_content=False,
+    ):
+        del execution_id, principal, after_sequences, include_content
+
+        async def values():
+            if False:
+                yield None
+            raise _ExecutionStreamFailure(cause)
+
+        return values()
+
+    run = _task_graph_run(
+        _Runtime(),
+        "graph",
+        Principal("owner", "tenant"),
+        failed_watch_tree,
+    )
+    stream = run.watch()
+    delivered: list[TaskGraphRunEvent] = []
+    with pytest.raises(TaskObservationError) as raised:
+        while True:
+            delivered.append(await anext(stream))
+
+    assert raised.value.origin == "stream"
+    assert raised.value.cause_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
+    assert raised.value.safe_details == {"execution_id": "execution"}
+    assert delivered
+    assert raised.value.cursor == delivered[-1].cursor
+    assert raised.value.__cause__ is cause
+
+
+@pytest.mark.asyncio
+async def test_task_graph_durable_stream_integrity_error_remains_raw() -> None:
+    class BrokenGraphService(_TaskGraphService):
+        def stream_events(
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+        ):
+            del graph_id, principal, after_sequence
+
+            async def values():
+                if False:
+                    yield None
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+            return values()
+
+    runtime = _Runtime()
+    runtime.graph = BrokenGraphService()
+    run = _task_graph_run(
+        runtime,
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+
+    with pytest.raises(AIError) as raised:
+        await anext(run.watch())
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert not isinstance(raised.value, TaskObservationError)
+
+
+@pytest.mark.asyncio
+async def test_task_graph_wait_outer_cancel_cleans_waiter() -> None:
     service = _WaitGraphService("block")
-    run = TaskGraphRun(
+    run = _task_graph_run(
         _wait_runtime(service),
         "graph",
         Principal("owner", "tenant"),
         _watch_tree,
     )
 
-    async def observer(_event: TaskGraphRunEvent) -> None:
-        return None
-
     task = asyncio.create_task(
-        run.wait(observer=observer),
+        run.wait(),
         name="test-task-graph-wait-cancel",
     )
     await service.wait_started.wait()
@@ -969,6 +1089,49 @@ async def test_task_graph_wait_outer_cancel_cleans_waiter_and_observer() -> None
 
 def test_runtime_does_not_expose_stream_tree() -> None:
     assert not hasattr(Runtime, "stream_tree")
+
+
+def test_runtime_domain_facades_match_the_supported_method_sets() -> None:
+    execution_methods = {
+        name
+        for name, value in vars(RuntimeExecutions).items()
+        if callable(value) and not name.startswith("_")
+    }
+    session_methods = {
+        name
+        for name, value in vars(RuntimeSessions).items()
+        if callable(value) and not name.startswith("_")
+    }
+
+    assert execution_methods == {
+        "get",
+        "inspect",
+        "list",
+        "list_children",
+        "result",
+        "wait",
+        "retry",
+        "fork",
+        "cancel",
+        "recovery_effects",
+        "resolve_tool_effect",
+        "recover",
+        "trace",
+        "transcript",
+        "history",
+        "model_interactions",
+    }
+    assert session_methods == {
+        "get",
+        "create",
+        "reconcile",
+        "list",
+        "history",
+        "timeline",
+        "fork",
+        "update",
+        "close",
+    }
 
 
 def test_task_run_event_rejects_execution_without_node() -> None:

@@ -671,6 +671,15 @@ class _LostTaskWaiter:
         del graph_id, tenant_id
         return None
 
+    def graph_failure(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> "AIError | None":
+        del graph_id, tenant_id
+        return None
+
     async def wait_graph_activity(
         self,
         graph_id: str,
@@ -781,6 +790,15 @@ class _TerminalTaskWaiter:
         del graph_id, tenant_id
         return 0
 
+    def graph_failure(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> "AIError | None":
+        del graph_id, tenant_id
+        return None
+
     async def wait_graph_activity(
         self,
         graph_id: str,
@@ -824,7 +842,7 @@ async def test_task_wait_returns_current_terminal_graph_state_without_local_wait
 
 
 @pytest.mark.asyncio
-async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> None:
+async def test_task_wait_prefers_persisted_terminal_state_without_local_wait() -> None:
     waiter = _TerminalTaskWaiter(AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED))
     repository = _TransitionTaskRepository()
     service = _terminal_task_service(waiter, tasks=repository)
@@ -835,9 +853,9 @@ async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> Non
         timeout_seconds=1,
     )
 
-    assert waiter.started.is_set()
+    assert not waiter.started.is_set()
     assert repository.graph_state_reads == 1
-    assert repository.event_reads == 2
+    assert repository.event_reads == 0
     assert result.status is TaskStatus.SUCCEEDED
 
 

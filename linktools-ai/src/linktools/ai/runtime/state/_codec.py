@@ -60,6 +60,7 @@ from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskBindingContract,
     TaskExpanderRef,
+    TaskRef,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLimits,
@@ -120,6 +121,7 @@ from ._contracts import (
     SessionRecord,
     StoredAgentRunCheckpoint,
     StoredUserInput,
+    TaskPreparedInputRecord,
     ToolOperationAdmission,
     ToolOperationRecord,
     TranscriptChunk,
@@ -131,9 +133,10 @@ from ._contracts import (
     TranscriptSeekRecord,
     TranscriptSpanRef,
 )
-from ._task_capability_capture import (
-    TASK_CAPABILITY_CAPTURE_FORMAT_VERSION,
-    read_task_capability_capture_declarations,
+from ._task_graph_binding_capture import (
+    TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION,
+    TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS,
+    read_task_graph_binding_capture_declarations,
 )
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._step_contracts import (
@@ -149,7 +152,9 @@ from ._store import (
 )
 
 CURRENT_DATA_VERSION = 1
+_TASK_NODE_WIRE_ID = "task_node"
 _TASK_NODE_TERMINAL_WIRE_ID = "task_node_terminal"
+_TASK_NODE_VIEW_WIRE_ID = "task_node_view"
 DomainT = TypeVar("DomainT")
 _logger = environ.get_logger("ai.runtime.state.codec")
 
@@ -220,10 +225,13 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("task_graph_limits", TaskGraphLimits),
     ("task_graph_view", TaskGraphView),
     ("task_lease", TaskLease),
-    ("task_node", TaskNode),
+    (_TASK_NODE_WIRE_ID, TaskNode),
+    ("task_ref", TaskRef),
     ("task_expander_ref", TaskExpanderRef),
-    ("task_node_view", TaskNodeView),
+    (_TASK_NODE_VIEW_WIRE_ID, TaskNodeView),
     ("task_result", TaskResultRecord),
+    ("task_result_ref", TaskResultRef),
+    ("task_prepared_input", TaskPreparedInputRecord),
     ("task_terminal", TaskTerminalRecord),
     ("tool_operation", ToolOperationRecord),
     ("usage_metrics", UsageMetrics),
@@ -333,6 +341,27 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "task_graph_limits": ("max_concurrency", "max_depth", "max_nodes", "max_budget"),
         "task_lease": ("graph_id", "node_id", "tenant_id", "owner", "fence", "lease_expires_at", "execution_id"),
         "task_expander_ref": ("id", "revision"),
+        "task_ref": ("id", "revision"),
+        "task_result_ref": (
+            "namespace",
+            "tenant_id",
+            "graph_id",
+            "node_id",
+            "result_digest",
+        ),
+        "task_prepared_input": (
+            "graph_id",
+            "node_id",
+            "tenant_id",
+            "admission_digest",
+            "task_ref",
+            "input_identity",
+            "source_refs",
+            "stored_user_input",
+            "final_input_digest",
+            "request_identity",
+            "published_fence",
+        ),
         "task_terminal": ("node_id", "owner", "fence", "status", "result_digest", "error_code", "error_digest", "completed_at", "execution_id"),
         "tool_operation": ("tool_operation_id", "execution_id", "agent_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "status", "owner", "fence", "lease_expires_at", "error_code", "created_at", "updated_at", "arguments_payload", "result_payload", "error_payload"),
         "usage_metrics": ("model_requests", "tool_calls", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"),
@@ -402,6 +431,7 @@ def _encode_v1_task_node_fields(
 ) -> Mapping[str, JsonValue]:
     fields: dict[str, JsonValue] = {
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
+        "task": _encode_domain(value.task, codec, persisted=persisted),
         "dependencies": _encode_domain(
             value.dependencies, codec, persisted=persisted
         ),
@@ -460,7 +490,7 @@ def _decode_v1_task_node(
     persisted: bool,
 ) -> TaskNode:
     required = frozenset(
-        {"node_id", "dependencies", "input", "budget_cost", "expander"}
+        {"node_id", "task", "dependencies", "input", "budget_cost", "expander"}
     )
     keys = set(raw_fields)
     if not required.issubset(keys):
@@ -522,7 +552,7 @@ def _decode_v1_task_node(
     reconcile = raw_fields.get("reconcile", False)
     if not isinstance(effect_policy, str) or not isinstance(reconcile, bool):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return TaskNode(
+    return TaskNode.from_resolved(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         tuple(
             _decode_domain(
@@ -531,6 +561,15 @@ def _decode_v1_task_node(
                 codec,
                 persisted=persisted,
             )
+        ),
+        task=cast(
+            TaskRef | None,
+            _decode_domain(
+                raw_fields["task"],
+                TaskRef | None,
+                codec,
+                persisted=persisted,
+            ),
         ),
         input=_decode_domain(
             raw_fields["input"],
@@ -584,9 +623,10 @@ def _decode_v1_terminal_task_node(
     persisted: bool,
 ) -> TaskNode:
     node = _decode_v1_task_node(raw_fields, codec, persisted)
-    return TaskNode(
+    return TaskNode.from_resolved(
         node.node_id,
         node.dependencies,
+        task=node.task,
         input=node.input,
         budget_cost=node.budget_cost,
         expander=node.expander,
@@ -660,6 +700,12 @@ def _encode_v1_task_node_view(
         "occupies_concurrency": _encode_domain(
             value.occupies_concurrency, codec, persisted=persisted
         ),
+        "error_origin": _encode_domain(
+            value.error_origin, codec, persisted=persisted
+        ),
+        "safe_error_details": _encode_domain(
+            dict(value.safe_error_details), codec, persisted=persisted
+        ),
     }
     if not persisted:
         fields.update(
@@ -694,6 +740,8 @@ def _decode_v1_task_node_view(
         "error_digest",
         "next_attempt_at",
         "occupies_concurrency",
+        "error_origin",
+        "safe_error_details",
     }
     if not persisted:
         expected.update({"dependencies", "owner", "fence", "lease_expires_at"})
@@ -775,6 +823,24 @@ def _decode_v1_task_node_view(
                 codec,
                 persisted=persisted,
             )
+        ),
+        cast(
+            str | None,
+            _decode_domain(
+                raw_fields["error_origin"],
+                str | None,
+                codec,
+                persisted=persisted,
+            ),
+        ),
+        cast(
+            Mapping[str, JsonValue],
+            _decode_domain(
+                raw_fields["safe_error_details"],
+                Mapping[str, JsonValue],
+                codec,
+                persisted=persisted,
+            ),
         ),
     )
 
@@ -966,9 +1032,9 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
         "object_ref": _encode_v1_object_ref,
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
-        "task_node": _encode_v1_task_node,
+        _TASK_NODE_WIRE_ID: _encode_v1_task_node,
         _TASK_NODE_TERMINAL_WIRE_ID: _encode_v1_terminal_task_node,
-        "task_node_view": _encode_v1_task_node_view,
+        _TASK_NODE_VIEW_WIRE_ID: _encode_v1_task_node_view,
         "task_result": _encode_v1_task_result,
     }
 )
@@ -977,9 +1043,9 @@ _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
         "object_ref": _decode_v1_object_ref,
         "stored_user_input": _decode_v1_stored_user_input,
         "task_graph_view": _decode_v1_task_graph_view,
-        "task_node": _decode_v1_task_node,
+        _TASK_NODE_WIRE_ID: _decode_v1_task_node,
         _TASK_NODE_TERMINAL_WIRE_ID: _decode_v1_terminal_task_node,
-        "task_node_view": _decode_v1_task_node_view,
+        _TASK_NODE_VIEW_WIRE_ID: _decode_v1_task_node_view,
         "task_result": _decode_v1_task_result,
     }
 )
@@ -1691,7 +1757,7 @@ def iter_runtime_object_dependencies(
             yield default_domain, nested
         return
 
-    if reference.key.startswith("v1/task-capability-capture/"):
+    if reference.key.startswith("v1/task-graph-binding-capture/"):
         format_version = manifest.get("format_version")
         if (
             isinstance(format_version, bool)
@@ -1699,20 +1765,28 @@ def iter_runtime_object_dependencies(
             or format_version < 1
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if format_version != TASK_CAPABILITY_CAPTURE_FORMAT_VERSION:
+        if format_version != TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if (
-            manifest.get("kind") != "task-capability-capture"
-            or not isinstance(manifest.get("roots"), Mapping)
-            or not isinstance(manifest.get("bindings"), Mapping)
+            set(manifest) != TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS
+            or manifest.get("kind") != "task-graph-binding-capture"
+            or not isinstance(manifest.get("namespace"), str)
+            or not manifest.get("namespace")
+            or not isinstance(manifest.get("tenant_id"), str)
+            or not manifest.get("tenant_id")
+            or not isinstance(manifest.get("graph_id"), str)
+            or not manifest.get("graph_id")
+            or not isinstance(manifest.get("request_digest"), str)
+            or len(manifest.get("request_digest", "")) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in manifest.get("request_digest", "")
+            )
             or not isinstance(manifest.get("tasks"), list)
             or not isinstance(manifest.get("expanders"), list)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for values in (manifest["roots"], manifest["bindings"]):
-            for raw in cast("Mapping[object, object]", values).values():
-                AgentBindingContract.from_payload(raw)
-        read_task_capability_capture_declarations(
+        read_task_graph_binding_capture_declarations(
             manifest["tasks"],
             manifest["expanders"],
         )
@@ -1746,9 +1820,10 @@ def _iter_runtime_object_refs(
             _TASK_NODE_TERMINAL_WIRE_ID,
         }:
             node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted=True))
-            prompt = node.input.get("user_prompt")
+            task_input = node.input
+            prompt = task_input.get("prompt")
             if (
-                node.input.get("task_id") == "linktools.ai.agent"
+                task_input.get("kind") == "agent-task-input"
                 and isinstance(prompt, Mapping)
                 and prompt.get("kind") == "stored-user-content-v1"
             ):
@@ -2427,18 +2502,18 @@ def _validate_v1_codec_definition() -> None:
         "object_ref",
         "stored_user_input",
         "task_graph_view",
-        "task_node",
+        _TASK_NODE_WIRE_ID,
         _TASK_NODE_TERMINAL_WIRE_ID,
-        "task_node_view",
+        _TASK_NODE_VIEW_WIRE_ID,
         "task_result",
     }
     custom_decoders = {
         "object_ref",
         "stored_user_input",
         "task_graph_view",
-        "task_node",
+        _TASK_NODE_WIRE_ID,
         _TASK_NODE_TERMINAL_WIRE_ID,
-        "task_node_view",
+        _TASK_NODE_VIEW_WIRE_ID,
         "task_result",
     }
     if set(_V1_DATACLASS_ENCODERS) != custom_encoders:
@@ -2457,6 +2532,7 @@ def _validate_v1_codec_definition() -> None:
     if task_node_fields != (
         "node_id",
         "dependencies",
+        "task",
         "budget_cost",
         "expander",
         "input_refs",

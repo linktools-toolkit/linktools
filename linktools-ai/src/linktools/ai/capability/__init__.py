@@ -24,7 +24,6 @@ from ._skill_source import (
     SkillSourceRegistry,
 )
 from ._subagent import SubagentCapability, SubagentDelegate
-from ._task import TaskExpander, TaskExpansionContext
 from ._tool_signal import ToolCallFailed, ToolCallRetry
 from ._tool_metadata import (
     TOOL_CLASS_METADATA_KEY,
@@ -77,8 +76,6 @@ __all__ = [
     "SkillSourceRef",
     "SkillSourceRegistry",
     "SubagentDelegate",
-    "TaskExpander",
-    "TaskExpansionContext",
     "ToolCallFailed",
     "ToolCallRetry",
     "mcp_resource_path",

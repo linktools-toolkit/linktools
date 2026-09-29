@@ -21,7 +21,6 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime
-from linktools.ai.runtime._agent_task import _cancel_execution
 from linktools.ai.runtime._approval import DefaultApprovalService
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.runtime._factory import compose_runtime_components
@@ -252,23 +251,6 @@ def test_binding_codec_rejects_partial_current_v1_shapes(
 
 
 @pytest.mark.asyncio
-async def test_task_child_unknown_cancel_requires_recovery() -> None:
-    principal = Principal("principal", "tenant", "service")
-    execution = _UncertainExecution()
-
-    with pytest.raises(AIError) as error:
-        await _cancel_execution(
-            execution,
-            "execution",
-            principal,
-            "graph",
-            "node",
-        )
-
-    assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
-
-
-@pytest.mark.asyncio
 async def test_subagent_unknown_cancel_requires_recovery() -> None:
     dispatcher = object.__new__(SubagentDispatcher)
     dispatcher._execution = _UncertainExecution()
@@ -294,21 +276,21 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
         storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
-        result = await runtime.agent("default").run(
+        result = await runtime.agents.get("default").run(
             "hello",
             timeout_seconds=10,
         )
         assert result.status is ExecutionStatus.SUCCEEDED
 
-        history = await runtime.execution.history(
+        history = await runtime.executions.history(
             result.execution_id,
             principal=runtime.default_principal,
         )
-        transcript = await runtime.execution.transcript(
+        transcript = await runtime.executions.transcript(
             result.execution_id,
             principal=runtime.default_principal,
         )
-        trace = await runtime.execution.trace(
+        trace = await runtime.executions.trace(
             result.execution_id,
             principal=runtime.default_principal,
         )

@@ -65,12 +65,13 @@ from ._metrics import _MetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
-from ._task_capability_capture import TaskCapabilityCaptureStore
+from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from ._runtime_identity import token_seed
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
+from .state._contracts import TaskAdmissionRepository
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -95,6 +96,7 @@ class _RuntimeComponents:
     metric_control: _MetricBuffer | None
     binding_resolver: _AgentBindingResolver
     history: object
+    task_admissions: TaskAdmissionRepository
 
 
 async def compose_runtime_components(
@@ -175,17 +177,6 @@ async def compose_runtime_components(
             for document in group.instructions.documents
         )
         rules = RepositoryInstructions(instruction_documents)
-        task_contributions = tuple(
-            candidate
-            for candidate in candidates
-            if candidate.kind == "task"
-        )
-        expander_contributions = tuple(
-            candidate
-            for candidate in candidates
-            if candidate.kind == "task_expander"
-        )
-
         agents = {
             candidate.id: candidate.value
             for candidate in candidates
@@ -205,7 +196,7 @@ async def compose_runtime_components(
             candidates=tuple(
                 candidate
                 for candidate in candidates
-                if candidate.kind not in {"agent", "task", "task_expander"}
+                if candidate.kind != "agent"
             ),
             agents=agents,
         )
@@ -283,8 +274,6 @@ async def compose_runtime_components(
             limits=selected_limits,
             execution_cwd=execution_cwd,
             app=app,
-            task_contributions=task_contributions,
-            expander_contributions=expander_contributions,
             history_reader=history_reader,
             session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
@@ -398,14 +387,7 @@ def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
 def _validate_candidate_uniqueness(
     candidates: Sequence[CapabilityContribution[object]],
 ) -> None:
-    identities = tuple(
-        (
-            (candidate.kind, candidate.id, candidate.revision)
-            if candidate.kind in {"task", "task_expander"}
-            else (candidate.kind, candidate.id)
-        )
-        for candidate in candidates
-    )
+    identities = tuple((candidate.kind, candidate.id) for candidate in candidates)
     if len(identities) != len(set(identities)):
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
@@ -478,8 +460,6 @@ async def _build_local_components(
     limits: PromptLimits,
     execution_cwd: "str | None",
     app: AppT,
-    task_contributions: Sequence[CapabilityContribution[AppT]],
-    expander_contributions: Sequence[CapabilityContribution[AppT]],
     history_reader: ExecutionHistoryReader,
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
@@ -657,27 +637,22 @@ async def _build_local_components(
             release_terminal=storage.retention.release_session,
             workspace_access=input_materializer.access,
         )
-        task_capability_captures = TaskCapabilityCaptureStore(
+        task_graph_binding_captures = TaskGraphBindingCaptureStore(
             namespace,
-            compiler,
-            binding_resolver,
             storage.object_store(RuntimeDomain.TASK),
-            agent_task_id="linktools.ai.agent",
         )
         task_runner = RuntimeTaskNodeRunner(
             execution,
-            catalog,
-            compiler,
-            session=session,
             namespace=namespace,
             app=app,
             authorization=authorization,
             task_state=storage.task.tasks,
+            task_admissions=storage.task.admissions,
             task_objects=storage.object_store(RuntimeDomain.TASK),
             artifact_state=storage.artifact,
             artifact_objects=storage.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
-            capability_captures=task_capability_captures,
+            binding_captures=task_graph_binding_captures,
             input_materializer=ExecutionInputMaterializer(
                 input_materializer.access,
                 limits,
@@ -686,9 +661,6 @@ async def _build_local_components(
                 payload_policy=PayloadPolicy(inline_limit_bytes=0),
                 object_domain=RuntimeDomain.TASK,
             ),
-            task_contributions=task_contributions,
-            expander_contributions=expander_contributions,
-            release_dependency_hold=execution.release_dependency_hold,
             task_durable=(
                 storage.plan.route(RuntimeDomain.TASK).retention
                 is RuntimeRetentionMode.DURABLE
@@ -775,7 +747,6 @@ async def _build_local_components(
         )
         if RuntimeDomain.RECOVERY in storage.plan.durable_domains:
             await backend.reconcile()
-        await graph_service.recover_pending()
     except BaseException:
         abort_actions = (
             close_actions
@@ -816,6 +787,7 @@ async def _build_local_components(
             authorization=authorization,
             artifact=artifact,
         ),
+        task_admissions=storage.task.admissions,
     )
 
 

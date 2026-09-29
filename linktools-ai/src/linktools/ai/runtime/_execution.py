@@ -1562,6 +1562,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1572,6 +1573,7 @@ class DefaultExecutionService:
             session_agent_id=agent_id,
             scope="session.resume",
             prepare_local_stream=True,
+            dependency_hold_id=dependency_hold_id,
             binding_contract=binding_contract,
         )
 
@@ -2505,6 +2507,27 @@ class DefaultExecutionService:
             ValueError,
         ) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    @consumed_query
+    async def result_payload_size(
+        self, execution_id: str, *, principal: Principal
+    ) -> int:
+        execution = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_READ,
+        )
+        if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
+            raise _execution_recovery_error(execution)
+        if execution.status is not ExecutionStatus.SUCCEEDED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result = await self._state.executions.get_result(
+            execution_id,
+            tenant_id=principal.tenant_id,
+        )
+        if result is None or result.output is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result.output.size
 
     @consumed_query
     async def wait(

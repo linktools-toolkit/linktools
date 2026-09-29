@@ -27,7 +27,8 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..spec import binding_digest_payload
+from ..errors import ErrorDiagnostics
+from ._definitions import Task, TaskExpander, TaskExpanderRef, TaskRef
 
 
 def normalize_timeout_seconds(value: object) -> "float | None":
@@ -91,7 +92,6 @@ def _normalize_json_value(value: object) -> JsonValue:
     raise TypeError(f"unsupported task node input value: {type(value).__name__}")
 
 
-_TASK_EXPANDER_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
 _TASK_DEPENDENCY_POLICIES = frozenset({"all_succeeded", "all_terminal"})
 
@@ -119,26 +119,11 @@ class TaskResultRef:
             raise ValueError("task result reference is invalid")
 
 
-@dataclass(frozen=True, slots=True)
-class TaskExpanderRef:
-    id: str
-    revision: int
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.id, str)
-            or _TASK_EXPANDER_ID.fullmatch(self.id) is None
-            or not isinstance(self.revision, int)
-            or isinstance(self.revision, bool)
-            or self.revision < 1
-        ):
-            raise ValueError("task expander reference is invalid")
-
-
 @dataclass(frozen=True, slots=True, init=False)
 class TaskNode:
     node_id: str
     dependencies: tuple[str, ...]
+    task: "TaskRef | None"
     budget_cost: int
     expander: "TaskExpanderRef | None"
     input_refs: "Mapping[str, TaskResultRef]"
@@ -157,6 +142,42 @@ class TaskNode:
         node_id: str,
         dependencies: "tuple[str, ...]" = (),
         *,
+        task: "Task | TaskRef | None" = None,
+        input: "Mapping[str, JsonValue] | None" = None,
+        budget_cost: int = 1,
+        expander: "TaskExpander | TaskExpanderRef | None" = None,
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
+        output_type: object | None = None,
+        dependency_policy: str = "all_succeeded",
+    ) -> None:
+        self._initialize(
+            node_id,
+            dependencies,
+            task=task,
+            input=input,
+            budget_cost=budget_cost,
+            expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+            output_type=output_type,
+            output_contract=None,
+            effect_policy="none",
+            reconcile=False,
+            dependency_policy=dependency_policy,
+        )
+
+    @classmethod
+    def from_resolved(
+        cls,
+        node_id: str,
+        dependencies: "tuple[str, ...]" = (),
+        *,
+        task: "TaskRef | None",
         input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
         expander: "TaskExpanderRef | None" = None,
@@ -164,11 +185,50 @@ class TaskNode:
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
         retry_delay_seconds: float = 0,
-        output_type: object | None = None,
         output_contract: "Mapping[str, JsonValue] | None" = None,
         effect_policy: str = "none",
         reconcile: bool = False,
         dependency_policy: str = "all_succeeded",
+    ) -> "TaskNode":
+        """Build a node whose execution contract has already been resolved."""
+        value = cls.__new__(cls)
+        value._initialize(
+            node_id,
+            dependencies,
+            task=task,
+            input=input,
+            budget_cost=budget_cost,
+            expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+            output_type=None,
+            output_contract=output_contract,
+            effect_policy=effect_policy,
+            reconcile=reconcile,
+            dependency_policy=dependency_policy,
+        )
+        return value
+
+    def _initialize(
+        self,
+        node_id: str,
+        dependencies: "tuple[str, ...]",
+        *,
+        task: "Task | TaskRef | None",
+        input: "Mapping[str, JsonValue] | None",
+        budget_cost: int,
+        expander: "TaskExpander | TaskExpanderRef | None",
+        input_refs: "Mapping[str, TaskResultRef] | None",
+        timeout_seconds: "float | None",
+        max_attempts: int,
+        retry_delay_seconds: float,
+        output_type: object | None,
+        output_contract: "Mapping[str, JsonValue] | None",
+        effect_policy: str,
+        reconcile: bool,
+        dependency_policy: str,
     ) -> None:
         if isinstance(dependencies, (str, bytes)):
             raise TypeError("task node dependencies are invalid")
@@ -189,7 +249,10 @@ class TaskNode:
             or not isinstance(budget_cost, int)
             or isinstance(budget_cost, bool)
             or budget_cost < 1
-            or (expander is not None and not isinstance(expander, TaskExpanderRef))
+            or (
+                expander is not None
+                and not isinstance(expander, (TaskExpander, TaskExpanderRef))
+            )
             or isinstance(max_attempts, bool)
             or not isinstance(max_attempts, int)
             or max_attempts < 1
@@ -202,6 +265,18 @@ class TaskNode:
         if not isinstance(values, Mapping):
             raise TypeError("task node input must be a mapping")
         normalized = _normalize_json_mapping(values)
+        if task is None:
+            task_ref = None
+        elif isinstance(task, Task):
+            task_ref = task.ref
+        elif isinstance(task, TaskRef):
+            task_ref = task
+        else:
+            raise TypeError("task must be Task or TaskRef")
+        if isinstance(expander, TaskExpander):
+            expander_ref = expander.ref
+        else:
+            expander_ref = expander
         references = {} if input_refs is None else dict(input_refs)
         if any(
             not isinstance(name, str)
@@ -210,8 +285,6 @@ class TaskNode:
             for name, reference in references.items()
         ):
             raise ValueError("task node input references are invalid")
-        if set(references).intersection(normalized):
-            raise ValueError("task node input reference names conflict with input")
         if set(references).intersection(normalized_dependencies):
             raise ValueError(
                 "task node input reference names conflict with dependencies"
@@ -226,8 +299,9 @@ class TaskNode:
             raise ValueError("task node cannot contain both output type and contract")
         object.__setattr__(self, "node_id", node_id)
         object.__setattr__(self, "dependencies", normalized_dependencies)
+        object.__setattr__(self, "task", task_ref)
         object.__setattr__(self, "budget_cost", budget_cost)
-        object.__setattr__(self, "expander", expander)
+        object.__setattr__(self, "expander", expander_ref)
         object.__setattr__(self, "input_refs", MappingProxyType(references))
         object.__setattr__(self, "timeout_seconds", normalized_timeout)
         object.__setattr__(self, "max_attempts", max_attempts)
@@ -254,16 +328,10 @@ class TaskNode:
     ) -> "TaskNode":
         """Declare a node whose value is supplied through the Runtime API."""
         values = {} if input is None else dict(input)
-        if "task_id" in values or "task_revision" in values:
-            raise ValueError("task wait input cannot contain reserved fields")
-        values = {
-            "task_id": "linktools.ai.input",
-            "task_revision": 1,
-            **values,
-        }
         return cls(
             node_id,
             dependencies,
+            task=TaskRef.deferred_input(),
             input=values,
             output_type=output_type,
         )
@@ -316,6 +384,8 @@ class TaskNodeView:
     execution_id: "str | None" = None
     next_attempt_at: "datetime | None" = None
     occupies_concurrency: bool = False
+    error_origin: "str | None" = None
+    safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.owner is not None:
@@ -327,6 +397,13 @@ class TaskNodeView:
             raise ValueError("pending task node cannot carry an execution id")
         if not isinstance(self.occupies_concurrency, bool):
             raise TypeError("task concurrency projection must be bool")
+        if self.error_origin not in {None, "node", "execution"}:
+            raise ValueError("task node failure origin is invalid")
+        try:
+            details = ImmutableJsonMapping(self.safe_error_details)
+        except (TypeError, ValueError) as error:
+            raise ValueError("task node safe error details are invalid") from error
+        object.__setattr__(self, "safe_error_details", details)
         if self.occupies_concurrency and self.status is not TaskStatus.WAITING:
             raise ValueError("only waiting task can retain concurrency capacity")
         if self.next_attempt_at is not None and (
@@ -498,30 +575,32 @@ def _task_graph_request_digest(
 
 
 def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
-    node_input = node.input
+    node_input = dict(node.input)
+    prompt = node_input.get("prompt")
     if (
-        node_input.get("task_id") == "linktools.ai.agent"
-        and node_input.get("task_revision") == 1
-        and isinstance(node_input.get("binding_contract"), Mapping)
+        node.task is not None
+        and node_input.get("kind") == "agent-task-input"
+        and isinstance(prompt, Mapping)
     ):
-        node_input = dict(node_input)
-        node_input["binding_contract"] = canonical_sha256(
-            binding_digest_payload(node_input["binding_contract"])
-        )
-        prompt = node_input.get("user_prompt")
-        if isinstance(prompt, Mapping) and prompt.get("kind") in {
-            "task-user-content-v1",
-            "stored-user-content-v1",
-        }:
-            node_input["user_prompt"] = {
-                "kind": "task-input-intent-v1",
-                "intent": prompt["intent"],
+        if prompt.get("kind") == "stored-user-content-v1":
+            intent_digest = prompt.get("source_intent_digest")
+        else:
+            intent_digest = canonical_sha256(prompt)
+        if isinstance(intent_digest, str):
+            node_input["prompt"] = {
+                "kind": "task-prompt-intent-v1",
+                "digest": intent_digest,
             }
     value: dict[str, JsonValue] = {
         "node_id": node.node_id,
         "dependencies": sorted(node.dependencies),
         "input": node_input,
         "budget_cost": node.budget_cost,
+        "task": (
+            None
+            if node.task is None
+            else {"id": node.task.id, "revision": node.task.revision}
+        ),
         "expander": (
             None
             if node.expander is None
@@ -645,6 +724,38 @@ class TaskNodeResult:
     execution_id: "str | None"
     error_code: "str | None"
     error_digest: "str | None"
+    result_ref: "TaskResultRef | None" = None
+    safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
+    error_diagnostics: "ErrorDiagnostics | None" = None
+    output: "JsonValue | None" = None
+    content_included: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.node_id, str) or not self.node_id:
+            raise ValueError("task node result id is invalid")
+        try:
+            details = ImmutableJsonMapping(self.safe_error_details)
+        except (TypeError, ValueError) as error:
+            raise ValueError("task node result error details are invalid") from error
+        if not isinstance(self.content_included, bool):
+            raise TypeError("task node content flag must be bool")
+        if self.error_diagnostics is not None and not isinstance(
+            self.error_diagnostics,
+            ErrorDiagnostics,
+        ):
+            raise ValueError("task node error diagnostics are invalid")
+        if self.result_ref is not None and (
+            self.status is not TaskStatus.SUCCEEDED
+            or self.result_digest != self.result_ref.result_digest
+        ):
+            raise ValueError("task node result reference is inconsistent")
+        if self.content_included:
+            if self.status is not TaskStatus.SUCCEEDED:
+                raise ValueError("failed task node cannot include output")
+            object.__setattr__(self, "output", _normalize_json_value(self.output))
+        elif self.output is not None:
+            raise ValueError("omitted task output must be None")
+        object.__setattr__(self, "safe_error_details", details)
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,6 +805,7 @@ class TaskNodeInfo:
     """Safe public task-node metadata without raw input content."""
 
     node_id: str
+    task: "TaskRef | None"
     dependencies: tuple[str, ...]
     budget_cost: int
     expander: "TaskExpanderRef | None"
@@ -710,6 +822,7 @@ class TaskNodeInfo:
     def from_node(cls, node: TaskNode) -> "TaskNodeInfo":
         return cls(
             node.node_id,
+            node.task,
             node.dependencies,
             node.budget_cost,
             node.expander,

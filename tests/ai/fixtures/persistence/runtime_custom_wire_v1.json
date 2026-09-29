@@ -28,7 +28,7 @@
     "result_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "result_ref": "result"
   },
-  "task_node@1": {
+  "task_node": {
     "$dataclass": "task_node",
     "fields": {
       "budget_cost": 2,
@@ -37,6 +37,7 @@
           "dependency"
         ]
       },
+      "expander": null,
       "input": {
         "$mapping": [
           [
@@ -46,7 +47,7 @@
         ]
       },
       "node_id": "node",
-      "expander": null
+      "task": null
     },
     "schema": 1
   }

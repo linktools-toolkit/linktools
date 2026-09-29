@@ -48,6 +48,7 @@ from ...core import (
     validate_agent_id,
     validate_lease_owner,
     validate_resource_id,
+    validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
@@ -63,6 +64,8 @@ from ...task import (
     TaskNode,
     TaskNodeView,
     TaskResultRecord,
+    TaskResultRef,
+    TaskRef,
     TaskTerminalRecord,
 )
 from ...workspace import validate_workspace_path
@@ -300,6 +303,58 @@ class StoredUserInput:
                 "payload_size": self.payload.size,
             }
         )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskPreparedInputRecord:
+    graph_id: str
+    node_id: str
+    tenant_id: str
+    admission_digest: str
+    task_ref: TaskRef
+    input_identity: str
+    source_refs: tuple[tuple[str, TaskResultRef], ...]
+    stored_user_input: StoredUserInput
+    final_input_digest: str
+    request_identity: str
+    published_fence: int
+
+    def __post_init__(self) -> None:
+        validate_tenant_id(self.tenant_id)
+        digests = (
+            self.admission_digest,
+            self.input_identity,
+            self.final_input_digest,
+            self.request_identity,
+        )
+        if (
+            not isinstance(self.graph_id, str)
+            or not self.graph_id
+            or not isinstance(self.node_id, str)
+            or not self.node_id
+            or any(not _is_sha256(value) for value in digests)
+            or not isinstance(self.task_ref, TaskRef)
+            or not isinstance(self.stored_user_input, StoredUserInput)
+            or isinstance(self.published_fence, bool)
+            or not isinstance(self.published_fence, int)
+            or self.published_fence < 1
+            or not isinstance(self.source_refs, tuple)
+        ):
+            raise ValueError("prepared Task input is invalid")
+        names: set[str] = set()
+        previous = ""
+        for name, reference in self.source_refs:
+            if (
+                not isinstance(name, str)
+                or not name
+                or name in names
+                or name < previous
+                or not isinstance(reference, TaskResultRef)
+                or reference.tenant_id != self.tenant_id
+            ):
+                raise ValueError("prepared Task input sources are invalid")
+            names.add(name)
+            previous = name
 
 
 @dataclass(frozen=True, slots=True)
@@ -2140,9 +2195,29 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def graph_state(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskGraphState | None: ...
+    async def result_header(
+        self, graph_id: str, *, tenant_id: str
+    ) -> tuple[TaskGraph, int] | None: ...
+    async def get_node_states(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> tuple[TaskNodeView, ...]: ...
     async def get_results(
         self, graph_id: str, node_ids: tuple[str, ...], *, tenant_id: str
     ) -> Mapping[str, TaskResultRecord]: ...
+    async def get_prepared_input(
+        self, graph_id: str, node_id: str, *, tenant_id: str
+    ) -> TaskPreparedInputRecord | None: ...
+    async def publish_prepared_input(
+        self,
+        lease: TaskLease,
+        record: TaskPreparedInputRecord,
+        *,
+        tenant_id: str,
+    ) -> TaskPreparedInputRecord: ...
     async def list_events(
         self, graph_id: str, *, tenant_id: str, after_sequence: int, limit: int
     ) -> Page[TaskEvent]: ...
@@ -2204,6 +2279,8 @@ class TaskRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         error_code: str,
         error_digest: str,
+        error_origin: str = "node",
+        safe_error_details: Mapping[str, JsonValue] | None = None,
         execution_id: str | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,

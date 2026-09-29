@@ -129,12 +129,14 @@ class _CaptureSessionExecution:
         request: ExecutionRequest,
         *,
         binding_contract: object | None = None,
+        dependency_hold_id: str | None = None,
     ) -> ExecutionHandle:
         self.agent_id = agent_id
         self.binding_digest = binding_digest
         self.session_id = session_id
         self.request = request
         self.binding_contract = binding_contract
+        self.dependency_hold_id = dependency_hold_id
         return ExecutionHandle("execution")
 
 
