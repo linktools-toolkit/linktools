@@ -151,10 +151,84 @@ class TaskNode:
         max_attempts: int = 1,
         retry_delay_seconds: float = 0,
         output_type: object | None = None,
+        dependency_policy: str = "all_succeeded",
+    ) -> None:
+        self._initialize(
+            node_id,
+            dependencies,
+            task=task,
+            input=input,
+            budget_cost=budget_cost,
+            expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+            output_type=output_type,
+            output_contract=None,
+            effect_policy="none",
+            reconcile=False,
+            dependency_policy=dependency_policy,
+        )
+
+    @classmethod
+    def from_resolved(
+        cls,
+        node_id: str,
+        dependencies: "tuple[str, ...]" = (),
+        *,
+        task: "TaskRef | None",
+        input: "Mapping[str, JsonValue] | None" = None,
+        budget_cost: int = 1,
+        expander: "TaskExpanderRef | None" = None,
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
         output_contract: "Mapping[str, JsonValue] | None" = None,
         effect_policy: str = "none",
         reconcile: bool = False,
         dependency_policy: str = "all_succeeded",
+    ) -> "TaskNode":
+        """Build a node whose execution contract has already been resolved."""
+        value = cls.__new__(cls)
+        value._initialize(
+            node_id,
+            dependencies,
+            task=task,
+            input=input,
+            budget_cost=budget_cost,
+            expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+            output_type=None,
+            output_contract=output_contract,
+            effect_policy=effect_policy,
+            reconcile=reconcile,
+            dependency_policy=dependency_policy,
+        )
+        return value
+
+    def _initialize(
+        self,
+        node_id: str,
+        dependencies: "tuple[str, ...]",
+        *,
+        task: "Task | TaskRef | None",
+        input: "Mapping[str, JsonValue] | None",
+        budget_cost: int,
+        expander: "TaskExpander | TaskExpanderRef | None",
+        input_refs: "Mapping[str, TaskResultRef] | None",
+        timeout_seconds: "float | None",
+        max_attempts: int,
+        retry_delay_seconds: float,
+        output_type: object | None,
+        output_contract: "Mapping[str, JsonValue] | None",
+        effect_policy: str,
+        reconcile: bool,
+        dependency_policy: str,
     ) -> None:
         if isinstance(dependencies, (str, bytes)):
             raise TypeError("task node dependencies are invalid")
