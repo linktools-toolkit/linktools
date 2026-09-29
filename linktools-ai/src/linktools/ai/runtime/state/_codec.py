@@ -1757,7 +1757,7 @@ def iter_runtime_object_dependencies(
             yield default_domain, nested
         return
 
-    if reference.key.startswith("v2/task-capture/"):
+    if reference.key.startswith("v1/task-graph-binding-capture/"):
         format_version = manifest.get("format_version")
         if (
             isinstance(format_version, bool)
@@ -1769,7 +1769,7 @@ def iter_runtime_object_dependencies(
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if (
             set(manifest) != TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS
-            or manifest.get("kind") != "task-definition-capture"
+            or manifest.get("kind") != "task-graph-binding-capture"
             or not isinstance(manifest.get("namespace"), str)
             or not manifest.get("namespace")
             or not isinstance(manifest.get("tenant_id"), str)
