@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping
 
-from ..core import normalize_json_value, validate_logical_id
+from ..core import validate_logical_id
 from ..errors import AIError, ErrorCode
 from ._codec import (
     AgentSpecCodec,
@@ -17,40 +17,6 @@ from ._codec import (
     decode_author_yaml_mapping,
 )
 from ._contract import AgentSpec, MCPServerSpec, SkillSpec
-
-_AGENT_AUTHOR_FIELDS = frozenset(
-    {
-        "version",
-        "id",
-        "revision",
-        "model",
-        "system_prompt",
-        "instructions",
-        "allow_tools",
-        "allow_skills",
-        "allow_subagents",
-        "description",
-        "metadata",
-    }
-)
-_MCP_AUTHOR_FIELDS = frozenset(
-    {
-        "version",
-        "id",
-        "revision",
-        "type",
-        "transport",
-        "command",
-        "args",
-        "env",
-        "url",
-        "headers",
-        "resource",
-    }
-)
-_MCP_CONFIG_FIELDS = frozenset(
-    {"type", "transport", "command", "args", "env", "url", "headers"}
-)
 
 
 class AgentSpecAdapter:
@@ -94,7 +60,6 @@ class AgentSpecAdapter:
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         canonical_payload = _canonicalize_agent_fields(payload)
-        _reject_unknown_author_fields(canonical_payload, _AGENT_AUTHOR_FIELDS)
         if "id" in canonical_payload:
             declared_id = canonical_payload["id"]
             try:
@@ -247,7 +212,6 @@ class MCPServerSpecAdapter:
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         raw = decode_author_json_mapping(data)
-        _reject_unknown_author_fields(raw, {"mcpServers"})
         servers = raw.get("mcpServers")
         if not isinstance(servers, Mapping):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
@@ -260,11 +224,6 @@ class MCPServerSpecAdapter:
                 or not isinstance(value, Mapping)
             ):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-            _reject_unknown_author_fields(
-                value,
-                _MCP_CONFIG_FIELDS,
-                path=f"mcpServers.{identity}",
-            )
             result.append(
                 _decode_mcp_author_server(
                     value,
@@ -281,7 +240,6 @@ class MCPServerSpecAdapter:
         *,
         package_id: "str | None",
     ) -> MCPServerSpec:
-        _reject_unknown_author_fields(raw, _MCP_AUTHOR_FIELDS)
         version = raw.get("version", 1)
         if isinstance(version, bool) or not isinstance(version, int) or version != 1:
             raise AIError(
@@ -344,7 +302,6 @@ def _validated_agent_defaults(
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     if not isinstance(normalized, dict):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    _reject_unknown_author_fields(normalized, _AGENT_AUTHOR_FIELDS)
     if {"id", "version", "system_prompt"}.intersection(normalized):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     _decode_agent_mapping(
@@ -399,30 +356,7 @@ def _canonicalize_agent_fields(
         if canonical in result:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         result[canonical] = value
-    return normalize_json_value(result)
-
-
-def _reject_unknown_author_fields(
-    payload: Mapping[str, object],
-    allowed: "set[str] | frozenset[str]",
-    *,
-    path: "str | None" = None,
-) -> None:
-    for key in payload:
-        if not isinstance(key, str):
-            raise AIError(
-                ErrorCode.OUTPUT_CONTRACT_INVALID,
-                "author field names must be strings",
-            )
-        if key not in allowed:
-            details: dict[str, str] = {"field": key}
-            if path is not None:
-                details["path"] = path
-            raise AIError(
-                ErrorCode.OUTPUT_CONTRACT_INVALID,
-                f"unsupported author field: {key}",
-                safe_details=details,
-            )
+    return result
 
 
 def _without_line_ending(value: str) -> str:

@@ -140,25 +140,18 @@ def test_agent_markdown_rejects_invalid_frontmatter(document: bytes) -> None:
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_agent_markdown_reports_unknown_frontmatter_field() -> None:
-    with pytest.raises(AIError) as error:
-        AgentSpecAdapter().decode_markdown(
-            b"---\nmodle: test\n---\nbody",
-            logical_id="worker",
-        )
-
-    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
-    assert error.value.safe_details == {"field": "modle"}
-
-
 def test_agent_markdown_resolves_only_stable_author_defaults() -> None:
     adapter = AgentSpecAdapter()
     defaults = {
         "model": "worker-model",
         "allow_tools": ["tool"],
+        "planning": True,
+        "tool_retries": 7,
+        "usage_limits": {"model_requests": 100},
     }
     spec = adapter.decode_markdown(
-        b"---\nallow-tools: []\n---\nbody",
+        b"---\nallow-tools: []\nplanning: true\n"
+        b"tool-retries: 1\nusage-limits: {model-requests: 2}\n---\nbody",
         logical_id="team/worker",
         defaults=defaults,
     )
@@ -169,30 +162,6 @@ def test_agent_markdown_resolves_only_stable_author_defaults() -> None:
     assert spec.planning is False
     assert spec.tool_retries == AgentSpec.DEFAULT_TOOL_RETRIES
     assert spec.usage_limits is None
-
-
-@pytest.mark.parametrize("field", ("modle", "planning", "tool_retries", "usage_limits"))
-def test_agent_author_mapping_rejects_unprojected_fields(field: str) -> None:
-    with pytest.raises(AIError) as raised:
-        AgentSpecAdapter().from_mapping(
-            {"id": "worker", field: True},
-            logical_id="worker",
-        )
-
-    assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
-    assert raised.value.safe_details == {"field": field}
-
-
-def test_agent_author_defaults_reject_unsupported_execution_limits() -> None:
-    with pytest.raises(AIError) as raised:
-        AgentSpecAdapter().decode_markdown(
-            b"---\n{}\n---\nbody",
-            logical_id="worker",
-            defaults={"usage_limits": {"model_requests": 2}},
-        )
-
-    assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
-    assert raised.value.safe_details == {"field": "usage_limits"}
 
 
 def test_skill_markdown_ignores_unrelated_frontmatter_fields() -> None:
@@ -262,31 +231,32 @@ def test_agent_markdown_rejects_metadata_that_is_not_a_json_map() -> None:
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_agent_author_mapping_accepts_version_alias_and_rejects_unknown_defaults() -> None:
+def test_agent_markdown_ignores_unrelated_author_fields() -> None:
     adapter = AgentSpecAdapter()
 
     versioned = adapter.from_mapping(
-        {"system_prompt": "", "version": 1},
+        {"system_prompt": "", "version": 1, "future_field": True},
         logical_id="worker",
     )
     assert versioned == AgentSpec("worker")
 
-    for field in ("planning", "future_field"):
-        with pytest.raises(AIError) as raised:
-            adapter.from_mapping(
-                {"system_prompt": "", "model": "explicit", field: True},
-                logical_id="worker",
-            )
-        assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
-        assert raised.value.safe_details == {"field": field}
-
-    with pytest.raises(AIError) as raised:
-        adapter.from_mapping(
-            {"system_prompt": ""},
-            logical_id="worker",
-            defaults={"model": "configured", "tool_retries": 1},
-        )
-    assert raised.value.safe_details == {"field": "tool_retries"}
+    explicit = adapter.from_mapping(
+        {
+            "system_prompt": "",
+            "model": "explicit",
+            "planning": True,
+            "future_field": {"future": True},
+        },
+        logical_id="worker",
+        defaults={
+            "model": "configured",
+            "tool_retries": 1,
+            "future_default": True,
+        },
+    )
+    assert explicit.model == "explicit"
+    assert explicit.planning is False
+    assert explicit.tool_retries == AgentSpec.DEFAULT_TOOL_RETRIES
 
 
 @pytest.mark.asyncio
@@ -294,9 +264,10 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
-    defaults = {"model": "configured"}
+    defaults = {"model": "configured", "tool_retries": 4}
     loader = AgentDeclarationLoader("worker", defaults)
     defaults["model"] = "changed"
+    defaults["tool_retries"] = 40
     await store.put(
         AssetKey("worker", "team/AGENT.md"),
         b"---\n{}\n---\nworker prompt",
