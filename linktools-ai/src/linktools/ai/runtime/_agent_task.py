@@ -63,6 +63,8 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         build_input: AgentTaskInputBuilder | None,
         start_execution: Callable[..., Awaitable[object]],
         get_execution: Callable[[str, Principal], Awaitable[object]],
+        acquire_execution_hold: Callable[[str, Principal, str], Awaitable[None]],
+        release_execution_hold: Callable[[str, Principal, str], Awaitable[None]],
         result_reader: Callable[[TaskNodeInvocation, str], Awaitable[JsonValue]],
         result_ref_reader: Callable[[TaskNodeInvocation, str], Awaitable[TaskResultRef]],
         get_prepared_input: Callable[
@@ -93,6 +95,8 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         self._build_input = build_input
         self._start_execution = start_execution
         self._get_execution = get_execution
+        self._acquire_execution_hold = acquire_execution_hold
+        self._release_execution_hold = release_execution_hold
         self._result_reader = result_reader
         self._result_ref_reader = result_ref_reader
         self._get_prepared_input = get_prepared_input
@@ -302,34 +306,121 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         if request_identity is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        execution = (
-            await self._get_execution(
-                invocation.execution_id,
-                invocation.principal,
-            )
-            if invocation.execution_id is not None
-            else await self._start_execution(
+        execution, execution_id = await self._establish_execution(
+            invocation,
+            control,
+            prompt,
+            files=files,
+            session_id=task_input.session_id,
+            memory_scope=task_input.memory_scope,
+            planning=planning,
+            thinking=thinking,
+            idempotency_key=request_identity,
+        )
+        result = await execution.wait()
+        return _agent_task_result(result, execution_id)
+
+    async def _establish_execution(
+        self,
+        invocation: TaskNodeInvocation,
+        control: TaskNodeRunControl,
+        prompt: CanonicalUserInput,
+        *,
+        files: tuple[str, ...],
+        session_id: str | None,
+        memory_scope: str | None,
+        planning: bool,
+        thinking: ThinkingValue,
+        idempotency_key: str,
+    ) -> tuple[object, str]:
+        task = asyncio.create_task(
+            self._start_and_handoff(
+                invocation,
+                control,
+                prompt,
+                files=files,
+                session_id=session_id,
+                memory_scope=memory_scope,
+                planning=planning,
+                thinking=thinking,
+                idempotency_key=idempotency_key,
+            ),
+            name=f"agent-task-handoff-{invocation.graph_id}-{invocation.node.node_id}",
+        )
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+                if task.done():
+                    break
+        result = task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _start_and_handoff(
+        self,
+        invocation: TaskNodeInvocation,
+        control: TaskNodeRunControl,
+        prompt: CanonicalUserInput,
+        *,
+        files: tuple[str, ...],
+        session_id: str | None,
+        memory_scope: str | None,
+        planning: bool,
+        thinking: ThinkingValue,
+        idempotency_key: str,
+    ) -> tuple[object, str]:
+        hold_id = f"task:{invocation.graph_id}:{invocation.node.node_id}"
+        if invocation.execution_id is None:
+            execution = await self._start_execution(
                 invocation,
                 prompt,
                 files=files,
-                session_id=task_input.session_id,
-                memory_scope=task_input.memory_scope,
+                session_id=session_id,
+                memory_scope=memory_scope,
                 planning=planning,
                 thinking=thinking,
-                idempotency_key=request_identity,
+                idempotency_key=idempotency_key,
+                dependency_hold_id=hold_id,
             )
-        )
+        else:
+            execution = await self._get_execution(
+                invocation.execution_id,
+                invocation.principal,
+            )
         execution_id = getattr(execution, "execution_id", None)
         if not isinstance(execution_id, str) or not execution_id:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        current = control.execution_id
-        if current is None:
-            await control.bind_execution(execution_id)
-        elif current != execution_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await control.handoff_execution(execution_id)
-        result = await execution.wait()
-        return _agent_task_result(result, execution_id)
+        if invocation.execution_id is not None:
+            await self._acquire_execution_hold(
+                execution_id,
+                invocation.principal,
+                hold_id,
+            )
+        try:
+            current = control.execution_id
+            if current is None:
+                await control.bind_execution(execution_id)
+            elif current != execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await control.handoff_execution(execution_id)
+        except BaseException:
+            await self._release_execution_hold(
+                execution_id,
+                invocation.principal,
+                hold_id,
+            )
+            raise
+        await self._release_execution_hold(
+            execution_id,
+            invocation.principal,
+            hold_id,
+        )
+        return execution, execution_id
 
     async def wait_bound(
         self,

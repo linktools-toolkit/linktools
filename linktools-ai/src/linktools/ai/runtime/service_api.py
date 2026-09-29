@@ -1358,6 +1358,7 @@ class SessionService(Protocol):
         request: ResumeSessionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle: ...
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest

@@ -1562,6 +1562,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1572,6 +1573,7 @@ class DefaultExecutionService:
             session_agent_id=agent_id,
             scope="session.resume",
             prepare_local_stream=True,
+            dependency_hold_id=dependency_hold_id,
             binding_contract=binding_contract,
         )
 

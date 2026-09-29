@@ -615,6 +615,7 @@ class Runtime(Generic[AppT]):
         thinking: "ThinkingValue | None",
         correlation: "Mapping[str, object] | None" = None,
         compiled_agent: "CompiledAgent | None" = None,
+        dependency_hold_id: "str | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
@@ -648,6 +649,7 @@ class Runtime(Generic[AppT]):
             handle = await self._execution_service.start(
                 binding.binding_digest,
                 request,
+                dependency_hold_id=dependency_hold_id,
                 binding_contract=binding.binding_contract,
             )
         else:
@@ -671,6 +673,7 @@ class Runtime(Generic[AppT]):
                 session_id,
                 resume_request,
                 binding_contract=binding.binding_contract,
+                dependency_hold_id=dependency_hold_id,
             )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s "
@@ -911,6 +914,7 @@ class Runtime(Generic[AppT]):
             planning: bool,
             thinking: ThinkingValue,
             idempotency_key: str,
+            dependency_hold_id: str,
         ) -> Execution[AppT]:
             output_type: type[BaseModel] | OutputBinding | None = (
                 invocation.node.output_type
@@ -941,6 +945,7 @@ class Runtime(Generic[AppT]):
                 thinking=thinking,
                 correlation=invocation.correlation,
                 compiled_agent=compiled,
+                dependency_hold_id=dependency_hold_id,
             )
 
         async def get_execution(
@@ -948,6 +953,28 @@ class Runtime(Generic[AppT]):
             principal: Principal,
         ) -> Execution[AppT]:
             return Execution(self, execution_id, principal, self._watch_execution_tree)
+
+        async def acquire_execution_hold(
+            execution_id: str,
+            principal: Principal,
+            hold_id: str,
+        ) -> None:
+            await self._execution_service.acquire_dependency_hold(
+                execution_id,
+                tenant_id=principal.tenant_id,
+                hold_id=hold_id,
+            )
+
+        async def release_execution_hold(
+            execution_id: str,
+            principal: Principal,
+            hold_id: str,
+        ) -> None:
+            await self._execution_service.release_dependency_hold(
+                execution_id,
+                tenant_id=principal.tenant_id,
+                hold_id=hold_id,
+            )
 
         node_runtime = self._require_task_node_runtime()
         runner = RuntimeAgentTaskRunner[AppT](
@@ -963,6 +990,8 @@ class Runtime(Generic[AppT]):
             build_input=build_input,
             start_execution=start_execution,
             get_execution=get_execution,
+            acquire_execution_hold=acquire_execution_hold,
+            release_execution_hold=release_execution_hold,
             result_reader=node_runtime.read_input_result,
             result_ref_reader=node_runtime.read_input_result_ref,
             get_prepared_input=node_runtime.get_prepared_agent_input,

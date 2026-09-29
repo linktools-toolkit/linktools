@@ -422,6 +422,7 @@ class DefaultSessionService:
         request: ResumeSessionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle:
         return await self._resume(
             agent_id,
@@ -429,6 +430,7 @@ class DefaultSessionService:
             session_id,
             request,
             binding_contract=binding_contract,
+            dependency_hold_id=dependency_hold_id,
         )
 
     async def _resume(
@@ -439,6 +441,7 @@ class DefaultSessionService:
         request: ResumeSessionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(
@@ -478,6 +481,7 @@ class DefaultSessionService:
                 session_id,
                 execution_request,
                 binding_contract=binding_contract,
+                dependency_hold_id=dependency_hold_id,
             )
 
     async def fork(
