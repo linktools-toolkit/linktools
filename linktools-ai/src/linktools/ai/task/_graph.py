@@ -331,7 +331,7 @@ class TaskNode:
         return cls(
             node_id,
             dependencies,
-            task=TaskRef("linktools.ai.input", 1),
+            task=TaskRef.deferred_input(),
             input=values,
             output_type=output_type,
         )
