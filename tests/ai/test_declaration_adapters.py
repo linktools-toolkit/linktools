@@ -262,7 +262,7 @@ def test_agent_markdown_rejects_metadata_that_is_not_a_json_map() -> None:
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_agent_author_mapping_rejects_unprojected_fields() -> None:
+def test_agent_author_mapping_accepts_version_alias_and_rejects_unknown_defaults() -> None:
     adapter = AgentSpecAdapter()
 
     versioned = adapter.from_mapping(

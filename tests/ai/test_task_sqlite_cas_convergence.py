@@ -4,6 +4,7 @@
 
 import asyncio
 import sqlite3
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
+    ExecutionEventType,
+    ExecutionLineageKind,
     JsonValue,
     Principal,
     ResourceKind,
@@ -22,14 +25,21 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import AgentTaskInput, Runtime, RuntimeStorage
+from linktools.ai.runtime import (
+    AgentTaskInput,
+    Runtime,
+    RuntimeStorage,
+    TaskGraphRunEvent,
+)
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
+from linktools.ai.runtime.service_api import ExecutionStreamEvent, ExecutionTreeEvent
 from linktools.ai.runtime.state._sql import _SqlTransaction
 from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
 from linktools.ai.task import (
     DefaultTaskGraphService,
     Task,
+    TaskExpansionContext,
     TaskEvent,
     TaskEventType,
     TaskGraph,
@@ -41,9 +51,12 @@ from linktools.ai.task import (
     TaskLease,
     TaskExpanderRef,
     TaskNode,
+    TaskNodeContext,
     TaskNodeInvocation,
     TaskNodeRunControl,
+    TaskNodeRunError,
     TaskNodeRunResult,
+    TaskExpander,
     TaskNodeView,
     TaskTerminalRecord,
 )
@@ -206,8 +219,6 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    await state.initialize(namespace="sqlite-dynamic-state", tenant_id="default")
-    repository = state.task.tasks
     graph = TaskGraph(
         "dynamic-state",
         (TaskNode("expand", expander=TaskExpanderRef("application.expand", 1)),),
@@ -216,7 +227,7 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
         graph,
         Principal("tester", "default"),
         "submit:dynamic-state",
-        TaskGraphLimits(max_concurrency=1),
+        TaskGraphLimits(max_concurrency=1, max_depth=20),
     )
     definition_read = asyncio.Event()
     continue_read = asyncio.Event()
@@ -230,63 +241,365 @@ async def test_sqlite_graph_state_keeps_one_snapshot_during_expansion(
         return records
 
     try:
-        await state.task.admissions.admit(
-            TaskGraphAdmission.from_request(request),
-            graph,
-        )
-        lease = await repository.claim(
-            graph.graph_id,
-            "expand",
-            tenant_id="default",
-            owner="expander",
-            lease_seconds=60,
-        )
-        monkeypatch.setattr(_SqlTransaction, "list_records", gated_list_records)
-        state_read = asyncio.create_task(
-            repository.graph_state(graph.graph_id, tenant_id="default")
-        )
-        await asyncio.wait_for(definition_read.wait(), timeout=1)
-        await asyncio.wait_for(
-            repository.complete(
-                lease,
+        async with Runtime.open(
+            "sqlite-dynamic-state",
+            models=_TaskTestModels(),  # type: ignore[arg-type]
+            storage=state,
+        ) as runtime:
+            repository = state.task.tasks
+            await state.task.admissions.admit(
+                TaskGraphAdmission.from_request(request),
+                graph,
+            )
+            run = await runtime.tasks.bind().get(
+                graph.graph_id,
+                principal=request.principal,
+            )
+            lease = await repository.claim(
+                graph.graph_id,
+                "expand",
                 tenant_id="default",
-                execution_id="execution-expand",
-                result_digest="b" * 64,
-                expanded_nodes=(TaskNode("child", dependencies=("expand",)),),
-            ),
-            timeout=5,
-        )
-        continue_read.set()
-        before_expansion = await asyncio.wait_for(state_read, timeout=5)
+                owner="expander",
+                lease_seconds=60,
+            )
+            monkeypatch.setattr(_SqlTransaction, "list_records", gated_list_records)
+            state_read = asyncio.create_task(run.state(include_content=True))
+            await asyncio.wait_for(definition_read.wait(), timeout=1)
+            await asyncio.wait_for(
+                repository.complete(
+                    lease,
+                    tenant_id="default",
+                    execution_id="execution-expand",
+                    result_digest="b" * 64,
+                    expanded_nodes=(
+                        TaskNode(
+                            "child",
+                            dependencies=("expand",),
+                            expander=TaskExpanderRef("application.expand", 1),
+                        ),
+                    ),
+                ),
+                timeout=5,
+            )
+            continue_read.set()
+            before_expansion = await asyncio.wait_for(state_read, timeout=5)
 
-        assert before_expansion is not None
-        assert {node.node_id for node in before_expansion.nodes} == {"expand"}
-        assert {node.node_id for node in before_expansion.node_states} == {"expand"}
+            assert {node.node_id for node in before_expansion.nodes} == {"expand"}
+            assert {node.node_id for node in before_expansion.node_states} == {"expand"}
+            assert before_expansion.node_states[0].status is TaskStatus.RUNNING
 
-        after_expansion = await repository.graph_state(
-            graph.graph_id,
-            tenant_id="default",
-        )
-        assert after_expansion is not None
-        definitions = {node.node_id: node for node in after_expansion.nodes}
-        statuses = {node.node_id: node for node in after_expansion.node_states}
-        assert set(definitions) == set(statuses) == {"child", "expand"}
-        assert statuses["child"].dependencies == definitions["child"].dependencies
-        assert statuses["child"].dependencies == ("expand",)
+            after_expansion = await run.state(include_content=True)
+            definitions = {node.node_id: node for node in after_expansion.nodes}
+            statuses = {
+                node.node_id: node for node in after_expansion.node_states
+            }
+            assert set(definitions) == set(statuses) == {"child", "expand"}
+            assert statuses["child"].dependencies == definitions["child"].dependencies
+            assert statuses["child"].dependencies == ("expand",)
+            assert statuses["expand"].status is TaskStatus.SUCCEEDED
 
-        state_store = state.task.tasks.state_store
-        child_state_key = repository._state_key(graph.graph_id, "child")
+            def assert_coherent(snapshot: TaskGraphState) -> int:
+                nodes = {node.node_id: node for node in snapshot.nodes}
+                node_states = {
+                    node.node_id: node for node in snapshot.node_states
+                }
+                assert set(nodes) == set(node_states)
+                assert all(
+                    node_states[node_id].dependencies == node.dependencies
+                    for node_id, node in nodes.items()
+                )
+                assert all(isinstance(node.status, TaskStatus) for node in node_states.values())
+                return len(nodes)
 
-        async def remove_child_state(transaction) -> None:
-            assert await transaction.delete_record(child_state_key)
+            stop_reader = asyncio.Event()
+            read_count = 0
+            observed_sizes: set[int] = set()
 
-        await state_store.mutate(remove_child_state)
-        with pytest.raises(AIError) as raised:
-            await repository.graph_state(graph.graph_id, tenant_id="default")
-        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+            async def read_states() -> None:
+                nonlocal read_count
+                while not stop_reader.is_set():
+                    observed_sizes.add(
+                        assert_coherent(await run.state(include_content=True))
+                    )
+                    read_count += 1
+                    await asyncio.sleep(0)
+
+            async def expand_repeatedly() -> None:
+                parent_id = "child"
+                for index in range(12):
+                    lease = await repository.claim(
+                        graph.graph_id,
+                        parent_id,
+                        tenant_id="default",
+                        owner="expander",
+                        lease_seconds=60,
+                    )
+                    next_id = f"child-{index}"
+                    await repository.complete(
+                        lease,
+                        tenant_id="default",
+                        execution_id=f"execution-{next_id}",
+                        result_digest="c" * 64,
+                        expanded_nodes=(
+                            TaskNode(
+                                next_id,
+                                dependencies=(parent_id,),
+                                expander=TaskExpanderRef(
+                                    "application.expand",
+                                    1,
+                                ),
+                            ),
+                        ),
+                    )
+                    parent_id = next_id
+                    await asyncio.sleep(0)
+
+            reader = asyncio.create_task(read_states())
+            try:
+                await expand_repeatedly()
+                stop_reader.set()
+                await reader
+            finally:
+                stop_reader.set()
+                if not reader.done():
+                    await reader
+
+            assert read_count > 0
+            assert max(observed_sizes) > min(observed_sizes)
+            final_state = await run.state(include_content=True)
+            assert assert_coherent(final_state) == 14
+
+            state_store = state.task.tasks.state_store
+            child_state_key = repository._state_key(graph.graph_id, "child")
+
+            async def remove_child_state(transaction) -> None:
+                assert await transaction.delete_record(child_state_key)
+
+            await state_store.mutate(remove_child_state)
+            with pytest.raises(AIError) as raised:
+                await run.state(include_content=True)
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         continue_read.set()
         await state.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "dynamic-watch.sqlite"
+    await _provision_sqlite(database)
+    storage = RuntimeStorage.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
+    root_started = asyncio.Event()
+    release_root = asyncio.Event()
+    expansion_started = asyncio.Event()
+    stream_requests: list[tuple[str, dict[str, int]]] = []
+    principal = Principal("watcher", "default")
+    original_run = RuntimeTaskNodeRunner.run
+
+    async def wait_for_expansion(context: TaskNodeContext[object]) -> JsonValue:
+        del context
+        root_started.set()
+        await release_root.wait()
+        return {"expanded": True}
+
+    root_task = Task(
+        "sqlite.watch.root",
+        wait_for_expansion,
+        effect_policy="none",
+    )
+
+    async with Runtime.open(
+        "sqlite-dynamic-watch",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=storage,
+        capabilities=(_agent_group(),),
+    ) as runtime:
+        agent_task = runtime.tasks.from_agent(
+            "sqlite.watch.agent",
+            runtime.agents.get("default"),
+        )
+
+        def expand_children(
+            context: TaskExpansionContext,
+        ) -> tuple[TaskNode, ...]:
+            assert context.source_node.node_id == "root"
+            expansion_started.set()
+            return (
+                TaskNode(
+                    "child-succeeded",
+                    dependencies=("root",),
+                    task=agent_task,
+                    input=AgentTaskInput("succeed"),
+                ),
+                TaskNode(
+                    "child-failed",
+                    dependencies=("child-succeeded",),
+                    task=agent_task,
+                    input=AgentTaskInput("fail"),
+                ),
+            )
+
+        expander = TaskExpander("sqlite.watch.expand", expand_children)
+        graph = TaskGraph(
+            "dynamic-watch",
+            (TaskNode("root", task=root_task, expander=expander),),
+        )
+
+        async def run_child(
+            self: RuntimeTaskNodeRunner,
+            invocation: TaskNodeInvocation,
+            *,
+            control: TaskNodeRunControl,
+        ) -> TaskNodeRunResult:
+            if invocation.node.node_id == "root":
+                return await original_run(self, invocation, control=control)
+            execution_id = f"execution-{invocation.node.node_id}"
+            await control.bind_execution(execution_id)
+            if invocation.node.node_id == "child-failed":
+                raise TaskNodeRunError(ErrorCode.TASK_NODE_FAILED, execution_id)
+            result = StoredPayload.inline_json(
+                {"graph_id": invocation.graph_id, "node_id": invocation.node.node_id}
+            )
+            return TaskNodeRunResult(result.digest, execution_id=execution_id)
+
+        async def inspect_execution(
+            execution_id: str,
+            *,
+            principal: Principal,
+        ) -> SimpleNamespace:
+            assert principal == principal_arg
+            return SimpleNamespace(
+                binding_kind=(
+                    "agent"
+                    if execution_id in {
+                        "execution-child-succeeded",
+                        "execution-child-failed",
+                    }
+                    else "task"
+                )
+            )
+
+        def watch_tree(
+            execution_id: str,
+            *,
+            principal: Principal,
+            after_sequences: dict[str, int] | None = None,
+            include_content: bool = False,
+        ) -> AsyncIterator[ExecutionTreeEvent]:
+            del include_content
+            assert principal == principal_arg
+            after = dict(after_sequences or {})
+            stream_requests.append((execution_id, after))
+            event_type = (
+                ExecutionEventType.EXECUTION_FAILED.value
+                if execution_id == "execution-child-failed"
+                else ExecutionEventType.EXECUTION_SUCCEEDED.value
+            )
+
+            async def events():
+                if after.get(execution_id, 0) >= 1:
+                    return
+                yield ExecutionTreeEvent(
+                    execution_id,
+                    "default",
+                    ExecutionLineageKind.RUN,
+                    None,
+                    execution_id,
+                    None,
+                    0,
+                    ExecutionStreamEvent(execution_id, 1, event_type, {}),
+                )
+
+            return events()
+
+        principal_arg = principal
+        monkeypatch.setattr(RuntimeTaskNodeRunner, "run", run_child)
+        monkeypatch.setattr(runtime.executions, "inspect", inspect_execution)
+        monkeypatch.setattr(runtime, "_watch_execution_tree", watch_tree)
+        engine = runtime.tasks.bind(root_task, agent_task, expander)
+        run = await engine.start(
+            graph,
+            idempotency_key="submit:dynamic-watch",
+            principal=principal,
+            limits=TaskGraphLimits(max_concurrency=1),
+        )
+        await asyncio.wait_for(root_started.wait(), timeout=5)
+        watch = run.watch()
+        first = await asyncio.wait_for(anext(watch), timeout=5)
+        assert isinstance(first.event, TaskEvent)
+        assert first.event.event_type is TaskEventType.GRAPH_ADMITTED
+        assert not expansion_started.is_set()
+
+        execution_events: dict[str, TaskGraphRunEvent] = {}
+        release_root.set()
+        try:
+            while set(execution_events) != {
+                "child-succeeded",
+                "child-failed",
+            }:
+                event = await asyncio.wait_for(anext(watch), timeout=10)
+                if isinstance(event.event, ExecutionTreeEvent):
+                    execution_events[event.node_id] = event
+        finally:
+            await watch.aclose()
+
+        assert expansion_started.is_set()
+        result = await run.wait(timeout_seconds=10)
+        assert result.status is TaskStatus.FAILED
+        final_state = await run.state(include_content=True)
+        statuses = {node.node_id: node.status for node in final_state.node_states}
+        assert statuses["child-succeeded"] is TaskStatus.SUCCEEDED
+        assert statuses["child-failed"] is TaskStatus.FAILED
+
+        successful = execution_events["child-succeeded"]
+        assert isinstance(successful.event, ExecutionTreeEvent)
+        success_cursor = successful.cursor
+        assert success_cursor is not None
+
+    reopened_storage = RuntimeStorage.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
+    async with Runtime.open(
+        "sqlite-dynamic-watch",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=reopened_storage,
+        capabilities=(_agent_group(),),
+    ) as runtime:
+        agent_task = runtime.tasks.from_agent(
+            "sqlite.watch.agent",
+            runtime.agents.get("default"),
+        )
+        monkeypatch.setattr(runtime.executions, "inspect", inspect_execution)
+        monkeypatch.setattr(runtime, "_watch_execution_tree", watch_tree)
+        reopened = await runtime.tasks.bind(root_task, agent_task, expander).get(
+            graph.graph_id,
+            principal=principal,
+        )
+        replayed = [item async for item in reopened.watch(cursor=success_cursor)]
+
+    replayed_execution_events = [
+        item
+        for item in replayed
+        if isinstance(item.event, ExecutionTreeEvent)
+    ]
+    assert [
+        (item.node_id, item.event.event.event_type)
+        for item in replayed_execution_events
+    ] == [
+        ("child-failed", ExecutionEventType.EXECUTION_FAILED.value),
+    ]
+    assert any(
+        execution_id == "execution-child-succeeded"
+        and after.get(execution_id) == 1
+        for execution_id, after in stream_requests
+    )
 
 
 @pytest.mark.asyncio

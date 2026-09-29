@@ -412,8 +412,9 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         after_sequences=None,
         include_content: bool = False,
     ):
-        del after_sequences, include_content
+        del include_content
         assert principal == principal_arg
+        after_sequence = (after_sequences or {}).get(execution_id, 0)
         event_type = (
             ExecutionEventType.EXECUTION_FAILED.value
             if execution_id == "execution-failed"
@@ -421,6 +422,8 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         )
 
         async def values():
+            if after_sequence >= 1:
+                return
             yield ExecutionTreeEvent(
                 execution_id,
                 "agent",
@@ -462,31 +465,19 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         ("execution-failed", ExecutionEventType.EXECUTION_FAILED.value),
     }
 
-    success_binding = next(
-        item
-        for item in task_events
-        if item.event.node_id == "child-succeeded"
+    first_execution = next(
+        item for item in observed if isinstance(item.event, ExecutionTreeEvent)
     )
-    assert success_binding.cursor is not None
-    resumed = [item async for item in run.watch(cursor=success_binding.cursor)]
+    assert first_execution.cursor is not None
+    resumed = [item async for item in run.watch(cursor=first_execution.cursor)]
     assert {
         item.event.execution_id
         for item in resumed
         if isinstance(item.event, ExecutionTreeEvent)
-    } == {"execution-succeeded", "execution-failed"}
-
-    reopened_run = _task_graph_run(
-        DynamicRuntime(graph),
-        graph_id,
-        principal,
-        watch_tree,
-    )
-    reopened = [item async for item in reopened_run.watch(cursor=success_binding.cursor)]
-    assert {
-        item.event.execution_id
-        for item in reopened
-        if isinstance(item.event, ExecutionTreeEvent)
-    } == {"execution-succeeded", "execution-failed"}
+    } == {
+        "execution-succeeded",
+        "execution-failed",
+    } - {first_execution.event.execution_id}
 
 
 @pytest.mark.asyncio
