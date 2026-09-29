@@ -1015,6 +1015,100 @@ async def test_task_observer_exception_is_visible_without_changing_graph_state()
 
 
 @pytest.mark.asyncio
+async def test_task_execution_cancel_invokes_cancel_callback_once() -> None:
+    started = asyncio.Event()
+    cancel_calls = 0
+
+    async def run_task(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        started.set()
+        await asyncio.Event().wait()
+        return {"unreachable": True}
+
+    async def cancel_task(context: TaskNodeContext[None]) -> None:
+        nonlocal cancel_calls
+        del context
+        cancel_calls += 1
+
+    task = Task(
+        "example.cancel-callback-once",
+        run_task,
+        effect_policy="none",
+        cancel=cancel_task,
+    )
+    graph = TaskGraph(
+        "cancel-callback-once",
+        (TaskNode("node", task=task),),
+    )
+    async with Runtime.open(
+        "cancel-callback-once-runtime",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+    ) as runtime:
+        graph_run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key="cancel-callback-once-graph-0001",
+        )
+        await asyncio.wait_for(started.wait(), 3)
+        execution = await graph_run.execution("node")
+        first = await execution.cancel(
+            idempotency_key="cancel-callback-once-operation-0001"
+        )
+        replay = await execution.cancel(
+            idempotency_key="cancel-callback-once-operation-0001"
+        )
+        result = await graph_run.wait(timeout_seconds=5)
+
+        assert first.cancelled
+        assert replay.cancelled
+        assert result.status is TaskStatus.CANCELLED
+        assert cancel_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_recovery_required_execution_preserves_recovery_boundary() -> None:
+    started = asyncio.Event()
+
+    async def uncertain_task(context: TaskNodeContext[None]) -> JsonValue:
+        del context
+        started.set()
+        raise RuntimeError("effect outcome unknown")
+
+    task = Task(
+        "example.cancel-recovery-required",
+        uncertain_task,
+        effect_policy="non_replay_safe",
+    )
+    graph = TaskGraph(
+        "cancel-recovery-required",
+        (TaskNode("node", task=task),),
+    )
+    async with Runtime.open(
+        "cancel-recovery-required-runtime",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+    ) as runtime:
+        graph_run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key="cancel-recovery-required-graph-0001",
+        )
+        await asyncio.wait_for(started.wait(), 3)
+        initial = await graph_run.wait(timeout_seconds=5)
+        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+
+        execution = await graph_run.execution("node")
+        with pytest.raises(AIError) as raised:
+            await execution.cancel(
+                idempotency_key="cancel-recovery-required-operation-0001"
+            )
+        assert raised.value.code is ErrorCode.TASK_EFFECT_UNKNOWN
+
+        current = await graph_run.state(include_content=True)
+        assert current.status is TaskStatus.RECOVERY_REQUIRED
+        assert current.node_states[0].status is TaskStatus.RECOVERY_REQUIRED
+
+
+@pytest.mark.asyncio
 async def test_task_execution_cancel_persists_node_intent_before_execution_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3792,22 +3886,33 @@ async def test_runtime_reconcile_unknown_exception_and_invalid_stay_recoverable(
         assert recovered_node.status is TaskStatus.RECOVERY_REQUIRED
         assert recovered_node.execution_id == initial_node.execution_id
         assert recovered_node.error_code == ErrorCode.TASK_EFFECT_UNKNOWN.value
+        assert recovered_node.error_origin == "execution"
         assert run_calls == 1
         assert reconcile_calls == 1
         assert execution.status.value == "RECOVERY_REQUIRED"
         messages = [record.getMessage() for record in caplog.records]
         if reconcile_case == "exception":
+            assert recovered_node.safe_error_details == {
+                "reconcile_exception_type": "ValueError"
+            }
             assert any(
                 "task effect reconciliation failed" in message
                 and "type=ValueError" in message
                 for message in messages
             )
         elif reconcile_case == "invalid":
+            assert recovered_node.safe_error_details == {
+                "reconcile_result_type": "dict"
+            }
             assert any(
                 "task effect reconciliation returned an invalid value" in message
                 and "type=dict" in message
                 for message in messages
             )
+        else:
+            assert recovered_node.safe_error_details == {
+                "reconcile_outcome": "unknown"
+            }
 
 
 @pytest.mark.asyncio

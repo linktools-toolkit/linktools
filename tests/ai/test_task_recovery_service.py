@@ -528,6 +528,81 @@ async def test_effect_unknown_cancel_is_discovered_after_filesystem_reopen(
 
 
 @pytest.mark.asyncio
+async def test_recover_settles_cancel_receipt_after_graph_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-terminal-cancel", tenant_id="tenant")
+    try:
+        request = _request("terminal-cancel-receipt")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            request.graph,
+        )
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+        )
+        original_record_success = service._record_success
+        interrupted = False
+
+        async def interrupt_cancel_receipt(
+            operation,
+            tenant_id,
+            view,
+            *,
+            expected_status=OperationStatus.RUNNING,
+        ):
+            nonlocal interrupted
+            if operation.operation_kind is OperationKind.TASK_CANCEL and not interrupted:
+                interrupted = True
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            return await original_record_success(
+                operation,
+                tenant_id,
+                view,
+                expected_status=expected_status,
+            )
+
+        monkeypatch.setattr(service, "_record_success", interrupt_cancel_receipt)
+        with pytest.raises(AIError) as raised:
+            await service.cancel(
+                request.graph.graph_id,
+                CancelGraphRequest(request.principal, "cancel:terminal-receipt"),
+            )
+        assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+
+        operation_id = idempotency_key_digest("cancel:terminal-receipt")
+        interrupted_operation = await state.task.operations.get(
+            operation_id,
+            tenant_id="tenant",
+        )
+        terminal = await state.task.tasks.get_graph(
+            request.graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert interrupted_operation is not None
+        assert interrupted_operation.status is OperationStatus.RUNNING
+        assert terminal is not None
+        assert terminal.status is TaskStatus.CANCELLED
+
+        monkeypatch.setattr(service, "_record_success", original_record_success)
+        recovered = await service.recover(
+            request.graph.graph_id,
+            RecoverGraphRequest(request.principal, "recover:terminal-receipt"),
+        )
+        settled_operation = await state.task.operations.get(
+            operation_id,
+            tenant_id="tenant",
+        )
+        assert recovered.status is TaskStatus.CANCELLED
+        assert settled_operation is not None
+        assert settled_operation.status is OperationStatus.SUCCEEDED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_running_cancel_replay_reapplies_durable_graph_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -936,12 +1011,11 @@ async def test_node_cancel_requires_execution_confirmation_before_terminal_proje
         )
         cancel_request = CancelGraphRequest(request.principal, "cancel:node")
 
-        unresolved = await service.settle_execution_cancellation(
+        unresolved = await service.cancel_node(
             "node-cancel",
             "node",
             "execution",
             cancel_request,
-            cancel_confirmed=None,
         )
         unresolved_operation = await state.task.operations.get(
             idempotency_key_digest("cancel:node"),
@@ -955,14 +1029,22 @@ async def test_node_cancel_requires_execution_confirmation_before_terminal_proje
         assert unresolved_operation is not None
         assert unresolved_operation.status is OperationStatus.EFFECT_UNKNOWN
         assert graph_state is not None
-        assert graph_state.node_states[0].status is TaskStatus.RECOVERY_REQUIRED
+        node_state = graph_state.node_states[0]
+        assert node_state.status is TaskStatus.RECOVERY_REQUIRED
 
-        confirmed = await service.settle_execution_cancellation(
+        await state.task.tasks.cancel_node(
+            "node-cancel",
+            "node",
+            tenant_id="tenant",
+            execution_id="execution",
+            cancel_confirmed=True,
+            expected_fence=node_state.fence,
+        )
+        confirmed = await service.cancel_node(
             "node-cancel",
             "node",
             "execution",
             cancel_request,
-            cancel_confirmed=True,
         )
         confirmed_operation = await state.task.operations.get(
             idempotency_key_digest("cancel:node"),
@@ -1017,12 +1099,34 @@ async def test_node_cancel_scope_and_execution_identity_are_preserved() -> None:
             TenantAuthorizationPolicy("tenant"),
         )
         cancel_request = CancelGraphRequest(request.principal, "cancel:node-scope")
-        result = await service.settle_execution_cancellation(
+        unresolved = await service.cancel_node(
             request.graph.graph_id,
             "target",
             "target-execution",
             cancel_request,
+        )
+        assert unresolved.status is TaskStatus.RECOVERY_REQUIRED
+        unresolved_state = await state.task.tasks.graph_state(
+            request.graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert unresolved_state is not None
+        target_state = next(
+            node for node in unresolved_state.node_states if node.node_id == "target"
+        )
+        await state.task.tasks.cancel_node(
+            request.graph.graph_id,
+            "target",
+            tenant_id="tenant",
+            execution_id="target-execution",
             cancel_confirmed=True,
+            expected_fence=target_state.fence,
+        )
+        result = await service.cancel_node(
+            request.graph.graph_id,
+            "target",
+            "target-execution",
+            cancel_request,
         )
         snapshot = await state.task.tasks.graph_state(
             request.graph.graph_id,
@@ -1037,12 +1141,11 @@ async def test_node_cancel_scope_and_execution_identity_are_preserved() -> None:
         assert result.status is TaskStatus.PENDING
 
         with pytest.raises(AIError) as conflicting_replay:
-            await service.settle_execution_cancellation(
+            await service.cancel_node(
                 request.graph.graph_id,
                 "target",
                 "different-execution",
                 cancel_request,
-                cancel_confirmed=True,
             )
         assert conflicting_replay.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
     finally:
