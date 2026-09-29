@@ -391,6 +391,26 @@ def test_task_definitions_keep_explicit_identity_and_contract() -> None:
     assert TaskNode("node", task=definition).task == definition.ref
 
 
+def test_task_node_separates_authoring_from_resolved_contract() -> None:
+    with pytest.raises(TypeError):
+        TaskNode("node", effect_policy="replay_safe")  # type: ignore[call-arg]
+
+    resolved = TaskNode.from_resolved(
+        "node",
+        task=TaskRef("example.direct", 1),
+        effect_policy="replay_safe",
+        output_contract={"mode": "structured", "schema": {"type": "object"}},
+        reconcile=True,
+    )
+
+    assert resolved.effect_policy == "replay_safe"
+    assert resolved.reconcile is True
+    assert resolved.output_contract == {
+        "mode": "structured",
+        "schema": {"type": "object"},
+    }
+
+
 def test_agent_task_input_keeps_but_excludes_unknown_additive_fields() -> None:
     value = dict(
         AgentTaskInput(
