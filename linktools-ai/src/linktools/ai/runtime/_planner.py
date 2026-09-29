@@ -80,7 +80,7 @@ from ._task_graph_binding_capture import (
     builtin_task_declaration,
     task_declaration_semantics,
 )
-from .service_api import ExecutionService, _TaskAttemptLease
+from .service_api import ExecutionService, ExecutionView
 from .service_api import ExecutionResult
 from .state import ArtifactRecord, ArtifactRepositories, RuntimeDomain
 
@@ -1712,7 +1712,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         unknown_effect: bool,
         cause: BaseException | None = None,
-        attempt: _TaskAttemptLease,
+        attempt: ExecutionView,
     ) -> TaskNodeRunResult:
         if unknown_effect:
             await self._execution.require_task_recovery(
@@ -2216,7 +2216,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             raise TaskNodeRunError(
                 ErrorCode.TASK_EFFECT_UNKNOWN,
                 execution_id,
-                safe_details=execution_view.safe_error_details,
             )
 
         if (

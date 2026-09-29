@@ -91,7 +91,6 @@ from .service_api import (
     RetryExecutionRequest,
     TranscriptItem,
     UsageReadCutoff,
-    _TaskAttemptLease,
 )
 from .service_api import (
     project_execution_view as _project_execution_view,
@@ -804,7 +803,7 @@ class DefaultExecutionService:
         execution_id: str,
         *,
         principal: Principal,
-    ) -> _TaskAttemptLease:
+    ) -> ExecutionView:
         current = await self._load_authorized(
             execution_id,
             principal,
@@ -818,13 +817,13 @@ class DefaultExecutionService:
             ExecutionStatus.CANCELLED,
             ExecutionStatus.RECOVERY_REQUIRED,
         }:
-            return _task_attempt_lease(current)
+            return _execution_view(current)
         now = datetime.now(timezone.utc)
         if current.status is ExecutionStatus.WAITING_RETRY:
             if current.task_next_attempt_at is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if current.task_next_attempt_at > now:
-                return _task_attempt_lease(current)
+                return _execution_view(current)
         elif current.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.task_deadline_at is not None and current.task_deadline_at <= now:
@@ -835,14 +834,14 @@ class DefaultExecutionService:
                     ErrorCode.EXECUTION_WAIT_TIMEOUT,
                     safe_details={"reason": "deadline_exceeded"},
                 ),
-                attempt=_task_attempt_lease(current),
+                attempt=_execution_view(current),
             )
             current = await self._load_authorized(
                 execution_id,
                 principal,
                 AuthorizationAction.EXECUTION_RUN,
             )
-            return _task_attempt_lease(current)
+            return _execution_view(current)
         if current.task_attempt >= current.binding.max_attempts:
             await self.fail_task(
                 execution_id,
@@ -851,14 +850,14 @@ class DefaultExecutionService:
                     ErrorCode.TASK_NODE_FAILED,
                     safe_details={"reason": "attempts_exhausted"},
                 ),
-                attempt=_task_attempt_lease(current),
+                attempt=_execution_view(current),
             )
             current = await self._load_authorized(
                 execution_id,
                 principal,
                 AuthorizationAction.EXECUTION_RUN,
             )
-            return _task_attempt_lease(current)
+            return _execution_view(current)
         deadline = current.task_deadline_at
         if deadline is None and current.binding.timeout_seconds is not None:
             deadline = now + timedelta(seconds=current.binding.timeout_seconds)
@@ -878,7 +877,7 @@ class DefaultExecutionService:
             payload={"attempt": current.task_attempt + 1},
             occurred_at=now,
         )
-        return _task_attempt_lease(updated)
+        return _execution_view(updated)
 
     async def schedule_task_retry(
         self,
@@ -886,7 +885,7 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         error_code: str,
-        attempt: _TaskAttemptLease | None = None,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionView:
         current = await self._load_authorized(
             execution_id,
@@ -947,7 +946,7 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         error_code: str,
-        attempt: _TaskAttemptLease | None = None,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionView:
         current = await self._load_authorized(
             execution_id,
@@ -1330,7 +1329,7 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         output: JsonValue,
-        attempt: _TaskAttemptLease | None = None,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionResult:
         current = await self._load_authorized(
             execution_id,
@@ -1351,7 +1350,7 @@ class DefaultExecutionService:
         principal: Principal,
         output: JsonValue,
         terminal_event_payload: "Mapping[str, JsonValue] | None" = None,
-        attempt: _TaskAttemptLease | None = None,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionResult:
         if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
@@ -1420,7 +1419,7 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         error: AIError,
-        attempt: _TaskAttemptLease | None = None,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionResult:
         current = await self._load_authorized(
             execution_id,
@@ -3584,27 +3583,14 @@ class DefaultExecutionService:
         return await self._load_authorized(execution_id, principal, action)
 
 
-def _task_attempt_lease(execution: ExecutionRecord) -> _TaskAttemptLease:
-    return _TaskAttemptLease(
-        execution.execution_id,
-        execution.revision,
-        execution.event_sequence,
-        execution.task_attempt,
-        execution.status,
-        execution.task_deadline_at,
-        execution.task_next_attempt_at,
-    )
-
-
 def _require_task_attempt(
     execution: ExecutionRecord,
-    attempt: _TaskAttemptLease | None,
+    attempt: ExecutionView | None,
 ) -> None:
     if attempt is None:
         return
     if (
         attempt.execution_id != execution.execution_id
-        or attempt.revision != execution.revision
         or attempt.event_sequence != execution.event_sequence
         or attempt.task_attempt != execution.task_attempt
         or attempt.status is not execution.status
