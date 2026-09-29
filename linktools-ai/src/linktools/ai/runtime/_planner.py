@@ -440,7 +440,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 for identity in required_tasks:
                     previous = current_tasks.get(identity)
                     replacement = task_map.get(identity)
-                    if previous is None and identity == (_DEFERRED_INPUT_ID, 1):
+                    if previous is None and identity == (
+                        _BUILTIN_INPUT_TASK_ID,
+                        _BUILTIN_INPUT_TASK_REVISION,
+                    ):
                         continue
                     if (
                         previous is None
