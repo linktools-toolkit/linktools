@@ -90,7 +90,7 @@ class SqlStateStorageGroup:
         self._owns_context = owns_context
         self._read_only = read_only
         self._mutation_lock = (
-            asyncio.Lock() if context.dialect.name == "sqlite" else None
+            asyncio.Lock() if context.dialect.single_writer else None
         )
         self._close_lock = asyncio.Lock()
         self._closed = False
@@ -137,24 +137,28 @@ class SqlStateStorageGroup:
         if active is not None:
             return await fn(active)
         async with self._session() as session:
-            transaction = _SqlTransaction(
-                session,
-                self._metadata,
-                self._context,
-                store.store_digest,
-            )
-            token = bind_state_scope(
-                self,
-                {store: transaction},
-                writable=False,
-            )
-            try:
-                readonly = active_state_transaction(store)
-                if readonly is None:
-                    raise RuntimeError("read-only StateTransaction scope was not bound")
-                return await fn(readonly)
-            finally:
-                reset_state_transaction(token)
+            async with session.begin():
+                await self._context.dialect.begin_consistent_read(session)
+                transaction = _SqlTransaction(
+                    session,
+                    self._metadata,
+                    self._context,
+                    store.store_digest,
+                )
+                token = bind_state_scope(
+                    self,
+                    {store: transaction},
+                    writable=False,
+                )
+                try:
+                    readonly = active_state_transaction(store)
+                    if readonly is None:
+                        raise RuntimeError(
+                            "read-only StateTransaction scope was not bound"
+                        )
+                    return await fn(readonly)
+                finally:
+                    reset_state_transaction(token)
 
     async def mutate(
         self,

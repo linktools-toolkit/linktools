@@ -91,6 +91,13 @@ class SqlAlchemyDialect(Protocol):
     @property
     def name(self) -> str: ...
 
+    @property
+    def single_writer(self) -> bool: ...
+
+    async def configure_engine(self, engine: "AsyncEngine") -> None: ...
+
+    async def begin_consistent_read(self, session: "AsyncSession") -> None: ...
+
     async def database_now(self, session: "AsyncSession") -> datetime: ...
 
     async def insert_ignore_conflict(
@@ -179,6 +186,24 @@ class SQLiteDialect:
     @property
     def name(self) -> str:
         return "sqlite"
+
+    @property
+    def single_writer(self) -> bool:
+        return self.name == "sqlite"
+
+    async def configure_engine(self, engine: "AsyncEngine") -> None:
+        if self.single_writer:
+            await configure_sqlite_engine(engine)
+
+    async def begin_consistent_read(self, session: "AsyncSession") -> None:
+        if self.single_writer:
+            from sqlalchemy import text
+
+            await session.execute(text("BEGIN"))
+            return
+        await session.connection(
+            execution_options={"isolation_level": "REPEATABLE READ"}
+        )
 
     async def database_now(self, session: "AsyncSession") -> datetime:
         from sqlalchemy import select

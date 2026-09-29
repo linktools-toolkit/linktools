@@ -445,7 +445,12 @@ def _decode_mcp_author_server(
     revision: int,
     package: bool,
 ) -> MCPServerSpec:
-    transport_value = raw.get("type")
+    if "type" in raw and "transport" in raw:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    transport_key = "type" if "type" in raw else "transport"
+    transport_value = raw.get(transport_key)
+    if transport_key in raw and transport_value is None:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     has_command = "command" in raw
     has_url = "url" in raw
     if transport_value is None:

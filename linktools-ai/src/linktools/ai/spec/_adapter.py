@@ -4,7 +4,7 @@
 
 from collections.abc import Mapping
 
-from ..core import normalize_json_value, validate_logical_id
+from ..core import validate_logical_id
 from ..errors import AIError, ErrorCode
 from ._codec import (
     AgentSpecCodec,
@@ -59,19 +59,20 @@ class AgentSpecAdapter:
         validate_logical_id(logical_id)
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if "id" in payload:
-            declared_id = payload["id"]
+        canonical_payload = _canonicalize_agent_fields(payload)
+        if "id" in canonical_payload:
+            declared_id = canonical_payload["id"]
             try:
                 validate_logical_id(declared_id)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
             if declared_id != logical_id:
                 raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        system_prompt = payload.get("system_prompt", "")
+        system_prompt = canonical_payload.get("system_prompt", "")
         if not isinstance(system_prompt, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         merged = _validated_agent_defaults(defaults, logical_id)
-        merged.update(payload)
+        merged.update(canonical_payload)
         merged["id"] = logical_id
         merged["system_prompt"] = system_prompt
         return _decode_agent_mapping(merged)
@@ -239,6 +240,13 @@ class MCPServerSpecAdapter:
         *,
         package_id: "str | None",
     ) -> MCPServerSpec:
+        version = raw.get("version", 1)
+        if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                "unsupported MCP author version",
+                safe_details={"field": "version"},
+            )
         identity = raw.get("id")
         if package_id is None:
             if not isinstance(identity, str) or not identity.strip():
@@ -287,7 +295,9 @@ def _validated_agent_defaults(
     if not isinstance(defaults, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     try:
-        normalized = normalize_json_value(dict(defaults))
+        normalized = _canonicalize_agent_fields(defaults)
+    except AIError:
+        raise
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     if not isinstance(normalized, dict):
@@ -346,7 +356,7 @@ def _canonicalize_agent_fields(
         if canonical in result:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         result[canonical] = value
-    return normalize_json_value(result)
+    return result
 
 
 def _without_line_ending(value: str) -> str:

@@ -578,38 +578,70 @@ class TaskGraphRun(Generic[AppT]):
         execution_tasks: dict[str, asyncio.Task[ExecutionTreeEvent]] = {}
 
         async def start_execution(node_id: str, execution_id: str) -> None:
-            current = execution_ids.get(node_id)
-            if current is not None:
-                if current != execution_id:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return
-            execution_ids[node_id] = execution_id
-            node = nodes.get(node_id)
-            if node is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if (
-                node.task is not None
-                and node.task.id == "linktools.ai.input"
-                and node.task.revision == 1
-            ):
-                return
-            execution = await self._runtime.executions.inspect(
-                execution_id,
-                principal=self._principal,
-            )
-            if execution.binding_kind == "task":
-                return
-            stream = self._watch_tree(
-                execution_id,
-                principal=self._principal,
-                after_sequences=after_execution_sequences.get(node_id),
-                include_content=include_content,
-            )
-            execution_streams[node_id] = stream
-            execution_tasks[node_id] = asyncio.create_task(
-                stream.__anext__(),
-                name=f"task-run-execution-{self.graph_id}-{node_id}",
-            )
+            try:
+                current = execution_ids.get(node_id)
+                if current is not None:
+                    if current != execution_id:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    return
+                execution_ids[node_id] = execution_id
+                node = nodes.get(node_id)
+                if node is None:
+                    snapshot = await self._state()
+                    refreshed_states = {
+                        item.node_id: item for item in snapshot.node_states
+                    }
+                    refreshed_nodes = {
+                        item.node_id: item for item in snapshot.nodes
+                    }
+                    if (
+                        len(refreshed_states) != len(snapshot.node_states)
+                        or len(refreshed_nodes) != len(snapshot.nodes)
+                        or set(refreshed_states) != set(refreshed_nodes)
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    states.clear()
+                    states.update(refreshed_states)
+                    nodes.clear()
+                    nodes.update(refreshed_nodes)
+                    node = nodes.get(node_id)
+                if node is None:
+                    raise AIError(
+                        ErrorCode.STORAGE_INTEGRITY_ERROR,
+                        safe_details={
+                            "graph_id": self.graph_id,
+                            "node_id": node_id,
+                        },
+                    )
+                if (
+                    node.task is not None
+                    and node.task.id == "linktools.ai.input"
+                    and node.task.revision == 1
+                ):
+                    return
+                execution = await self._runtime.executions.inspect(
+                    execution_id,
+                    principal=self._principal,
+                )
+                if execution.binding_kind == "task":
+                    return
+                stream = self._watch_tree(
+                    execution_id,
+                    principal=self._principal,
+                    after_sequences=after_execution_sequences.get(node_id),
+                    include_content=include_content,
+                )
+                execution_streams[node_id] = stream
+                execution_tasks[node_id] = asyncio.create_task(
+                    stream.__anext__(),
+                    name=f"task-run-execution-{self.graph_id}-{node_id}",
+                )
+            except asyncio.CancelledError:
+                raise
+            except _ExecutionStreamFailure:
+                raise
+            except Exception as error:
+                raise _ExecutionStreamFailure(error) from error
 
         def last_delivered_cursor() -> str | None:
             try:
@@ -1086,5 +1118,4 @@ def _state_result(state: TaskGraphState) -> TaskGraphResult:
             for state in state.node_states
         ),
     )
-
 
