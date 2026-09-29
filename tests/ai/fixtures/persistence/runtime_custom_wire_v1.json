@@ -28,8 +28,8 @@
     "result_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "result_ref": "result"
   },
-  "task_node@2": {
-    "$dataclass": "task_node@2",
+  "task_node@1": {
+    "$dataclass": "task_node",
     "fields": {
       "budget_cost": 2,
       "dependencies": {
