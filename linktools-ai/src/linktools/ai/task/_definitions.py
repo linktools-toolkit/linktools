@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 from pydantic import BaseModel
 
 from ..core import ImmutableJsonMapping, JsonValue, Principal, normalize_json_value
-from ..spec import canonicalize_pydantic_model_schema
+from ..errors import AIError
+from ..spec import canonicalize_json_schema, canonicalize_pydantic_model_schema
 
 if TYPE_CHECKING:
     from ._graph import TaskNode
@@ -321,8 +322,11 @@ def _normalize_runner_contract(
     if not isinstance(value, dict):
         raise ValueError("runner task contract is invalid")
     required = {"version", "type", "effect_policy", "output_contract", "reconcile"}
+    allowed = required | {"config"}
     if not required.issubset(value):
         raise ValueError("runner task contract is incomplete")
+    if set(value) - allowed:
+        raise ValueError("runner task contract is invalid")
     if (
         value["version"] != 1
         or isinstance(value["version"], bool)
@@ -339,8 +343,17 @@ def _normalize_runner_contract(
         if set(output) != {"kind"}:
             raise ValueError("runner output contract is invalid")
     elif output.get("kind") == "schema":
-        if set(output) != {"kind", "schema"} or not isinstance(output.get("schema"), Mapping):
+        schema = output.get("schema")
+        if set(output) != {"kind", "schema"} or not isinstance(schema, Mapping):
             raise ValueError("runner output contract is invalid")
+        try:
+            canonical_schema = canonicalize_json_schema(schema)
+        except AIError as error:
+            raise ValueError("runner output contract is invalid") from error
+        value["output_contract"] = {
+            "kind": "schema",
+            "schema": canonical_schema,
+        }
     else:
         raise ValueError("runner output contract is invalid")
     if "config" in value and not isinstance(value["config"], Mapping):
