@@ -224,7 +224,7 @@ class TaskEngine(Generic[AppT]):
         graph = TaskGraph(
             graph_id,
             tuple(
-                TaskNode(
+                TaskNode.from_resolved(
                     node.node_id,
                     node.dependencies,
                     task=node.task,
