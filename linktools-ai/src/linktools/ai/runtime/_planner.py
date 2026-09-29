@@ -80,6 +80,8 @@ from ._object import RuntimeObjectKeyFactory
 from ._task_graph_binding_capture import (
     TaskGraphBindingCapture,
     TaskGraphBindingCaptureStore,
+    _BUILTIN_INPUT_TASK_ID,
+    _BUILTIN_INPUT_TASK_REVISION,
     builtin_task_declaration,
     task_declaration_semantics,
 )
@@ -90,8 +92,6 @@ from .state import ArtifactRecord, ArtifactRepositories, RuntimeDomain
 _logger = environ.get_logger("ai.runtime.planner")
 AppT = TypeVar("AppT")
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
-_DEFERRED_INPUT_ID = "linktools.ai.input"
-_DEFERRED_INPUT_REVISION = 1
 
 
 class _TaskCallableAdapter:
@@ -153,8 +153,8 @@ class _TaskRunnerAdapter:
 
 
 class _DeferredInputHandler:
-    id = _DEFERRED_INPUT_ID
-    revision = _DEFERRED_INPUT_REVISION
+    id = _BUILTIN_INPUT_TASK_ID
+    revision = _BUILTIN_INPUT_TASK_REVISION
     effect_policy = "none"
     output_type = None
     reconcile = None

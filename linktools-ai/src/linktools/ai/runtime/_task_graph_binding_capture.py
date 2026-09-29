@@ -26,19 +26,24 @@ from .state._task_graph_binding_capture import (
     task_expander_declaration_identity,
 )
 
-_KIND = "task-definition-capture"
+_KIND = "task-graph-binding-capture"
 _VERSION = TASK_GRAPH_BINDING_CAPTURE_FORMAT_VERSION
 _TASK_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_BUILTIN_INPUT_TASK_ID = "linktools.ai.input"
+_BUILTIN_INPUT_TASK_REVISION = 1
+_BUILTIN_INPUT_TASK_DECLARATION = {
+    "version": 1,
+    "id": _BUILTIN_INPUT_TASK_ID,
+    "revision": _BUILTIN_INPUT_TASK_REVISION,
+    "type": "input",
+    "effect_policy": "none",
+    "output_contract": {"kind": "json"},
+    "reconcile": False,
+}
 _BUILTIN_TASKS: dict[tuple[str, int], dict[str, JsonValue]] = {
-    ("linktools.ai.input", 1): {
-        "version": 1,
-        "id": "linktools.ai.input",
-        "revision": 1,
-        "type": "input",
-        "effect_policy": "none",
-        "output_contract": {"kind": "json"},
-        "reconcile": False,
-    },
+    (_BUILTIN_INPUT_TASK_ID, _BUILTIN_INPUT_TASK_REVISION): (
+        _BUILTIN_INPUT_TASK_DECLARATION
+    ),
 }
 def builtin_task_declaration(
     task_id: str,

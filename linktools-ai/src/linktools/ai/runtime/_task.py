@@ -1011,22 +1011,6 @@ def _task_stream_observation_error(
 __all__ = ["TaskGraphRun"]
 
 
-_OBSERVER_DRAIN_STATUSES = frozenset(
-    {
-        TaskStatus.SUCCEEDED,
-        TaskStatus.FAILED,
-        TaskStatus.BLOCKED,
-        TaskStatus.CANCELLED,
-        TaskStatus.RECOVERY_REQUIRED,
-    }
-)
-
-
-def _must_drain_observer(status: TaskStatus) -> bool:
-    """Return whether wait() must observe the durable graph boundary before returning."""
-    return status in _OBSERVER_DRAIN_STATUSES
-
-
 def _public_task_status(
     status: TaskStatus,
     states: object = (),
@@ -1104,11 +1088,3 @@ def _state_result(state: TaskGraphState) -> TaskGraphResult:
     )
 
 
-def _detach_task(task: "asyncio.Task[object]") -> None:
-    def consume(done: "asyncio.Task[object]") -> None:
-        try:
-            done.exception()
-        except (asyncio.CancelledError, Exception):
-            pass
-
-    task.add_done_callback(consume)

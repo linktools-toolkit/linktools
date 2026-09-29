@@ -26,6 +26,10 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
   proof that its owned process tree is quiescent.
 - Architecture and release gates encode long-lived invariants only. Do not encode current package names, module depth, class names, or layout as policy.
 - Build/release tooling must not become a second owner of Runtime semantic truth.
+- Keep Runtime's root API limited to lifecycle, metadata, and domain entry points. Domain-specific actions belong to the owning domain facade; cross-domain adapters belong to the target domain rather than the Runtime root.
+- Keep Task definition identity, TaskGraph invocation data, and scheduling dependencies separate. A scheduling dependency constrains execution order only; it becomes model-visible input only through an explicit, versioned input contract that reads the durable result.
+- Recovery authorization and recovered execution identity are separate facts. The recovery actor authorizes the control operation; resumed execution keeps the principal admitted with the durable graph.
+- An execution referenced by a TaskGraph must retain terminal data until the graph has durably established its execution binding/handoff. Caller cancellation must not reopen that gap.
 
 ### Durable contracts and identity
 
