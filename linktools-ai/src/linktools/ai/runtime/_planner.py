@@ -2238,6 +2238,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             request=False,
         )
         if isinstance(handler, _TaskRunnerAdapter):
+            if execution_cancelled and isinstance(
+                handler.runner,
+                RuntimeAgentTaskRunner,
+            ):
+                return
             await handler.runner.cancel(
                 replace(invocation, execution_id=execution_id),
             )
