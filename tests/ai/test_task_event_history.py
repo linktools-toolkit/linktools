@@ -21,6 +21,7 @@ from linktools.ai.task import (
     TaskGraphRequest,
     TaskExpanderRef,
     TaskNode,
+    TaskTerminalRecord,
 )
 from linktools.ai.storage import FilesystemObjectStore
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -253,6 +254,98 @@ async def test_task_expansion_commits_topology_and_events_atomically() -> None:
         )
         assert replayed is not None
         assert "not-committed" not in {node.node_id for node in replayed.nodes}
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("commit_unknown_at", ("before", "after"))
+async def test_expansion_commit_unknown_preserves_atomic_readback_and_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    commit_unknown_at: str,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace=f"task-expansion-unknown-{commit_unknown_at}", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph(
+            f"expansion-unknown-{commit_unknown_at}",
+            (TaskNode("root", expander=TaskExpanderRef("application.expand", 1)),),
+        )
+        await admit_graph(state, graph)
+        lease = await repository.claim(
+            graph.graph_id,
+            "root",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        child = TaskNode("child", dependencies=("root",))
+        store = repository.state_store
+        original_mutate = store.mutate
+        injected = False
+
+        async def inject_commit_unknown(operation):
+            nonlocal injected
+            if not injected and commit_unknown_at == "before":
+                injected = True
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            result = await original_mutate(operation)
+            if not injected and commit_unknown_at == "after":
+                injected = True
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            return result
+
+        monkeypatch.setattr(store, "mutate", inject_commit_unknown)
+        async def complete() -> TaskTerminalRecord:
+            return await repository.complete(
+                lease,
+                tenant_id="tenant",
+                execution_id="execution-root",
+                result_digest="a" * 64,
+                expanded_nodes=(child,),
+            )
+
+        if commit_unknown_at == "before":
+            with pytest.raises(AIError) as unknown:
+                await complete()
+            assert unknown.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+            pending = await repository.graph_state(
+                graph.graph_id,
+                tenant_id="tenant",
+            )
+            assert pending is not None
+            assert [node.node_id for node in pending.nodes] == ["root"]
+            assert pending.node_states[0].status is TaskStatus.RUNNING
+            monkeypatch.setattr(store, "mutate", original_mutate)
+            terminal = await complete()
+        else:
+            terminal = await complete()
+            assert terminal.status is TaskStatus.SUCCEEDED
+            replay = await complete()
+            assert replay.status is TaskStatus.SUCCEEDED
+
+        assert terminal.status is TaskStatus.SUCCEEDED
+        final = await repository.graph_state(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert final is not None
+        assert [node.node_id for node in final.nodes] == ["child", "root"]
+        assert {node.node_id: node.status for node in final.node_states} == {
+            "child": TaskStatus.PENDING,
+            "root": TaskStatus.SUCCEEDED,
+        }
+        events = await repository.list_events(
+            graph.graph_id,
+            tenant_id="tenant",
+            after_sequence=0,
+            limit=100,
+        )
+        assert sum(
+            event.event_type is TaskEventType.GRAPH_EXPANDED
+            for event in events.items
+        ) == 1
     finally:
         await state.close()
 

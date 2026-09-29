@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -184,6 +185,153 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
 
 
 @pytest.mark.asyncio
+async def test_successful_recover_key_does_not_clear_a_later_recovery_boundary() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-recover-replay", tenant_id="tenant")
+    try:
+        request = await _recovery_graph(state, "recover-replay")
+        launcher = _Launcher()
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            launcher,
+        )
+        recovery_request = RecoverGraphRequest(request.principal, "recover:stable-key")
+
+        first = await service.recover("recover-replay", recovery_request)
+        assert first.status is TaskStatus.PENDING
+        assert launcher.started == ["recover-replay"]
+
+        lease = await state.task.tasks.claim(
+            "recover-replay",
+            "node",
+            tenant_id="tenant",
+            owner="later-worker",
+            lease_seconds=30,
+        )
+        await state.task.tasks.mark_recovery_required(
+            lease,
+            tenant_id="tenant",
+            error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+            error_digest=canonical_sha256(
+                {"graph_id": "recover-replay", "later": "unknown"}
+            ),
+            execution_id="execution",
+        )
+
+        replayed = await service.recover("recover-replay", recovery_request)
+        operation = await state.task.operations.get(
+            idempotency_key_digest("recover:stable-key"),
+            tenant_id="tenant",
+        )
+
+        assert replayed.status is TaskStatus.RECOVERY_REQUIRED
+        assert replayed.node_results[0].status is TaskStatus.RECOVERY_REQUIRED
+        assert launcher.started == ["recover-replay"]
+        assert operation is not None
+        assert operation.status is OperationStatus.SUCCEEDED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_recover_replay_keeps_stable_receipt_as_graph_advances() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-recover-concurrent", tenant_id="tenant")
+    release_first_starts = asyncio.Event()
+    both_first_starts = asyncio.Event()
+    first: asyncio.Task | None = None
+    second: asyncio.Task | None = None
+    try:
+        request = _request("recover-concurrent")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            request.graph,
+        )
+
+        class _ProgressLauncher(_Launcher):
+            async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:
+                await super().start(launch)
+                if len(self.started) <= 2:
+                    if len(self.started) == 2:
+                        both_first_starts.set()
+                    await release_first_starts.wait()
+                return TaskGraphHandle(launch.graph_id)
+
+        launcher = _ProgressLauncher()
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            launcher,
+        )
+        recovery_request = RecoverGraphRequest(request.principal, "recover:concurrent")
+        first = asyncio.create_task(
+            service.recover("recover-concurrent", recovery_request)
+        )
+        second = asyncio.create_task(
+            service.recover("recover-concurrent", recovery_request)
+        )
+        await asyncio.wait_for(both_first_starts.wait(), 1)
+
+        lease = await state.task.tasks.claim(
+            "recover-concurrent",
+            "node",
+            tenant_id="tenant",
+            owner="concurrent-worker",
+            lease_seconds=30,
+        )
+        third = await service.recover("recover-concurrent", recovery_request)
+        assert third.status is TaskStatus.RUNNING
+
+        await state.task.tasks.complete(
+            lease,
+            tenant_id="tenant",
+            execution_id="execution-concurrent",
+            result_digest="b" * 64,
+        )
+        after_completion = await service.recover(
+            "recover-concurrent",
+            recovery_request,
+        )
+        assert after_completion.status is TaskStatus.SUCCEEDED
+
+        other = _request("recover-concurrent-other")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(other),
+            other.graph,
+        )
+        with pytest.raises(AIError) as conflicting_request:
+            await service.recover(
+                other.graph.graph_id,
+                RecoverGraphRequest(other.principal, "recover:concurrent"),
+            )
+        assert conflicting_request.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+
+        release_first_starts.set()
+        first_result, second_result = await asyncio.gather(first, second)
+        assert first_result.status is TaskStatus.SUCCEEDED
+        assert second_result.status is TaskStatus.SUCCEEDED
+        assert launcher.started == ["recover-concurrent"] * 3
+
+        operation = await state.task.operations.get(
+            idempotency_key_digest("recover:concurrent"),
+            tenant_id="tenant",
+        )
+        assert operation is not None
+        assert operation.status is OperationStatus.SUCCEEDED
+        assert operation.result_ref == "recover-concurrent"
+        assert operation.result_digest == canonical_sha256(
+            {"graph_id": "recover-concurrent"}
+        )
+    finally:
+        release_first_starts.set()
+        blocked = tuple(task for task in (first, second) if task is not None)
+        if blocked:
+            await asyncio.gather(*blocked, return_exceptions=True)
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_recovery_actor_does_not_replace_admitted_execution_principal() -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
@@ -309,6 +457,72 @@ async def test_cancel_intent_stays_unknown_until_execution_fact_is_available() -
         assert launcher.cancelled == ["cancel"]
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+async def test_effect_unknown_cancel_is_discovered_after_filesystem_reopen(
+    tmp_path: Path,
+) -> None:
+    storage_root = tmp_path / "cancel-effect-unknown"
+    state = RuntimeStorage.filesystem(storage_root)
+    await state.initialize(namespace="task-service-cancel-reopen", tenant_id="tenant")
+    try:
+        request = await _recovery_graph(state, "cancel-reopen")
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            _Launcher(),
+        )
+        cancelled = await service.cancel(
+            "cancel-reopen",
+            CancelGraphRequest(request.principal, "cancel:reopen"),
+        )
+        operation_id = idempotency_key_digest("cancel:reopen")
+        operation = await state.task.operations.get(
+            operation_id,
+            tenant_id="tenant",
+        )
+
+        assert cancelled.status is TaskStatus.RECOVERY_REQUIRED
+        assert operation is not None
+        assert operation.status is OperationStatus.EFFECT_UNKNOWN
+    finally:
+        await state.close()
+
+    reopened = RuntimeStorage.filesystem(storage_root)
+    await reopened.initialize(namespace="task-service-cancel-reopen", tenant_id="tenant")
+    try:
+        launcher = _Launcher()
+        service = DefaultTaskGraphService(
+            reopened.task,
+            TenantAuthorizationPolicy("tenant"),
+            launcher,
+        )
+        pending = await reopened.task.operations.list_pending(
+            ResourceKind.TASK_GRAPH,
+            "cancel-reopen",
+            tenant_id="tenant",
+            limit=10,
+            states=frozenset({OperationStatus.EFFECT_UNKNOWN}),
+        )
+        assert [item.operation_id for item in pending] == [operation_id]
+
+        recovered = await service.recover(
+            "cancel-reopen",
+            RecoverGraphRequest(request.principal, "recover:cancel-reopen"),
+        )
+        cancel_operation = await reopened.task.operations.get(
+            operation_id,
+            tenant_id="tenant",
+        )
+
+        assert recovered.status is TaskStatus.RECOVERY_REQUIRED
+        assert cancel_operation is not None
+        assert cancel_operation.status is OperationStatus.EFFECT_UNKNOWN
+        assert launcher.started == []
+        assert launcher.cancelled == []
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio
