@@ -219,6 +219,7 @@ def _running_interaction(
         duration_ns=None,
         usage=None,
         started_at=started_at,
+        finished_at=None,
     )
 
 
