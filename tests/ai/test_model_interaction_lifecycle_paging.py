@@ -265,7 +265,7 @@ def _reader() -> tuple[StepExecutionHistoryReader, _Executions, _StagingStore]:
             executions=executions,  # type: ignore[arg-type]
             store=store,  # type: ignore[arg-type]
             cursor_signer=HmacCursorSigner("lifecycle", b"lifecycle-key"),
-            lifecycle_store=store,
+            interaction_staging_store=store,
         ),
         executions,
         store,

@@ -199,7 +199,7 @@ class _ToolOperationHistoryReader(Protocol):
     ) -> tuple[ToolOperationRecord, ...]: ...
 
 
-class _ModelInteractionLifecycleStore(Protocol):
+class _ModelInteractionStagingStore(Protocol):
     async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None: ...
 
     async def model_interaction_history_high_water(
@@ -233,7 +233,7 @@ class StepExecutionHistoryReader:
         store: AgentRunStore,
         cursor_signer: CursorSigner,
         tool_operations: "_ToolOperationHistoryReader | None" = None,
-        lifecycle_store: "_ModelInteractionLifecycleStore | None" = None,
+        interaction_staging_store: "_ModelInteractionStagingStore | None" = None,
     ) -> None:
         try:
             validate_persistence_namespace(namespace)
@@ -244,7 +244,7 @@ class StepExecutionHistoryReader:
         self._store = store
         self._cursor_signer = cursor_signer
         self._tool_operations = tool_operations
-        self._lifecycle_store = lifecycle_store
+        self._interaction_staging_store = interaction_staging_store
 
     async def trace(
         self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int
@@ -502,12 +502,12 @@ class StepExecutionHistoryReader:
                         execution_id=source.record.execution_id,
                         agent_run_sequence=source.agent_run_sequence,
                     )
-                    if self._lifecycle_store is None:
+                    if self._interaction_staging_store is None:
                         high_water = await self._store.model_interaction_count(
                             agent_run_id=agent_run_id
                         )
                     else:
-                        high_water = await self._lifecycle_store.model_interaction_history_high_water(
+                        high_water = await self._interaction_staging_store.model_interaction_history_high_water(
                             agent_run_id=agent_run_id
                         )
                     captured.append(
@@ -570,8 +570,8 @@ class StepExecutionHistoryReader:
             )
             fetch_limit = min(remaining, available)
             staged_values: list[StagedModelInteraction] = []
-            if self._lifecycle_store is not None:
-                interactions, staged_values = await self._lifecycle_store.list_model_interaction_history_snapshot(
+            if self._interaction_staging_store is not None:
+                interactions, staged_values = await self._interaction_staging_store.list_model_interaction_history_snapshot(
                     agent_run_id=agent_run_id,
                     after_request_sequence=after_request_sequence,
                     limit=fetch_limit,
@@ -628,10 +628,10 @@ class StepExecutionHistoryReader:
         for occurrence_group in _interaction_occurrence_groups(staged_occurrences):
             resolved_values: tuple[object, ...]
             if include_content:
-                if self._lifecycle_store is None:
+                if self._interaction_staging_store is None:
                     raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
                 resolved_values = tuple(
-                    await self._lifecycle_store.resolve_model_interactions(
+                    await self._interaction_staging_store.resolve_model_interactions(
                         tuple(value.interaction for value in occurrence_group)
                     )
                 )
@@ -1552,8 +1552,8 @@ class StepExecutionHistoryReader:
                 agent_run_sequence=sequence,
             )
             run = await self._store.get_agent_run(agent_run_id=deterministic_id)
-            if run is None and self._lifecycle_store is not None:
-                run = await self._lifecycle_store.get_agent_run(
+            if run is None and self._interaction_staging_store is not None:
+                run = await self._interaction_staging_store.get_agent_run(
                     agent_run_id=deterministic_id
                 )
             if run is None:
@@ -1598,8 +1598,8 @@ class StepExecutionHistoryReader:
                 agent_run_sequence=sequence,
             )
             run = await self._store.get_agent_run(agent_run_id=deterministic_id)
-            if run is None and self._lifecycle_store is not None:
-                run = await self._lifecycle_store.get_agent_run(
+            if run is None and self._interaction_staging_store is not None:
+                run = await self._interaction_staging_store.get_agent_run(
                     agent_run_id=deterministic_id
                 )
             if run is None:

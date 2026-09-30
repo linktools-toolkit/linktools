@@ -403,7 +403,7 @@ def _execution_history_reader(
         store=storage.run_store.read_store(RuntimeDomain.EXECUTION),
         cursor_signer=HmacCursorSigner("execution-history", runtime_token_seed),
         tool_operations=storage.recovery.tools,
-        lifecycle_store=storage.run_store,
+        interaction_staging_store=storage.run_store,
     )
 
 
