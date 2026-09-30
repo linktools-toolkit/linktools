@@ -1178,6 +1178,8 @@ def _crash_session_process(
     original_complete = RuntimeToolOperationBridge.complete
     original_checkpoint = RuntimeAgentRunStore.save_checkpoint
     original_success = LocalExecutionBackend._commit_success
+    original_reconcile_handoff = LocalExecutionBackend._reconcile_handoff
+    original_commit_reconciled = LocalExecutionBackend._commit_reconciled_terminal
     original_activate = RuntimeStateCommands.commit_agent_attempt_checkpoint
     original_admission = RuntimeStateCommands.commit_tool_admission
 
@@ -1230,11 +1232,30 @@ def _crash_session_process(
             os._exit(91)
         return result
 
+    async def reconcile_handoff(
+        self: LocalExecutionBackend,
+        checkpoint: Any,
+    ) -> Any:
+        if phase == "handoff_prepared":
+            os._exit(91)
+        return await original_reconcile_handoff(self, checkpoint)
+
+    async def commit_reconciled(
+        self: LocalExecutionBackend,
+        checkpoint: Any,
+    ) -> Any:
+        result = await original_commit_reconciled(self, checkpoint)
+        if phase == "terminal_before_handoff_complete":
+            os._exit(91)
+        return result
+
     RuntimeToolOperationBridge.complete = complete
     RuntimeStateCommands.commit_agent_attempt_checkpoint = activate
     RuntimeStateCommands.commit_tool_admission = admit
     RuntimeAgentRunStore.save_checkpoint = save_checkpoint
     LocalExecutionBackend._commit_success = commit_success
+    LocalExecutionBackend._reconcile_handoff = reconcile_handoff
+    LocalExecutionBackend._commit_reconciled_terminal = commit_reconciled
 
     async def run() -> None:
         if backend == "sqlite":
@@ -1389,6 +1410,91 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
         await state.close()
         if engine is not None:
             await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "expected_status"),
+    (
+        ("handoff_prepared", ExecutionStatus.STARTED),
+        ("terminal_before_handoff_complete", ExecutionStatus.SUCCEEDED),
+    ),
+)
+async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restart(
+    tmp_path: Path,
+    phase: str,
+    expected_status: ExecutionStatus,
+) -> None:
+    database = tmp_path / "handoff-restart.db"
+    effect_log = tmp_path / "handoff-effects.txt"
+    await _exit_at_boundary(database, effect_log, "split_sqlite", phase)
+    committed_effects = effect_log.read_text().splitlines()
+    assert len(committed_effects) == 1
+    execution_id = committed_effects[0]
+
+    inspection = _split_sqlite_storage(database)
+    await inspection.initialize(
+        namespace="session-tool-crash",
+        tenant_id="default",
+    )
+    current = await inspection.execution.executions.get(
+        execution_id,
+        tenant_id="default",
+    )
+    checkpoint = await inspection.recovery.checkpoints.get(
+        execution_id,
+        tenant_id="default",
+    )
+    assert current is not None
+    assert current.status is expected_status
+    assert checkpoint is not None
+    assert checkpoint.state.value == "handoff"
+    assert checkpoint.handoff_phase.value == "prepared"
+    await inspection.close()
+
+    state = _split_sqlite_storage(database)
+    calls: list[str] = []
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=effect_log,
+    )
+    try:
+        async with Runtime.open(
+            "session-tool-crash",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            session = runtime.agents.get("default").session("session")
+            execution = await session.start("inspect", idempotency_key="turn-1")
+            result = await execution.wait(timeout_seconds=15)
+            assert execution.execution_id == execution_id
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert calls == []
+            assert effect_log.read_text().splitlines() == committed_effects
+            completed = await state.recovery.checkpoints.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert completed is not None
+            assert completed.state.value == "completed"
+            assert completed.handoff_phase.value == "completed"
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id is None
+            history = await session.history()
+            assert _relevant_kinds(history.items) == [
+                "user",
+                "tool_call",
+                "tool_result",
+                "assistant",
+            ]
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio

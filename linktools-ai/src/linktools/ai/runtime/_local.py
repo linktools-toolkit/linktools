@@ -1789,11 +1789,12 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if handoff.source_agent_run_id is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._agent_run_lifecycle.materialize_from_recovery(
-                    target=RuntimeDomain.EXECUTION,
-                    agent_run_id=handoff.source_agent_run_id,
-                    execution_id=checkpoint.execution_id,
-                )
+                if execution.status is not ExecutionStatus.SUCCEEDED:
+                    await self._agent_run_lifecycle.materialize_from_recovery(
+                        target=RuntimeDomain.EXECUTION,
+                        agent_run_id=handoff.source_agent_run_id,
+                        execution_id=checkpoint.execution_id,
+                    )
                 agent_run_checkpoint = await self._run_stores[
                     RuntimeDomain.EXECUTION
                 ].latest_checkpoint(

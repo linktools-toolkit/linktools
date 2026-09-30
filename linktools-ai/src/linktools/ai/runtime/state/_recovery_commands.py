@@ -540,7 +540,7 @@ class RuntimeRecoveryCommands:
                     return _partial()
                 if ledger is not None:
                     if not _same_resolution_operation(ledger, operation):
-                        return _partial()
+                        return CommitObservation(DurableCommitState.NOT_COMMITTED)
                     if _resolved_tool_matches(
                         tool,
                         expected_fence=expected_fence,
@@ -554,7 +554,6 @@ class RuntimeRecoveryCommands:
                 if (
                     tool.execution_id == operation.execution_id
                     and tool.status is ToolOperationStatus.EFFECT_UNKNOWN
-                    and tool.fence == expected_fence
                 ):
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 return _partial()
