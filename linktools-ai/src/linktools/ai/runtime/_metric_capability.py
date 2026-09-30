@@ -459,9 +459,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         }
         try:
             await self._event_sink(event_type, payload)
-        except asyncio.CancelledError:
-            raise
-        except RunCancelled:
+        except (asyncio.CancelledError, RunCancelled, AIError):
             raise
         except Exception as error:
             raise AIError(
