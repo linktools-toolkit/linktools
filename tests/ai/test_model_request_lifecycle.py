@@ -1266,7 +1266,10 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
             wait_task = asyncio.create_task(execution.wait())
             try:
                 await asyncio.wait_for(models.entered.wait(), timeout=5)
-                first = await execution.model_interactions(limit=1)
+                first = await execution.model_interactions(
+                    limit=1,
+                    include_content=True,
+                )
                 assert [(item.request_sequence, item.status) for item in first.items] == [
                     (1, "SUCCEEDED")
                 ]
