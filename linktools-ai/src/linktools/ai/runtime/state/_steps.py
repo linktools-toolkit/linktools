@@ -480,25 +480,63 @@ class RuntimeAgentRunStore(AgentRunStore):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return tuple(messages)
 
-            resolved_values: list[object] = []
-            for value in staged:
-                request = await resolve_projection(value.request_context)
-                response = (
-                    None
-                    if value.response_context is None
-                    else await resolve_projection(value.response_context)
-                )
-                resolved_values.append(
-                    (
-                        request,
-                        response,
-                        self._staging.staged_payload(
-                            agent_run_id,
-                            value.request_envelope_digest,
-                        ),
+            try:
+                resolved_values: list[object] = []
+                for value in staged:
+                    request = await resolve_projection(value.request_context)
+                    response = (
+                        None
+                        if value.response_context is None
+                        else await resolve_projection(value.response_context)
                     )
+                    resolved_values.append(
+                        (
+                            request,
+                            response,
+                            self._staging.staged_payload(
+                                agent_run_id,
+                                value.request_envelope_digest,
+                            ),
+                        )
+                    )
+                return resolved_values
+            except AIError:
+                if self._staging.get_agent_run_local(agent_run_id) is not None:
+                    raise
+                archive = self.read_store(RuntimeDomain.EXECUTION)
+                archived = await archive.list_model_interactions(
+                    agent_run_id=agent_run_id,
+                    after_request_sequence=staged[0].request_sequence - 1,
+                    limit=len(staged),
                 )
-            return resolved_values
+                if (
+                    len(archived) != len(staged)
+                    or any(
+                        not isinstance(record, ModelInteractionRecord)
+                        or record.agent_run_id != agent_run_id
+                        or record.request_sequence != staged_value.request_sequence
+                        for record, staged_value in zip(archived, staged, strict=True)
+                    )
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                resolved = await archive.resolve_model_interactions(archived)
+                if len(resolved) != len(staged):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                result: list[object] = []
+                for staged_value, value in zip(staged, resolved, strict=True):
+                    if not isinstance(value, tuple) or len(value) != 3:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    request, response, envelope = value
+                    result.append(
+                        (
+                            request,
+                            response
+                            if staged_value.response_context is not None
+                            else None,
+                            envelope,
+                        )
+                    )
+                return result
         return await self._staging.resolve_model_interactions(values)
 
     def read_store(self, runtime_domain: RuntimeDomain) -> AgentRunStore:

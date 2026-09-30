@@ -1300,7 +1300,7 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                     execution.model_interactions(
                         cursor=first.next_cursor,
                         limit=1,
-                        include_content=False,
+                        include_content=True,
                     )
                 )
                 await asyncio.wait_for(archive_read_started.wait(), timeout=3)
@@ -1320,6 +1320,8 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                     (item.request_sequence, item.status)
                     for item in captured_page.items
                 ] == [(2, "RUNNING")]
+                assert captured_page.items[0].request["messages"]
+                assert captured_page.items[0].response is None
 
                 durable_page = await execution.model_interactions(
                     cursor=first.next_cursor,
