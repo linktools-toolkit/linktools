@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime usage aggregation over durable model-request facts."""
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -52,6 +53,8 @@ def _interaction(
         "MODEL_FAILED" if status == "FAILED" else None,
         duration_ns,
         usage,
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 
 

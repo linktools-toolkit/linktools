@@ -45,6 +45,7 @@ from linktools.ai.runtime.state._steps import (
 
 
 def _interaction(sequence: int) -> StagedModelInteraction:
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return StagedModelInteraction(
         agent_run_id="run",
         step_index=1,
@@ -59,6 +60,8 @@ def _interaction(sequence: int) -> StagedModelInteraction:
         error_code=None,
         duration_ns=0,
         usage=None,
+        started_at=timestamp,
+        finished_at=timestamp,
     )
 
 
@@ -204,6 +207,7 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
             source_refs=(0,),
         )
         envelope_digest, _ = intern(b"{}")
+        timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
         interaction = StagedModelInteraction(
             agent_run_id="run",
             step_index=1,
@@ -218,6 +222,8 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
             error_code=None,
             duration_ns=0,
             usage=None,
+            started_at=timestamp,
+            finished_at=timestamp,
         )
 
         prepared = await archive.prepare_interactions(

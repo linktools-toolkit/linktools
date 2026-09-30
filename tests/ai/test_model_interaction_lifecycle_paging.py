@@ -167,6 +167,9 @@ def _record(execution_id: str, *, child: bool = False) -> object:
 
 
 def _interaction(agent_id: str, sequence: int) -> ModelInteractionRecord:
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(
+        milliseconds=sequence
+    )
     return ModelInteractionRecord(
         agent_id,
         step_index=sequence,
@@ -184,6 +187,8 @@ def _interaction(agent_id: str, sequence: int) -> ModelInteractionRecord:
         error_code=None,
         duration_ns=0,
         usage=None,
+        started_at=started_at,
+        finished_at=started_at + timedelta(milliseconds=1),
     )
 
 
