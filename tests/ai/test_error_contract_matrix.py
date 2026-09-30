@@ -3,8 +3,8 @@
 """Required error-contract matrix coverage."""
 
 import json
-from datetime import datetime, timezone
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -14,8 +14,8 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     JsonValue,
-    Principal,
     Page,
+    Principal,
     ResourceKind,
     ResourceRef,
     StructuredRedactor,
@@ -34,8 +34,10 @@ from linktools.ai.runtime._agent_executor import (
     _execution_error,
     _map_event,
 )
-from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._execution import _ExecutionRuntimeBridge
+from linktools.ai.runtime._execution import (
+    DefaultExecutionService,
+    _ExecutionRuntimeBridge,
+)
 from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
 from linktools.ai.storage import StoragePath
@@ -328,7 +330,7 @@ async def test_task_wait_timeout_has_stable_code() -> None:
     assert error.value.code is ErrorCode.TASK_WAIT_TIMEOUT
 
 
-class _FailedExecution:
+class _ResultExecution:
     def __init__(self, result: ExecutionResult) -> None:
         self._result = result
 
@@ -340,7 +342,7 @@ class _FailedExecution:
         raise AssertionError("JSON result path must not scan execution events")
 
 
-class _FailedAgent:
+class _ResultAgent:
     def __init__(self, result: ExecutionResult) -> None:
         self._result = result
 
@@ -352,20 +354,20 @@ class _FailedAgent:
         memory_scope: str,
         planning: bool,
         thinking: bool,
-    ) -> _FailedExecution:
+    ) -> _ResultExecution:
         del prompt, session_id, memory_scope, planning, thinking
-        return _FailedExecution(self._result)
+        return _ResultExecution(self._result)
 
 
-class _FailedRuntime:
+class _ResultRuntime:
     def __init__(self, result: ExecutionResult) -> None:
-        self._agent = _FailedAgent(result)
+        self._agent = _ResultAgent(result)
 
     @property
-    def agents(self) -> "_FailedRuntime":
+    def agents(self) -> "_ResultRuntime":
         return self
 
-    def get(self) -> _FailedAgent:
+    def get(self) -> _ResultAgent:
         return self._agent
 
 
@@ -442,7 +444,7 @@ class _StreamingRuntime:
 async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    runtime = _FailedRuntime(_failed_result(details={"status_code": 429}))
+    runtime = _ResultRuntime(_failed_result(details={"status_code": 429}))
     with pytest.raises(CommandError):
         await _emit_result(
             runtime,  # type: ignore[arg-type]
@@ -456,6 +458,37 @@ async def test_cli_json_failed_result_uses_result_contract_without_event_scan(
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["error_code"] == ErrorCode.MODEL_RATE_LIMITED.value
     assert payload["safe_error_details"] == {"status_code": 429}
+
+
+@pytest.mark.asyncio
+async def test_cli_json_success_result_uses_result_contract_without_event_scan(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = ExecutionResult(
+        "successful-execution",
+        ExecutionStatus.SUCCEEDED,
+        {"text": "done"},
+        UsageMetrics(),
+        None,
+        {},
+    )
+    exit_code = await _emit_result(
+        _ResultRuntime(result),  # type: ignore[arg-type]
+        "prompt",
+        "session",
+        "memory",
+        True,
+        False,
+        False,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["execution_id"] == "successful-execution"
+    assert payload["status"] == ExecutionStatus.SUCCEEDED.value
+    assert payload["output"] == {"text": "done"}
+    assert payload["error_code"] is None
+    assert payload["safe_error_details"] == {}
 
 
 @pytest.mark.asyncio

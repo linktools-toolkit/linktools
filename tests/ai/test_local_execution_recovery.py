@@ -417,6 +417,20 @@ async def test_local_cancel_with_tool_ledger_read_failure_is_not_confirmed() -> 
     assert backend._execution.executions.record.status is ExecutionStatus.CANCELLING
 
 
+@pytest.mark.asyncio
+async def test_local_failure_does_not_terminalize_when_tool_ledger_read_fails() -> None:
+    backend = _backend()
+    current = _record()
+    backend._execution.executions.record = current
+    backend._tool_operations = _FailingToolOperations()
+
+    with pytest.raises(AIError) as raised:
+        await backend._commit_failure(current, ValueError("unrelated"))
+
+    assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert backend._execution.executions.record is current
+
+
 class _Checkpoints:
     def __init__(self, checkpoint: object | None) -> None:
         self.checkpoint = checkpoint
