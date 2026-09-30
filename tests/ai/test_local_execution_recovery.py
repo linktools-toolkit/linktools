@@ -130,7 +130,16 @@ class _StartCommands:
 def _backend() -> LocalExecutionBackend:
     record = _record()
     backend = object.__new__(LocalExecutionBackend)
+
+    async def no_resolution_operations(
+        *_args: object, **_kwargs: object
+    ) -> tuple[object, ...]:
+        return ()
+
     backend._execution = _ExecutionState(record)
+    backend._recovery = SimpleNamespace(
+        operations=SimpleNamespace(list_pending=no_resolution_operations)
+    )
     binding = _binding()
     backend._catalog = SimpleNamespace(binding=lambda digest: binding)
     backend._restore_binding = None
@@ -452,8 +461,9 @@ class _Sessions:
         *,
         tenant_id: str,
         execution_id: str,
-    ) -> None:
+    ) -> object:
         self.releases.append((session_id, tenant_id, execution_id))
+        return SimpleNamespace(active_execution_id=None)
 
 
 @pytest.mark.asyncio

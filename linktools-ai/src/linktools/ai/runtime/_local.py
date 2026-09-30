@@ -1038,21 +1038,32 @@ class LocalExecutionBackend:
             current.execution_id,
             tenant_id=self._tenant_id,
         )
+        finish_checkpoint = False
         if checkpoint is not None:
             if checkpoint.terminal_handoff is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if checkpoint.state is RecoveryCheckpointState.ADMITTED:
                 if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._finish_checkpoint(checkpoint)
+                finish_checkpoint = True
             elif checkpoint.state is not RecoveryCheckpointState.COMPLETED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.session_id is not None:
-            await self._conversation.sessions.release_execution(
+            released = await self._conversation.sessions.release_execution(
                 current.session_id,
                 tenant_id=self._tenant_id,
                 execution_id=current.execution_id,
             )
+            if released.active_execution_id == current.execution_id:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "execution_id": current.execution_id,
+                        "phase": "start_cleanup_session_release",
+                    },
+                )
+        if finish_checkpoint and checkpoint is not None:
+            await self._finish_checkpoint(checkpoint)
         _logger.info("start admission aborted: execution=%s", current.execution_id)
 
     def _task_done(self, execution_id: str, task: asyncio.Task[None]) -> None:
@@ -3661,12 +3672,44 @@ class LocalExecutionBackend:
             for record in records
             if record.status is ToolOperationStatus.EFFECT_UNKNOWN
         )
-        pending = sum(
-            record.status
-            in {ToolOperationStatus.PENDING, ToolOperationStatus.CLAIMED}
-            for record in records
-        )
+        pending = 0
+        for record in records:
+            if record.status is ToolOperationStatus.CLAIMED:
+                pending += 1
+            elif (
+                record.status is ToolOperationStatus.PENDING
+                and not await self._has_confirmed_not_applied_resolution(record)
+            ):
+                pending += 1
         return effects, pending
+
+    async def _has_confirmed_not_applied_resolution(
+        self,
+        operation: ToolOperationRecord,
+    ) -> bool:
+        resolutions = await self._recovery.operations.list_pending(
+            ResourceKind.TOOL_OPERATION,
+            operation.tool_operation_id,
+            tenant_id=self._tenant_id,
+            limit=1000,
+            states=frozenset({OperationStatus.SUCCEEDED}),
+        )
+        result_digest = canonical_sha256(
+            {
+                "operation_id": operation.tool_operation_id,
+                "fence": operation.fence,
+                "status": ToolOperationStatus.PENDING.value,
+                "payload_digest": None,
+            }
+        )
+        return any(
+            resolution.operation_kind is OperationKind.TOOL_EFFECT_RESOLVE
+            and resolution.resource_kind is ResourceKind.TOOL_OPERATION
+            and resolution.resource_id == operation.tool_operation_id
+            and resolution.result_ref == operation.tool_operation_id
+            and resolution.result_digest == result_digest
+            for resolution in resolutions
+        )
 
     async def _require_tool_effect_recovery(
         self,
@@ -3721,6 +3764,19 @@ class LocalExecutionBackend:
     ) -> tuple[ExecutionRecoveryEffect, ...]:
         """Return unresolved tool effects through the recovery coordinator."""
         return await self._recovery_coordinator.recovery_effects(
+            execution_id,
+            tenant_id=tenant_id,
+        )
+
+    async def recover_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> ExecutionRecord:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return await self._recovery_coordinator.recover_execution(
             execution_id,
             tenant_id=tenant_id,
         )
@@ -3800,6 +3856,13 @@ class LocalExecutionBackend:
             execution_id,
             tenant_id=tenant_id,
             limit=257,
+            states=frozenset(
+                {
+                    OperationStatus.PENDING,
+                    OperationStatus.RUNNING,
+                    OperationStatus.EFFECT_UNKNOWN,
+                }
+            ),
         )
         cancel = tuple(
             value
@@ -3850,6 +3913,7 @@ class LocalExecutionBackend:
         if current.status not in {
             OperationStatus.PENDING,
             OperationStatus.RUNNING,
+            OperationStatus.EFFECT_UNKNOWN,
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         updated = OperationLedgerRecord(
