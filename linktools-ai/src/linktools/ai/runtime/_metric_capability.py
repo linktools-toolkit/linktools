@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -185,7 +185,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 if interrupted:
                     raise asyncio.CancelledError from error
                 raise
-            except BaseException:
+            except Exception:
                 interrupted = await self._complete_request(
                     fact,
                     run_context,
@@ -227,7 +227,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 if interrupted:
                     raise asyncio.CancelledError from error
                 raise
-            except BaseException as error:
+            except Exception as error:
                 interrupted = await self._complete_request(
                     fact,
                     run_context,
@@ -275,7 +275,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 if interrupted:
                     raise asyncio.CancelledError from error
                 raise
-            except BaseException as error:
+            except Exception as error:
                 interrupted = await self._complete_request(
                     fact,
                     run_context,
@@ -343,25 +343,18 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         parameters: ModelRequestParameters,
         streaming: bool = False,
         source_messages: Sequence[ModelMessage] | None = None,
-        *,
-        on_accepted: Callable[[], None] | None = None,
     ) -> None:
         if phase == "started":
-            try:
-                self._stage_request(
-                    fact,
-                    messages=messages,
-                    model_settings=model_settings,
-                    parameters=parameters,
-                    streaming=streaming,
-                    model=model,
-                    model_id=str(getattr(model, "model_id", "")) or None,
-                    source_messages=source_messages,
-                )
-            except BaseException:
-                raise
-            if on_accepted is not None:
-                on_accepted()
+            self._stage_request(
+                fact,
+                messages=messages,
+                model_settings=model_settings,
+                parameters=parameters,
+                streaming=streaming,
+                model=model,
+                model_id=str(getattr(model, "model_id", "")) or None,
+                source_messages=source_messages,
+            )
             try:
                 await self._record_request_event(fact, phase="started")
                 await self._publish_request_event(fact, phase="started")
@@ -391,7 +384,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 if interrupted:
                     raise asyncio.CancelledError from error
                 raise
-            except BaseException as error:
+            except Exception as error:
                 interrupted = await self._complete_request(
                     fact,
                     ctx.deps,
@@ -515,7 +508,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             raise
         except RunCancelled:
             raise
-        except BaseException as error:
+        except Exception as error:
             raise AIError(
                 ErrorCode.INTERNAL_ERROR,
                 safe_details={"phase": "model_request_event_publication"},
@@ -571,7 +564,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 error_code=error_code,
             )
 
-        return await _wait_for_handoff(handoff())
+        return await _await_request_handoff(handoff())
 
     def _stage_request(
         self,
@@ -717,22 +710,6 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             self._recorder.try_record(observation)
         except Exception:
             _logger.exception("model metric observation rejected")
-
-
-async def _wait_for_handoff(awaitable: Awaitable[None]) -> bool:
-    task = asyncio.create_task(awaitable)
-    interrupted = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.cancelled():
-                raise
-            interrupted = True
-    if task.cancelled():
-        raise asyncio.CancelledError
-    task.result()
-    return interrupted
 
 
 def _event_usage(response: ModelResponse | None) -> JsonValue | None:

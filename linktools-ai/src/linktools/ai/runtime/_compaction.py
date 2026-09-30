@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
@@ -28,28 +28,12 @@ from pydantic_ai_harness.compaction import (
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ..workspace import validate_workspace_path
-from ._journal import ModelRequestFact, ModelRequestJournal
+from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
 from ._message import binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20
 _logger = environ.get_logger("ai.runtime.compaction")
-
-
-async def _wait_for_compaction_handoff(awaitable: Awaitable[None]) -> bool:
-    task = asyncio.create_task(awaitable)
-    interrupted = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.cancelled():
-                raise
-            interrupted = True
-    if task.cancelled():
-        raise asyncio.CancelledError
-    task.result()
-    return interrupted
 
 
 @dataclass(slots=True)
@@ -86,8 +70,6 @@ class ExternalModelRequestRecorder(Protocol):
         parameters: ModelRequestParameters,
         streaming: bool,
         source_messages: Sequence[ModelMessage] | None,
-        *,
-        on_accepted: Callable[[], None] | None = None,
     ) -> None: ...
 
 
@@ -128,11 +110,6 @@ class _ObservedCompactionModel(WrapperModel):
         fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
         request_sequence = fact.request_sequence
         accepted = False
-
-        def mark_accepted() -> None:
-            nonlocal accepted
-            accepted = True
-
         try:
             await self._notify(
                 fact,
@@ -142,8 +119,8 @@ class _ObservedCompactionModel(WrapperModel):
                 messages=messages,
                 model_settings=model_settings,
                 parameters=model_request_parameters,
-                on_accepted=mark_accepted,
             )
+            accepted = True
             try:
                 response = await self.wrapped.request(
                     messages,
@@ -174,7 +151,7 @@ class _ObservedCompactionModel(WrapperModel):
                     parameters=model_request_parameters,
                 )
                 raise
-            except BaseException as error:
+            except Exception as error:
                 await self._finish(
                     request_sequence,
                     status="FAILED",
@@ -187,7 +164,7 @@ class _ObservedCompactionModel(WrapperModel):
                 )
                 raise
             finished = self._journal.finish(request_sequence, status="SUCCEEDED")
-            interrupted = await _wait_for_compaction_handoff(
+            interrupted = await _await_request_handoff(
                 self._notify(
                     finished,
                     phase="completed",
@@ -229,7 +206,7 @@ class _ObservedCompactionModel(WrapperModel):
                     parameters=model_request_parameters,
                 )
             raise
-        except BaseException as error:
+        except Exception as error:
             current = self._journal.current(request_sequence)
             if accepted and current.status is None:
                 await self._finish(
@@ -259,7 +236,7 @@ class _ObservedCompactionModel(WrapperModel):
         parameters: ModelRequestParameters,
     ) -> None:
         finished = self._journal.finish(request_sequence, status=status)
-        interrupted = await _wait_for_compaction_handoff(
+        interrupted = await _await_request_handoff(
             self._notify(
                 finished,
                 phase=phase,
@@ -283,7 +260,6 @@ class _ObservedCompactionModel(WrapperModel):
         messages: Sequence[ModelMessage],
         model_settings: ModelSettings | None,
         parameters: ModelRequestParameters,
-        on_accepted: Callable[[], None] | None = None,
     ) -> None:
         if self._observer is not None:
             await self._observer(
@@ -307,10 +283,7 @@ class _ObservedCompactionModel(WrapperModel):
                 parameters,
                 False,
                 self._source_messages,
-                on_accepted=on_accepted if phase == "started" else None,
             )
-        elif phase == "started" and on_accepted is not None:
-            on_accepted()
 
 
 class CompactionCapability(AbstractCapability[None]):
