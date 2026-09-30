@@ -526,7 +526,7 @@ class ContextProjection:
 
 @dataclass(frozen=True, slots=True)
 class ModelInteractionRecord:
-    """Derived observation of one logical model request."""
+    """Durable observation of one terminal logical model request."""
 
     agent_run_id: str
     step_index: int
@@ -541,6 +541,8 @@ class ModelInteractionRecord:
     error_code: str | None
     duration_ns: int
     usage: UsageMetrics | None
+    started_at: datetime
+    finished_at: datetime
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
 
     def __post_init__(self) -> None:
@@ -551,6 +553,10 @@ class ModelInteractionRecord:
             or self.purpose not in {"agent", "compaction"}
             or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
             or self.duration_ns < 0
+            or not isinstance(self.started_at, datetime)
+            or self.started_at.tzinfo is None
+            or not isinstance(self.finished_at, datetime)
+            or self.finished_at.tzinfo is None
             or not isinstance(self.request_context, ContextProjection)
             or not isinstance(self.request_envelope, RuntimePayloadRef)
         ):

@@ -111,6 +111,8 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
                 staged.error_code,
                 staged.duration_ns,
                 staged.usage,
+                staged.started_at,
+                staged.finished_at,
                 staged.attachments,
             )
             for staged in values

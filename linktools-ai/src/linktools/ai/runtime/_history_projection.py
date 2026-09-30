@@ -654,8 +654,6 @@ class StepExecutionHistoryReader:
                     occurrence.depth,
                     resolved_context,
                     include_content=include_content,
-                    started_at=interaction.started_at,
-                    finished_at=interaction.finished_at,
                 )
         stored_occurrences = tuple(
             value
@@ -663,7 +661,6 @@ class StepExecutionHistoryReader:
             if isinstance(value.interaction, ModelInteractionRecord)
         )
         for occurrence_group in _interaction_occurrence_groups(stored_occurrences):
-            times = await self._model_request_times(occurrence_group[0].interaction.agent_run_id)
             resolved_values: tuple[object, ...]
             if include_content:
                 resolved_values = await self._store.resolve_model_interactions(
@@ -678,10 +675,6 @@ class StepExecutionHistoryReader:
                 resolved_values,
                 strict=True,
             ):
-                started_at, finished_at = times.get(
-                    occurrence.interaction.request_sequence,
-                    (None, None),
-                )
                 selected_items[
                     (occurrence.interaction.agent_run_id, occurrence.interaction.request_sequence)
                 ] = self._project_model_interaction(
@@ -691,8 +684,6 @@ class StepExecutionHistoryReader:
                     occurrence.depth,
                     resolved_context,
                     include_content=include_content,
-                    started_at=started_at,
-                    finished_at=finished_at,
                 )
         selected = tuple(
             selected_items[
@@ -979,8 +970,6 @@ class StepExecutionHistoryReader:
         resolved: object | None,
         *,
         include_content: bool,
-        started_at: datetime | None,
-        finished_at: datetime | None,
     ) -> ModelInteractionItem:
         request: dict[str, JsonValue] = {}
         response: JsonValue | None = None
@@ -1029,36 +1018,9 @@ class StepExecutionHistoryReader:
             duration_ns=interaction.duration_ns,
             usage=interaction.usage,
             content_included=include_content,
-            started_at=started_at,
-            finished_at=finished_at,
+            started_at=interaction.started_at,
+            finished_at=interaction.finished_at,
         )
-
-    async def _model_request_times(
-        self,
-        agent_run_id: str,
-    ) -> dict[int, tuple[datetime | None, datetime | None]]:
-        values: dict[int, list[datetime | None]] = {}
-        for event in await self._store.list_events(agent_run_id=agent_run_id):
-            if event.kind not in {
-                "model_request_started",
-                "model_request_completed",
-                "model_request_failed",
-                "model_request_cancelled",
-            }:
-                continue
-            sequence = _event_request_sequence(event)
-            if sequence is None:
-                continue
-            pair = values.setdefault(sequence, [None, None])
-            index = 0 if event.kind == "model_request_started" else 1
-            timestamp = _event_timestamp(event)
-            if pair[index] is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            pair[index] = timestamp
-        return {
-            sequence: (pair[0], pair[1])
-            for sequence, pair in values.items()
-        }
 
     async def _tool_call_metadata(
         self,

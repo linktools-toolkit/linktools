@@ -93,9 +93,9 @@ class StagedModelInteraction:
     error_code: str | None
     duration_ns: int | None
     usage: UsageMetrics | None
+    started_at: datetime
+    finished_at: datetime | None
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -106,6 +106,13 @@ class StagedModelInteraction:
             or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}
             or self.duration_ns is not None
             and self.duration_ns < 0
+            or not isinstance(self.started_at, datetime)
+            or self.started_at.tzinfo is None
+            or self.finished_at is not None
+            and (
+                not isinstance(self.finished_at, datetime)
+                or self.finished_at.tzinfo is None
+            )
             or len(self.request_envelope_digest) != 64
             or any(
                 value not in "0123456789abcdef"
@@ -128,10 +135,7 @@ class StagedModelInteraction:
             and self.response_context is not None
             or self.status == "FAILED"
             and not self.error_code
-            or self.finished_at is not None
-            and self.started_at is None
             or self.status != "RUNNING"
-            and self.started_at is not None
             and self.finished_at is None
         ):
             raise ValueError("staged model interaction is invalid")

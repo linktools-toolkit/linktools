@@ -338,6 +338,7 @@ class AgentRunRecorder:
                 usage=None,
                 attachments=self._interaction_attachments[fact.request_sequence],
                 started_at=fact.started_at,
+                finished_at=None,
             )
         )
 
