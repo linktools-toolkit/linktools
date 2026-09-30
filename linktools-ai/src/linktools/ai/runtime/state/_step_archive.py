@@ -19,6 +19,7 @@ from ...errors import AIError, ErrorCode
 from ...storage import ObjectStore, StoredPayload
 from .._message import decode_model_messages, encode_model_messages
 from .._model_interaction import (
+    ModelInteractionLifecycle,
     StagedContextSpan,
     StagedModelInteraction,
     context_projection_to_durable,
@@ -353,6 +354,9 @@ class StagingAgentRunStore(AgentRunStore):
         self._events: dict[str, list[StepEvent]] = {}
         self._checkpoints: dict[str, list[AgentRunCheckpoint]] = {}
         self._interactions: dict[str, list[StagedModelInteraction]] = {}
+        self._interaction_lifecycle: dict[
+            str, dict[int, ModelInteractionLifecycle]
+        ] = {}
         self._payloads: dict[str, dict[str, bytes]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -450,6 +454,70 @@ class StagingAgentRunStore(AgentRunStore):
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
         self._interactions.setdefault(interaction.agent_run_id, []).append(interaction)
+
+    def stage_model_interaction_lifecycle(
+        self,
+        interaction: ModelInteractionLifecycle,
+    ) -> None:
+        self._ensure_open()
+        if not isinstance(interaction, ModelInteractionLifecycle):
+            raise TypeError("model interaction lifecycle is invalid")
+        values = self._interaction_lifecycle.setdefault(interaction.agent_run_id, {})
+        previous = values.get(interaction.request_sequence)
+        if previous is None:
+            if interaction.status != "RUNNING":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values[interaction.request_sequence] = interaction
+            return
+        stable_previous = (
+            previous.agent_run_id,
+            previous.step_index,
+            previous.request_sequence,
+            previous.purpose,
+            previous.output_retry_index,
+            previous.model,
+            previous.request,
+            previous.started_at,
+        )
+        stable_current = (
+            interaction.agent_run_id,
+            interaction.step_index,
+            interaction.request_sequence,
+            interaction.purpose,
+            interaction.output_retry_index,
+            interaction.model,
+            interaction.request,
+            interaction.started_at,
+        )
+        if stable_previous != stable_current:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if previous.status != "RUNNING":
+            if previous != interaction:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return
+        if interaction.status == "RUNNING":
+            if previous != interaction:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return
+        values[interaction.request_sequence] = interaction
+
+    async def list_model_interaction_lifecycle(
+        self,
+        *,
+        agent_run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[ModelInteractionLifecycle]:
+        self._ensure_open()
+        _validate_interaction_page(after_request_sequence, limit)
+        values = self._interaction_lifecycle.get(agent_run_id, {})
+        result = [
+            values[sequence]
+            for sequence in sorted(values)
+            if after_request_sequence is None
+            or sequence > after_request_sequence
+        ]
+        return result if limit is None else result[:limit]
 
     async def list_model_interactions(
         self,
@@ -576,6 +644,7 @@ class StagingAgentRunStore(AgentRunStore):
         self._events.pop(agent_run_id, None)
         self._checkpoints.pop(agent_run_id, None)
         self._interactions.pop(agent_run_id, None)
+        self._interaction_lifecycle.pop(agent_run_id, None)
         self._payloads.pop(agent_run_id, None)
 
     def capture_projection_local(

@@ -12,7 +12,7 @@ from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
 from ...errors import AIError, ErrorCode
-from .._model_interaction import StagedModelInteraction
+from .._model_interaction import ModelInteractionLifecycle, StagedModelInteraction
 from ._contracts import (
     ExecutionRunSealHead,
     LoadedContextMessage,
@@ -316,6 +316,65 @@ class RuntimeAgentRunStore(AgentRunStore):
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise TypeError("staged model interaction has no AgentRun identity")
         self._projection_dirty.add(agent_run_id)
+
+    def stage_model_interaction_lifecycle(
+        self,
+        interaction: ModelInteractionLifecycle,
+    ) -> None:
+        self._staging.stage_model_interaction_lifecycle(interaction)
+
+    async def list_model_interaction_lifecycle(
+        self,
+        *,
+        agent_run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[ModelInteractionLifecycle]:
+        await self._ensure_business()
+        return await self._staging.list_model_interaction_lifecycle(
+            agent_run_id=agent_run_id,
+            after_request_sequence=after_request_sequence,
+            limit=limit,
+        )
+
+    async def model_interaction_history_high_water(
+        self,
+        *,
+        agent_run_id: str,
+    ) -> int:
+        """Read a lifecycle-first high water mark across the archive handoff."""
+        await self._ensure_business()
+        lifecycle = await self._staging.list_model_interaction_lifecycle(
+            agent_run_id=agent_run_id
+        )
+        archived = await self.read_store(RuntimeDomain.EXECUTION).model_interaction_count(
+            agent_run_id=agent_run_id
+        )
+        return max(
+            archived,
+            max((item.request_sequence for item in lifecycle), default=0),
+        )
+
+    async def list_model_interaction_history_snapshot(
+        self,
+        *,
+        agent_run_id: str,
+        after_request_sequence: int,
+        limit: int,
+    ) -> tuple[list[object], list[ModelInteractionLifecycle]]:
+        """Capture local identities before reading their durable handoff."""
+        await self._ensure_business()
+        lifecycle = await self._staging.list_model_interaction_lifecycle(
+            agent_run_id=agent_run_id,
+            after_request_sequence=after_request_sequence,
+            limit=limit,
+        )
+        archived = await self.read_store(RuntimeDomain.EXECUTION).list_model_interactions(
+            agent_run_id=agent_run_id,
+            after_request_sequence=after_request_sequence,
+            limit=limit,
+        )
+        return archived, lifecycle
 
     async def list_model_interactions(
         self,

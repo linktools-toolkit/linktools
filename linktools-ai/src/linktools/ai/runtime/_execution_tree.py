@@ -7,7 +7,7 @@ import sys
 from collections.abc import AsyncIterator, Mapping
 from typing import Protocol
 
-from ..core import ExecutionLineageKind, Principal
+from ..core import ExecutionEventType, ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
 from .service_api import (
     ExecutionStreamEvent,
@@ -18,6 +18,22 @@ from .service_api import (
 
 _DISCOVERY_BACKOFF_INITIAL = 1.0
 _DISCOVERY_BACKOFF_MAX = 30.0
+_MODEL_REQUEST_PROGRESS_FIELDS = frozenset(
+    {
+        "execution_id",
+        "agent_run_sequence",
+        "request_sequence",
+        "step_index",
+        "purpose",
+        "output_retry_index",
+        "status",
+        "started_at",
+        "finished_at",
+        "duration_ns",
+        "error_code",
+        "usage",
+    }
+)
 
 
 class _ExecutionTreeReader(Protocol):
@@ -414,6 +430,20 @@ def _project_stream_event(
 ) -> ExecutionStreamEvent:
     if include_content:
         return event
+    if event.event_type in {
+        ExecutionEventType.MODEL_REQUEST_STARTED.value,
+        ExecutionEventType.MODEL_REQUEST_FINISHED.value,
+    } and isinstance(event.payload, Mapping):
+        return ExecutionStreamEvent(
+            event.execution_id,
+            event.durable_sequence,
+            event.event_type,
+            {
+                key: value
+                for key, value in event.payload.items()
+                if key in _MODEL_REQUEST_PROGRESS_FIELDS
+            },
+        )
     return ExecutionStreamEvent(
         event.execution_id,
         event.durable_sequence,

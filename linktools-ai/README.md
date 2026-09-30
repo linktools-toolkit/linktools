@@ -519,6 +519,32 @@ dependencies, while `dependencies` continues to contain only successful
 result references. Observer callback failures are reported as
 `TASK_OBSERVER_FAILED` and do not fail the graph or retry nodes.
 
+Execution and TaskGraph observation streams also expose
+`MODEL_REQUEST_STARTED` and `MODEL_REQUEST_FINISHED`. The request key is
+`(execution_id, agent_run_sequence, request_sequence)`; a started event means
+the Runtime accepted a logical handler call, not that a provider received
+network traffic. Default lightweight observation keeps only request identity,
+purpose, retry index, status, timestamps, duration, safe error code, and
+request-level usage. It never includes prompts or response text. A successful
+handler call that later fails output validation remains successful, and the
+retry is a separate request.
+
+An uncursored `model_interactions(include_content=False)` query is a fixed
+lifecycle page: it includes RUNNING requests and terminal requests visible when
+the query starts. RUNNING items have known `started_at`; `finished_at`,
+`duration_ns`, `usage`, and `error_code` are `None`. Usage is never shown as
+zero before it is known. Passing explicit `cutoffs` selects the existing
+terminal-only usage snapshot; `cutoffs=()` selects an empty snapshot. Cursors
+retain their query mode and high-water marks.
+
+The live event buffer can fall back to durable replay before an uncommitted
+start event is delivered. Clients that need to show every active request should
+refresh the owning Runtime's `model_interactions(cursor=None, cutoffs=None,
+include_content=False)` on subscription and reconnect, and while the execution
+is active. Merge event and history rows by request key, with terminal state
+taking priority over RUNNING. The history refresh is independent of the event
+buffer and does not advance an event cursor.
+
 Downstream code must not scan `ExecutionRecord`, codec data, `StateStore`, or
 private repositories directly. The current pre-release wire contract is the
 single persistence baseline; superseded development data is not a compatibility
