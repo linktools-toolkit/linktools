@@ -57,6 +57,7 @@ def task_declaration_identity(value: object) -> tuple[str, int]:
         "effect_policy",
         "output_contract",
         "reconcile",
+        "cancel",
         "config",
     }:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -65,6 +66,7 @@ def task_declaration_identity(value: object) -> tuple[str, int]:
     contract_version = value.get("version")
     task_type = value.get("type")
     effect_policy = value.get("effect_policy")
+    cancel = value.get("cancel")
     config = value.get("config")
     if (
         isinstance(contract_version, bool)
@@ -75,6 +77,14 @@ def task_declaration_identity(value: object) -> tuple[str, int]:
         or not isinstance(effect_policy, str)
         or effect_policy not in {"none", "replay_safe", "non_replay_safe"}
         or not isinstance(value.get("reconcile"), bool)
+        or (
+            task_type == "function"
+            and not isinstance(cancel, bool)
+        )
+        or (
+            "cancel" in value
+            and not isinstance(cancel, bool)
+        )
         or not isinstance(output_contract, Mapping)
         or ("config" in value and not isinstance(config, Mapping))
     ):
