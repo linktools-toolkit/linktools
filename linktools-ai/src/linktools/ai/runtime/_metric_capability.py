@@ -193,7 +193,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     selected_model,
                     status="FAILED",
                     response=None,
-                    error_code=ErrorCode.INTERNAL_ERROR.value,
+                    error_code=_model_error_code(error),
                     usage=None,
                     phase="failed",
                 )
@@ -346,7 +346,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     model,
                     status="FAILED",
                     response=None,
-                    error_code=ErrorCode.INTERNAL_ERROR.value,
+                    error_code=_model_error_code(error),
                     usage=None,
                     phase="failed",
                 )
