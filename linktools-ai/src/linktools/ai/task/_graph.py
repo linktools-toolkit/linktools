@@ -93,7 +93,18 @@ def _normalize_json_value(value: object) -> JsonValue:
 
 
 _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
-_TASK_DEPENDENCY_POLICIES = frozenset({"all_succeeded", "all_terminal"})
+_TASK_DEPENDENCY_POLICIES = frozenset(
+    {"all_succeeded", "all_terminal", "any_succeeded"}
+)
+_TASK_FAILURE_POLICIES = frozenset({"propagate", "isolate"})
+_TERMINAL_TASK_STATUSES = frozenset(
+    {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +146,7 @@ class TaskNode:
     effect_policy: str
     reconcile: bool
     dependency_policy: str
+    failure_policy: str
     _input: bytes = field(repr=False)
 
     def __init__(
@@ -152,6 +164,7 @@ class TaskNode:
         retry_delay_seconds: float = 0,
         output_type: object | None = None,
         dependency_policy: str = "all_succeeded",
+        failure_policy: str = "propagate",
     ) -> None:
         self._initialize(
             node_id,
@@ -169,6 +182,7 @@ class TaskNode:
             effect_policy="none",
             reconcile=False,
             dependency_policy=dependency_policy,
+            failure_policy=failure_policy,
         )
 
     @classmethod
@@ -189,6 +203,7 @@ class TaskNode:
         effect_policy: str = "none",
         reconcile: bool = False,
         dependency_policy: str = "all_succeeded",
+        failure_policy: str = "propagate",
     ) -> "TaskNode":
         """Build a node whose execution contract has already been resolved."""
         value = cls.__new__(cls)
@@ -208,6 +223,7 @@ class TaskNode:
             effect_policy=effect_policy,
             reconcile=reconcile,
             dependency_policy=dependency_policy,
+            failure_policy=failure_policy,
         )
         return value
 
@@ -229,6 +245,7 @@ class TaskNode:
         effect_policy: str,
         reconcile: bool,
         dependency_policy: str,
+        failure_policy: str,
     ) -> None:
         if isinstance(dependencies, (str, bytes)):
             raise TypeError("task node dependencies are invalid")
@@ -258,7 +275,10 @@ class TaskNode:
             or max_attempts < 1
             or effect_policy not in {"none", "replay_safe", "non_replay_safe"}
             or not isinstance(reconcile, bool)
+            or not isinstance(dependency_policy, str)
             or dependency_policy not in _TASK_DEPENDENCY_POLICIES
+            or not isinstance(failure_policy, str)
+            or failure_policy not in _TASK_FAILURE_POLICIES
         ):
             raise ValueError("task node identity is invalid")
         values: Mapping[str, JsonValue] = {} if input is None else input
@@ -311,7 +331,39 @@ class TaskNode:
         object.__setattr__(self, "effect_policy", effect_policy)
         object.__setattr__(self, "reconcile", reconcile)
         object.__setattr__(self, "dependency_policy", dependency_policy)
+        object.__setattr__(self, "failure_policy", failure_policy)
         object.__setattr__(self, "_input", canonical_json_bytes(normalized))
+
+    def dependency_status(self, dependency_states: Mapping[str, TaskStatus]) -> TaskStatus:
+        """Return the dependency-derived state without changing persisted state."""
+        statuses = tuple(dependency_states[dependency] for dependency in self.dependencies)
+        if any(not isinstance(status, TaskStatus) for status in statuses):
+            raise ValueError("task dependency status is invalid")
+        if self.dependency_policy == "all_succeeded":
+            if any(
+                status in _TERMINAL_TASK_STATUSES
+                and status is not TaskStatus.SUCCEEDED
+                for status in statuses
+            ):
+                return TaskStatus.BLOCKED
+            if all(status is TaskStatus.SUCCEEDED for status in statuses):
+                return TaskStatus.READY
+            return TaskStatus.PENDING
+        if self.dependency_policy == "all_terminal":
+            return (
+                TaskStatus.READY
+                if all(status in _TERMINAL_TASK_STATUSES for status in statuses)
+                else TaskStatus.PENDING
+            )
+        if self.dependency_policy == "any_succeeded":
+            if not all(status in _TERMINAL_TASK_STATUSES for status in statuses):
+                return TaskStatus.PENDING
+            return (
+                TaskStatus.READY
+                if any(status is TaskStatus.SUCCEEDED for status in statuses)
+                else TaskStatus.BLOCKED
+            )
+        raise ValueError("task node dependency policy is invalid")
 
     @property
     def input(self) -> "dict[str, JsonValue]":
@@ -596,6 +648,8 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
         "dependencies": sorted(node.dependencies),
         "input": node_input,
         "budget_cost": node.budget_cost,
+        "dependency_policy": node.dependency_policy,
+        "failure_policy": node.failure_policy,
         "task": (
             None
             if node.task is None
@@ -633,8 +687,6 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
         value["effect_policy"] = node.effect_policy
     if node.reconcile:
         value["reconcile"] = True
-    if node.dependency_policy != "all_succeeded":
-        value["dependency_policy"] = node.dependency_policy
     return value
 
 
@@ -817,6 +869,7 @@ class TaskNodeInfo:
     effect_policy: str
     dependency_policy: str = "all_succeeded"
     reconcile: bool = False
+    failure_policy: str = "propagate"
 
     @classmethod
     def from_node(cls, node: TaskNode) -> "TaskNodeInfo":
@@ -834,6 +887,7 @@ class TaskNodeInfo:
             node.effect_policy,
             node.dependency_policy,
             reconcile=node.reconcile,
+            failure_policy=node.failure_policy,
         )
 
 
@@ -887,7 +941,7 @@ class TaskGraphState:
                 or state.dependencies != node.dependencies
             ):
                 raise ValueError("task graph state node identity is invalid")
-        aggregate = _aggregate_graph_status(states)
+        aggregate = _aggregate_graph_status(states, nodes)
         if aggregate is not self.status:
             terminal = {
                 TaskStatus.SUCCEEDED,
@@ -907,22 +961,38 @@ class TaskGraphState:
         object.__setattr__(self, "node_states", states)
 
 
-def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
-    statuses = {node.status for node in nodes}
+def _aggregate_graph_status(
+    states: "tuple[TaskNodeView, ...]",
+    definitions: "tuple[TaskNode, ...]",
+) -> TaskStatus:
+    failure_policies = {node.node_id: node.failure_policy for node in definitions}
+    statuses = {node.status for node in states}
     if TaskStatus.RECOVERY_REQUIRED in statuses:
         return TaskStatus.RECOVERY_REQUIRED
-    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
-        return TaskStatus.SUCCEEDED
     if TaskStatus.RUNNING in statuses or TaskStatus.WAITING in statuses:
         return TaskStatus.RUNNING
     if TaskStatus.PENDING in statuses or TaskStatus.READY in statuses:
         return TaskStatus.PENDING
-    if TaskStatus.FAILED in statuses:
+    if any(
+        node.status is TaskStatus.FAILED
+        and failure_policies[node.node_id] == "propagate"
+        for node in states
+    ):
         return TaskStatus.FAILED
-    if TaskStatus.BLOCKED in statuses:
+    if any(
+        node.status is TaskStatus.BLOCKED
+        and failure_policies[node.node_id] == "propagate"
+        for node in states
+    ):
         return TaskStatus.BLOCKED
-    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
+    if TaskStatus.CANCELLED in statuses:
         return TaskStatus.CANCELLED
+    if not statuses or statuses <= {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+    }:
+        return TaskStatus.SUCCEEDED
     raise ValueError("task graph aggregate status is invalid")
 
 
@@ -959,17 +1029,6 @@ class TaskInputSupplyRequest:
         validate_idempotency_key(self.idempotency_key)
 
 
-def ready_nodes(
-    graph: TaskGraph, completed: "frozenset[str]"
-) -> "tuple[TaskNode, ...]":
-    return tuple(
-        node
-        for node in graph.nodes
-        if node.node_id not in completed
-        and all(dependency in completed for dependency in node.dependencies)
-    )
-
-
 __all__ = [
     "CancelGraphRequest",
     "RecoverGraphRequest",
@@ -996,5 +1055,4 @@ __all__ = [
     "TaskInputSupplyRequest",
     "TaskStatus",
     "TaskTerminalRecord",
-    "ready_nodes",
 ]

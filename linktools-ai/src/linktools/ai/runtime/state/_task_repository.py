@@ -190,11 +190,11 @@ def _validate_task_lease_scope(lease: TaskLease, tenant_id: str) -> None:
 def _reconciled_task_nodes(
     nodes: tuple[TaskNodeView, ...],
     *,
-    dependency_policies: Mapping[str, str] | None = None,
+    definitions: Mapping[str, TaskNode],
     now: datetime | None = None,
 ) -> tuple[TaskNodeView, ...]:
     values = {node.node_id: node for node in nodes}
-    if len(values) != len(nodes):
+    if len(values) != len(nodes) or set(definitions) != set(values):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     indegree = {node.node_id: len(node.dependencies) for node in nodes}
     dependents: dict[str, list[str]] = {node.node_id: [] for node in nodes}
@@ -241,40 +241,28 @@ def _reconciled_task_nodes(
         if (
             node.status in _TERMINAL_TASK_STATUSES
             or node.status is TaskStatus.RECOVERY_REQUIRED
+            or node.execution_id is not None
         ):
             continue
-        dependencies = tuple(values[dependency] for dependency in node.dependencies)
-        policy = (dependency_policies or {}).get(node_id, "all_succeeded")
-        if policy not in {"all_succeeded", "all_terminal"}:
+        definition = definitions.get(node_id)
+        if definition is None or definition.dependencies != node.dependencies:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        failed = any(
-            dependency.status
-            in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
-            for dependency in dependencies
-        )
-        terminal = all(
-            dependency.status
-            in {
-                TaskStatus.SUCCEEDED,
-                TaskStatus.FAILED,
-                TaskStatus.BLOCKED,
-                TaskStatus.CANCELLED,
-            }
-            for dependency in dependencies
-        )
-        if policy == "all_succeeded" and failed:
+        dependency_state = {
+            dependency: values[dependency].status
+            for dependency in definition.dependencies
+        }
+        dependency_status = definition.dependency_status(dependency_state)
+        if dependency_status is TaskStatus.BLOCKED:
             values[node_id] = replace(
                 node,
                 status=TaskStatus.BLOCKED,
                 error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value,
                 error_digest=None,
             )
-        elif node.status is TaskStatus.PENDING and (
-            terminal
-            if policy == "all_terminal"
-            else all(dependency.status is TaskStatus.SUCCEEDED for dependency in dependencies)
-        ):
+        elif dependency_status is TaskStatus.READY and node.status is TaskStatus.PENDING:
             values[node_id] = replace(node, status=TaskStatus.READY)
+        elif dependency_status is TaskStatus.PENDING and node.status is TaskStatus.READY:
+            values[node_id] = replace(node, status=TaskStatus.PENDING)
     return tuple(values[node.node_id] for node in nodes)
 
 
@@ -833,7 +821,7 @@ class TaskRepositoryImpl(RepositoryBase):
         return (
             TaskGraphView(
                 graph_id,
-                _effective_graph_status(header, ordered_states),
+                _effective_graph_status(header, ordered_states, nodes),
                 nodes,
             ),
             ordered_states,
@@ -1563,7 +1551,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 before,
                 graph_record,
                 next_nodes,
-                _isolated_graph_status(next_nodes),
+                _isolated_graph_status(next_nodes, before.graph.nodes),
             )
             return value
 
@@ -1639,7 +1627,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 before,
                 graph_record,
                 next_nodes,
-                _isolated_graph_status(next_nodes),
+                _isolated_graph_status(next_nodes, before.graph.nodes),
             )
             return value
 
@@ -1809,7 +1797,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 before,
                 graph_record,
                 next_nodes,
-                _isolated_graph_status(next_nodes),
+                _isolated_graph_status(next_nodes, before.graph.nodes),
             )
             return value
 
@@ -1916,12 +1904,12 @@ class TaskRepositoryImpl(RepositoryBase):
             )
             next_nodes = _reconciled_task_nodes(
                 cleared,
-                dependency_policies={
-                    node.node_id: node.dependency_policy
+                definitions={
+                    node.node_id: node
                     for node in before.graph.nodes
                 },
             )
-            next_status = _isolated_graph_status(next_nodes)
+            next_status = _isolated_graph_status(next_nodes, before.graph.nodes)
             return await self._apply_graph_transition(
                 transaction,
                 before,
@@ -2027,8 +2015,8 @@ class TaskRepositoryImpl(RepositoryBase):
             )
             next_nodes = _reconciled_task_nodes(
                 next_nodes,
-                dependency_policies={
-                    node.node_id: node.dependency_policy
+                definitions={
+                    node.node_id: node
                     for node in before.graph.nodes
                 },
             )
@@ -2037,7 +2025,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 before,
                 graph_record,
                 next_nodes,
-                _isolated_graph_status(next_nodes),
+                _isolated_graph_status(next_nodes, before.graph.nodes),
             )
 
         try:
@@ -2098,19 +2086,13 @@ class TaskRepositoryImpl(RepositoryBase):
             now = await transaction.now()
             next_nodes = _reconciled_task_nodes(
                 before.node_states,
-                dependency_policies={
-                    node.node_id: node.dependency_policy
+                definitions={
+                    node.node_id: node
                     for node in before.graph.nodes
                 },
                 now=now,
             )
-            isolated = _isolated_graph_status(next_nodes)
-            next_status = (
-                TaskStatus.CANCELLED
-                if before.graph.status is TaskStatus.CANCELLED
-                and isolated is not TaskStatus.RECOVERY_REQUIRED
-                else isolated
-            )
+            next_status = _isolated_graph_status(next_nodes, before.graph.nodes)
             await self._apply_graph_transition(
                 transaction,
                 before,
@@ -2246,8 +2228,8 @@ class TaskRepositoryImpl(RepositoryBase):
                         value if node.node_id == node_id else node
                         for node in before.node_states
                     ),
-                    dependency_policies={
-                        node.node_id: node.dependency_policy
+                    definitions={
+                        node.node_id: node
                         for node in before.graph.nodes
                     },
                 )
@@ -2256,7 +2238,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 before,
                 graph_record,
                 next_nodes,
-                _isolated_graph_status(next_nodes),
+                _isolated_graph_status(next_nodes, before.graph.nodes),
             )
 
         try:
@@ -2366,7 +2348,7 @@ class TaskRepositoryImpl(RepositoryBase):
                     continue
                 next_values.append(node)
             next_nodes = tuple(next_values)
-            isolated = _isolated_graph_status(next_nodes)
+            isolated = _isolated_graph_status(next_nodes, before.graph.nodes)
             next_status = isolated
             return await self._apply_graph_transition(
                 transaction,
@@ -2520,32 +2502,17 @@ class TaskRepositoryImpl(RepositoryBase):
                 and not expired
             ):
                 raise AIError(ErrorCode.TASK_OWNER_CONFLICT)
-            dependency_values = tuple(
-                dependencies[dependency] for dependency in node.dependencies
+            definition = next(
+                (value for value in graph.nodes if value.node_id == node_id),
+                None,
             )
-            dependency_terminal = all(
-                value.status
-                in {
-                    TaskStatus.SUCCEEDED,
-                    TaskStatus.FAILED,
-                    TaskStatus.BLOCKED,
-                    TaskStatus.CANCELLED,
+            if definition is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            dependency_status = definition.dependency_status(
+                {
+                    dependency: dependencies[dependency].status
+                    for dependency in definition.dependencies
                 }
-                for value in dependency_values
-            )
-            dependencies_succeeded = all(
-                value.status is TaskStatus.SUCCEEDED
-                for value in dependency_values
-            )
-            dependency_policy = next(
-                definition.dependency_policy
-                for definition in graph.nodes
-                if definition.node_id == node_id
-            )
-            dependencies_ready = (
-                dependency_terminal
-                if dependency_policy == "all_terminal"
-                else dependencies_succeeded
             )
             if node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not (
                 node.status is TaskStatus.RUNNING and expired
@@ -2558,8 +2525,7 @@ class TaskRepositoryImpl(RepositoryBase):
             ):
                 raise AIError(ErrorCode.TASK_NOT_READY)
             if (
-                node.status in {TaskStatus.PENDING, TaskStatus.READY}
-                and not dependencies_ready
+                dependency_status is not TaskStatus.READY
             ):
                 raise AIError(ErrorCode.TASK_NOT_READY)
             expected_fence = node.fence + 1
@@ -2866,28 +2832,42 @@ class TaskRepositoryImpl(RepositoryBase):
                 occupies_concurrency=False,
             )
             state_by_id[target_node_id] = source_value
-            new_states: list[TaskNodeView] = []
-            for value in added:
-                new_states.append(
-                    TaskNodeView(
-                        target_graph_id,
-                        value.node_id,
-                        value.dependencies,
-                        TaskStatus.READY
-                        if not value.dependencies
-                        else TaskStatus.PENDING,
-                        None,
-                        0,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
+            added_ids = {value.node_id for value in added}
+            definitions_by_id = {value.node_id: value for value in next_nodes}
+            for added_node_id in TaskGraph(
+                target_graph_id,
+                next_nodes,
+            ).topological_order():
+                if added_node_id not in added_ids:
+                    continue
+                value = definitions_by_id[added_node_id]
+                dependency_status = value.dependency_status(
+                    {
+                        dependency: state_by_id[dependency].status
+                        for dependency in value.dependencies
+                    }
                 )
-            new_state_by_id = {value.node_id: value for value in new_states}
-            state_by_id.update(new_state_by_id)
+                initial_status = (
+                    TaskStatus.PENDING
+                    if value.dependencies
+                    else dependency_status
+                )
+                state_by_id[added_node_id] = TaskNodeView(
+                    target_graph_id,
+                    value.node_id,
+                    value.dependencies,
+                    initial_status,
+                    None,
+                    0,
+                    None,
+                    None,
+                    ErrorCode.TASK_DEPENDENCY_FAILED.value
+                    if initial_status is TaskStatus.BLOCKED
+                    else None,
+                    None,
+                )
             after_states = tuple(state_by_id[value.node_id] for value in next_nodes)
-            after_status = _isolated_graph_status(after_states)
+            after_status = _isolated_graph_status(after_states, next_nodes)
             after = _TaskEventState(
                 TaskGraphView(target_graph_id, after_status, next_nodes),
                 after_states,
@@ -2944,9 +2924,9 @@ class TaskRepositoryImpl(RepositoryBase):
                             self._stored(
                                 "task_node_state",
                                 [target_graph_id, value.node_id],
-                                new_state_by_id[value.node_id],
+                                state_by_id[value.node_id],
                                 parent=self._state_parent(target_graph_id),
-                                state=new_state_by_id[value.node_id].status.value,
+                                state=state_by_id[value.node_id].status.value,
                             ),
                         )
                     )
@@ -3194,7 +3174,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 value if state.node_id == target_node_id else state
                 for state in before.node_states
             )
-            after_status = _isolated_graph_status(after_states)
+            after_status = _isolated_graph_status(after_states, before.graph.nodes)
             after = _TaskEventState(
                 TaskGraphView(target_graph_id, after_status, before.graph.nodes),
                 after_states,

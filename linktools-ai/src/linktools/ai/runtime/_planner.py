@@ -647,6 +647,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 effect_policy=node.effect_policy,
                 reconcile=node.reconcile,
                 dependency_policy=node.dependency_policy,
+                failure_policy=node.failure_policy,
             )
         if not task_input.files and isinstance(task_input.prompt, str):
             return node
@@ -679,6 +680,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             effect_policy=node.effect_policy,
             reconcile=node.reconcile,
             dependency_policy=node.dependency_policy,
+            failure_policy=node.failure_policy,
         )
 
     async def restore_prepared_agent_prompt(
@@ -1170,6 +1172,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             effect_policy=_handler_effect_policy(handler, request=True),
             reconcile=_handler_has_reconcile(handler),
             dependency_policy=node.dependency_policy,
+            failure_policy=node.failure_policy,
         )
 
     def admit_request(self, graph: TaskGraph) -> TaskGraph:
@@ -1335,6 +1338,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 effect_policy=node.effect_policy,
                 reconcile=node.reconcile,
                 dependency_policy=node.dependency_policy,
+                failure_policy=node.failure_policy,
             )
             if canonical.input != node.input:
                 raise AIError(
@@ -2736,15 +2740,19 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         del graph_id
         if set(dependency_states) != set(node.dependencies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        required = (
-            set(node.dependencies)
-            if node.dependency_policy == "all_succeeded"
-            else {
-                dependency_id
+        dependency_status = node.dependency_status(
+            {
+                dependency_id: state.status
                 for dependency_id, state in dependency_states.items()
-                if state.status is TaskStatus.SUCCEEDED
             }
         )
+        if dependency_status is not TaskStatus.READY:
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        required = {
+            dependency_id
+            for dependency_id, state in dependency_states.items()
+            if state.status is TaskStatus.SUCCEEDED
+        }
         if set(dependency_results) != required:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values: dict[str, TaskDependency] = {}
@@ -2948,7 +2956,7 @@ def _dependency_identity_payload(
             }
             for dependency_id in sorted(dependencies)
         ]
-    if node.dependency_policy != "all_terminal":
+    if node.dependency_policy not in {"all_terminal", "any_succeeded"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if set(dependency_states) != set(node.dependencies):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

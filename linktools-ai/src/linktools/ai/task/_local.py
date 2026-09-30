@@ -2257,10 +2257,7 @@ class LocalTaskGraphLauncher:
                 result_digest,
                 state.execution_id,
             )
-        if (
-            node.dependency_policy == "all_succeeded"
-            and set(results) != set(node.dependencies)
-        ):
+        if set(results) != set(successful):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return results, states
 
@@ -2292,17 +2289,19 @@ class LocalTaskGraphLauncher:
             state = states.get(dependency_id)
             if state is None or state.status not in _TERMINAL:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if (
-                node.dependency_policy == "all_succeeded"
-                and state.status is not TaskStatus.SUCCEEDED
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values[dependency_id] = TaskDependencyState(
                 state.status,
                 state.result_digest,
                 state.error_code,
                 state.error_digest,
             )
+        if (
+            node.dependency_status(
+                {dependency_id: state.status for dependency_id, state in values.items()}
+            )
+            is not TaskStatus.READY
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
     async def _notify(self, run: _GraphRun) -> None:

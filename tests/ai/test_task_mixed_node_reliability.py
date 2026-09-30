@@ -72,6 +72,7 @@ from linktools.ai.task import (
     TaskNode,
     TaskNodeContext,
     TaskNodeInvocation,
+    TaskNodeView,
     Task,
     TaskRef,
     TaskEffectResolution,
@@ -1765,6 +1766,7 @@ async def test_recovery_preflight_preserves_unknown_agent_input_version(
                         effect_policy=node.effect_policy,
                         reconcile=node.reconcile,
                         dependency_policy=node.dependency_policy,
+                        failure_policy=node.failure_policy,
                     )
                 nodes.append(node)
             original_validate_recovery(replace(state, nodes=tuple(nodes)))
@@ -2080,17 +2082,182 @@ def test_task_dependency_state_exposes_only_terminal_semantics() -> None:
 
 
 
-def test_all_terminal_uses_a_distinct_persisted_task_node_wire() -> None:
-    default_node = TaskNode("default")
-    terminal_node = TaskNode("terminal", dependency_policy="all_terminal")
+@pytest.mark.parametrize(
+    "dependency_policy",
+    ("all_succeeded", "all_terminal", "any_succeeded"),
+)
+@pytest.mark.parametrize("failure_policy", ("propagate", "isolate"))
+def test_task_node_policies_round_trip_on_the_explicit_single_wire(
+    dependency_policy: str,
+    failure_policy: str,
+) -> None:
+    node = TaskNode(
+        "node",
+        dependency_policy=dependency_policy,
+        failure_policy=failure_policy,
+    )
 
-    default_wire = _encode_persisted_domain(default_node)
-    terminal_wire = _encode_persisted_domain(terminal_node)
+    wire = _encode_persisted_domain(node)
 
-    assert default_wire["$dataclass"] == "task_node"
-    assert "dependency_policy" not in default_wire["fields"]
-    assert terminal_wire["$dataclass"] == "task_node_terminal"
-    assert "dependency_policy" not in terminal_wire["fields"]
+    assert wire["$dataclass"] == "task_node"
+    assert wire["fields"]["dependency_policy"] == dependency_policy
+    assert wire["fields"]["failure_policy"] == failure_policy
+    assert decode_domain(wire, TaskNode) == node
+
+
+@pytest.mark.parametrize(
+    ("dependency_policy", "dependency_states", "expected"),
+    (
+        ("all_succeeded", {}, TaskStatus.READY),
+        ("all_terminal", {}, TaskStatus.READY),
+        ("any_succeeded", {}, TaskStatus.BLOCKED),
+        (
+            "all_succeeded",
+            {"ok": TaskStatus.SUCCEEDED, "ignored": TaskStatus.FAILED},
+            TaskStatus.READY,
+        ),
+        (
+            "all_succeeded",
+            {"bad": TaskStatus.FAILED, "waiting": TaskStatus.PENDING},
+            TaskStatus.BLOCKED,
+        ),
+        (
+            "all_succeeded",
+            {"recovering": TaskStatus.RECOVERY_REQUIRED},
+            TaskStatus.PENDING,
+        ),
+        (
+            "all_terminal",
+            {"ok": TaskStatus.SUCCEEDED, "bad": TaskStatus.CANCELLED},
+            TaskStatus.READY,
+        ),
+        (
+            "all_terminal",
+            {"ok": TaskStatus.SUCCEEDED, "waiting": TaskStatus.WAITING},
+            TaskStatus.PENDING,
+        ),
+        (
+            "any_succeeded",
+            {"ok": TaskStatus.SUCCEEDED, "waiting": TaskStatus.RUNNING},
+            TaskStatus.PENDING,
+        ),
+        (
+            "any_succeeded",
+            {"ok": TaskStatus.SUCCEEDED, "bad": TaskStatus.BLOCKED},
+            TaskStatus.READY,
+        ),
+        (
+            "any_succeeded",
+            {"bad": TaskStatus.FAILED, "cancelled": TaskStatus.CANCELLED},
+            TaskStatus.BLOCKED,
+        ),
+        (
+            "any_succeeded",
+            {"bad": TaskStatus.FAILED, "recovering": TaskStatus.RECOVERY_REQUIRED},
+            TaskStatus.PENDING,
+        ),
+    ),
+)
+def test_task_dependency_status_policy_truth_table(
+    dependency_policy: str,
+    dependency_states: Mapping[str, TaskStatus],
+    expected: TaskStatus,
+) -> None:
+    node = TaskNode(
+        "consumer",
+        tuple(key for key in dependency_states if key != "ignored"),
+        dependency_policy=dependency_policy,
+    )
+
+    assert node.dependency_status(dependency_states) is expected
+
+
+def test_task_dependency_status_requires_declared_dependency_state() -> None:
+    node = TaskNode("consumer", ("missing",), dependency_policy="all_terminal")
+
+    with pytest.raises(KeyError):
+        node.dependency_status({})
+
+
+def test_task_graph_request_identity_includes_both_node_policies() -> None:
+    principal = Principal("owner", "tenant")
+    original = TaskGraph(
+        "policy-identity",
+        (
+            TaskNode(
+                "node",
+                dependency_policy="all_terminal",
+                failure_policy="propagate",
+            ),
+        ),
+    )
+    admission = TaskGraphAdmission.from_request(
+        TaskGraphRequest(original, principal, "policy-identity-request-0001")
+    )
+
+    for changed in (
+        TaskNode("node", dependency_policy="any_succeeded"),
+        TaskNode("node", dependency_policy="all_terminal", failure_policy="isolate"),
+    ):
+        with pytest.raises(AIError) as raised:
+            admission.validate_graph(TaskGraph("policy-identity", (changed,)))
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize(
+    ("node_statuses", "expected"),
+    (
+        (
+            ((TaskStatus.FAILED, "isolate"), (TaskStatus.BLOCKED, "isolate")),
+            TaskStatus.SUCCEEDED,
+        ),
+        (
+            ((TaskStatus.FAILED, "propagate"), (TaskStatus.BLOCKED, "isolate")),
+            TaskStatus.FAILED,
+        ),
+        (
+            ((TaskStatus.FAILED, "isolate"), (TaskStatus.BLOCKED, "propagate")),
+            TaskStatus.BLOCKED,
+        ),
+        (
+            ((TaskStatus.FAILED, "propagate"), (TaskStatus.CANCELLED, "isolate")),
+            TaskStatus.FAILED,
+        ),
+        (
+            ((TaskStatus.FAILED, "isolate"), (TaskStatus.CANCELLED, "isolate")),
+            TaskStatus.CANCELLED,
+        ),
+    ),
+)
+def test_task_graph_aggregate_obeys_failure_and_cancel_priority(
+    node_statuses: tuple[tuple[TaskStatus, str], ...],
+    expected: TaskStatus,
+) -> None:
+    nodes = tuple(
+        TaskNode(f"node-{index}", failure_policy=failure_policy)
+        for index, (_status, failure_policy) in enumerate(node_statuses)
+    )
+    states = tuple(
+        TaskNodeView(
+            "aggregate-policy",
+            f"node-{index}",
+            (),
+            status,
+            None,
+            0,
+            None,
+            None,
+            ErrorCode.TASK_DEPENDENCY_FAILED.value
+            if status is TaskStatus.BLOCKED
+            else None,
+            None,
+        )
+        for index, (status, _failure_policy) in enumerate(node_statuses)
+    )
+
+    state = TaskGraphState("aggregate-policy", expected, nodes, states)
+
+    assert state.status is expected
 
 
 @pytest.mark.asyncio
@@ -2153,6 +2320,235 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
     }
 
 
+@pytest.mark.asyncio
+async def test_any_succeeded_waits_for_all_terminal_dependencies_and_filters_results() -> None:
+    held_started = asyncio.Event()
+    release_held = asyncio.Event()
+    success_returned = asyncio.Event()
+    observed: dict[str, object] = {}
+    blocked_calls = 0
+
+    async def fail(context: TaskNodeContext[None]) -> JsonValue:
+        if context.node_id == "held-failure":
+            held_started.set()
+            await release_held.wait()
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+    async def succeed(_context: TaskNodeContext[None]) -> JsonValue:
+        success_returned.set()
+        return "successful dependency"
+
+    async def collect(context: TaskNodeContext[None]) -> JsonValue:
+        observed["states"] = {
+            node_id: state.status
+            for node_id, state in context.dependency_states.items()
+        }
+        observed["results"] = set(context.dependencies)
+        return "collected"
+
+    async def forbidden(_context: TaskNodeContext[None]) -> JsonValue:
+        nonlocal blocked_calls
+        blocked_calls += 1
+        return "must stay blocked"
+
+    application = CapabilityGroup[None]("application")
+    failure = application.task(
+        TaskFunction[None]("example.policy-failure", 1, fail),
+        effect_policy="none",
+    )
+    success = application.task(
+        TaskFunction[None]("example.policy-success", 1, succeed),
+        effect_policy="none",
+    )
+    mixed = application.task(
+        TaskFunction[None]("example.policy-mixed", 1, collect),
+        effect_policy="none",
+    )
+    blocked = application.task(
+        TaskFunction[None]("example.policy-blocked", 1, forbidden),
+        effect_policy="none",
+    )
+    application.agent(
+        "default", model="default", allow_tools=(), allow_skills=(), allow_subagents=()
+    )
+    graph = TaskGraph(
+        "any-succeeded-runtime",
+        (
+            failure.node("held-failure", failure_policy="isolate"),
+            failure.node("failed-fast", failure_policy="isolate"),
+            success.node("success"),
+            mixed.node(
+                "mixed",
+                dependencies=("held-failure", "success"),
+                dependency_policy="any_succeeded",
+            ),
+            blocked.node(
+                "blocked-any",
+                dependencies=("held-failure", "failed-fast"),
+                dependency_policy="any_succeeded",
+                failure_policy="isolate",
+            ),
+        ),
+    )
+
+    async with Runtime.open(
+        "any-succeeded-runtime",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+        capabilities=(application,),
+    ) as runtime:
+        run = await runtime.tasks.bind(failure, success, mixed, blocked).start(
+            graph,
+            idempotency_key="any-succeeded-runtime-0001",
+        )
+        await asyncio.wait_for(held_started.wait(), 10)
+        await asyncio.wait_for(success_returned.wait(), 10)
+        deadline = asyncio.get_running_loop().time() + 10
+        while True:
+            state = await run.state(include_content=True)
+            state_by_id = {node.node_id: node for node in state.node_states}
+            if state_by_id["success"].status is TaskStatus.SUCCEEDED:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("success dependency did not become terminal")
+            await asyncio.sleep(0.001)
+        assert "mixed" not in observed
+        assert blocked_calls == 0
+
+        release_held.set()
+        result = await run.wait(timeout_seconds=10)
+        final_state = await run.state(include_content=True)
+
+    assert result.status is TaskStatus.SUCCEEDED
+    assert observed == {
+        "states": {
+            "held-failure": TaskStatus.FAILED,
+            "success": TaskStatus.SUCCEEDED,
+        },
+        "results": {"success"},
+    }
+    assert blocked_calls == 0
+    assert {
+        node.node_id: node.status for node in result.node_results
+    } == {
+        "held-failure": TaskStatus.FAILED,
+        "failed-fast": TaskStatus.FAILED,
+        "success": TaskStatus.SUCCEEDED,
+        "mixed": TaskStatus.SUCCEEDED,
+        "blocked-any": TaskStatus.BLOCKED,
+    }
+    blocked_state = next(
+        node for node in final_state.node_states if node.node_id == "blocked-any"
+    )
+    assert blocked_state.error_code == ErrorCode.TASK_DEPENDENCY_FAILED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "filesystem", "sqlite"))
+async def test_task_policy_matrix_persists_in_each_runtime_backend(
+    backend: str,
+    tmp_path: Path,
+) -> None:
+    called: list[str] = []
+
+    async def succeed(context: TaskNodeContext[None]) -> JsonValue:
+        called.append(context.node_id)
+        return context.node_id
+
+    application = CapabilityGroup[None]("application")
+    task = application.task(
+        TaskFunction[None](f"example.persist-policy-{backend}", 1, succeed),
+        effect_policy="none",
+    )
+    application.agent(
+        "default", model="default", allow_tools=(), allow_skills=(), allow_subagents=()
+    )
+    if backend == "memory":
+        storage = RuntimeStorage.in_memory()
+        reopen_storage = None
+    elif backend == "filesystem":
+        storage_path = tmp_path / "runtime"
+        storage = RuntimeStorage.filesystem(storage_path)
+        reopen_storage = RuntimeStorage.filesystem(storage_path)
+    else:
+        storage_path = tmp_path / "runtime.sqlite"
+        storage = RuntimeStorage.sqlite(storage_path)
+        reopen_storage = RuntimeStorage.sqlite(storage_path)
+
+    policies = tuple(
+        (dependency_policy, failure_policy)
+        for dependency_policy in ("all_succeeded", "all_terminal", "any_succeeded")
+        for failure_policy in ("propagate", "isolate")
+    )
+    graph = TaskGraph(
+        f"persist-policy-{backend}",
+        tuple(
+            task.node(
+                f"{dependency_policy}-{failure_policy}",
+                dependency_policy=dependency_policy,
+                failure_policy=failure_policy,
+            )
+            for dependency_policy, failure_policy in policies
+        ),
+    )
+
+    async with Runtime.open(
+        f"persist-policy-{backend}",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=storage,
+        capabilities=(application,),
+    ) as runtime:
+        run = await runtime.tasks.bind(task).start(
+            graph,
+            idempotency_key=f"persist-policy-{backend}-0001",
+        )
+        result = await run.wait(timeout_seconds=10)
+        state = await run.state()
+
+    restored_state = None
+    if reopen_storage is not None:
+        async with Runtime.open(
+            f"persist-policy-{backend}",
+            models=_TaskTestModels(),  # type: ignore[arg-type]
+            storage=reopen_storage,
+            capabilities=(application,),
+        ) as runtime:
+            restored_run = await runtime.tasks.bind(task).get(graph.graph_id)
+            restored_result = await restored_run.wait(timeout_seconds=10)
+            restored_state = await restored_run.state()
+        assert restored_result.status is result.status
+
+    expected_policies = {
+        f"{dependency_policy}-{failure_policy}": (
+            dependency_policy,
+            failure_policy,
+        )
+        for dependency_policy, failure_policy in policies
+    }
+    assert {
+        node.node_id: (node.dependency_policy, node.failure_policy)
+        for node in state.nodes
+    } == expected_policies
+    if restored_state is not None:
+        assert {
+            node.node_id: (node.dependency_policy, node.failure_policy)
+            for node in restored_state.nodes
+        } == expected_policies
+        assert {node.node_id: node.status for node in restored_state.node_states} == {
+            node.node_id: node.status for node in state.node_states
+        }
+    assert set(called) == {
+        "all_succeeded-propagate",
+        "all_succeeded-isolate",
+        "all_terminal-propagate",
+        "all_terminal-isolate",
+    }
+    statuses = {node.node_id: node.status for node in result.node_results}
+    assert statuses["any_succeeded-propagate"] is TaskStatus.BLOCKED
+    assert statuses["any_succeeded-isolate"] is TaskStatus.BLOCKED
+    assert result.status is TaskStatus.BLOCKED
+
+
 class _TestTaskExpander:
     def __init__(self, expander_id: str, revision: int = 1) -> None:
         self.id = expander_id
@@ -2161,6 +2557,359 @@ class _TestTaskExpander:
     def expand(self, context: object) -> tuple[TaskNode, ...]:
         del context
         return ()
+
+
+@pytest.mark.asyncio
+async def test_expansion_applies_dependency_policies_to_each_new_node() -> None:
+    ran: list[str] = []
+    observed_dependencies: dict[str, tuple[dict[str, TaskStatus], set[str]]] = {}
+
+    async def succeed(context: TaskNodeContext[None]) -> JsonValue:
+        ran.append(context.node_id)
+        observed_dependencies[context.node_id] = (
+            {
+                node_id: state.status
+                for node_id, state in context.dependency_states.items()
+            },
+            set(context.dependencies),
+        )
+        return context.node_id
+
+    async def fail(_context: TaskNodeContext[None]) -> JsonValue:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+    handler = TaskFunction[None](
+        "example.expansion-policy-handler",
+        1,
+        succeed,
+        effect_policy="none",
+    )
+    failure = TaskFunction[None](
+        "example.expansion-policy-failure",
+        1,
+        fail,
+        effect_policy="none",
+    )
+    expanded_names = (
+        "empty-any",
+        "empty-terminal",
+        "on-source",
+        "on-mixed",
+        "all-succeeded-success",
+        "all-succeeded-mixed",
+        "terminal-after-failures",
+        "all-failed",
+        "source-excluded",
+        "nested-any",
+    )
+
+    def expand(_context: TaskExpansionContext) -> tuple[TaskNode, ...]:
+        return (
+            handler.node(
+                "empty-any",
+                dependency_policy="any_succeeded",
+                failure_policy="isolate",
+            ),
+            handler.node(
+                "empty-terminal",
+                dependency_policy="all_terminal",
+                failure_policy="isolate",
+            ),
+            handler.node(
+                "on-source",
+                dependencies=("expansion-source",),
+                dependency_policy="any_succeeded",
+                failure_policy="isolate",
+            ),
+            handler.node(
+                "on-mixed",
+                dependencies=("expansion-source", "failed-root"),
+                dependency_policy="any_succeeded",
+                failure_policy="isolate",
+            ),
+            handler.node(
+                "all-succeeded-success",
+                dependencies=("expansion-source", "success-root"),
+                dependency_policy="all_succeeded",
+                failure_policy="isolate",
+            ),
+            handler.node(
+                "all-succeeded-mixed",
+                dependencies=("success-root", "failed-root"),
+                dependency_policy="all_succeeded",
+                failure_policy="isolate",
+            ),
+            handler.node(
+                "terminal-after-failures",
+                dependencies=("failed-root", "dependency-blocked"),
+                dependency_policy="all_terminal",
+                failure_policy="isolate",
+            ),
+            handler.node(
+                "all-failed",
+                dependencies=("failed-root", "dependency-blocked"),
+                dependency_policy="any_succeeded",
+                failure_policy="isolate",
+            ),
+            handler.node(
+                "source-excluded",
+                dependencies=("failed-root",),
+                dependency_policy="any_succeeded",
+                failure_policy="isolate",
+            ),
+            handler.node(
+                "nested-any",
+                dependencies=("on-mixed", "all-failed"),
+                dependency_policy="any_succeeded",
+                failure_policy="isolate",
+            ),
+        )
+
+    expander = TaskExpander("example.expansion-policy", expand)
+    application = CapabilityGroup[None]("application")
+    application.task(handler)
+    application.task(failure)
+    application.task_expander(expander)
+    application.agent(
+        "default", model="default", allow_tools=(), allow_skills=(), allow_subagents=()
+    )
+    graph = TaskGraph(
+        "expansion-dependency-policies",
+        (
+            handler.node("expansion-source", expander=expander.ref),
+            handler.node("success-root"),
+            failure.node("failed-root", failure_policy="isolate"),
+            handler.node(
+                "dependency-blocked",
+                dependencies=("failed-root",),
+                failure_policy="isolate",
+            ),
+        ),
+    )
+
+    async with Runtime.open(
+        "expansion-dependency-policies",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+        capabilities=(application,),
+    ) as runtime:
+        run = await runtime.tasks.bind(handler, failure, expander).start(
+            graph,
+            idempotency_key="expansion-dependency-policies-0001",
+        )
+        result = await run.wait(timeout_seconds=10)
+        state = await run.state()
+
+    assert result.status is TaskStatus.SUCCEEDED
+    assert set(ran) == {
+        "expansion-source",
+        "success-root",
+        "empty-terminal",
+        "on-source",
+        "on-mixed",
+        "all-succeeded-success",
+        "terminal-after-failures",
+        "nested-any",
+    }
+    result_statuses = {node.node_id: node.status for node in result.node_results}
+    assert result_statuses["on-source"] is TaskStatus.SUCCEEDED
+    assert result_statuses["on-mixed"] is TaskStatus.SUCCEEDED
+    assert result_statuses["empty-terminal"] is TaskStatus.SUCCEEDED
+    assert result_statuses["all-succeeded-success"] is TaskStatus.SUCCEEDED
+    assert result_statuses["all-succeeded-mixed"] is TaskStatus.BLOCKED
+    assert result_statuses["terminal-after-failures"] is TaskStatus.SUCCEEDED
+    assert result_statuses["all-failed"] is TaskStatus.BLOCKED
+    assert result_statuses["source-excluded"] is TaskStatus.BLOCKED
+    assert result_statuses["empty-any"] is TaskStatus.BLOCKED
+    assert result_statuses["nested-any"] is TaskStatus.SUCCEEDED
+    assert observed_dependencies["all-succeeded-success"] == (
+        {
+            "expansion-source": TaskStatus.SUCCEEDED,
+            "success-root": TaskStatus.SUCCEEDED,
+        },
+        {"expansion-source", "success-root"},
+    )
+    assert observed_dependencies["terminal-after-failures"] == (
+        {
+            "dependency-blocked": TaskStatus.BLOCKED,
+            "failed-root": TaskStatus.FAILED,
+        },
+        set(),
+    )
+    node_infos = {node.node_id: node for node in state.nodes}
+    assert set(expanded_names) <= set(node_infos)
+    assert {
+        node_id: (node_infos[node_id].dependency_policy, node_infos[node_id].failure_policy)
+        for node_id in expanded_names
+    } == {
+        "empty-any": ("any_succeeded", "isolate"),
+        "on-source": ("any_succeeded", "isolate"),
+        "on-mixed": ("any_succeeded", "isolate"),
+        "all-succeeded-success": ("all_succeeded", "isolate"),
+        "all-succeeded-mixed": ("all_succeeded", "isolate"),
+        "terminal-after-failures": ("all_terminal", "isolate"),
+        "all-failed": ("any_succeeded", "isolate"),
+        "source-excluded": ("any_succeeded", "isolate"),
+        "nested-any": ("any_succeeded", "isolate"),
+        "empty-terminal": ("all_terminal", "isolate"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_expanded_join_failure_propagates_after_isolated_candidate_failure() -> None:
+    ran: list[str] = []
+    join_dependencies: dict[str, TaskStatus] = {}
+
+    async def succeed(_context: TaskNodeContext[None]) -> JsonValue:
+        return "source"
+
+    async def fail(context: TaskNodeContext[None]) -> JsonValue:
+        ran.append(context.node_id)
+        if context.node_id == "join":
+            join_dependencies.update(
+                {
+                    node_id: state.status
+                    for node_id, state in context.dependency_states.items()
+                }
+            )
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+    application = CapabilityGroup[None]("application")
+    source_task = TaskFunction[None](
+        "example.expanded-join-source", 1, succeed, effect_policy="none"
+    )
+    candidate_task = TaskFunction[None](
+        "example.expanded-join-candidate", 1, fail, effect_policy="none"
+    )
+    application.task(source_task)
+    application.task(candidate_task)
+
+    def expand(_context: TaskExpansionContext) -> tuple[TaskNode, ...]:
+        return (
+            candidate_task.node(
+                "join",
+                dependencies=("candidate",),
+                dependency_policy="all_terminal",
+            ),
+        )
+
+    expander = TaskExpander("example.expanded-join-failure", expand)
+    application.task_expander(expander)
+    graph = TaskGraph(
+        "expanded-join-failure",
+        (
+            source_task.node("source", expander=expander.ref),
+            candidate_task.node("candidate", failure_policy="isolate"),
+        ),
+    )
+
+    async with Runtime.open(
+        "expanded-join-failure",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+        capabilities=(application,),
+    ) as runtime:
+        run = await runtime.tasks.bind(source_task, candidate_task, expander).start(
+            graph,
+            idempotency_key="expanded-join-failure-0001",
+        )
+        result = await run.wait(timeout_seconds=10)
+
+    assert result.status is TaskStatus.FAILED
+    assert set(ran) == {"candidate", "join"}
+    assert join_dependencies == {"candidate": TaskStatus.FAILED}
+    assert {
+        node.node_id: node.status for node in result.node_results
+    } == {
+        "source": TaskStatus.SUCCEEDED,
+        "candidate": TaskStatus.FAILED,
+        "join": TaskStatus.FAILED,
+    }
+
+
+@pytest.mark.asyncio
+async def test_nested_expander_source_does_not_implicitly_wait_for_its_child() -> None:
+    grandchild_started = asyncio.Event()
+    release_grandchild = asyncio.Event()
+
+    async def run(context: TaskNodeContext[None]) -> JsonValue:
+        if context.node_id == "grandchild":
+            grandchild_started.set()
+            await release_grandchild.wait()
+        return context.node_id
+
+    application = CapabilityGroup[None]("application")
+    task = TaskFunction[None](
+        "example.nested-expansion-boundary",
+        1,
+        run,
+        effect_policy="none",
+    )
+    application.task(task)
+    reference = TaskExpanderRef("example.nested-expansion-boundary", 1)
+
+    def expand(context: TaskExpansionContext) -> tuple[TaskNode, ...]:
+        if context.source_node.node_id == "root":
+            return (
+                task.node(
+                    "branch",
+                    dependencies=("root",),
+                    expander=reference,
+                ),
+                task.node(
+                    "join",
+                    dependencies=("branch",),
+                    dependency_policy="all_succeeded",
+                ),
+            )
+        if context.source_node.node_id == "branch":
+            return (task.node("grandchild", dependencies=("branch",)),)
+        return ()
+
+    expander = TaskExpander("example.nested-expansion-boundary", expand)
+    application.task_expander(expander)
+    graph = TaskGraph(
+        "nested-expansion-boundary",
+        (task.node("root", expander=expander.ref),),
+    )
+
+    async with Runtime.open(
+        "nested-expansion-boundary",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+        capabilities=(application,),
+    ) as runtime:
+        run_handle = await runtime.tasks.bind(task, expander).start(
+            graph,
+            idempotency_key="nested-expansion-boundary-0001",
+        )
+        try:
+            await asyncio.wait_for(grandchild_started.wait(), 10)
+            deadline = asyncio.get_running_loop().time() + 10
+            while True:
+                state = await run_handle.state()
+                states = {node.node_id: node.status for node in state.node_states}
+                if states.get("join") is TaskStatus.SUCCEEDED:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("join did not follow its declared source")
+                await asyncio.sleep(0.001)
+            assert states["grandchild"] is TaskStatus.RUNNING
+            assert state.status is TaskStatus.RUNNING
+        finally:
+            release_grandchild.set()
+
+        result = await run_handle.wait(timeout_seconds=10)
+
+    assert result.status is TaskStatus.SUCCEEDED
+    assert {
+        node.node_id: node.status for node in result.node_results
+    } == {
+        "root": TaskStatus.SUCCEEDED,
+        "branch": TaskStatus.SUCCEEDED,
+        "join": TaskStatus.SUCCEEDED,
+        "grandchild": TaskStatus.SUCCEEDED,
+    }
 
 
 class _ApplicationGraphExpander:
@@ -4734,3 +5483,124 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
         assert snapshot.node_states[0].lease_expires_at is not None
     finally:
         await probe.close()
+
+
+@pytest.mark.asyncio
+async def test_any_succeeded_barrier_survives_runtime_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.task import _local
+
+    monkeypatch.setattr(_local, "_LEASE_SECONDS", 1)
+    storage_root = tmp_path / "state"
+    held_started = asyncio.Event()
+    held_cancelled = asyncio.Event()
+    success_calls = 0
+    held_calls = 0
+    join_calls = 0
+    joined: dict[str, object] = {}
+
+    async def succeed(_context: TaskNodeContext[None]) -> JsonValue:
+        nonlocal success_calls
+        success_calls += 1
+        return {"value": "committed"}
+
+    async def hold_then_fail(_context: TaskNodeContext[None]) -> JsonValue:
+        nonlocal held_calls
+        held_calls += 1
+        if held_calls == 1:
+            held_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                held_cancelled.set()
+                raise
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+    async def join(context: TaskNodeContext[None]) -> JsonValue:
+        nonlocal join_calls
+        join_calls += 1
+        joined["states"] = {
+            node_id: state.status
+            for node_id, state in context.dependency_states.items()
+        }
+        joined["results"] = set(context.dependencies)
+        return "joined"
+
+    application = CapabilityGroup[None]("application")
+    success = TaskFunction[None]("example.restart-success", 1, succeed)
+    held = TaskFunction[None]("example.restart-held-failure", 1, hold_then_fail)
+    joiner = TaskFunction[None]("example.restart-join", 1, join)
+    application.task(success, effect_policy="none")
+    application.task(held, effect_policy="none")
+    application.task(joiner, effect_policy="none")
+    graph = TaskGraph(
+        "any-succeeded-restart",
+        (
+            success.node("success"),
+            held.node("held", failure_policy="isolate"),
+            joiner.node(
+                "join",
+                dependencies=("success", "held"),
+                dependency_policy="any_succeeded",
+            ),
+        ),
+    )
+
+    async with Runtime.open(
+        "any-succeeded-restart",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.filesystem(storage_root),
+        capabilities=(application,),
+    ) as runtime:
+        first_run = await runtime.tasks.bind(success, held, joiner).start(
+            graph,
+            idempotency_key="any-succeeded-restart-0001",
+        )
+        await asyncio.wait_for(held_started.wait(), 10)
+        deadline = asyncio.get_running_loop().time() + 10
+        while True:
+            first_state = await first_run.state()
+            state_by_id = {node.node_id: node for node in first_state.node_states}
+            if (
+                state_by_id["success"].status is TaskStatus.SUCCEEDED
+                and state_by_id["held"].status is TaskStatus.RUNNING
+            ):
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("success branch did not commit before shutdown")
+            await asyncio.sleep(0.001)
+        committed_result = state_by_id["success"].result_digest
+        committed_execution = state_by_id["success"].execution_id
+        assert committed_result is not None
+        assert committed_execution is not None
+        assert state_by_id["join"].status is TaskStatus.PENDING
+        assert join_calls == 0
+
+    assert held_cancelled.is_set()
+    await asyncio.sleep(1.1)
+
+    async with Runtime.open(
+        "any-succeeded-restart",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.filesystem(storage_root),
+        capabilities=(application,),
+    ) as runtime:
+        bound_tasks = runtime.tasks.bind(success, held, joiner)
+        await bound_tasks.recover_pending()
+        recovered_run = await bound_tasks.get(graph.graph_id)
+        result = await recovered_run.wait(timeout_seconds=10)
+        final_state = await recovered_run.state()
+
+    assert result.status is TaskStatus.RECOVERY_REQUIRED
+    assert success_calls == 1
+    assert held_calls == 1
+    assert join_calls == 0
+    assert joined == {}
+    final_by_id = {node.node_id: node for node in final_state.node_states}
+    assert final_by_id["success"].status is TaskStatus.SUCCEEDED
+    assert final_by_id["success"].result_digest == committed_result
+    assert final_by_id["success"].execution_id == committed_execution
+    assert final_by_id["held"].status is TaskStatus.RECOVERY_REQUIRED
+    assert final_by_id["join"].status is TaskStatus.PENDING
