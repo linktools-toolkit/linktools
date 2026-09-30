@@ -153,6 +153,19 @@ def _application(
     return application
 
 
+def _split_sqlite_storage(database: Path) -> RuntimeStorage:
+    return RuntimeStorage(
+        RuntimeStoragePlan(
+            conversation=RuntimeStorageRoute.sqlite(
+                database.with_name(f"{database.stem}-conversation.db")
+            ),
+            execution=RuntimeStorageRoute.sqlite(
+                database.with_name(f"{database.stem}-execution.db")
+            ),
+        )
+    )
+
+
 def _relevant_kinds(values: object) -> list[str]:
     return [
         item.item_kind
@@ -854,6 +867,8 @@ def _crash_session_process(
     async def run() -> None:
         if backend == "sqlite":
             state = RuntimeStorage.sqlite(database)
+        elif backend == "split_sqlite":
+            state = _split_sqlite_storage(Path(database))
         else:
             engine = create_async_engine(
                 URL.create("sqlite+aiosqlite", database=database)
@@ -902,7 +917,7 @@ async def _exit_at_boundary(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("sqlite", "sql"))
+@pytest.mark.parametrize("backend", ("sqlite", "sql", "split_sqlite"))
 @pytest.mark.parametrize(
     "phase",
     (
@@ -927,6 +942,8 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     engine = None
     if backend == "sqlite":
         state = RuntimeStorage.sqlite(database)
+    elif backend == "split_sqlite":
+        state = _split_sqlite_storage(database)
     else:
         engine = create_async_engine(
             URL.create("sqlite+aiosqlite", database=str(database))
@@ -966,9 +983,12 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
             execution_history = await runtime.history.history(
                 execution_id, principal=runtime.default_principal, include_content=True
             )
-            assert _relevant_kinds(execution_history.items) == _relevant_kinds(
-                history.items
-            )
+            execution_history_kinds = _relevant_kinds(execution_history.items)
+            session_history_kinds = _relevant_kinds(history.items)
+            if backend == "split_sqlite":
+                assert set(session_history_kinds) <= set(execution_history_kinds)
+            else:
+                assert execution_history_kinds == session_history_kinds
             interactions = await same.model_interactions(include_content=True)
             assert len(interactions.items) >= 2, interactions.items
             assert interactions.items[-1].response is not None
@@ -983,6 +1003,16 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
             )
             assert following.status is ExecutionStatus.SUCCEEDED
             assert effect_log.read_text().splitlines() == committed_effects
+            if backend == "split_sqlite":
+                repeated_history = await session.history()
+                assert _relevant_kinds(repeated_history.items) == [
+                    "user",
+                    "tool_call",
+                    "tool_result",
+                    "assistant",
+                    "user",
+                    "assistant",
+                ]
     finally:
         await state.close()
         if engine is not None:

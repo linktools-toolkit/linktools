@@ -870,6 +870,55 @@ class RuntimeAgentRunStore(AgentRunStore):
                     source_interactions,
                     source_resolved,
                 )
+                existing_values = await destination.list_model_interactions(
+                    agent_run_id=agent_run_id
+                )
+                existing_interactions = tuple(
+                    value
+                    for value in existing_values
+                    if isinstance(value, ModelInteractionRecord)
+                )
+                if len(existing_interactions) != len(existing_values):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                existing_by_sequence = {
+                    value.request_sequence: value for value in existing_interactions
+                }
+                source_by_sequence = {
+                    value.request_sequence: (value, resolved)
+                    for value, resolved in zip(
+                        source_interactions,
+                        source_resolved,
+                        strict=True,
+                    )
+                }
+                if (
+                    len(existing_by_sequence) != len(existing_interactions)
+                    or not existing_by_sequence.keys() <= source_by_sequence.keys()
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                missing_relocated: list[ModelInteractionRecord] = []
+                for value in relocated:
+                    existing_value = existing_by_sequence.get(
+                        value.request_sequence
+                    )
+                    if existing_value is None:
+                        missing_relocated.append(value)
+                        continue
+                    source_value, source_projection = source_by_sequence[
+                        value.request_sequence
+                    ]
+                    if (
+                        _interaction_semantic_header(existing_value)
+                        != _interaction_semantic_header(source_value)
+                        or tuple(
+                            await destination.resolve_model_interactions(
+                                (existing_value,)
+                            )
+                        )
+                        != (source_projection,)
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                relocated = tuple(missing_relocated)
             except BaseException:
                 await self._abandon_durability_flight(flight)
                 raise
