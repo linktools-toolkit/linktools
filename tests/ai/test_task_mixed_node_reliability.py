@@ -56,6 +56,10 @@ from linktools.ai.runtime.state._codec import (
     iter_runtime_object_refs,
 )
 from linktools.ai.runtime.state._contracts import StoredUserInput
+from linktools.ai.runtime.state._task_state import (
+    _effective_graph_status,
+    _isolated_graph_status,
+)
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload, read_object
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
@@ -2255,9 +2259,54 @@ def test_task_graph_aggregate_obeys_failure_and_cancel_priority(
         for index, (status, _failure_policy) in enumerate(node_statuses)
     )
 
-    state = TaskGraphState("aggregate-policy", expected, nodes, states)
+    assert _isolated_graph_status(states, nodes) is expected
 
-    assert state.status is expected
+
+def test_whole_graph_cancel_overrides_terminal_node_aggregate() -> None:
+    nodes = (
+        TaskNode("failed", failure_policy="propagate"),
+        TaskNode("cancelled"),
+    )
+    states = (
+        TaskNodeView(
+            "aggregate-cancel",
+            "failed",
+            (),
+            TaskStatus.FAILED,
+            None,
+            0,
+            None,
+            None,
+            ErrorCode.TASK_NODE_FAILED.value,
+            "a" * 64,
+        ),
+        TaskNodeView(
+            "aggregate-cancel",
+            "cancelled",
+            (),
+            TaskStatus.CANCELLED,
+            None,
+            0,
+            None,
+            None,
+            None,
+            None,
+        ),
+    )
+    graph = TaskGraphView("aggregate-cancel", TaskStatus.CANCELLED, nodes)
+
+    assert _isolated_graph_status(states, nodes) is TaskStatus.FAILED
+    assert _effective_graph_status(graph, states) is TaskStatus.CANCELLED
+    recovering = (
+        states[0],
+        replace(
+            states[1],
+            status=TaskStatus.RECOVERY_REQUIRED,
+            error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+            error_digest="b" * 64,
+        ),
+    )
+    assert _effective_graph_status(graph, recovering) is TaskStatus.RECOVERY_REQUIRED
 
 
 @pytest.mark.asyncio
