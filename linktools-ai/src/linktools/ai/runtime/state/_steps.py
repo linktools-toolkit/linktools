@@ -24,6 +24,7 @@ from ._contracts import (
     LoadedModelContext,
     ModelInteractionRecord,
     TranscriptMessageRef,
+    TranscriptSpanRef,
 )
 from ._durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._plan import RuntimeDomain, RuntimeRetentionMode

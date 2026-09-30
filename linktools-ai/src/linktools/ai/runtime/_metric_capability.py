@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -42,7 +42,7 @@ from ..capability import AgentContext
 from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ._journal import ModelRequestFact, ModelRequestJournal
+from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
 from ._metrics import (
     _bind_metric_execution_context,
     _metric_correlation,
