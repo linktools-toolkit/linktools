@@ -5451,6 +5451,28 @@ async def test_runtime_recovery_rejects_same_revision_task_semantic_drift(
     assert reconcile_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert reconcile_error.value.safe_details["reason"] == "task_reconcile_changed"
 
+    async def cancel_task(context: TaskNodeContext[None]) -> None:
+        del context
+
+    cancel_added = CapabilityGroup[None]("application")
+    cancel_added.task(
+        TaskFunction[None]("example.semantic-drift", 1, blocking_task),
+        effect_policy="none",
+        output_type=_EffectOutput,
+        cancel=cancel_task,
+        reconcile=reconcile,
+    )
+    with pytest.raises(AIError) as cancel_error:
+        async with Runtime.open(
+            "semantic-drift",
+            models=_TaskTestModels(),  # type: ignore[arg-type]
+            storage=RuntimeStorage.filesystem(storage_root),
+            capabilities=(cancel_added,),
+        ) as runtime:
+            await task_engine(runtime).recover_pending()
+    assert cancel_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert cancel_error.value.safe_details["reason"] == "task_cancel_changed"
+
     output_changed = CapabilityGroup[None]("application")
     output_changed.task(
         TaskFunction[None]("example.semantic-drift", 1, blocking_task),
