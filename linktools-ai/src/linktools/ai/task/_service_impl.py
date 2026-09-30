@@ -622,7 +622,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 await self._cleanup_graph_runtime(
                     view,
                     request.principal,
-                    invoke_effects=False,
+                    invoke_effects=True,
                 )
                 refreshed = await self._persistence.tasks.get_graph(
                     graph_id,
@@ -689,7 +689,7 @@ class DefaultTaskGraphService(TaskGraphService):
                         admission.launch(),
                         node_state.node_id,
                         execution_id,
-                        invoke_effects=False,
+                        invoke_effects=True,
                     )
                     graph_state = await self._persistence.tasks.graph_state(
                         graph_id,
