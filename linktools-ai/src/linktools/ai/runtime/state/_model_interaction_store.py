@@ -42,8 +42,7 @@ class ModelInteractionStagingAgentRunStore(StagingAgentRunStore):
     """Staging store with request-sequence idempotency and durable high-water capture."""
 
     def stage_model_interaction(self, interaction: object) -> None:
-        self._ensure_open()
-        _stage_interaction(self._interactions, interaction)
+        super().stage_model_interaction(interaction)
 
     def capture_projection_local(
         self,
@@ -383,56 +382,37 @@ def _validate_interaction_batch(
             not isinstance(interaction, StagedModelInteraction)
             or interaction.agent_run_id != run.agent_run_id
             or interaction.request_sequence in sequences
+            or interaction.status == "RUNNING"
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sequences.add(interaction.request_sequence)
     return values
 
 
-def _stage_interaction(
-    values_by_run: dict[str, list[StagedModelInteraction]],
-    interaction: object,
-) -> None:
-    if not isinstance(interaction, StagedModelInteraction):
-        raise TypeError("staged model interaction is invalid")
-    values = values_by_run.setdefault(interaction.agent_run_id, [])
-    if not values:
-        values.append(interaction)
-        return
-    last_sequence = values[-1].request_sequence
-    if interaction.request_sequence == last_sequence + 1:
-        values.append(interaction)
-        return
-    index = interaction.request_sequence - values[0].request_sequence
-    if (
-        0 <= index < len(values)
-        and values[index].request_sequence == interaction.request_sequence
-    ):
-        if values[index] == interaction:
-            return
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
 
 def _with_interaction_high_water(
     batch: ExecutionProjectionBatch,
     durable_high_water: int,
 ) -> ExecutionProjectionBatch:
-    interactions = tuple(
-        value
-        for value in batch.interactions
-        if value.request_sequence > durable_high_water
-    )
-    target = max(
-        durable_high_water,
-        max(
-            (value.request_sequence for value in batch.interactions),
-            default=0,
-        ),
-    )
+    interactions: list[StagedModelInteraction] = []
+    expected = durable_high_water + 1
+    running_seen = False
+    for value in batch.interactions:
+        if value.request_sequence <= durable_high_water:
+            continue
+        if value.request_sequence != expected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if value.status == "RUNNING":
+            running_seen = True
+            continue
+        if running_seen:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        interactions.append(value)
+        expected += 1
+    target = durable_high_water + len(interactions)
     return replace(
         batch,
-        interactions=interactions,
+        interactions=tuple(interactions),
         base_interaction_offset=durable_high_water,
         target_interaction_offset=target,
     )

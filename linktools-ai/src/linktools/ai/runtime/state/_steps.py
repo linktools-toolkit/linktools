@@ -12,7 +12,12 @@ from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
 from ...errors import AIError, ErrorCode
-from .._model_interaction import ModelInteractionLifecycle, StagedModelInteraction
+from .._message import decode_model_messages
+from .._model_interaction import (
+    StagedContextInline,
+    StagedContextSpan,
+    StagedModelInteraction,
+)
 from ._contracts import (
     ExecutionRunSealHead,
     LoadedContextMessage,
@@ -317,26 +322,6 @@ class RuntimeAgentRunStore(AgentRunStore):
             raise TypeError("staged model interaction has no AgentRun identity")
         self._projection_dirty.add(agent_run_id)
 
-    def stage_model_interaction_lifecycle(
-        self,
-        interaction: ModelInteractionLifecycle,
-    ) -> None:
-        self._staging.stage_model_interaction_lifecycle(interaction)
-
-    async def list_model_interaction_lifecycle(
-        self,
-        *,
-        agent_run_id: str,
-        after_request_sequence: int | None = None,
-        limit: int | None = None,
-    ) -> list[ModelInteractionLifecycle]:
-        await self._ensure_business()
-        return await self._staging.list_model_interaction_lifecycle(
-            agent_run_id=agent_run_id,
-            after_request_sequence=after_request_sequence,
-            limit=limit,
-        )
-
     async def model_interaction_history_high_water(
         self,
         *,
@@ -344,15 +329,24 @@ class RuntimeAgentRunStore(AgentRunStore):
     ) -> int:
         """Read a lifecycle-first high water mark across the archive handoff."""
         await self._ensure_business()
-        lifecycle = await self._staging.list_model_interaction_lifecycle(
+        staged = await self._staging.list_model_interactions(
             agent_run_id=agent_run_id
         )
+        if any(not isinstance(item, StagedModelInteraction) for item in staged):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         archived = await self.read_store(RuntimeDomain.EXECUTION).model_interaction_count(
             agent_run_id=agent_run_id
         )
         return max(
             archived,
-            max((item.request_sequence for item in lifecycle), default=0),
+            max(
+                (
+                    item.request_sequence
+                    for item in staged
+                    if isinstance(item, StagedModelInteraction)
+                ),
+                default=0,
+            ),
         )
 
     async def list_model_interaction_history_snapshot(
@@ -361,20 +355,24 @@ class RuntimeAgentRunStore(AgentRunStore):
         agent_run_id: str,
         after_request_sequence: int,
         limit: int,
-    ) -> tuple[list[object], list[ModelInteractionLifecycle]]:
-        """Capture local identities before reading their durable handoff."""
+    ) -> tuple[list[object], list[StagedModelInteraction]]:
+        """Capture staged identities before reading their durable handoff."""
         await self._ensure_business()
-        lifecycle = await self._staging.list_model_interaction_lifecycle(
+        staged = await self._staging.list_model_interactions(
             agent_run_id=agent_run_id,
             after_request_sequence=after_request_sequence,
             limit=limit,
         )
+        if any(not isinstance(item, StagedModelInteraction) for item in staged):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         archived = await self.read_store(RuntimeDomain.EXECUTION).list_model_interactions(
             agent_run_id=agent_run_id,
             after_request_sequence=after_request_sequence,
             limit=limit,
         )
-        return archived, lifecycle
+        return archived, [
+            item for item in staged if isinstance(item, StagedModelInteraction)
+        ]
 
     async def list_model_interactions(
         self,
@@ -393,13 +391,21 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def model_interaction_count(self, *, agent_run_id: str) -> int:
         await self._ensure_business()
         staged = await self._staging.list_model_interactions(agent_run_id=agent_run_id)
-        staged_sequences = tuple(
-            value.request_sequence
+        if any(not isinstance(value, StagedModelInteraction) for value in staged):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        terminal = [
+            value
             for value in staged
             if isinstance(value, StagedModelInteraction)
-        )
-        if len(staged_sequences) != len(staged):
+            and value.status != "RUNNING"
+        ]
+        if any(
+            value.status != "RUNNING"
+            for value in staged[len(terminal) :]
+            if isinstance(value, StagedModelInteraction)
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        staged_sequences = tuple(value.request_sequence for value in terminal)
         if staged_sequences and staged_sequences != tuple(
             range(staged_sequences[0], staged_sequences[0] + len(staged_sequences))
         ):
@@ -424,7 +430,73 @@ class RuntimeAgentRunStore(AgentRunStore):
         interactions: Sequence[object],
     ) -> list[object]:
         await self._ensure_business()
-        return await self._staging.resolve_model_interactions(interactions)
+        values = tuple(interactions)
+        if not values:
+            return []
+        if all(isinstance(value, StagedModelInteraction) for value in values):
+            staged = tuple(
+                value for value in values if isinstance(value, StagedModelInteraction)
+            )
+            agent_run_ids = {value.agent_run_id for value in staged}
+            if len(agent_run_ids) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            agent_run_id = staged[0].agent_run_id
+            checkpoint = await self._staging.latest_checkpoint(
+                agent_run_id=agent_run_id,
+                include_interrupted=True,
+            )
+            local_messages = () if checkpoint is None else tuple(checkpoint.messages)
+
+            async def resolve_projection(projection):
+                messages: list[ModelMessage] = []
+                for item in projection.items:
+                    if isinstance(item, StagedContextSpan):
+                        if item.end > len(local_messages):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        messages.extend(local_messages[item.start : item.end])
+                    elif isinstance(item, StagedContextInline):
+                        decoded = decode_model_messages(
+                            self._staging.staged_payload(
+                                agent_run_id,
+                                item.payload_digest,
+                            )
+                        )
+                        messages.extend(decoded)
+                    elif isinstance(item, TranscriptSpanRef):
+                        refs = tuple(
+                            TranscriptMessageRef(
+                                item.source_domain,
+                                item.owner_id,
+                                index,
+                            )
+                            for index in range(item.start, item.end)
+                        )
+                        resolved = await self.resolve_transcript_message_refs(refs)
+                        messages.extend(value.message for value in resolved)
+                    else:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return tuple(messages)
+
+            resolved_values: list[object] = []
+            for value in staged:
+                request = await resolve_projection(value.request_context)
+                response = (
+                    None
+                    if value.response_context is None
+                    else await resolve_projection(value.response_context)
+                )
+                resolved_values.append(
+                    (
+                        request,
+                        response,
+                        self._staging.staged_payload(
+                            agent_run_id,
+                            value.request_envelope_digest,
+                        ),
+                    )
+                )
+            return resolved_values
+        return await self._staging.resolve_model_interactions(values)
 
     def read_store(self, runtime_domain: RuntimeDomain) -> AgentRunStore:
         if runtime_domain not in self._archives:

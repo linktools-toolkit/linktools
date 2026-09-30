@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
@@ -92,9 +91,11 @@ class StagedModelInteraction:
     response_context: StagedContextProjection | None
     status: str
     error_code: str | None
-    duration_ns: int
+    duration_ns: int | None
     usage: UsageMetrics | None
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -102,19 +103,35 @@ class StagedModelInteraction:
             or self.step_index < 0
             or self.request_sequence < 1
             or self.purpose not in {"agent", "compaction"}
-            or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
-            or self.duration_ns < 0
+            or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}
+            or self.duration_ns is not None
+            and self.duration_ns < 0
             or len(self.request_envelope_digest) != 64
             or any(
                 value not in "0123456789abcdef"
                 for value in self.request_envelope_digest
             )
+            or self.status == "RUNNING"
+            and (
+                self.response_context is not None
+                or self.error_code is not None
+                or self.duration_ns is not None
+                or self.usage is not None
+                or self.finished_at is not None
+            )
+            or self.status != "RUNNING"
+            and self.duration_ns is None
             or self.status == "SUCCEEDED"
             and self.response_context is None
-            or self.status != "SUCCEEDED"
+            or self.status not in {"RUNNING", "SUCCEEDED"}
             and self.response_context is not None
             or self.status == "FAILED"
             and not self.error_code
+            or self.finished_at is not None
+            and self.started_at is None
+            or self.status != "RUNNING"
+            and self.started_at is not None
+            and self.finished_at is None
         ):
             raise ValueError("staged model interaction is invalid")
         if not isinstance(self.request_context, StagedContextProjection):
@@ -137,51 +154,6 @@ class StagedModelInteraction:
                 raise ValueError("staged model attachment fact is invalid")
             normalized_attachments.append(normalized)
         object.__setattr__(self, "attachments", tuple(normalized_attachments))
-
-
-@dataclass(frozen=True, slots=True)
-class ModelInteractionLifecycle:
-    """Process-local public projection of one accepted model request."""
-
-    agent_run_id: str
-    step_index: int
-    request_sequence: int
-    purpose: str
-    output_retry_index: int | None
-    model: Mapping[str, str]
-    request: Mapping[str, JsonValue]
-    response: JsonValue | None
-    status: str
-    error_code: str | None
-    duration_ns: int | None
-    usage: UsageMetrics | None
-    started_at: datetime
-    finished_at: datetime | None = None
-
-    def __post_init__(self) -> None:
-        if (
-            not self.agent_run_id
-            or self.step_index < 0
-            or self.request_sequence < 1
-            or self.purpose not in {"agent", "compaction"}
-            or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}
-            or self.duration_ns is not None and self.duration_ns < 0
-            or self.status == "RUNNING"
-            and (
-                self.response is not None
-                or self.error_code is not None
-                or self.duration_ns is not None
-                or self.usage is not None
-                or self.finished_at is not None
-            )
-            or self.status != "RUNNING"
-            and (self.duration_ns is None or self.finished_at is None)
-            or self.status == "FAILED" and not self.error_code
-        ):
-            raise ValueError("model interaction lifecycle is invalid")
-        object.__setattr__(self, "model", deepcopy(dict(self.model)))
-        object.__setattr__(self, "request", deepcopy(dict(self.request)))
-        object.__setattr__(self, "response", deepcopy(self.response))
 
 
 PayloadIntern = Callable[[bytes], tuple[str, int]]
@@ -426,7 +398,6 @@ def _sanitize_binary(source: object, value: JsonValue) -> None:
 
 
 __all__ = [
-    "ModelInteractionLifecycle",
     "StagedContextInline",
     "StagedContextItem",
     "StagedContextProjection",

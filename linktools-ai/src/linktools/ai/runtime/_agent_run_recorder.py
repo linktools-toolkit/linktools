@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Protocol, cast
 
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
@@ -25,13 +25,11 @@ from ._journal import (
 )
 from ._message import encode_model_messages, freeze_model_messages, project_transient_binary_content
 from ._model_interaction import (
-    ModelInteractionLifecycle,
     StagedContextProjection,
     StagedModelInteraction,
     build_context_projection,
     build_inline_context_projection,
     model_identity,
-    project_public_messages,
     request_envelope,
 )
 from .state._contracts import LoadedModelContext, TranscriptMessageRef
@@ -49,10 +47,6 @@ class _InteractionStagingPort(Protocol):
     def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]: ...
 
     def stage_model_interaction(self, interaction: object) -> None: ...
-
-    def stage_model_interaction_lifecycle(
-        self, interaction: ModelInteractionLifecycle
-    ) -> None: ...
 
 
 class AgentRunRecorder:
@@ -131,7 +125,6 @@ class AgentRunRecorder:
             int,
             tuple[Mapping[str, JsonValue], ...],
         ] = {}
-        self._interaction_lifecycle: dict[int, ModelInteractionLifecycle] = {}
 
     @property
     def agent_run_id(self) -> str:
@@ -328,34 +321,25 @@ class AgentRunRecorder:
             self._initial_attachments,
             accepted_attachment_ids=self._accepted_attachment_ids,
         )
-        request: dict[str, JsonValue] = {
-            "messages": project_public_messages(frozen),
-            **dict(envelope),
-        }
-        instructions = [
-            message.instructions
-            for message in frozen
-            if isinstance(message, ModelRequest) and message.instructions is not None
-        ]
-        if instructions:
-            request["instructions"] = instructions
-        lifecycle = ModelInteractionLifecycle(
-            agent_run_id=self._agent_run_id,
-            step_index=fact.step_index,
-            request_sequence=fact.request_sequence,
-            purpose=fact.purpose,
-            output_retry_index=fact.output_retry_index,
-            model=model_identity(model, route_id=model_id),
-            request=request,
-            response=None,
-            status="RUNNING",
-            error_code=None,
-            duration_ns=None,
-            usage=None,
-            started_at=fact.started_at,
+        self._interaction_store.stage_model_interaction(
+            StagedModelInteraction(
+                agent_run_id=self._agent_run_id,
+                step_index=fact.step_index,
+                request_sequence=fact.request_sequence,
+                purpose=fact.purpose,
+                output_retry_index=fact.output_retry_index,
+                model=self._interaction_models[fact.request_sequence],
+                request_context=projection,
+                request_envelope_digest=digest,
+                response_context=None,
+                status="RUNNING",
+                error_code=None,
+                duration_ns=None,
+                usage=None,
+                attachments=self._interaction_attachments[fact.request_sequence],
+                started_at=fact.started_at,
+            )
         )
-        self._interaction_store.stage_model_interaction_lifecycle(lifecycle)
-        self._interaction_lifecycle[fact.request_sequence] = lifecycle
 
     def finish_model_interaction(
         self,
@@ -371,7 +355,6 @@ class AgentRunRecorder:
         del model
         request_sequence = fact.request_sequence
         try:
-            previous_live = self._interaction_lifecycle.pop(request_sequence)
             projection = self._interaction_projections.pop(request_sequence)
             envelope_digest = self._interaction_payloads.pop(request_sequence)
             model_value = self._interaction_models.pop(request_sequence)
@@ -389,45 +372,26 @@ class AgentRunRecorder:
                     payload,
                 ),
             )
-        staged = StagedModelInteraction(
-            self._agent_run_id,
-            fact.step_index,
-            request_sequence,
-            fact.purpose,
-            fact.output_retry_index,
-            model_value,
-            projection,
-            envelope_digest,
-            response_projection,
-            status,
-            error_code,
-            duration_ns,
-            _usage_metrics(usage),
-            attachments,
+        self._interaction_store.stage_model_interaction(
+            StagedModelInteraction(
+                agent_run_id=self._agent_run_id,
+                step_index=fact.step_index,
+                request_sequence=request_sequence,
+                purpose=fact.purpose,
+                output_retry_index=fact.output_retry_index,
+                model=model_value,
+                request_context=projection,
+                request_envelope_digest=envelope_digest,
+                response_context=response_projection,
+                status=status,
+                error_code=error_code,
+                duration_ns=duration_ns,
+                usage=_usage_metrics(usage),
+                attachments=attachments,
+                started_at=fact.started_at,
+                finished_at=fact.finished_at,
+            )
         )
-        self._interaction_store.stage_model_interaction(staged)
-        response_value: JsonValue | None = None
-        if response is not None:
-            projected = project_public_messages(freeze_model_messages((response,)))
-            response_value = projected[0] if len(projected) == 1 else projected
-        lifecycle = ModelInteractionLifecycle(
-            agent_run_id=self._agent_run_id,
-            step_index=fact.step_index,
-            request_sequence=request_sequence,
-            purpose=fact.purpose,
-            output_retry_index=fact.output_retry_index,
-            model=previous_live.model,
-            request=previous_live.request,
-            response=response_value,
-            status=status,
-            error_code=error_code,
-            duration_ns=duration_ns,
-            usage=_usage_metrics(usage),
-            started_at=previous_live.started_at,
-            finished_at=fact.finished_at,
-        )
-        self._interaction_store.stage_model_interaction_lifecycle(lifecycle)
-        self._interaction_lifecycle[request_sequence] = lifecycle
 
     def request_sequence_for_tool_call(self, tool_call_id: str) -> int | None:
         return self._request_sequence_by_tool_call.get(tool_call_id)

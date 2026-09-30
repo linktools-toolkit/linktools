@@ -38,7 +38,7 @@ from ._journal import (
     REQUEST_PURPOSE_METADATA_KEY,
     REQUEST_SEQUENCE_METADATA_KEY,
 )
-from ._model_interaction import ModelInteractionLifecycle, project_public_messages
+from ._model_interaction import StagedModelInteraction, project_public_messages
 from .service_api import (
     AttachmentFact,
     ExecutionHistoryItem,
@@ -104,7 +104,7 @@ class _InteractionOccurrence:
     source_execution_id: str
     agent_run_sequence: int
     depth: int
-    interaction: ModelInteractionRecord | ModelInteractionLifecycle
+    interaction: ModelInteractionRecord | StagedModelInteraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +214,12 @@ class _ModelInteractionLifecycleStore(Protocol):
         agent_run_id: str,
         after_request_sequence: int,
         limit: int,
-    ) -> tuple[list[object], list[ModelInteractionLifecycle]]: ...
+    ) -> tuple[list[object], list[StagedModelInteraction]]: ...
+
+    async def resolve_model_interactions(
+        self,
+        interactions: Sequence[object],
+    ) -> list[object]: ...
 
 
 class StepExecutionHistoryReader:
@@ -479,19 +484,15 @@ class StepExecutionHistoryReader:
         )
         explicit_cutoffs = _normalize_usage_cutoffs(cutoffs)
         if cursor_state is not None:
-            cursor_coordinate, query_mode, cursor_cutoffs = cursor_state
-            if query_mode == "lifecycle" and explicit_cutoffs is not None:
-                raise AIError(ErrorCode.CURSOR_INVALID)
+            cursor_coordinate, cursor_cutoffs = cursor_state
             if (
-                query_mode == "usage"
-                and explicit_cutoffs is not None
+                explicit_cutoffs is not None
                 and explicit_cutoffs != cursor_cutoffs
             ):
                 raise AIError(ErrorCode.CURSOR_INVALID)
             fixed_cutoffs = cursor_cutoffs
         else:
             cursor_coordinate = None
-            query_mode = "lifecycle" if explicit_cutoffs is None else "usage"
             if explicit_cutoffs is None:
                 captured: list[UsageReadCutoff] = []
                 for source in current_sources:
@@ -568,9 +569,9 @@ class StepExecutionHistoryReader:
                 agent_run_sequence=source.agent_run_sequence,
             )
             fetch_limit = min(remaining, available)
-            lifecycle_values: list[ModelInteractionLifecycle] = []
-            if query_mode == "lifecycle" and self._lifecycle_store is not None:
-                interactions, lifecycle_values = await self._lifecycle_store.list_model_interaction_history_snapshot(
+            staged_values: list[StagedModelInteraction] = []
+            if self._lifecycle_store is not None:
+                interactions, staged_values = await self._lifecycle_store.list_model_interaction_history_snapshot(
                     agent_run_id=agent_run_id,
                     after_request_sequence=after_request_sequence,
                     limit=fetch_limit,
@@ -582,24 +583,20 @@ class StepExecutionHistoryReader:
                     limit=fetch_limit,
                 )
             selected_by_sequence: dict[
-                int, ModelInteractionRecord | ModelInteractionLifecycle
+                int, ModelInteractionRecord | StagedModelInteraction
             ] = {}
-
-            def select_archived_interaction(interaction: object) -> None:
-                if isinstance(interaction, ModelInteractionRecord):
-                    if interaction.agent_run_id != agent_run_id:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    selected_by_sequence[interaction.request_sequence] = interaction
-                elif query_mode == "usage":
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-            # The local-to-archive handoff can overlap these reads. A terminal
-            # archive row therefore takes precedence over its captured RUNNING value.
-            for interaction in lifecycle_values:
+            for interaction in staged_values:
                 if interaction.request_sequence <= high_water:
                     selected_by_sequence[interaction.request_sequence] = interaction
             for interaction in interactions:
-                select_archived_interaction(interaction)
+                if (
+                    not isinstance(interaction, ModelInteractionRecord)
+                    or interaction.agent_run_id != agent_run_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                # The local-to-archive handoff can overlap these reads. The
+                # durable terminal record wins once it is visible.
+                selected_by_sequence[interaction.request_sequence] = interaction
             selected_values = [
                 selected_by_sequence[sequence]
                 for sequence in sorted(selected_by_sequence)[:fetch_limit]
@@ -623,24 +620,43 @@ class StepExecutionHistoryReader:
 
         selected_occurrences = page[:limit]
         selected_items: dict[tuple[str, int], ModelInteractionItem] = {}
-        live_occurrences = tuple(
+        staged_occurrences = tuple(
             value
             for value in selected_occurrences
-            if isinstance(value.interaction, ModelInteractionLifecycle)
+            if isinstance(value.interaction, StagedModelInteraction)
         )
-        for occurrence in live_occurrences:
-            selected_items[
-                (
-                    occurrence.interaction.agent_run_id,
-                    occurrence.interaction.request_sequence,
+        for occurrence_group in _interaction_occurrence_groups(staged_occurrences):
+            resolved_values: tuple[object, ...]
+            if include_content:
+                if self._lifecycle_store is None:
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                resolved_values = tuple(
+                    await self._lifecycle_store.resolve_model_interactions(
+                        tuple(value.interaction for value in occurrence_group)
+                    )
                 )
-            ] = self._project_model_interaction_lifecycle(
-                occurrence.interaction,
-                occurrence.source_execution_id,
-                occurrence.agent_run_sequence,
-                occurrence.depth,
-                include_content=include_content,
-            )
+                if len(resolved_values) != len(occurrence_group):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            else:
+                resolved_values = (None,) * len(occurrence_group)
+            for occurrence, resolved_context in zip(
+                occurrence_group,
+                resolved_values,
+                strict=True,
+            ):
+                interaction = occurrence.interaction
+                selected_items[
+                    (interaction.agent_run_id, interaction.request_sequence)
+                ] = self._project_model_interaction(
+                    interaction,
+                    occurrence.source_execution_id,
+                    occurrence.agent_run_sequence,
+                    occurrence.depth,
+                    resolved_context,
+                    include_content=include_content,
+                    started_at=interaction.started_at,
+                    finished_at=interaction.finished_at,
+                )
         stored_occurrences = tuple(
             value
             for value in selected_occurrences
@@ -690,7 +706,6 @@ class StepExecutionHistoryReader:
                 tenant_id,
                 execution_id,
                 selected_occurrences[-1],
-                query_mode,
                 fixed_cutoffs,
                 self._cursor_signer,
             )
@@ -957,7 +972,7 @@ class StepExecutionHistoryReader:
 
     def _project_model_interaction(
         self,
-        interaction: ModelInteractionRecord,
+        interaction: ModelInteractionRecord | StagedModelInteraction,
         execution_id: str,
         agent_run_sequence: int,
         depth: int,
@@ -1016,35 +1031,6 @@ class StepExecutionHistoryReader:
             content_included=include_content,
             started_at=started_at,
             finished_at=finished_at,
-        )
-
-    def _project_model_interaction_lifecycle(
-        self,
-        interaction: ModelInteractionLifecycle,
-        execution_id: str,
-        agent_run_sequence: int,
-        depth: int,
-        *,
-        include_content: bool,
-    ) -> ModelInteractionItem:
-        return ModelInteractionItem(
-            execution_id=execution_id,
-            agent_run_sequence=agent_run_sequence,
-            depth=depth,
-            request_sequence=interaction.request_sequence,
-            purpose=interaction.purpose,
-            step_index=interaction.step_index,
-            output_retry_index=interaction.output_retry_index,
-            model=interaction.model,
-            request=interaction.request if include_content else {},
-            response=interaction.response if include_content else None,
-            status=interaction.status,
-            error_code=interaction.error_code,
-            duration_ns=interaction.duration_ns,
-            usage=interaction.usage,
-            content_included=include_content,
-            started_at=interaction.started_at,
-            finished_at=interaction.finished_at,
         )
 
     async def _model_request_times(
@@ -2095,7 +2081,7 @@ def _decode_model_interaction_cursor(
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
-) -> "tuple[tuple[str, int, int], str, tuple[UsageReadCutoff, ...]] | None":
+) -> "tuple[tuple[str, int, int], tuple[UsageReadCutoff, ...]] | None":
     if cursor is None:
         return None
     payload = decode_runtime_cursor(
@@ -2112,8 +2098,7 @@ def _decode_model_interaction_cursor(
     if (
         payload.revision != 0
         or not isinstance(value, Mapping)
-        or set(value) != {"position", "mode", "cutoffs"}
-        or value.get("mode") not in {"lifecycle", "usage"}
+        or set(value) != {"position", "cutoffs"}
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
     coordinate = value["position"]
@@ -2151,14 +2136,13 @@ def _decode_model_interaction_cursor(
     normalized = _normalize_usage_cutoffs(tuple(cutoffs))
     if normalized is None:
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return (coordinate[0], coordinate[1], coordinate[2]), value["mode"], normalized
+    return (coordinate[0], coordinate[1], coordinate[2]), normalized
 
 
 def _model_interaction_cursor(
     tenant_id: str,
     execution_id: str,
     occurrence: _InteractionOccurrence,
-    mode: str,
     cutoffs: tuple[UsageReadCutoff, ...],
     signer: CursorSigner,
 ) -> str:
@@ -2177,7 +2161,6 @@ def _model_interaction_cursor(
                     occurrence.agent_run_sequence,
                     occurrence.interaction.request_sequence,
                 ],
-                "mode": mode,
                 "cutoffs": [
                     [
                         value.execution_id,
