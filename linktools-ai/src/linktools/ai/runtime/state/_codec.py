@@ -153,7 +153,6 @@ from ._store import (
 
 CURRENT_DATA_VERSION = 1
 _TASK_NODE_WIRE_ID = "task_node"
-_TASK_NODE_TERMINAL_WIRE_ID = "task_node_terminal"
 _TASK_NODE_VIEW_WIRE_ID = "task_node_view"
 DomainT = TypeVar("DomainT")
 _logger = environ.get_logger("ai.runtime.state.codec")
@@ -242,10 +241,7 @@ _V1_WIRE_IDS = MappingProxyType(
     {target: wire_id for wire_id, target in _V1_WIRE_TYPES}
 )
 _V1_DOMAIN_TYPES = MappingProxyType(
-    {
-        **{wire_id: target for wire_id, target in _V1_WIRE_TYPES},
-        _TASK_NODE_TERMINAL_WIRE_ID: TaskNode,
-    }
+    {wire_id: target for wire_id, target in _V1_WIRE_TYPES}
 )
 
 _V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
@@ -440,6 +436,8 @@ def _encode_v1_task_node_fields(
             value.budget_cost, codec, persisted=persisted
         ),
         "expander": _encode_domain(value.expander, codec, persisted=persisted),
+        "dependency_policy": value.dependency_policy,
+        "failure_policy": value.failure_policy,
     }
     if value.output_type is not None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -479,8 +477,6 @@ def _encode_v1_task_node(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskNode):
         raise TypeError("V1 task_node encoder received the wrong type")
-    if value.dependency_policy != "all_succeeded":
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _encode_v1_task_node_fields(value, codec, persisted)
 
 
@@ -490,7 +486,16 @@ def _decode_v1_task_node(
     persisted: bool,
 ) -> TaskNode:
     required = frozenset(
-        {"node_id", "task", "dependencies", "input", "budget_cost", "expander"}
+        {
+            "node_id",
+            "task",
+            "dependencies",
+            "input",
+            "budget_cost",
+            "expander",
+            "dependency_policy",
+            "failure_policy",
+        }
     )
     keys = set(raw_fields)
     if not required.issubset(keys):
@@ -550,7 +555,14 @@ def _decode_v1_task_node(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     effect_policy = raw_fields.get("effect_policy", "none")
     reconcile = raw_fields.get("reconcile", False)
-    if not isinstance(effect_policy, str) or not isinstance(reconcile, bool):
+    dependency_policy = raw_fields["dependency_policy"]
+    failure_policy = raw_fields["failure_policy"]
+    if (
+        not isinstance(effect_policy, str)
+        or not isinstance(reconcile, bool)
+        or not isinstance(dependency_policy, str)
+        or not isinstance(failure_policy, str)
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return TaskNode.from_resolved(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
@@ -601,43 +613,8 @@ def _decode_v1_task_node(
         ),
         effect_policy=effect_policy,
         reconcile=reconcile,
-        dependency_policy="all_succeeded",
-    )
-
-
-def _encode_v1_terminal_task_node(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, TaskNode):
-        raise TypeError("V1 task_node_terminal encoder received the wrong type")
-    if value.dependency_policy != "all_terminal":
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return _encode_v1_task_node_fields(value, codec, persisted)
-
-
-def _decode_v1_terminal_task_node(
-    raw_fields: Mapping[str, object],
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> TaskNode:
-    node = _decode_v1_task_node(raw_fields, codec, persisted)
-    return TaskNode.from_resolved(
-        node.node_id,
-        node.dependencies,
-        task=node.task,
-        input=node.input,
-        budget_cost=node.budget_cost,
-        expander=node.expander,
-        input_refs=node.input_refs,
-        timeout_seconds=node.timeout_seconds,
-        max_attempts=node.max_attempts,
-        retry_delay_seconds=node.retry_delay_seconds,
-        output_contract=node.output_contract,
-        effect_policy=node.effect_policy,
-        reconcile=node.reconcile,
-        dependency_policy="all_terminal",
+        dependency_policy=dependency_policy,
+        failure_policy=failure_policy,
     )
 
 
@@ -1033,7 +1010,6 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
         _TASK_NODE_WIRE_ID: _encode_v1_task_node,
-        _TASK_NODE_TERMINAL_WIRE_ID: _encode_v1_terminal_task_node,
         _TASK_NODE_VIEW_WIRE_ID: _encode_v1_task_node_view,
         "task_result": _encode_v1_task_result,
     }
@@ -1044,7 +1020,6 @@ _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
         "stored_user_input": _decode_v1_stored_user_input,
         "task_graph_view": _decode_v1_task_graph_view,
         _TASK_NODE_WIRE_ID: _decode_v1_task_node,
-        _TASK_NODE_TERMINAL_WIRE_ID: _decode_v1_terminal_task_node,
         _TASK_NODE_VIEW_WIRE_ID: _decode_v1_task_node_view,
         "task_result": _decode_v1_task_result,
     }
@@ -1544,12 +1519,7 @@ def _encode_domain(
     if isinstance(value, StoredPayload):
         value.to_json()
     if is_dataclass(value):
-        wire_id = (
-            _TASK_NODE_TERMINAL_WIRE_ID
-            if isinstance(value, TaskNode)
-            and value.dependency_policy == "all_terminal"
-            else codec.wire_ids.get(type(value))
-        )
+        wire_id = codec.wire_ids.get(type(value))
         if wire_id is None:
             raise TypeError(f"unsupported dataclass type: {type(value).__name__}")
         encoder = codec.dataclass_encoders.get(wire_id)
@@ -1817,7 +1787,6 @@ def _iter_runtime_object_refs(
         dataclass_name = value.get("$dataclass")
         if dataclass_name in {
             codec.wire_ids.get(TaskNode),
-            _TASK_NODE_TERMINAL_WIRE_ID,
         }:
             node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted=True))
             task_input = node.input
@@ -2489,7 +2458,7 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 wire ids are not unique")
     if len(enum_wire_ids) != len(set(enum_wire_ids)):
         raise RuntimeError("Runtime v1 enum wire ids are not unique")
-    domain_wire_ids = set(wire_ids) | {_TASK_NODE_TERMINAL_WIRE_ID}
+    domain_wire_ids = set(wire_ids)
     if set(_CURRENT_CODEC.domain_types) != domain_wire_ids:
         raise RuntimeError("Runtime v1 domain type registry is incomplete")
     if set(_CURRENT_CODEC.wire_ids.values()) != set(wire_ids):
@@ -2503,7 +2472,6 @@ def _validate_v1_codec_definition() -> None:
         "stored_user_input",
         "task_graph_view",
         _TASK_NODE_WIRE_ID,
-        _TASK_NODE_TERMINAL_WIRE_ID,
         _TASK_NODE_VIEW_WIRE_ID,
         "task_result",
     }
@@ -2512,7 +2480,6 @@ def _validate_v1_codec_definition() -> None:
         "stored_user_input",
         "task_graph_view",
         _TASK_NODE_WIRE_ID,
-        _TASK_NODE_TERMINAL_WIRE_ID,
         _TASK_NODE_VIEW_WIRE_ID,
         "task_result",
     }
@@ -2544,6 +2511,7 @@ def _validate_v1_codec_definition() -> None:
         "effect_policy",
         "reconcile",
         "dependency_policy",
+        "failure_policy",
         "_input",
     ):
         raise RuntimeError("Runtime v1 task_node source contract changed")

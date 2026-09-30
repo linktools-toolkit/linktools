@@ -38,6 +38,8 @@
         ]
       },
       "expander": null,
+      "dependency_policy": "all_succeeded",
+      "failure_policy": "propagate",
       "input": {
         "$mapping": [
           [

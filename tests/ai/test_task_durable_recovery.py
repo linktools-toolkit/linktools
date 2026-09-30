@@ -55,6 +55,8 @@ def _expected_request_digest(request: TaskGraphRequest) -> str:
                     "dependencies": sorted(node.dependencies),
                     "input": node.input,
                     "budget_cost": node.budget_cost,
+                    "dependency_policy": node.dependency_policy,
+                    "failure_policy": node.failure_policy,
                     "task": None,
                     "expander": None,
                 }

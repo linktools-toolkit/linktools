@@ -56,6 +56,7 @@ from ._task_events import (
 from ._task_state import (
     _effective_graph_status,
     _is_sha256,
+    _isolated_graph_status,
     _require_canonical_graph_status,
 )
 
@@ -69,7 +70,29 @@ _RECOVERABLE_GRAPH_STATES = frozenset(
 
 
 def _task_submit_result_digest(graph: TaskGraph) -> str:
-    status = TaskStatus.SUCCEEDED if not graph.nodes else TaskStatus.PENDING
+    states = tuple(
+        TaskNodeView(
+            graph.graph_id,
+            node.node_id,
+            node.dependencies,
+            (
+                node.dependency_status({})
+                if not node.dependencies
+                else TaskStatus.PENDING
+            ),
+            None,
+            0,
+            None,
+            None,
+            ErrorCode.TASK_DEPENDENCY_FAILED.value
+            if not node.dependencies
+            and node.dependency_status({}) is TaskStatus.BLOCKED
+            else None,
+            None,
+        )
+        for node in graph.nodes
+    )
+    status = _isolated_graph_status(states, graph.nodes)
     return canonical_sha256({"graph_id": graph.graph_id, "status": status.value})
 
 
@@ -167,7 +190,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         return (
             TaskGraphView(
                 graph_id,
-                _effective_graph_status(header, ordered_states),
+                _effective_graph_status(header, ordered_states, nodes),
                 nodes,
             ),
             ordered_states,
@@ -525,7 +548,29 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         admission: TaskGraphAdmission,
         graph: TaskGraph,
     ) -> TaskGraphView:
-        status = TaskStatus.SUCCEEDED if not graph.nodes else TaskStatus.PENDING
+        node_views: list[TaskNodeView] = []
+        for node in graph.nodes:
+            node_status = (
+                node.dependency_status({})
+                if not node.dependencies
+                else TaskStatus.PENDING
+            )
+            node_view = TaskNodeView(
+                graph.graph_id,
+                node.node_id,
+                node.dependencies,
+                node_status,
+                None,
+                0,
+                None,
+                None,
+                ErrorCode.TASK_DEPENDENCY_FAILED.value
+                if node_status is TaskStatus.BLOCKED
+                else None,
+                None,
+            )
+            node_views.append(node_view)
+        status = _isolated_graph_status(tuple(node_views), graph.nodes)
         header = TaskGraphView(graph.graph_id, status, ())
         view = TaskGraphView(graph.graph_id, status, graph.nodes)
         records = [
@@ -542,24 +587,9 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                 scope=self._recovery_scope(),
             ),
         ]
-        node_views: list[TaskNodeView] = []
+        node_view_by_id = {value.node_id: value for value in node_views}
         for node in graph.nodes:
-            node_status = (
-                TaskStatus.READY if not node.dependencies else TaskStatus.PENDING
-            )
-            node_view = TaskNodeView(
-                graph.graph_id,
-                node.node_id,
-                node.dependencies,
-                node_status,
-                None,
-                0,
-                None,
-                None,
-                None,
-                None,
-            )
-            node_views.append(node_view)
+            node_view = node_view_by_id[node.node_id]
             records.append(
                 self._stored(
                     "task_node_definition",
@@ -574,7 +604,7 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
                     [graph.graph_id, node.node_id],
                     node_view,
                     parent=self._state_parent(graph.graph_id),
-                    state=node_status.value,
+                    state=node_view.status.value,
                 )
             )
         await transaction.insert_records(tuple(records))

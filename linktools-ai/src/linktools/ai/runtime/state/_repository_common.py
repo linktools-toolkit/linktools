@@ -467,6 +467,7 @@ class OperationLedgerRepository(_RepositoryBase):
         *,
         tenant_id: str,
         limit: int,
+        states: frozenset[OperationStatus] | None = None,
     ) -> tuple[OperationLedgerRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
@@ -481,7 +482,11 @@ class OperationLedgerRepository(_RepositoryBase):
             lambda transaction: transaction.list_operations(
                 OperationQuery(
                     stream_digest=stream,
-                    states=frozenset({"PENDING", "RUNNING"}),
+                    states=(
+                        frozenset({"PENDING", "RUNNING"})
+                        if states is None
+                        else frozenset(status.value for status in states)
+                    ),
                     limit=limit,
                 )
             )

@@ -238,6 +238,7 @@ class TaskEngine(Generic[AppT]):
                     effect_policy=node.effect_policy,
                     reconcile=node.reconcile,
                     dependency_policy=node.dependency_policy,
+                    failure_policy=node.failure_policy,
                 )
                 for node in nodes
             ),

@@ -41,6 +41,16 @@ class _CaptureLauncher:
         self.cancelled = launch
         return TaskGraphView(launch.graph_id, TaskStatus.CANCELLED, ())
 
+    async def settle_cancel(
+        self,
+        launch: TaskGraphLaunch,
+        *,
+        invoke_effects: bool,
+    ) -> TaskGraphView:
+        if invoke_effects:
+            return await self.cancel(launch)
+        return TaskGraphView(launch.graph_id, TaskStatus.RECOVERY_REQUIRED, ())
+
 
 def _request(
     graph: TaskGraph,

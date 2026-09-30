@@ -136,10 +136,10 @@ async def test_task_recovery_preserves_execution_reference_for_waiting_attach() 
             "recover",
             tenant_id="tenant",
         )
-        assert view.status is TaskStatus.RUNNING
+        assert view.status is TaskStatus.PENDING
         assert graph_state is not None
         root = {node.node_id: node for node in graph_state.node_states}["root"]
-        assert root.status is TaskStatus.WAITING
+        assert root.status is TaskStatus.READY
         assert root.fence == first.fence
         assert root.execution_id == "execution"
         assert root.error_code is None
@@ -192,15 +192,14 @@ async def test_cancel_does_not_overwrite_recovery_required() -> None:
             tenant_id="tenant",
             cancel_requested=True,
         )
-        assert final.status is TaskStatus.CANCELLED
+        assert final.status is TaskStatus.RECOVERY_REQUIRED
         terminal = await state.task.tasks.graph_state(
             "cancel",
             tenant_id="tenant",
         )
         assert terminal is not None
-        assert all(
-            node.status is TaskStatus.CANCELLED
-            for node in terminal.node_states
-        )
+        by_id = {node.node_id: node for node in terminal.node_states}
+        assert by_id["root"].status is TaskStatus.RECOVERY_REQUIRED
+        assert by_id["dependent"].status is TaskStatus.CANCELLED
     finally:
         await state.close()

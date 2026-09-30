@@ -784,7 +784,7 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         assert raised.value.code is ErrorCode.TASK_WAIT_TIMEOUT
         await asyncio.wait_for(started.wait(), timeout=1)
         view = await run.cancel(idempotency_key="cancel:timeout")
-        assert view.status is TaskStatus.CANCELLED
+        assert view.status is TaskStatus.RECOVERY_REQUIRED
 
 
 @pytest.mark.asyncio
