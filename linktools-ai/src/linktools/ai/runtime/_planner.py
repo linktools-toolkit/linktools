@@ -843,6 +843,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 reason = "task_output_contract_changed"
             elif declared.get("reconcile") != current.get("reconcile"):
                 reason = "task_reconcile_changed"
+            elif declared.get("cancel") != current.get("cancel"):
+                reason = "task_cancel_changed"
             raise AIError(
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
                 safe_details={
