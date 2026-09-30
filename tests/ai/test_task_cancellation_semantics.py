@@ -68,6 +68,56 @@ async def test_cancel_preserves_terminal_nodes_and_unsettled_active_work() -> No
 
 
 @pytest.mark.asyncio
+async def test_whole_graph_cancel_overrides_historical_failure_after_settlement() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-cancel-final-status", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph(
+            "cancel-final-status",
+            (
+                TaskNode("failed"),
+                TaskNode("pending"),
+            ),
+        )
+        await admit_graph(state, graph)
+        failed = await repository.claim(
+            graph.graph_id,
+            "failed",
+            tenant_id="tenant",
+            owner="failed-worker",
+            lease_seconds=30,
+        )
+        await repository.fail(
+            failed,
+            tenant_id="tenant",
+            error_code=ErrorCode.TASK_NODE_FAILED.value,
+            error_digest="a" * 64,
+        )
+        await repository.scheduler_state(graph.graph_id, tenant_id="tenant")
+
+        cancelled = await repository.cancel_graph(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        graph_state = await repository.graph_state(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert graph_state is not None
+        states = {item.node_id: item.status for item in graph_state.node_states}
+
+        assert cancelled.status is TaskStatus.CANCELLED
+        assert graph_state.status is TaskStatus.CANCELLED
+        assert states == {
+            "failed": TaskStatus.FAILED,
+            "pending": TaskStatus.CANCELLED,
+        }
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_cancel_does_not_terminalize_expired_claim_without_execution_binding() -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="task-cancel-unbound-claim", tenant_id="tenant")
