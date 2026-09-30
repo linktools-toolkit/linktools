@@ -37,7 +37,6 @@ from ._graph import (
     TaskTerminalRecord,
     normalize_retry_delay_seconds,
     normalize_timeout_seconds,
-    ready_nodes,
 )
 from ._handler import (
     TaskBindingContract,
@@ -115,5 +114,4 @@ __all__ = [
     "normalize_retry_delay_seconds",
     "normalize_timeout_seconds",
     "open_local_task_graph_service",
-    "ready_nodes",
 ]

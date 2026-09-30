@@ -4,7 +4,7 @@
 
 from ...core import TaskStatus
 from ...errors import AIError, ErrorCode
-from ...task import TaskGraphView, TaskNodeView
+from ...task import TaskGraphView, TaskNode, TaskNodeView
 
 
 def _is_sha256(value: object) -> bool:
@@ -20,32 +20,62 @@ def _require_canonical_graph_status(status: TaskStatus) -> None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _isolated_graph_status(nodes: tuple[TaskNodeView, ...]) -> TaskStatus:
+def _isolated_graph_status(
+    nodes: tuple[TaskNodeView, ...],
+    definitions: tuple[TaskNode, ...],
+) -> TaskStatus:
     statuses = {node.status for node in nodes}
+    failure_policies = {node.node_id: node.failure_policy for node in definitions}
+    if set(failure_policies) != {node.node_id for node in nodes}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if TaskStatus.RECOVERY_REQUIRED in statuses:
         return TaskStatus.RECOVERY_REQUIRED
-    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
-        return TaskStatus.SUCCEEDED
     if TaskStatus.RUNNING in statuses or TaskStatus.WAITING in statuses:
         return TaskStatus.RUNNING
     if TaskStatus.PENDING in statuses or TaskStatus.READY in statuses:
         return TaskStatus.PENDING
-    if TaskStatus.FAILED in statuses:
+    if any(
+        node.status is TaskStatus.FAILED
+        and failure_policies[node.node_id] == "propagate"
+        for node in nodes
+    ):
         return TaskStatus.FAILED
-    if TaskStatus.BLOCKED in statuses:
+    if any(
+        node.status is TaskStatus.BLOCKED
+        and failure_policies[node.node_id] == "propagate"
+        for node in nodes
+    ):
         return TaskStatus.BLOCKED
-    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
+    if TaskStatus.CANCELLED in statuses:
         return TaskStatus.CANCELLED
-    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return TaskStatus.SUCCEEDED
 
 
 def _effective_graph_status(
     graph: TaskGraphView,
     nodes: tuple[TaskNodeView, ...],
+    definitions: tuple[TaskNode, ...] | None = None,
 ) -> TaskStatus:
-    isolated = _isolated_graph_status(nodes)
+    isolated = _isolated_graph_status(
+        nodes,
+        graph.nodes if definitions is None else definitions,
+    )
     if isolated is TaskStatus.RECOVERY_REQUIRED:
         return isolated
     if graph.status is TaskStatus.CANCELLED:
-        return TaskStatus.CANCELLED
+        if (
+            all(
+                node.status
+                in {
+                    TaskStatus.SUCCEEDED,
+                    TaskStatus.FAILED,
+                    TaskStatus.BLOCKED,
+                    TaskStatus.CANCELLED,
+                }
+                for node in nodes
+            )
+            and any(node.status is TaskStatus.CANCELLED for node in nodes)
+        ):
+            return TaskStatus.CANCELLED
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return isolated

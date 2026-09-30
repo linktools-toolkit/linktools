@@ -98,6 +98,12 @@ class TaskNodeRunner(Protocol, Generic[AppT]):
         execution_id: str,
     ) -> TaskNodeRunResult: ...
 
+    async def inspect_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> "TaskNodeRunResult | None": ...
+
     async def supply_input(
         self,
         invocation: TaskNodeInvocation,
@@ -112,7 +118,8 @@ class TaskNodeRunner(Protocol, Generic[AppT]):
         resolution: TaskEffectResolution,
     ) -> "TaskNodeRunResult | None": ...
 
-    async def cancel(self, invocation: TaskNodeInvocation) -> None: ...
+    async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        """Cancel one invocation; repeated calls for the same execution are safe."""
 
 
 __all__ = [

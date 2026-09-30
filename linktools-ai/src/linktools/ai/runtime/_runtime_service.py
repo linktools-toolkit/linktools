@@ -1057,6 +1057,15 @@ class Runtime(Generic[AppT]):
             principal=principal,
         )
         key = idempotency_key or secrets.token_urlsafe(32)
+        request = CancelGraphRequest(principal, key, force)
+        if view.binding_kind == "task":
+            await self._graph_service.settle_execution_cancellation(
+                graph_id,
+                node_id,
+                execution_id,
+                request,
+                cancel_confirmed=None,
+            )
         try:
             if view.binding_kind == "task":
                 cancelled = await self._execution_service.cancel_task(
@@ -1074,28 +1083,30 @@ class Runtime(Generic[AppT]):
                 )
         except AIError as error:
             if error.code is ErrorCode.TASK_EFFECT_UNKNOWN:
-                await self._graph_service.cancel_node(
+                await self._graph_service.settle_execution_cancellation(
                     graph_id,
                     node_id,
                     execution_id,
-                    CancelGraphRequest(
-                        principal,
-                        key,
-                        force,
-                    ),
+                    request,
+                    cancel_confirmed=None,
                 )
             raise
 
         if cancelled.cancelled:
-            await self._graph_service.cancel_node(
+            await self._graph_service.settle_execution_cancellation(
                 graph_id,
                 node_id,
                 execution_id,
-                CancelGraphRequest(
-                    principal,
-                    key,
-                    force,
-                ),
+                request,
+                cancel_confirmed=True,
+            )
+        else:
+            await self._graph_service.settle_execution_cancellation(
+                graph_id,
+                node_id,
+                execution_id,
+                request,
+                cancel_confirmed=False,
             )
         return cancelled
 

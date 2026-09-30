@@ -947,6 +947,7 @@ async def test_task_binding_capture_reader_rejects_invalid_declaration_manifests
         "type": "function",
         "effect_policy": "none",
         "output_contract": {"kind": "json"},
+        "cancel": False,
         "reconcile": False,
     }
     expander_declaration: dict[str, object] = {

@@ -789,6 +789,7 @@ class DefaultExecutionService:
         elif current.status not in {
             ExecutionStatus.STARTED,
             ExecutionStatus.WAITING_RETRY,
+            ExecutionStatus.WAITING_DEFERRED,
             ExecutionStatus.RECOVERY_REQUIRED,
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
@@ -819,14 +820,43 @@ class DefaultExecutionService:
             return _execution_view(current)
         now = datetime.now(timezone.utc)
         if current.status is ExecutionStatus.WAITING_RETRY:
-            if (
-                current.task_next_attempt_at is None
-                or current.task_next_attempt_at > now
-            ):
+            if current.task_next_attempt_at is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.task_next_attempt_at > now:
                 return _execution_view(current)
         elif current.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.task_deadline_at is not None and current.task_deadline_at <= now:
+            await self.fail_task(
+                execution_id,
+                principal=principal,
+                error=AIError(
+                    ErrorCode.EXECUTION_WAIT_TIMEOUT,
+                    safe_details={"reason": "deadline_exceeded"},
+                ),
+                attempt=_execution_view(current),
+            )
+            current = await self._load_authorized(
+                execution_id,
+                principal,
+                AuthorizationAction.EXECUTION_RUN,
+            )
+            return _execution_view(current)
         if current.task_attempt >= current.binding.max_attempts:
+            await self.fail_task(
+                execution_id,
+                principal=principal,
+                error=AIError(
+                    ErrorCode.TASK_NODE_FAILED,
+                    safe_details={"reason": "attempts_exhausted"},
+                ),
+                attempt=_execution_view(current),
+            )
+            current = await self._load_authorized(
+                execution_id,
+                principal,
+                AuthorizationAction.EXECUTION_RUN,
+            )
             return _execution_view(current)
         deadline = current.task_deadline_at
         if deadline is None and current.binding.timeout_seconds is not None:
@@ -855,6 +885,7 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         error_code: str,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionView:
         current = await self._load_authorized(
             execution_id,
@@ -866,12 +897,31 @@ class DefaultExecutionService:
             or current.status is not ExecutionStatus.STARTED
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        _require_task_attempt(current, attempt)
         if current.task_attempt >= current.binding.max_attempts:
-            raise AIError(ErrorCode.TASK_NOT_READY)
+            await self.fail_task(
+                execution_id,
+                principal=principal,
+                error=AIError(
+                    ErrorCode.TASK_NODE_FAILED,
+                    safe_details={"reason": "attempts_exhausted"},
+                ),
+                attempt=attempt,
+            )
+            return await self.inspect(execution_id, principal=principal)
         now = datetime.now(timezone.utc)
         retry_at = now + timedelta(seconds=current.binding.retry_delay_seconds)
         if current.task_deadline_at is not None and retry_at >= current.task_deadline_at:
-            raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT)
+            await self.fail_task(
+                execution_id,
+                principal=principal,
+                error=AIError(
+                    ErrorCode.EXECUTION_WAIT_TIMEOUT,
+                    safe_details={"reason": "deadline_exceeded"},
+                ),
+                attempt=attempt,
+            )
+            return await self.inspect(execution_id, principal=principal)
         updated = await self._state.executions.transition_task_execution(
             execution_id,
             tenant_id=self._state.executions.tenant_id,
@@ -896,6 +946,7 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         error_code: str,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionView:
         current = await self._load_authorized(
             execution_id,
@@ -904,6 +955,7 @@ class DefaultExecutionService:
         )
         if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        _require_task_attempt(current, attempt)
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return _execution_view(current)
         if current.status is not ExecutionStatus.STARTED:
@@ -1032,9 +1084,31 @@ class DefaultExecutionService:
             current.task_deadline_at is not None
             and current.task_deadline_at <= now
         ):
-            raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT)
+            await self.fail_task(
+                execution_id,
+                principal=principal,
+                error=AIError(
+                    ErrorCode.EXECUTION_WAIT_TIMEOUT,
+                    safe_details={
+                        "task_effect": "not_applied",
+                        "reason": "deadline_exceeded",
+                    },
+                ),
+            )
+            return await self.inspect(execution_id, principal=principal)
         if current.task_attempt >= current.binding.max_attempts:
-            raise AIError(ErrorCode.TASK_NOT_READY)
+            await self.fail_task(
+                execution_id,
+                principal=principal,
+                error=AIError(
+                    ErrorCode.TASK_NODE_FAILED,
+                    safe_details={
+                        "task_effect": "not_applied",
+                        "reason": "attempts_exhausted",
+                    },
+                ),
+            )
+            return await self.inspect(execution_id, principal=principal)
         updated = await self._state.executions.transition_task_execution(
             execution_id,
             tenant_id=self._state.executions.tenant_id,
@@ -1255,6 +1329,7 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         output: JsonValue,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionResult:
         current = await self._load_authorized(
             execution_id,
@@ -1265,6 +1340,7 @@ class DefaultExecutionService:
             current,
             principal=principal,
             output=output,
+            attempt=attempt,
         )
 
     async def _complete_task_output(
@@ -1274,12 +1350,22 @@ class DefaultExecutionService:
         principal: Principal,
         output: JsonValue,
         terminal_event_payload: "Mapping[str, JsonValue] | None" = None,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionResult:
         if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        if attempt is not None and current.task_attempt != attempt.task_attempt:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
         execution_id = current.execution_id
         if current.status is ExecutionStatus.SUCCEEDED:
-            return await self.result(execution_id, principal=principal)
+            result = await self.result(execution_id, principal=principal)
+            if canonical_sha256(result.output) != canonical_sha256(output):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return result
+        if attempt is not None:
+            _require_task_attempt(current, attempt)
+            if current.status is not ExecutionStatus.STARTED:
+                raise AIError(ErrorCode.TASK_FENCE_STALE)
         if current.status not in {
             ExecutionStatus.STARTED,
             ExecutionStatus.WAITING_DEFERRED,
@@ -1333,6 +1419,7 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         error: AIError,
+        attempt: ExecutionView | None = None,
     ) -> ExecutionResult:
         current = await self._load_authorized(
             execution_id,
@@ -1341,8 +1428,18 @@ class DefaultExecutionService:
         )
         if not isinstance(current.binding, TaskBindingContract):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        if attempt is not None and current.task_attempt != attempt.task_attempt:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
         if current.status is ExecutionStatus.FAILED:
-            return await self.result(execution_id, principal=principal)
+            result = await self.result(execution_id, principal=principal)
+            if (
+                current.error_code != error.code.value
+                or dict(current.safe_error_details) != dict(error.safe_details)
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return result
+        if attempt is not None:
+            _require_task_attempt(current, attempt)
         if current.status not in {
             ExecutionStatus.STARTED,
             ExecutionStatus.WAITING_RETRY,
@@ -3484,6 +3581,23 @@ class DefaultExecutionService:
         action: AuthorizationAction,
     ) -> ExecutionRecord:
         return await self._load_authorized(execution_id, principal, action)
+
+
+def _require_task_attempt(
+    execution: ExecutionRecord,
+    attempt: ExecutionView | None,
+) -> None:
+    if attempt is None:
+        return
+    if (
+        attempt.execution_id != execution.execution_id
+        or attempt.event_sequence != execution.event_sequence
+        or attempt.task_attempt != execution.task_attempt
+        or attempt.status is not execution.status
+        or attempt.task_deadline_at != execution.task_deadline_at
+        or attempt.task_next_attempt_at != execution.task_next_attempt_at
+    ):
+        raise AIError(ErrorCode.TASK_FENCE_STALE)
 
 
 def _execution_view(execution: ExecutionRecord) -> ExecutionView:

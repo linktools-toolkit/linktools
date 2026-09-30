@@ -1153,6 +1153,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         error_code: str,
+        attempt: "ExecutionView | None" = None,
     ) -> ExecutionView: ...
 
     async def defer_task_input(
@@ -1192,6 +1193,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         output: JsonValue,
+        attempt: "ExecutionView | None" = None,
     ) -> ExecutionResult: ...
 
     async def fail_task(
@@ -1200,6 +1202,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         error: AIError,
+        attempt: "ExecutionView | None" = None,
     ) -> ExecutionResult: ...
 
     async def require_task_recovery(
@@ -1208,6 +1211,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         error_code: str,
+        attempt: "ExecutionView | None" = None,
     ) -> ExecutionView: ...
     async def cancel_task(
         self,

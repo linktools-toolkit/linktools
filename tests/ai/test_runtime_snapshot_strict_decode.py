@@ -208,6 +208,7 @@ def test_snapshot_task_capture_dependencies_reject_invalid_manifests(
         "type": "function",
         "effect_policy": "none",
         "output_contract": {"kind": "json"},
+        "cancel": False,
         "reconcile": False,
     }
     expander_declaration: dict[str, object] = {

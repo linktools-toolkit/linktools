@@ -80,7 +80,7 @@ from ._task_graph_binding_capture import (
     builtin_task_declaration,
     task_declaration_semantics,
 )
-from .service_api import ExecutionService
+from .service_api import ExecutionService, ExecutionView
 from .service_api import ExecutionResult
 from .state import ArtifactRecord, ArtifactRepositories, RuntimeDomain
 
@@ -647,6 +647,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 effect_policy=node.effect_policy,
                 reconcile=node.reconcile,
                 dependency_policy=node.dependency_policy,
+                failure_policy=node.failure_policy,
             )
         if not task_input.files and isinstance(task_input.prompt, str):
             return node
@@ -679,6 +680,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             effect_policy=node.effect_policy,
             reconcile=node.reconcile,
             dependency_policy=node.dependency_policy,
+            failure_policy=node.failure_policy,
         )
 
     async def restore_prepared_agent_prompt(
@@ -841,6 +843,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 reason = "task_output_contract_changed"
             elif declared.get("reconcile") != current.get("reconcile"):
                 reason = "task_reconcile_changed"
+            elif declared.get("cancel") != current.get("cancel"):
+                reason = "task_cancel_changed"
             raise AIError(
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
                 safe_details={
@@ -1170,6 +1174,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             effect_policy=_handler_effect_policy(handler, request=True),
             reconcile=_handler_has_reconcile(handler),
             dependency_policy=node.dependency_policy,
+            failure_policy=node.failure_policy,
         )
 
     def admit_request(self, graph: TaskGraph) -> TaskGraph:
@@ -1335,6 +1340,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 effect_policy=node.effect_policy,
                 reconcile=node.reconcile,
                 dependency_policy=node.dependency_policy,
+                failure_policy=node.failure_policy,
             )
             if canonical.input != node.input:
                 raise AIError(
@@ -1502,6 +1508,31 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     execution_id,
                     retry_at=claimed.task_next_attempt_at,
                 )
+            if claimed.status in {
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                result = await self._execution.result(
+                    execution_id,
+                    principal=principal,
+                )
+                raise TaskNodeRunError(
+                    ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
+                    execution_id,
+                    safe_details=result.safe_error_details,
+                )
+            if claimed.status is ExecutionStatus.SUCCEEDED:
+                result = await self._execution.result(
+                    execution_id,
+                    principal=principal,
+                )
+                return await self._complete_output(
+                    node,
+                    result.output,
+                    execution_id=execution_id,
+                    principal=principal,
+                    graph_id=graph_id,
+                )
             if (
                 claimed.status is not ExecutionStatus.STARTED
                 or claimed.task_attempt <= view.task_attempt
@@ -1521,6 +1552,36 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 execution_id,
                 principal=principal,
             )
+            if claimed.status is ExecutionStatus.RECOVERY_REQUIRED:
+                raise TaskNodeRunError(
+                    ErrorCode.TASK_EFFECT_UNKNOWN,
+                    execution_id,
+                )
+            if claimed.status in {
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                result = await self._execution.result(
+                    execution_id,
+                    principal=principal,
+                )
+                raise TaskNodeRunError(
+                    ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
+                    execution_id,
+                    safe_details=result.safe_error_details,
+                )
+            if claimed.status is ExecutionStatus.SUCCEEDED:
+                result = await self._execution.result(
+                    execution_id,
+                    principal=principal,
+                )
+                return await self._complete_output(
+                    node,
+                    result.output,
+                    execution_id=execution_id,
+                    principal=principal,
+                    graph_id=graph_id,
+                )
             if claimed.status is not ExecutionStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if claimed.task_attempt <= view.task_attempt:
@@ -1578,6 +1639,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT),
                 unknown_effect=node.effect_policy == "non_replay_safe",
                 cause=error,
+                attempt=claimed,
             )
         except AIError as error:
             return await self._settle_custom_failure(
@@ -1586,6 +1648,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 principal,
                 error,
                 unknown_effect=node.effect_policy == "non_replay_safe",
+                attempt=claimed,
             )
         except Exception as error:  # noqa: BLE001
             return await self._settle_custom_failure(
@@ -1595,6 +1658,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 AIError(ErrorCode.TASK_NODE_FAILED),
                 unknown_effect=node.effect_policy == "non_replay_safe",
                 cause=error,
+                attempt=claimed,
             )
 
         try:
@@ -1611,6 +1675,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     execution_id,
                     principal=principal,
                     error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+                    attempt=claimed,
                 )
                 raise TaskNodeRunError(
                     ErrorCode.TASK_EFFECT_UNKNOWN,
@@ -1620,6 +1685,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 execution_id,
                 principal=principal,
                 error=failure,
+                attempt=claimed,
             )
             raise TaskNodeRunError(
                 failure.code,
@@ -1631,6 +1697,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             execution_id,
             principal=principal,
             output=output,
+            attempt=claimed,
         )
         if result.status is not ExecutionStatus.SUCCEEDED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1651,12 +1718,14 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         unknown_effect: bool,
         cause: BaseException | None = None,
+        attempt: ExecutionView,
     ) -> TaskNodeRunResult:
         if unknown_effect:
             await self._execution.require_task_recovery(
                 execution_id,
                 principal=principal,
                 error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+                attempt=attempt,
             )
             raised = TaskNodeRunError(
                 ErrorCode.TASK_EFFECT_UNKNOWN,
@@ -1677,7 +1746,18 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 execution_id,
                 principal=principal,
                 error_code=error.code.value,
+                attempt=attempt,
             )
+            if retry.status is ExecutionStatus.FAILED:
+                result = await self._execution.result(
+                    execution_id,
+                    principal=principal,
+                )
+                raise TaskNodeRunError(
+                    ErrorCode(result.error_code or error.code.value),
+                    execution_id,
+                    safe_details=result.safe_error_details,
+                ) from cause or error
             if retry.task_next_attempt_at is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return TaskNodeRunResult(
@@ -1694,6 +1774,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             execution_id,
             principal=principal,
             error=error,
+            attempt=attempt,
         )
         raised = TaskNodeRunError(
             error.code,
@@ -1743,27 +1824,110 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             artifacts=None,
             dependency_states=dependency_states,
         )
-        resolution = await reconcile(context)
+        try:
+            resolution = await reconcile(context)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001
+            safe_details: dict[str, JsonValue] = {
+                "reconcile_exception_type": type(error).__name__,
+            }
+            if isinstance(error, AIError):
+                safe_details["reconcile_error_code"] = error.code.value
+                safe_details["reconcile_error_details"] = dict(error.safe_details)
+            _logger.error(
+                "task effect reconciliation failed: graph=%s node=%s execution=%s type=%s",
+                graph_id,
+                node.node_id,
+                execution_id,
+                type(error).__name__,
+                exc_info=True,
+            )
+            raise TaskNodeRunError(
+                ErrorCode.TASK_EFFECT_UNKNOWN,
+                execution_id,
+                safe_details=safe_details,
+            ) from error
         if not isinstance(resolution, TaskEffectResolution):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            _logger.error(
+                "task effect reconciliation returned an invalid value: graph=%s node=%s execution=%s type=%s",
+                graph_id,
+                node.node_id,
+                execution_id,
+                type(resolution).__name__,
+            )
+            raise TaskNodeRunError(
+                ErrorCode.TASK_EFFECT_UNKNOWN,
+                execution_id,
+                safe_details={
+                    "reconcile_result_type": type(resolution).__name__,
+                },
+            )
         if resolution.kind == "unknown":
-            raise TaskNodeRunError(ErrorCode.TASK_EFFECT_UNKNOWN, execution_id)
-        if resolution.kind == "not_applied":
-            retry = await self._execution.resume_task_not_applied(
+            raise TaskNodeRunError(
+                ErrorCode.TASK_EFFECT_UNKNOWN,
+                execution_id,
+                safe_details={"reconcile_outcome": "unknown"},
+            )
+
+        if node.effect_policy == "non_replay_safe":
+            reconciled = await self._execution.resolve_task_effect(
+                execution_id,
+                principal=principal,
+                resolution=resolution,
+            )
+        elif resolution.kind == "not_applied":
+            reconciled = await self._execution.resume_task_not_applied(
                 execution_id,
                 principal=principal,
             )
-            if retry.task_next_attempt_at is None:
+        else:
+            reconciled = None
+
+        if reconciled is not None:
+            if reconciled.status is ExecutionStatus.WAITING_RETRY:
+                if reconciled.task_next_attempt_at is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return TaskNodeRunResult(
+                    canonical_sha256(
+                        {
+                            "execution_id": execution_id,
+                            "retry_at": reconciled.task_next_attempt_at.isoformat(),
+                        }
+                    ),
+                    execution_id,
+                    retry_at=reconciled.task_next_attempt_at,
+                )
+            if reconciled.status in {
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                result = await self._execution.result(
+                    execution_id,
+                    principal=principal,
+                )
+                raise TaskNodeRunError(
+                    ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
+                    execution_id,
+                    safe_details=result.safe_error_details,
+                )
+            if reconciled.status is ExecutionStatus.RECOVERY_REQUIRED:
+                raise TaskNodeRunError(
+                    ErrorCode.TASK_EFFECT_UNKNOWN,
+                    execution_id,
+                )
+            if reconciled.status is not ExecutionStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return TaskNodeRunResult(
-                canonical_sha256(
-                    {
-                        "execution_id": execution_id,
-                        "retry_at": retry.task_next_attempt_at.isoformat(),
-                    }
-                ),
+            result = await self._execution.result(
                 execution_id,
-                retry_at=retry.task_next_attempt_at,
+                principal=principal,
+            )
+            return await self._complete_output(
+                node,
+                result.output,
+                execution_id=execution_id,
+                principal=principal,
+                graph_id=graph_id,
             )
 
         output = normalize_json_value(resolution.value)
@@ -1954,6 +2118,66 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             graph_id=invocation.graph_id,
         )
 
+    async def inspect_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult | None:
+        view = await self._execution.inspect(
+            execution_id,
+            principal=invocation.principal,
+        )
+        if view.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if view.status is ExecutionStatus.RECOVERY_REQUIRED:
+            raise TaskNodeRunError(
+                ErrorCode.TASK_EFFECT_UNKNOWN,
+                execution_id,
+            )
+        if view.status in {
+            ExecutionStatus.STARTED,
+            ExecutionStatus.WAITING_RETRY,
+            ExecutionStatus.WAITING_DEFERRED,
+        }:
+            return None
+        node = invocation.node
+        task_id, task_revision, _body = _parse_node(
+            node,
+            request=False,
+        )
+        handler = self._handler(
+            task_id,
+            task_revision,
+            graph_id=invocation.graph_id,
+            node_id=node.node_id,
+            request=False,
+        )
+        if isinstance(handler, _TaskRunnerAdapter):
+            return await self.wait_bound(invocation, execution_id)
+        if view.status is ExecutionStatus.SUCCEEDED:
+            result = await self._execution.result(
+                execution_id,
+                principal=invocation.principal,
+            )
+            return await self._complete_output(
+                node,
+                result.output,
+                execution_id=execution_id,
+                principal=invocation.principal,
+                graph_id=invocation.graph_id,
+            )
+        if view.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            result = await self._execution.result(
+                execution_id,
+                principal=invocation.principal,
+            )
+            raise TaskNodeRunError(
+                ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
+                execution_id,
+                safe_details=result.safe_error_details,
+            )
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
         graph_id = invocation.graph_id
@@ -1984,6 +2208,33 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if execution_id is None:
             return
 
+        execution_view = await self._execution.inspect(
+            execution_id,
+            principal=principal,
+        )
+        if execution_view.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+        }:
+            return
+        execution_cancelled = execution_view.status is ExecutionStatus.CANCELLED
+        if execution_view.status is ExecutionStatus.RECOVERY_REQUIRED:
+            raise TaskNodeRunError(
+                ErrorCode.TASK_EFFECT_UNKNOWN,
+                execution_id,
+            )
+
+        if (
+            not execution_cancelled
+            and node.effect_policy == "non_replay_safe"
+            and execution_view.task_attempt > 0
+        ):
+            await self._execution.cancel_task(
+                execution_id,
+                principal=principal,
+            )
+            return
+
         task_id, task_revision, body = _parse_node(node, request=False)
         handler = self._handler(
             task_id,
@@ -1993,6 +2244,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             request=False,
         )
         if isinstance(handler, _TaskRunnerAdapter):
+            if execution_cancelled and isinstance(
+                handler.runner,
+                RuntimeAgentTaskRunner,
+            ):
+                return
             await handler.runner.cancel(
                 replace(invocation, execution_id=execution_id),
             )
@@ -2033,10 +2289,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             dependency_states=dependency_states,
         )
         await handler.cancel(context)
-        await self._execution.cancel_task(
-            execution_id,
-            principal=principal,
-        )
+        if not execution_cancelled:
+            await self._execution.cancel_task(
+                execution_id,
+                principal=principal,
+            )
 
 
     async def get_result_record(
@@ -2485,15 +2742,19 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         del graph_id
         if set(dependency_states) != set(node.dependencies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        required = (
-            set(node.dependencies)
-            if node.dependency_policy == "all_succeeded"
-            else {
-                dependency_id
+        dependency_status = node.dependency_status(
+            {
+                dependency_id: state.status
                 for dependency_id, state in dependency_states.items()
-                if state.status is TaskStatus.SUCCEEDED
             }
         )
+        if dependency_status is not TaskStatus.READY:
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        required = {
+            dependency_id
+            for dependency_id, state in dependency_states.items()
+            if state.status is TaskStatus.SUCCEEDED
+        }
         if set(dependency_results) != required:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values: dict[str, TaskDependency] = {}
@@ -2697,7 +2958,7 @@ def _dependency_identity_payload(
             }
             for dependency_id in sorted(dependencies)
         ]
-    if node.dependency_policy != "all_terminal":
+    if node.dependency_policy not in {"all_terminal", "any_succeeded"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if set(dependency_states) != set(node.dependencies):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

@@ -150,6 +150,7 @@ class Task(Generic[AppT]):
             "type": "function",
             "effect_policy": effect_policy,
             "output_contract": output_contract,
+            "cancel": cancel is not None,
             "reconcile": reconcile is not None,
         }
         self._initialize(

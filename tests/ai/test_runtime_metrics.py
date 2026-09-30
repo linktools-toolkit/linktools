@@ -28,7 +28,9 @@ from linktools.ai.task import (
     TaskGraphState,
     TaskGraphView,
     TaskLease,
+    Task,
     TaskNode,
+    TaskNodeContext,
     TaskNodeRunResult,
     TaskNodeView,
 )
@@ -255,6 +257,109 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
 
 
 @pytest.mark.asyncio
+async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent() -> None:
+    store = InMemoryMetricStore()
+    metrics = Metrics.from_store(store, namespace="task-isolation-metrics")
+    start = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    async def fail(_context: TaskNodeContext[None]) -> JsonValue:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+    async def succeed(_context: TaskNodeContext[None]) -> JsonValue:
+        return {"value": "ok"}
+
+    failed_task = Task(
+        "example.metrics-isolated-failure",
+        fail,
+        effect_policy="none",
+    )
+    successful_task = Task(
+        "example.metrics-isolated-success",
+        succeed,
+        effect_policy="none",
+    )
+    graph = TaskGraph(
+        "isolated-task-failure",
+        (
+            TaskNode("failed", task=failed_task, failure_policy="isolate"),
+            TaskNode("succeeded", task=successful_task),
+        ),
+    )
+    observed_events: list[TaskEvent] = []
+
+    async with Runtime.open(
+        "task-isolation-metrics",
+        models=_TextModels(),  # type: ignore[arg-type]
+        storage=RuntimeStorage.in_memory(),
+        metrics=metrics,
+    ) as runtime:
+        run = await runtime.tasks.bind(failed_task, successful_task).start(
+            graph,
+            idempotency_key="isolated-task-failure-0001",
+        )
+        result = await run.wait(timeout_seconds=10)
+        state = await run.state()
+
+        async def observe(event: object) -> None:
+            payload = getattr(event, "event", None)
+            if isinstance(payload, TaskEvent):
+                observed_events.append(payload)
+
+        replayed = await run.replay(observe)
+        assert await run.result("succeeded") == {"value": "ok"}
+        results = await run.results(limit=10, include_content=True)
+
+    assert result.status is TaskStatus.SUCCEEDED
+    assert replayed.status is TaskStatus.SUCCEEDED
+    assert state.status is TaskStatus.SUCCEEDED
+    result_statuses = {node.node_id: node.status for node in result.node_results}
+    assert result_statuses == {
+        "failed": TaskStatus.FAILED,
+        "succeeded": TaskStatus.SUCCEEDED,
+    }
+    assert results.next_cursor is None
+    paged_results = {item.node_id: item for item in results.items}
+    assert paged_results["failed"].status is TaskStatus.FAILED
+    assert paged_results["failed"].error_code == ErrorCode.REQUEST_FIELD_INVALID.value
+    assert paged_results["failed"].output is None
+    assert paged_results["succeeded"].status is TaskStatus.SUCCEEDED
+    assert paged_results["succeeded"].output == {"value": "ok"}
+    assert any(
+        event.node_id == "failed" and event.status is TaskStatus.FAILED
+        for event in observed_events
+    )
+    assert observed_events[-1].event_type is TaskEventType.GRAPH_CHANGED
+    assert observed_events[-1].status is TaskStatus.SUCCEEDED
+
+    end = datetime.now(timezone.utc) + timedelta(seconds=1)
+    graph_metrics = await store.scan_observations(
+        "task-isolation-metrics",
+        kind="linktools.task.graph.terminal",
+        start=start,
+        end=end,
+        cursor=None,
+        limit=10,
+    )
+    failed_attempts = await store.scan_observations(
+        "task-isolation-metrics",
+        kind="linktools.task.node.attempt",
+        start=start,
+        end=end,
+        cursor=None,
+        limit=10,
+    )
+    assert len(graph_metrics.items) == 1
+    assert graph_metrics.items[0].status == TaskStatus.SUCCEEDED.value
+    attempts_by_node = {
+        observation.correlation["linktools.node_id"]: observation
+        for observation in failed_attempts.items
+    }
+    assert set(attempts_by_node) == {"failed", "succeeded"}
+    assert attempts_by_node["failed"].status == TaskStatus.FAILED.value
+    assert attempts_by_node["succeeded"].status == TaskStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
 async def test_runtime_metric_buffer_is_bounded_and_close_is_fail_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -381,6 +486,14 @@ class _CommitUnknownTaskRepository:
             view.nodes,
             await self.list_nodes(graph_id, tenant_id=tenant_id),
         )
+
+    async def graph_state(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphState:
+        return await self.scheduler_state(graph_id, tenant_id=tenant_id)
 
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         return await self.reconcile_graph(graph_id, tenant_id=tenant_id)
@@ -519,9 +632,11 @@ class _CommitUnknownTaskRepository:
         graph_id: str | None = None,
         node_id: str | None = None,
         expanded_nodes: tuple[TaskNode, ...] = (),
+        expected_fence: int | None = None,
     ) -> None:
         del graph_id, node_id, expanded_nodes
         assert lease.fence == 1
+        assert expected_fence is None
         assert tenant_id == "tenant"
         assert execution_id == "execution"
         assert result_digest == "a" * 64

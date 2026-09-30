@@ -281,6 +281,36 @@ def test_persisted_model_interaction_requires_attachments_field() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+@pytest.mark.parametrize("field", ("dependency_policy", "failure_policy"))
+def test_persisted_task_node_requires_explicit_policy_fields(field: str) -> None:
+    payload = copy.deepcopy(_encode_persisted_domain(TaskNode("node")))
+    payload["fields"].pop(field)
+
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(
+            _envelope(
+                payload,
+                wire_id=wire_type_id(TaskNode),
+            ),
+            TaskNode,
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_persisted_task_node_rejects_the_removed_terminal_wire_id() -> None:
+    payload = copy.deepcopy(_encode_persisted_domain(TaskNode("node")))
+    payload["$dataclass"] = "task_node_terminal"
+
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(
+            _envelope(payload, wire_id=wire_type_id(TaskNode)),
+            TaskNode,
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
 def test_dynamic_v1_default_remains_required() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     run = AgentRunRecord(agent_run_id="run", started_at=now)
