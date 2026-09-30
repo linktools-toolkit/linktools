@@ -88,6 +88,7 @@ async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
                     "type": "function",
                     "effect_policy": "none",
                     "output_contract": {"kind": "json"},
+                    "cancel": False,
                     "reconcile": False,
                 }
             ],
