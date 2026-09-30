@@ -2059,10 +2059,16 @@ class DefaultTaskGraphService(TaskGraphService):
                     AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
                 )
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if claimed or operation.status in {
+        if operation.status is OperationStatus.SUCCEEDED:
+            return view
+
+        drive_cancel = operation.status in {
             OperationStatus.RUNNING,
             OperationStatus.EFFECT_UNKNOWN,
-        }:
+        }
+        late_terminal = claimed and _terminal(view.status)
+
+        if drive_cancel and not late_terminal:
             try:
                 view = await self._persistence.tasks.cancel_graph(
                     graph_id,
@@ -2082,15 +2088,26 @@ class DefaultTaskGraphService(TaskGraphService):
                     request,
                     error,
                 )
-        elif operation.status is OperationStatus.SUCCEEDED:
+
+        if view.status is TaskStatus.RECOVERY_REQUIRED:
+            if operation.status is OperationStatus.RUNNING:
+                await self._record_effect_unknown(operation, tenant_id)
+            _logger.info(
+                "task graph cancel deferred for recovery: tenant=%s graph=%s",
+                tenant_id,
+                graph_id,
+            )
             return view
 
-        if not _terminal(view.status):
+        if drive_cancel and not late_terminal and (
+            not _terminal(view.status)
+            or view.status is TaskStatus.CANCELLED
+        ):
             try:
                 await self._cleanup_graph_runtime(
                     view,
                     request.principal,
-                    invoke_effects=claimed,
+                    invoke_effects=True,
                 )
                 reloaded = await self._persistence.tasks.get_graph(
                     graph_id,
@@ -2119,12 +2136,11 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             return view
 
-        if view.status is TaskStatus.CANCELLED:
+        if drive_cancel and not late_terminal and _terminal(view.status):
             try:
-                await self._cleanup_graph_runtime(
-                    view,
-                    request.principal,
-                    invoke_effects=claimed,
+                view = await self._persistence.tasks.cancel_graph(
+                    graph_id,
+                    tenant_id=tenant_id,
                 )
                 reloaded = await self._persistence.tasks.get_graph(
                     graph_id,
@@ -2134,8 +2150,6 @@ class DefaultTaskGraphService(TaskGraphService):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 view = reloaded
             except BaseException as error:  # noqa: BLE001
-                if isinstance(error, asyncio.CancelledError):
-                    raise
                 return await self._settle_cancel_error(
                     operation,
                     graph_id,
@@ -2145,10 +2159,7 @@ class DefaultTaskGraphService(TaskGraphService):
 
         if not _terminal(view.status):
             return view
-        if claimed or operation.status in {
-            OperationStatus.RUNNING,
-            OperationStatus.EFFECT_UNKNOWN,
-        }:
+        if drive_cancel:
             current = await self._record_success(
                 operation,
                 tenant_id,
