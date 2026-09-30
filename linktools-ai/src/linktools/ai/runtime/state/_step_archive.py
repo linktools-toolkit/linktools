@@ -504,17 +504,19 @@ class StagingAgentRunStore(AgentRunStore):
     ) -> list[object]:
         self._ensure_open()
         _validate_interaction_page(after_request_sequence, limit)
-        selected: list[object] = []
-        for interaction in self._interactions.get(agent_run_id, ()):
-            if (
-                after_request_sequence is not None
-                and interaction.request_sequence <= after_request_sequence
-            ):
-                continue
-            selected.append(interaction)
-            if limit is not None and len(selected) >= limit:
-                break
-        return selected
+        values = self._interactions.get(agent_run_id, ())
+        if not values:
+            return []
+        start = (
+            0
+            if after_request_sequence is None
+            else max(
+                0,
+                after_request_sequence - values[0].request_sequence + 1,
+            )
+        )
+        end = None if limit is None else start + limit
+        return list(values[start:end])
 
     async def model_interaction_count(self, *, agent_run_id: str) -> int:
         self._ensure_open()
