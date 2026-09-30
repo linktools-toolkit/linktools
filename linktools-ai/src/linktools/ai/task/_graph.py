@@ -941,59 +941,8 @@ class TaskGraphState:
                 or state.dependencies != node.dependencies
             ):
                 raise ValueError("task graph state node identity is invalid")
-        aggregate = _aggregate_graph_status(states, nodes)
-        if aggregate is not self.status:
-            terminal = {
-                TaskStatus.SUCCEEDED,
-                TaskStatus.FAILED,
-                TaskStatus.BLOCKED,
-                TaskStatus.CANCELLED,
-            }
-            explicit_cancelled = (
-                self.status is TaskStatus.CANCELLED
-                and bool(states)
-                and all(state.status in terminal for state in states)
-                and any(state.status is TaskStatus.CANCELLED for state in states)
-            )
-            if not explicit_cancelled:
-                raise ValueError("task graph state aggregate status is invalid")
         object.__setattr__(self, "nodes", nodes)
         object.__setattr__(self, "node_states", states)
-
-
-def _aggregate_graph_status(
-    states: "tuple[TaskNodeView, ...]",
-    definitions: "tuple[TaskNode, ...]",
-) -> TaskStatus:
-    failure_policies = {node.node_id: node.failure_policy for node in definitions}
-    statuses = {node.status for node in states}
-    if TaskStatus.RECOVERY_REQUIRED in statuses:
-        return TaskStatus.RECOVERY_REQUIRED
-    if TaskStatus.RUNNING in statuses or TaskStatus.WAITING in statuses:
-        return TaskStatus.RUNNING
-    if TaskStatus.PENDING in statuses or TaskStatus.READY in statuses:
-        return TaskStatus.PENDING
-    if any(
-        node.status is TaskStatus.FAILED
-        and failure_policies[node.node_id] == "propagate"
-        for node in states
-    ):
-        return TaskStatus.FAILED
-    if any(
-        node.status is TaskStatus.BLOCKED
-        and failure_policies[node.node_id] == "propagate"
-        for node in states
-    ):
-        return TaskStatus.BLOCKED
-    if TaskStatus.CANCELLED in statuses:
-        return TaskStatus.CANCELLED
-    if not statuses or statuses <= {
-        TaskStatus.SUCCEEDED,
-        TaskStatus.FAILED,
-        TaskStatus.BLOCKED,
-    }:
-        return TaskStatus.SUCCEEDED
-    raise ValueError("task graph aggregate status is invalid")
 
 
 @dataclass(frozen=True, slots=True)
