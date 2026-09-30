@@ -37,7 +37,6 @@ from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
 from linktools.ai.runtime._compaction import _ObservedCompactionModel
 from linktools.ai.runtime import _event as runtime_event
 from linktools.ai.runtime._journal import ModelRequestFact, ModelRequestJournal
-from linktools.ai.runtime._model_interaction import ModelInteractionLifecycle
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 from linktools.ai.runtime.service_api import ModelInteractionItem
 from linktools.ai.runtime.state import RuntimeDomain
@@ -146,17 +145,19 @@ def _observation_capability(
     )
 
 
-def test_model_interaction_values_copy_nested_request_and_response_content() -> None:
+def test_model_interaction_item_copies_nested_request_and_response_content() -> None:
     started_at = datetime.now(timezone.utc)
     source_request: dict[str, JsonValue] = {
         "messages": [{"parts": [{"text": "prompt"}]}]
     }
     source_response: JsonValue = {"parts": [{"text": "answer"}]}
-    lifecycle = ModelInteractionLifecycle(
-        agent_run_id="run",
-        step_index=1,
+    item = ModelInteractionItem(
+        execution_id="execution",
+        agent_run_sequence=1,
+        depth=0,
         request_sequence=1,
         purpose="agent",
+        step_index=1,
         output_retry_index=None,
         model={"provider": "test", "model_id": "test"},
         request=source_request,
@@ -170,31 +171,8 @@ def test_model_interaction_values_copy_nested_request_and_response_content() -> 
     )
     source_request["messages"].clear()  # type: ignore[union-attr]
     source_response.clear()  # type: ignore[union-attr]
-    assert lifecycle.request["messages"] == [{"parts": [{"text": "prompt"}]}]
-    assert lifecycle.response == {"parts": [{"text": "answer"}]}
-
-    item = ModelInteractionItem(
-        execution_id="execution",
-        agent_run_sequence=1,
-        depth=0,
-        request_sequence=1,
-        purpose="agent",
-        step_index=1,
-        output_retry_index=None,
-        model=lifecycle.model,
-        request=lifecycle.request,
-        response=lifecycle.response,
-        status="SUCCEEDED",
-        error_code=None,
-        duration_ns=1,
-        usage=None,
-        started_at=started_at,
-        finished_at=started_at + timedelta(milliseconds=1),
-    )
-    item.request["messages"].clear()  # type: ignore[union-attr]
-    item.response.clear()  # type: ignore[union-attr]
-    assert lifecycle.request["messages"] == [{"parts": [{"text": "prompt"}]}]
-    assert lifecycle.response == {"parts": [{"text": "answer"}]}
+    assert item.request["messages"] == [{"parts": [{"text": "prompt"}]}]
+    assert item.response == {"parts": [{"text": "answer"}]}
 
 
 def test_request_events_and_lifecycle_share_the_same_identity_and_times() -> None:
@@ -772,7 +750,7 @@ def test_compaction_preaccept_failures_propagate_without_terminal_record(
             await wrapped.request([], None, ModelRequestParameters())
 
         assert raised.value is failure
-        assert await store.list_model_interaction_lifecycle(
+        assert await store.list_model_interactions(
             agent_run_id=agent_run_id
         ) == []
         assert await store.list_events(agent_run_id=agent_run_id) == []
@@ -842,7 +820,7 @@ def test_compaction_after_recorder_acceptance_finishes_provider_failure() -> Non
             await wrapped.request([], None, ModelRequestParameters())
 
         assert raised.value is provider_error
-        values = await store.list_model_interaction_lifecycle(
+        values = await store.list_model_interactions(
             agent_run_id=agent_run_id
         )
         assert [(value.request_sequence, value.status) for value in values] == [
@@ -889,12 +867,8 @@ def test_compaction_terminal_handoff_propagates_single_or_repeated_cancel(
             _parameters: object,
             _streaming: bool,
             _source_messages: object,
-            *,
-            on_accepted: Callable[[], None] | None = None,
         ) -> None:
             facts.append((phase, fact))
-            if phase == "started" and on_accepted is not None:
-                on_accepted()
             if phase in {"completed", "failed"}:
                 finish_entered.set()
                 await release_finish.wait()
