@@ -457,7 +457,7 @@ async def test_cancel_intent_stays_unknown_until_execution_fact_is_available() -
         assert settled_cancel is not None
         assert settled_cancel.status is OperationStatus.EFFECT_UNKNOWN
         assert launcher.started == []
-        assert launcher.cancelled == ["cancel", "cancel"]
+        assert launcher.cancelled == ["cancel"]
     finally:
         await state.close()
 
@@ -846,7 +846,7 @@ async def test_running_cancel_replay_reapplies_durable_graph_projection(
             tenant_id="tenant",
         )
 
-        assert calls == 2
+        assert calls == 3
         assert result.status is TaskStatus.CANCELLED
         assert operation is not None
         assert operation.status is OperationStatus.SUCCEEDED
