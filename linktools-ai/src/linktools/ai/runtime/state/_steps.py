@@ -328,7 +328,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         *,
         agent_run_id: str,
     ) -> int:
-        """Read a lifecycle-first high water mark across the archive handoff."""
+        """Read the staged high water mark across the archive handoff."""
         await self._ensure_business()
         staged = await self._staging.list_model_interactions(
             agent_run_id=agent_run_id
@@ -423,8 +423,10 @@ class RuntimeAgentRunStore(AgentRunStore):
         return max(staged_high_water, durable_high_water)
 
     async def resolve_model_interaction(self, interaction: object) -> object:
-        await self._ensure_business()
-        return await self._staging.resolve_model_interaction(interaction)
+        values = await self.resolve_model_interactions((interaction,))
+        if len(values) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return values[0]
 
     async def resolve_model_interactions(
         self,

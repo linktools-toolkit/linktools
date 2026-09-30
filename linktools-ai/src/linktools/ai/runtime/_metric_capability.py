@@ -579,30 +579,6 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             usage=usage,
         )
 
-    def _finish_request_secondary(
-        self,
-        fact: ModelRequestFact,
-        model: Model,
-        response: ModelResponse | None,
-        status: str,
-        error_code: str | None,
-        usage: object | None,
-    ) -> None:
-        try:
-            self._finish_request(
-                fact,
-                model,
-                response,
-                status,
-                error_code,
-                usage,
-            )
-        except Exception:
-            _logger.exception(
-                "secondary model interaction staging failed: sequence=%s",
-                fact.request_sequence,
-            )
-
     def _record_model(
         self,
         run_context: AgentContext[object] | None,
