@@ -1329,7 +1329,7 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                 durable_page = await execution.model_interactions(
                     cursor=first.next_cursor,
                     limit=1,
-                    include_content=False,
+                    include_content=True,
                 )
                 assert [
                     (item.request_sequence, item.status)
