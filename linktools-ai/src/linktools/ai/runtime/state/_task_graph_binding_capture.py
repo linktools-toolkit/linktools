@@ -83,7 +83,10 @@ def task_declaration_identity(value: object) -> tuple[str, int]:
         )
         or (
             "cancel" in value
-            and not isinstance(cancel, bool)
+            and (
+                task_type != "function"
+                or not isinstance(cancel, bool)
+            )
         )
         or not isinstance(output_contract, Mapping)
         or ("config" in value and not isinstance(config, Mapping))
