@@ -41,9 +41,6 @@ from ._store import FactQuery, StateTransaction, StoredFact, StoredRecord
 class ModelInteractionStagingAgentRunStore(StagingAgentRunStore):
     """Staging store with request-sequence idempotency and durable high-water capture."""
 
-    def stage_model_interaction(self, interaction: object) -> None:
-        super().stage_model_interaction(interaction)
-
     def capture_projection_local(
         self,
         agent_run_id: str,
