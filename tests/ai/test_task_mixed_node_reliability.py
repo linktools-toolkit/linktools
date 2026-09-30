@@ -2302,6 +2302,7 @@ def test_whole_graph_cancel_overrides_terminal_node_aggregate() -> None:
         replace(
             states[1],
             status=TaskStatus.RECOVERY_REQUIRED,
+            fence=1,
             error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
             error_digest="b" * 64,
         ),
