@@ -449,7 +449,51 @@ class StagingAgentRunStore(AgentRunStore):
         self._ensure_open()
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
-        self._interactions.setdefault(interaction.agent_run_id, []).append(interaction)
+        values = self._interactions.setdefault(interaction.agent_run_id, [])
+        if not values or interaction.request_sequence == values[-1].request_sequence + 1:
+            values.append(interaction)
+            return
+        index = interaction.request_sequence - values[0].request_sequence
+        if (
+            index < 0
+            or index >= len(values)
+            or values[index].request_sequence != interaction.request_sequence
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        previous = values[index]
+        if previous == interaction:
+            return
+        stable_previous = (
+            previous.agent_run_id,
+            previous.step_index,
+            previous.request_sequence,
+            previous.purpose,
+            previous.output_retry_index,
+            previous.model,
+            previous.request_context,
+            previous.request_envelope_digest,
+            previous.attachments,
+            previous.started_at,
+        )
+        stable_current = (
+            interaction.agent_run_id,
+            interaction.step_index,
+            interaction.request_sequence,
+            interaction.purpose,
+            interaction.output_retry_index,
+            interaction.model,
+            interaction.request_context,
+            interaction.request_envelope_digest,
+            interaction.attachments,
+            interaction.started_at,
+        )
+        if (
+            previous.status != "RUNNING"
+            or interaction.status == "RUNNING"
+            or stable_previous != stable_current
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        values[index] = interaction
 
     async def list_model_interactions(
         self,
@@ -460,27 +504,38 @@ class StagingAgentRunStore(AgentRunStore):
     ) -> list[object]:
         self._ensure_open()
         _validate_interaction_page(after_request_sequence, limit)
-        selected: list[object] = []
-        for interaction in self._interactions.get(agent_run_id, ()):
-            if (
-                after_request_sequence is not None
-                and interaction.request_sequence <= after_request_sequence
-            ):
-                continue
-            selected.append(interaction)
-            if limit is not None and len(selected) >= limit:
-                break
-        return selected
+        values = self._interactions.get(agent_run_id, ())
+        if not values:
+            return []
+        start = (
+            0
+            if after_request_sequence is None
+            else max(
+                0,
+                after_request_sequence - values[0].request_sequence + 1,
+            )
+        )
+        end = None if limit is None else start + limit
+        return list(values[start:end])
 
     async def model_interaction_count(self, *, agent_run_id: str) -> int:
         self._ensure_open()
         values = self._interactions.get(agent_run_id, ())
-        if not values:
+        terminal: list[StagedModelInteraction] = []
+        running_seen = False
+        for value in values:
+            if value.status == "RUNNING":
+                running_seen = True
+                continue
+            if running_seen:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            terminal.append(value)
+        if not terminal:
             return 0
-        sequences = tuple(value.request_sequence for value in values)
-        if sequences != tuple(range(1, len(values) + 1)):
+        sequences = tuple(value.request_sequence for value in terminal)
+        if sequences != tuple(range(sequences[0], sequences[0] + len(sequences))):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return len(values)
+        return len(terminal)
 
     async def resolve_model_interaction(self, interaction: object) -> object:
         del interaction
@@ -1175,6 +1230,8 @@ class StateStepArchive(AgentRunStore):
                     staged.error_code,
                     staged.duration_ns,
                     staged.usage,
+                    staged.started_at,
+                    staged.finished_at,
                     staged.attachments,
                 )
             )

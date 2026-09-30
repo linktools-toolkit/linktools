@@ -979,16 +979,25 @@ async def _materialize_agent(
                 tool_metrics=tool_metrics,
             ),
         )
+    async def publish_model_request_event(
+        event_type: ExecutionEventType,
+        payload: JsonValue,
+    ) -> None:
+        if scope.event_sink is not None:
+            await scope.event_sink(DurableBoundary(event_type, payload))
+
     model_observation = ModelObservationCapability(
         metrics,
         source_namespace=scope.context.namespace,
         tenant_id=scope.context.principal.tenant_id,
         execution_id=scope.context.execution_id,
+        agent_run_sequence=scope.agent_run_sequence,
         session_id=scope.context.session_id,
         agent_run_id=scope.agent_run_id,
         agent_id=compiled_agent.spec.id,
         journal=model_journal,
         interaction_recorder=run_recorder,
+        event_sink=publish_model_request_event,
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(

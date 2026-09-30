@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from time import monotonic_ns
 from typing import Literal
 
@@ -31,9 +34,11 @@ class ModelRequestFact:
     purpose: ModelRequestPurpose
     observation_id: str
     started_ns: int
+    started_at: datetime
     output_retry_index: int | None = None
     duration_ns: int | None = None
     status: str | None = None
+    finished_at: datetime | None = None
 
     def metadata(self, *, include_observation: bool) -> dict[str, str]:
         values = {
@@ -102,6 +107,7 @@ class ModelRequestJournal:
                 purpose,
             ),
             started_ns=monotonic_ns(),
+            started_at=datetime.now(timezone.utc),
             output_retry_index=output_retry_index,
         )
         self._facts[sequence] = fact
@@ -124,6 +130,7 @@ class ModelRequestJournal:
             fact,
             duration_ns=max(0, elapsed if duration_ns is None else duration_ns),
             status=status,
+            finished_at=datetime.now(timezone.utc),
         )
         self._facts[request_sequence] = return_value
         return return_value
@@ -152,6 +159,22 @@ class ModelRequestJournal:
             return self._facts.pop(request_sequence)
         except KeyError as error:
             raise RuntimeError("model request fact is missing") from error
+
+
+async def _await_request_handoff(awaitable: Awaitable[None]) -> bool:
+    task = asyncio.create_task(awaitable)
+    interrupted = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            interrupted = True
+    if task.cancelled():
+        raise asyncio.CancelledError
+    task.result()
+    return interrupted
 
 
 __all__ = [

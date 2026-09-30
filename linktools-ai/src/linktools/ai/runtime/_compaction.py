@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
+from pydantic_ai.exceptions import RunCancelled
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.wrapper import WrapperModel
@@ -27,7 +28,7 @@ from pydantic_ai_harness.compaction import (
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ..workspace import validate_workspace_path
-from ._journal import ModelRequestFact, ModelRequestJournal
+from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
 from ._message import binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
@@ -108,115 +109,137 @@ class _ObservedCompactionModel(WrapperModel):
     ) -> ModelResponse:
         fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
         request_sequence = fact.request_sequence
-        if self._observer is not None:
-            await self._observer(
-                self._ctx,
-                fact,
-                "started",
-                self.wrapped,
-                None,
-                None,
-            )
-        if self._recorder is not None:
-            await self._recorder(
-                self._ctx,
-                fact,
-                "started",
-                self.wrapped,
-                None,
-                None,
-                messages,
-                model_settings,
-                model_request_parameters,
-                False,
-                self._source_messages,
-            )
         try:
-            response = await self.wrapped.request(
-                messages,
-                model_settings,
-                model_request_parameters,
+            await self._notify(
+                fact,
+                phase="started",
+                response=None,
+                error=None,
+                messages=messages,
+                model_settings=model_settings,
+                parameters=model_request_parameters,
             )
-        except asyncio.CancelledError as error:
-            fact = self._journal.finish(request_sequence, status="CANCELLED")
-            self._journal.consume(request_sequence)
-            if self._observer is not None:
-                await self._observer(
-                    self._ctx,
-                    fact,
-                    "cancelled",
-                    self.wrapped,
-                    None,
-                    error,
-                )
-            if self._recorder is not None:
-                await self._recorder(
-                    self._ctx,
-                    fact,
-                    "cancelled",
-                    self.wrapped,
-                    None,
-                    error,
+            try:
+                response = await self.wrapped.request(
                     messages,
                     model_settings,
                     model_request_parameters,
-                    False,
-                    self._source_messages,
                 )
-            raise
-        except BaseException as error:
-            fact = self._journal.finish(request_sequence, status="FAILED")
+            except asyncio.CancelledError as error:
+                await self._finish(
+                    request_sequence,
+                    status="CANCELLED",
+                    phase="cancelled",
+                    response=None,
+                    error=error,
+                    messages=messages,
+                    model_settings=model_settings,
+                    parameters=model_request_parameters,
+                )
+                raise
+            except RunCancelled as error:
+                await self._finish(
+                    request_sequence,
+                    status="CANCELLED",
+                    phase="cancelled",
+                    response=None,
+                    error=error,
+                    messages=messages,
+                    model_settings=model_settings,
+                    parameters=model_request_parameters,
+                )
+                raise
+            except Exception as error:
+                await self._finish(
+                    request_sequence,
+                    status="FAILED",
+                    phase="failed",
+                    response=None,
+                    error=error,
+                    messages=messages,
+                    model_settings=model_settings,
+                    parameters=model_request_parameters,
+                )
+                raise
+            finished = self._journal.finish(request_sequence, status="SUCCEEDED")
+            interrupted = await _await_request_handoff(
+                self._notify(
+                    finished,
+                    phase="completed",
+                    response=response,
+                    error=None,
+                    messages=messages,
+                    model_settings=model_settings,
+                    parameters=model_request_parameters,
+                )
+            )
+            if interrupted:
+                raise asyncio.CancelledError
+            return response
+        finally:
             self._journal.consume(request_sequence)
-            if self._observer is not None:
-                await self._observer(
-                    self._ctx,
-                    fact,
-                    "failed",
-                    self.wrapped,
-                    None,
-                    error,
-                )
-            if self._recorder is not None:
-                await self._recorder(
-                    self._ctx,
-                    fact,
-                    "failed",
-                    self.wrapped,
-                    None,
-                    error,
-                    messages,
-                    model_settings,
-                    model_request_parameters,
-                    False,
-                    self._source_messages,
-                )
-            raise
-        fact = self._journal.finish(request_sequence, status="SUCCEEDED")
-        self._journal.consume(request_sequence)
+
+    async def _finish(
+        self,
+        request_sequence: int,
+        *,
+        status: str,
+        phase: str,
+        response: ModelResponse | None,
+        error: BaseException | None,
+        messages: Sequence[ModelMessage],
+        model_settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+    ) -> None:
+        finished = self._journal.finish(request_sequence, status=status)
+        interrupted = await _await_request_handoff(
+            self._notify(
+                finished,
+                phase=phase,
+                response=response,
+                error=error,
+                messages=messages,
+                model_settings=model_settings,
+                parameters=parameters,
+            )
+        )
+        if interrupted:
+            raise asyncio.CancelledError
+
+    async def _notify(
+        self,
+        fact: ModelRequestFact,
+        *,
+        phase: str,
+        response: ModelResponse | None,
+        error: BaseException | None,
+        messages: Sequence[ModelMessage],
+        model_settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+    ) -> None:
         if self._observer is not None:
             await self._observer(
                 self._ctx,
                 fact,
-                "completed",
+                phase,
                 self.wrapped,
                 response,
-                None,
+                error,
             )
         if self._recorder is not None:
             await self._recorder(
                 self._ctx,
                 fact,
-                "completed",
+                phase,
                 self.wrapped,
                 response,
-                None,
+                error,
                 messages,
                 model_settings,
-                model_request_parameters,
+                parameters,
                 False,
                 self._source_messages,
             )
-        return response
 
 
 class CompactionCapability(AbstractCapability[None]):

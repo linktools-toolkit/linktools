@@ -38,7 +38,7 @@ from ._journal import (
     REQUEST_PURPOSE_METADATA_KEY,
     REQUEST_SEQUENCE_METADATA_KEY,
 )
-from ._model_interaction import project_public_messages
+from ._model_interaction import StagedModelInteraction, project_public_messages
 from .service_api import (
     AttachmentFact,
     ExecutionHistoryItem,
@@ -104,7 +104,7 @@ class _InteractionOccurrence:
     source_execution_id: str
     agent_run_sequence: int
     depth: int
-    interaction: ModelInteractionRecord
+    interaction: ModelInteractionRecord | StagedModelInteraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +199,29 @@ class _ToolOperationHistoryReader(Protocol):
     ) -> tuple[ToolOperationRecord, ...]: ...
 
 
+class _ModelInteractionStagingStore(Protocol):
+    async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None: ...
+
+    async def model_interaction_history_high_water(
+        self,
+        *,
+        agent_run_id: str,
+    ) -> int: ...
+
+    async def list_model_interaction_history_snapshot(
+        self,
+        *,
+        agent_run_id: str,
+        after_request_sequence: int,
+        limit: int,
+    ) -> tuple[list[object], list[StagedModelInteraction]]: ...
+
+    async def resolve_model_interactions(
+        self,
+        interactions: Sequence[object],
+    ) -> list[object]: ...
+
+
 class StepExecutionHistoryReader:
     """Own the adapter projection between AgentRunStore facts and Runtime views."""
 
@@ -210,6 +233,7 @@ class StepExecutionHistoryReader:
         store: AgentRunStore,
         cursor_signer: CursorSigner,
         tool_operations: "_ToolOperationHistoryReader | None" = None,
+        interaction_staging_store: "_ModelInteractionStagingStore | None" = None,
     ) -> None:
         try:
             validate_persistence_namespace(namespace)
@@ -220,6 +244,7 @@ class StepExecutionHistoryReader:
         self._store = store
         self._cursor_signer = cursor_signer
         self._tool_operations = tool_operations
+        self._interaction_staging_store = interaction_staging_store
 
     async def trace(
         self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int
@@ -460,7 +485,10 @@ class StepExecutionHistoryReader:
         explicit_cutoffs = _normalize_usage_cutoffs(cutoffs)
         if cursor_state is not None:
             cursor_coordinate, cursor_cutoffs = cursor_state
-            if explicit_cutoffs is not None and explicit_cutoffs != cursor_cutoffs:
+            if (
+                explicit_cutoffs is not None
+                and explicit_cutoffs != cursor_cutoffs
+            ):
                 raise AIError(ErrorCode.CURSOR_INVALID)
             fixed_cutoffs = cursor_cutoffs
         else:
@@ -474,11 +502,19 @@ class StepExecutionHistoryReader:
                         execution_id=source.record.execution_id,
                         agent_run_sequence=source.agent_run_sequence,
                     )
+                    if self._interaction_staging_store is None:
+                        high_water = await self._store.model_interaction_count(
+                            agent_run_id=agent_run_id
+                        )
+                    else:
+                        high_water = await self._interaction_staging_store.model_interaction_history_high_water(
+                            agent_run_id=agent_run_id
+                        )
                     captured.append(
                         UsageReadCutoff(
                             source.record.execution_id,
                             source.agent_run_sequence,
-                            await self._store.model_interaction_count(agent_run_id=agent_run_id),
+                            high_water,
                         )
                     )
                 fixed_cutoffs = tuple(captured)
@@ -533,21 +569,44 @@ class StepExecutionHistoryReader:
                 agent_run_sequence=source.agent_run_sequence,
             )
             fetch_limit = min(remaining, available)
-            interactions = await self._store.list_model_interactions(
-                agent_run_id=agent_run_id,
-                after_request_sequence=after_request_sequence,
-                limit=fetch_limit,
-            )
-            if len(interactions) != fetch_limit:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            expected_sequence = after_request_sequence
+            staged_values: list[StagedModelInteraction] = []
+            if self._interaction_staging_store is not None:
+                interactions, staged_values = await self._interaction_staging_store.list_model_interaction_history_snapshot(
+                    agent_run_id=agent_run_id,
+                    after_request_sequence=after_request_sequence,
+                    limit=fetch_limit,
+                )
+            else:
+                interactions = await self._store.list_model_interactions(
+                    agent_run_id=agent_run_id,
+                    after_request_sequence=after_request_sequence,
+                    limit=fetch_limit,
+                )
+            selected_by_sequence: dict[
+                int, ModelInteractionRecord | StagedModelInteraction
+            ] = {}
+            for interaction in staged_values:
+                if interaction.request_sequence <= high_water:
+                    selected_by_sequence[interaction.request_sequence] = interaction
             for interaction in interactions:
-                expected_sequence += 1
                 if (
                     not isinstance(interaction, ModelInteractionRecord)
                     or interaction.agent_run_id != agent_run_id
-                    or interaction.request_sequence != expected_sequence
                 ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                # The local-to-archive handoff can overlap these reads. The
+                # durable terminal record wins once it is visible.
+                selected_by_sequence[interaction.request_sequence] = interaction
+            selected_values = [
+                selected_by_sequence[sequence]
+                for sequence in sorted(selected_by_sequence)[:fetch_limit]
+            ]
+            if len(selected_values) != fetch_limit:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            expected_sequence = after_request_sequence
+            for interaction in selected_values:
+                expected_sequence += 1
+                if interaction.request_sequence != expected_sequence:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 page.append(
                     _InteractionOccurrence(
@@ -561,8 +620,47 @@ class StepExecutionHistoryReader:
 
         selected_occurrences = page[:limit]
         selected_items: dict[tuple[str, int], ModelInteractionItem] = {}
-        for occurrence_group in _interaction_occurrence_groups(selected_occurrences):
-            times = await self._model_request_times(occurrence_group[0].interaction.agent_run_id)
+        staged_occurrences = tuple(
+            value
+            for value in selected_occurrences
+            if isinstance(value.interaction, StagedModelInteraction)
+        )
+        for occurrence_group in _interaction_occurrence_groups(staged_occurrences):
+            resolved_values: tuple[object, ...]
+            if include_content:
+                if self._interaction_staging_store is None:
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                resolved_values = tuple(
+                    await self._interaction_staging_store.resolve_model_interactions(
+                        tuple(value.interaction for value in occurrence_group)
+                    )
+                )
+                if len(resolved_values) != len(occurrence_group):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            else:
+                resolved_values = (None,) * len(occurrence_group)
+            for occurrence, resolved_context in zip(
+                occurrence_group,
+                resolved_values,
+                strict=True,
+            ):
+                interaction = occurrence.interaction
+                selected_items[
+                    (interaction.agent_run_id, interaction.request_sequence)
+                ] = self._project_model_interaction(
+                    interaction,
+                    occurrence.source_execution_id,
+                    occurrence.agent_run_sequence,
+                    occurrence.depth,
+                    resolved_context,
+                    include_content=include_content,
+                )
+        stored_occurrences = tuple(
+            value
+            for value in selected_occurrences
+            if isinstance(value.interaction, ModelInteractionRecord)
+        )
+        for occurrence_group in _interaction_occurrence_groups(stored_occurrences):
             resolved_values: tuple[object, ...]
             if include_content:
                 resolved_values = await self._store.resolve_model_interactions(
@@ -577,10 +675,6 @@ class StepExecutionHistoryReader:
                 resolved_values,
                 strict=True,
             ):
-                started_at, finished_at = times.get(
-                    occurrence.interaction.request_sequence,
-                    (None, None),
-                )
                 selected_items[
                     (occurrence.interaction.agent_run_id, occurrence.interaction.request_sequence)
                 ] = self._project_model_interaction(
@@ -590,8 +684,6 @@ class StepExecutionHistoryReader:
                     occurrence.depth,
                     resolved_context,
                     include_content=include_content,
-                    started_at=started_at,
-                    finished_at=finished_at,
                 )
         selected = tuple(
             selected_items[
@@ -871,15 +963,13 @@ class StepExecutionHistoryReader:
 
     def _project_model_interaction(
         self,
-        interaction: ModelInteractionRecord,
+        interaction: ModelInteractionRecord | StagedModelInteraction,
         execution_id: str,
         agent_run_sequence: int,
         depth: int,
         resolved: object | None,
         *,
         include_content: bool,
-        started_at: datetime | None,
-        finished_at: datetime | None,
     ) -> ModelInteractionItem:
         request: dict[str, JsonValue] = {}
         response: JsonValue | None = None
@@ -928,36 +1018,9 @@ class StepExecutionHistoryReader:
             duration_ns=interaction.duration_ns,
             usage=interaction.usage,
             content_included=include_content,
-            started_at=started_at,
-            finished_at=finished_at,
+            started_at=interaction.started_at,
+            finished_at=interaction.finished_at,
         )
-
-    async def _model_request_times(
-        self,
-        agent_run_id: str,
-    ) -> dict[int, tuple[datetime | None, datetime | None]]:
-        values: dict[int, list[datetime | None]] = {}
-        for event in await self._store.list_events(agent_run_id=agent_run_id):
-            if event.kind not in {
-                "model_request_started",
-                "model_request_completed",
-                "model_request_failed",
-                "model_request_cancelled",
-            }:
-                continue
-            sequence = _event_request_sequence(event)
-            if sequence is None:
-                continue
-            pair = values.setdefault(sequence, [None, None])
-            index = 0 if event.kind == "model_request_started" else 1
-            timestamp = _event_timestamp(event)
-            if pair[index] is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            pair[index] = timestamp
-        return {
-            sequence: (pair[0], pair[1])
-            for sequence, pair in values.items()
-        }
 
     async def _tool_call_metadata(
         self,
@@ -1451,6 +1514,10 @@ class StepExecutionHistoryReader:
                 agent_run_sequence=sequence,
             )
             run = await self._store.get_agent_run(agent_run_id=deterministic_id)
+            if run is None and self._interaction_staging_store is not None:
+                run = await self._interaction_staging_store.get_agent_run(
+                    agent_run_id=deterministic_id
+                )
             if run is None:
                 if (
                     record.status is ExecutionStatus.SUCCEEDED
@@ -1493,6 +1560,10 @@ class StepExecutionHistoryReader:
                 agent_run_sequence=sequence,
             )
             run = await self._store.get_agent_run(agent_run_id=deterministic_id)
+            if run is None and self._interaction_staging_store is not None:
+                run = await self._interaction_staging_store.get_agent_run(
+                    agent_run_id=deterministic_id
+                )
             if run is None:
                 if (
                     record.status is ExecutionStatus.SUCCEEDED

@@ -218,6 +218,8 @@ def test_persisted_model_interaction_accepts_legacy_attachment_without_identifie
         error_code=None,
         duration_ns=1,
         usage=None,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         attachments=(
             {
                 "fact": "accepted",
@@ -249,7 +251,8 @@ def test_persisted_model_interaction_accepts_legacy_attachment_without_identifie
     assert decoded.attachments[0]["input_identifier"] is None
 
 
-def test_persisted_model_interaction_requires_attachments_field() -> None:
+@pytest.mark.parametrize("field_name", ("started_at", "finished_at", "attachments"))
+def test_persisted_model_interaction_requires_current_fields(field_name: str) -> None:
     interaction = ModelInteractionRecord(
         agent_run_id="run",
         step_index=1,
@@ -267,10 +270,12 @@ def test_persisted_model_interaction_requires_attachments_field() -> None:
         error_code=None,
         duration_ns=1,
         usage=None,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         attachments=(),
     )
     payload = copy.deepcopy(_encode_persisted_domain(interaction))
-    payload["fields"].pop("attachments")
+    payload["fields"].pop(field_name)
 
     with pytest.raises(AIError) as raised:
         _decode_enveloped_domain(

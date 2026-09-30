@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -39,15 +39,18 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.usage import UsageLimitExceeded
 
 from ..capability import AgentContext
+from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ._journal import ModelRequestFact, ModelRequestJournal
+from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
 from ._metrics import (
     _bind_metric_execution_context,
     _metric_correlation,
 )
 
 _logger = environ.get_logger("ai.runtime.model_metrics")
+
+ModelRequestEventSink = Callable[[ExecutionEventType, JsonValue], Awaitable[None]]
 
 
 class ModelInteractionRecorder(Protocol):
@@ -96,17 +99,20 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         source_namespace: str,
         tenant_id: str,
         execution_id: str,
+        agent_run_sequence: int = 1,
         session_id: str | None,
         agent_run_id: str,
         agent_id: str,
         journal: ModelRequestJournal | None = None,
         interaction_recorder: ModelInteractionRecorder | None = None,
+        event_sink: ModelRequestEventSink | None = None,
     ) -> None:
         self.id = "linktools.ai.model-observation"
         self._recorder = recorder
         self._source_namespace = source_namespace
         self._tenant_id = tenant_id
         self._execution_id = execution_id
+        self._agent_run_sequence = agent_run_sequence
         self._session_id = session_id
         self._agent_run_id = agent_run_id
         self._agent_id = agent_id
@@ -117,6 +123,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             agent_run_id=agent_run_id,
         )
         self._interaction_recorder = interaction_recorder
+        self._event_sink = event_sink
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="innermost")
@@ -148,114 +155,115 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             output_retry_index=None if ctx.retry <= 0 else ctx.retry,
         )
         request_sequence = fact.request_sequence
-        self._stage_request(fact, request_context)
-        await self._record_request_event(fact, phase="started")
         try:
-            response = await handler(request_context)
-        except asyncio.CancelledError:
-            fact = self._journal.finish(request_sequence, status="CANCELLED")
-            self._finish_request_secondary(
+            self._stage_request(fact, request_context)
+            try:
+                await self._record_request_event(fact, phase="started")
+                await self._publish_request_event(fact, phase="started")
+            except asyncio.CancelledError:
+                await self._complete_request(
+                    fact,
+                    run_context,
+                    selected_model,
+                    status="CANCELLED",
+                    response=None,
+                    error_code=None,
+                    usage=None,
+                    phase="cancelled",
+                )
+                raise
+            except RunCancelled as error:
+                interrupted = await self._complete_request(
+                    fact,
+                    run_context,
+                    selected_model,
+                    status="CANCELLED",
+                    response=None,
+                    error_code=_model_error_code(error),
+                    usage=None,
+                    phase="cancelled",
+                )
+                if interrupted:
+                    raise asyncio.CancelledError from error
+                raise
+            except Exception as error:
+                interrupted = await self._complete_request(
+                    fact,
+                    run_context,
+                    selected_model,
+                    status="FAILED",
+                    response=None,
+                    error_code=_model_error_code(error),
+                    usage=None,
+                    phase="failed",
+                )
+                if interrupted:
+                    raise asyncio.CancelledError from error
+                if isinstance(error, AIError):
+                    raise
+                raise AIError(
+                    ErrorCode.INTERNAL_ERROR,
+                    safe_details={"phase": "model_request_started_event"},
+                ) from error
+
+            try:
+                response = await handler(request_context)
+            except asyncio.CancelledError:
+                await self._complete_request(
+                    fact,
+                    run_context,
+                    selected_model,
+                    status="CANCELLED",
+                    response=None,
+                    error_code=None,
+                    usage=None,
+                    phase="cancelled",
+                )
+                raise
+            except RunCancelled as error:
+                interrupted = await self._complete_request(
+                    fact,
+                    run_context,
+                    selected_model,
+                    status="CANCELLED",
+                    response=None,
+                    error_code=_model_error_code(error),
+                    usage=None,
+                    phase="cancelled",
+                )
+                if interrupted:
+                    raise asyncio.CancelledError from error
+                raise
+            except Exception as error:
+                interrupted = await self._complete_request(
+                    fact,
+                    run_context,
+                    selected_model,
+                    status="FAILED",
+                    response=None,
+                    error_code=_model_error_code(error),
+                    usage=None,
+                    phase="failed",
+                )
+                if interrupted:
+                    raise asyncio.CancelledError from error
+                raise
+
+            interrupted = await self._complete_request(
                 fact,
-                selected_model,
-                None,
-                "CANCELLED",
-                None,
-                None,
-            )
-            await self._record_request_event(
-                fact,
-                phase="cancelled",
-            )
-            self._record_model(
                 run_context,
-                fact,
-                model=selected_model,
-                response=None,
-                status="CANCELLED",
+                selected_model,
+                status="SUCCEEDED",
+                response=response,
                 error_code=None,
-                measurements=(),
+                usage=response.usage,
+                phase="completed",
             )
+            if interrupted:
+                raise asyncio.CancelledError
+            return response
+        finally:
             self._journal.consume(request_sequence)
-            raise
-        except RunCancelled as error:
-            fact = self._journal.finish(request_sequence, status="CANCELLED")
-            error_code = _model_error_code(error)
-            self._finish_request_secondary(
-                fact,
-                selected_model,
-                None,
-                "CANCELLED",
-                error_code,
-                None,
-            )
-            await self._record_request_event(
-                fact,
-                phase="cancelled",
-                error_code=error_code,
-            )
-            self._record_model(
-                run_context,
-                fact,
-                model=selected_model,
-                response=None,
-                status="CANCELLED",
-                error_code=error_code,
-                measurements=(),
-            )
-            self._journal.consume(request_sequence)
-            raise
-        except Exception as error:
-            fact = self._journal.finish(request_sequence, status="FAILED")
-            error_code = _model_error_code(error)
-            self._finish_request_secondary(
-                fact,
-                selected_model,
-                None,
-                "FAILED",
-                error_code,
-                None,
-            )
-            await self._record_request_event(
-                fact,
-                phase="failed",
-                error_code=error_code,
-            )
-            self._record_model(
-                run_context,
-                fact,
-                model=selected_model,
-                response=None,
-                status="FAILED",
-                error_code=error_code,
-                measurements=(),
-            )
-            self._journal.consume(request_sequence)
-            raise
-        fact = self._journal.finish(request_sequence, status="SUCCEEDED")
-        self._finish_request(
-            fact,
-            selected_model,
-            response,
-            "SUCCEEDED",
-            None,
-            response.usage,
-        )
-        await self._record_request_event(
-            fact,
-            phase="completed",
-            response=response,
-        )
-        self._record_model(
-            run_context,
-            fact,
-            model=selected_model,
-            response=response,
-            status="SUCCEEDED",
-            error_code=None,
-            measurements=_provider_usage_measurements(response),
-        )
-        self._journal.consume(request_sequence)
-        return response
 
     async def after_model_request(
         self,
@@ -302,58 +310,97 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 model_id=str(getattr(model, "model_id", "")) or None,
                 source_messages=source_messages,
             )
-            await self._record_request_event(fact, phase="started")
+            try:
+                await self._record_request_event(fact, phase="started")
+                await self._publish_request_event(fact, phase="started")
+            except asyncio.CancelledError:
+                await self._complete_request(
+                    fact,
+                    ctx.deps,
+                    model,
+                    status="CANCELLED",
+                    response=None,
+                    error_code=None,
+                    usage=None,
+                    phase="cancelled",
+                )
+                raise
+            except RunCancelled as error:
+                interrupted = await self._complete_request(
+                    fact,
+                    ctx.deps,
+                    model,
+                    status="CANCELLED",
+                    response=None,
+                    error_code=_model_error_code(error),
+                    usage=None,
+                    phase="cancelled",
+                )
+                if interrupted:
+                    raise asyncio.CancelledError from error
+                raise
+            except Exception as error:
+                interrupted = await self._complete_request(
+                    fact,
+                    ctx.deps,
+                    model,
+                    status="FAILED",
+                    response=None,
+                    error_code=_model_error_code(error),
+                    usage=None,
+                    phase="failed",
+                )
+                if interrupted:
+                    raise asyncio.CancelledError from error
+                if isinstance(error, AIError):
+                    raise
+                raise AIError(
+                    ErrorCode.INTERNAL_ERROR,
+                    safe_details={"phase": "model_request_started_event"},
+                ) from error
             return
         if phase not in {"completed", "failed", "cancelled"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if phase == "completed":
             if response is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._record_model(
-                ctx.deps,
-                fact,
-                model=model,
-                response=response,
-                status="SUCCEEDED",
-                error_code=None,
-                measurements=_provider_usage_measurements(response),
-            )
-            self._finish_request(
-                fact,
-                model,
-                response,
-                "SUCCEEDED",
-                None,
-                response.usage,
-            )
-            await self._record_request_event(
-                fact,
-                phase="completed",
-                response=response,
-            )
-            return
-        exception = error if isinstance(error, Exception) else None
-        error_code = None if exception is None else _model_error_code(exception)
+            status = "SUCCEEDED"
+            error_code = None
+            usage = response.usage
+            measurements = _provider_usage_measurements(response)
+        else:
+            exception = error if isinstance(error, Exception) else None
+            error_code = None if exception is None else _model_error_code(exception)
+            status = "CANCELLED" if phase == "cancelled" else "FAILED"
+            usage = None
+            measurements = ()
+        self._finish_request(
+            fact,
+            model,
+            response if phase == "completed" else None,
+            status,
+            error_code,
+            usage,
+        )
         self._record_model(
             ctx.deps,
             fact,
             model=model,
-            response=None,
-            status="CANCELLED" if phase == "cancelled" else "FAILED",
+            response=response if phase == "completed" else None,
+            status=status,
             error_code=error_code,
-            measurements=(),
-        )
-        self._finish_request_secondary(
-            fact,
-            model,
-            None,
-            "CANCELLED" if phase == "cancelled" else "FAILED",
-            error_code,
-            None,
+            measurements=measurements,
         )
         await self._record_request_event(
             fact,
             phase=phase,
+            response=response if phase == "completed" else None,
+            error_code=error_code,
+        )
+        await self._publish_request_event(
+            fact,
+            phase=phase,
+            response=response if phase == "completed" else None,
             error_code=error_code,
         )
 
@@ -375,6 +422,102 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             error_code=error_code,
             include_observation=self._recorder is not None,
         )
+
+    async def _publish_request_event(
+        self,
+        fact: ModelRequestFact,
+        *,
+        phase: str,
+        response: ModelResponse | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        if self._event_sink is None:
+            return
+        if phase == "started":
+            event_type = ExecutionEventType.MODEL_REQUEST_STARTED
+            status = "RUNNING"
+        elif phase in {"completed", "failed", "cancelled"}:
+            event_type = ExecutionEventType.MODEL_REQUEST_FINISHED
+            status = fact.status
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload: dict[str, JsonValue] = {
+            "execution_id": self._execution_id,
+            "agent_run_sequence": self._agent_run_sequence,
+            "request_sequence": fact.request_sequence,
+            "step_index": fact.step_index,
+            "purpose": fact.purpose,
+            "output_retry_index": fact.output_retry_index,
+            "status": status,
+            "started_at": fact.started_at.isoformat(),
+            "finished_at": (
+                None if fact.finished_at is None else fact.finished_at.isoformat()
+            ),
+            "duration_ns": fact.duration_ns,
+            "error_code": error_code,
+            "usage": _event_usage(response),
+        }
+        try:
+            await self._event_sink(event_type, payload)
+        except (asyncio.CancelledError, RunCancelled, AIError):
+            raise
+        except Exception as error:
+            raise AIError(
+                ErrorCode.INTERNAL_ERROR,
+                safe_details={"phase": "model_request_event_publication"},
+            ) from error
+
+    async def _complete_request(
+        self,
+        fact: ModelRequestFact,
+        run_context: AgentContext[object] | None,
+        model: Model,
+        *,
+        status: str,
+        response: ModelResponse | None,
+        error_code: str | None,
+        usage: object | None,
+        phase: str,
+    ) -> bool:
+        finished = self._journal.finish(fact.request_sequence, status=status)
+        self._finish_request(
+            finished,
+            model,
+            response,
+            status,
+            error_code,
+            usage,
+        )
+        measurements = (
+            _provider_usage_measurements(response)
+            if status == "SUCCEEDED" and response is not None
+            else ()
+        )
+        self._record_model(
+            run_context,
+            finished,
+            model=model,
+            response=response,
+            status=status,
+            error_code=error_code,
+            measurements=measurements,
+        )
+
+        async def handoff() -> None:
+            await self._record_request_event(
+                finished,
+                phase=phase,
+                response=response,
+                error_code=error_code,
+            )
+            await self._publish_request_event(
+                finished,
+                phase=phase,
+                response=response,
+                error_code=error_code,
+            )
+
+        return await _await_request_handoff(handoff())
 
     def _stage_request(
         self,
@@ -433,30 +576,6 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             duration_ns=fact.duration_ns or 0,
             usage=usage,
         )
-
-    def _finish_request_secondary(
-        self,
-        fact: ModelRequestFact,
-        model: Model,
-        response: ModelResponse | None,
-        status: str,
-        error_code: str | None,
-        usage: object | None,
-    ) -> None:
-        try:
-            self._finish_request(
-                fact,
-                model,
-                response,
-                status,
-                error_code,
-                usage,
-            )
-        except Exception:
-            _logger.exception(
-                "secondary model interaction staging failed: sequence=%s",
-                fact.request_sequence,
-            )
 
     def _record_model(
         self,
@@ -520,6 +639,20 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             self._recorder.try_record(observation)
         except Exception:
             _logger.exception("model metric observation rejected")
+
+
+def _event_usage(response: ModelResponse | None) -> JsonValue | None:
+    if response is None:
+        return None
+    usage = response.usage
+    return {
+        "model_requests": 1,
+        "tool_calls": 0,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+    }
 
 
 def _provider_usage_measurements(

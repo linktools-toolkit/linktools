@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
+from datetime import datetime
 from typing import cast
 
 from pydantic import TypeAdapter
@@ -90,8 +91,10 @@ class StagedModelInteraction:
     response_context: StagedContextProjection | None
     status: str
     error_code: str | None
-    duration_ns: int
+    duration_ns: int | None
     usage: UsageMetrics | None
+    started_at: datetime
+    finished_at: datetime | None
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
 
     def __post_init__(self) -> None:
@@ -100,19 +103,40 @@ class StagedModelInteraction:
             or self.step_index < 0
             or self.request_sequence < 1
             or self.purpose not in {"agent", "compaction"}
-            or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
-            or self.duration_ns < 0
+            or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}
+            or self.duration_ns is not None
+            and self.duration_ns < 0
+            or not isinstance(self.started_at, datetime)
+            or self.started_at.tzinfo is None
+            or self.finished_at is not None
+            and (
+                not isinstance(self.finished_at, datetime)
+                or self.finished_at.tzinfo is None
+            )
             or len(self.request_envelope_digest) != 64
             or any(
                 value not in "0123456789abcdef"
                 for value in self.request_envelope_digest
             )
+            or self.status == "RUNNING"
+            and (
+                self.started_at is None
+                or self.response_context is not None
+                or self.error_code is not None
+                or self.duration_ns is not None
+                or self.usage is not None
+                or self.finished_at is not None
+            )
+            or self.status != "RUNNING"
+            and self.duration_ns is None
             or self.status == "SUCCEEDED"
             and self.response_context is None
-            or self.status != "SUCCEEDED"
+            or self.status not in {"RUNNING", "SUCCEEDED"}
             and self.response_context is not None
             or self.status == "FAILED"
             and not self.error_code
+            or self.status != "RUNNING"
+            and self.finished_at is None
         ):
             raise ValueError("staged model interaction is invalid")
         if not isinstance(self.request_context, StagedContextProjection):

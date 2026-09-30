@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,7 @@ def _journal() -> ModelRequestJournal:
 
 
 def _cancelled_interaction(sequence: int = 1) -> StagedModelInteraction:
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return StagedModelInteraction(
         agent_run_id="run",
         step_index=1,
@@ -118,6 +120,8 @@ def _cancelled_interaction(sequence: int = 1) -> StagedModelInteraction:
         error_code=None,
         duration_ns=0,
         usage=None,
+        started_at=timestamp,
+        finished_at=timestamp,
     )
 
 

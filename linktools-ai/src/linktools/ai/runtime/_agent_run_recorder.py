@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from typing import Protocol, cast
 
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
@@ -156,6 +157,7 @@ class AgentRunRecorder:
         tool_name: str | None = None,
         error: str | None = None,
         metadata: Mapping[str, str] | None = None,
+        timestamp: datetime | None = None,
     ) -> None:
         run = self._run
         if run is None:
@@ -167,6 +169,7 @@ class AgentRunRecorder:
                 agent_run_id=run.agent_run_id,
                 kind=kind,
                 step_index=step_index,
+                timestamp=(datetime.now(timezone.utc) if timestamp is None else timestamp),
                 agent_conversation_id=run.agent_conversation_id,
                 parent_agent_run_id=run.parent_agent_run_id,
                 agent_id=run.agent_id,
@@ -298,7 +301,7 @@ class AgentRunRecorder:
             source_refs=source_refs,
             source_keys=source_keys,
         )
-        _envelope, envelope_bytes = request_envelope(
+        envelope, envelope_bytes = request_envelope(
             model_settings=model_settings,
             parameters=parameters,
             streaming=streaming,
@@ -317,6 +320,26 @@ class AgentRunRecorder:
             frozen,
             self._initial_attachments,
             accepted_attachment_ids=self._accepted_attachment_ids,
+        )
+        self._interaction_store.stage_model_interaction(
+            StagedModelInteraction(
+                agent_run_id=self._agent_run_id,
+                step_index=fact.step_index,
+                request_sequence=fact.request_sequence,
+                purpose=fact.purpose,
+                output_retry_index=fact.output_retry_index,
+                model=self._interaction_models[fact.request_sequence],
+                request_context=projection,
+                request_envelope_digest=digest,
+                response_context=None,
+                status="RUNNING",
+                error_code=None,
+                duration_ns=None,
+                usage=None,
+                attachments=self._interaction_attachments[fact.request_sequence],
+                started_at=fact.started_at,
+                finished_at=None,
+            )
         )
 
     def finish_model_interaction(
@@ -352,20 +375,22 @@ class AgentRunRecorder:
             )
         self._interaction_store.stage_model_interaction(
             StagedModelInteraction(
-                self._agent_run_id,
-                fact.step_index,
-                request_sequence,
-                fact.purpose,
-                fact.output_retry_index,
-                model_value,
-                projection,
-                envelope_digest,
-                response_projection,
-                status,
-                error_code,
-                duration_ns,
-                _usage_metrics(usage),
-                attachments,
+                agent_run_id=self._agent_run_id,
+                step_index=fact.step_index,
+                request_sequence=request_sequence,
+                purpose=fact.purpose,
+                output_retry_index=fact.output_retry_index,
+                model=model_value,
+                request_context=projection,
+                request_envelope_digest=envelope_digest,
+                response_context=response_projection,
+                status=status,
+                error_code=error_code,
+                duration_ns=duration_ns,
+                usage=_usage_metrics(usage),
+                attachments=attachments,
+                started_at=fact.started_at,
+                finished_at=fact.finished_at,
             )
         )
 
@@ -424,11 +449,18 @@ class AgentRunRecorder:
                     MODEL_USAGE_CACHE_WRITE_METADATA_KEY: str(usage.cache_write_tokens),
                 }
             )
+        if phase == "started":
+            timestamp = fact.started_at
+        elif fact.finished_at is not None:
+            timestamp = fact.finished_at
+        else:
+            timestamp = None
         await self.record_event(
             cast(EventKind, kind),
             fact.step_index,
             error=error_code,
             metadata=metadata,
+            timestamp=timestamp,
         )
 
 

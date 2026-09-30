@@ -3,6 +3,7 @@
 """Runtime service protocols and transport-neutral request values."""
 
 from collections.abc import AsyncIterator, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, cast
@@ -349,7 +350,7 @@ class ModelInteractionItem:
             or self.depth < 0
             or self.request_sequence < 1
             or self.step_index < 0
-            or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+            or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}
             or self.duration_ns is not None and self.duration_ns < 0
         ):
             raise ValueError("model interaction item is invalid")
@@ -357,8 +358,18 @@ class ModelInteractionItem:
             raise TypeError("model interaction content flag must be bool")
         if not self.content_included and (self.request or self.response is not None):
             raise ValueError("omitted model interaction content must be empty")
-        object.__setattr__(self, "model", dict(self.model))
-        object.__setattr__(self, "request", dict(self.request))
+        if self.status == "RUNNING" and (
+            self.started_at is None
+            or self.response is not None
+            or self.finished_at is not None
+            or self.duration_ns is not None
+            or self.usage is not None
+            or self.error_code is not None
+        ):
+            raise ValueError("running model interaction has terminal data")
+        object.__setattr__(self, "model", deepcopy(dict(self.model)))
+        object.__setattr__(self, "request", deepcopy(dict(self.request)))
+        object.__setattr__(self, "response", deepcopy(self.response))
 
 
 @dataclass(frozen=True, slots=True)

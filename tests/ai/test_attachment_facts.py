@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Structured attachment fact query regressions."""
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +71,8 @@ def _interaction(
         error_code=None,
         duration_ns=1,
         usage=None,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         attachments=attachments,  # type: ignore[arg-type]
     )
 

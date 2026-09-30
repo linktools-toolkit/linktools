@@ -248,6 +248,65 @@ async def test_execution_watch_projects_complete_execution_tree() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_graph_watch_forwards_model_request_progress_with_execution_identity() -> None:
+    runtime = _Runtime()
+
+    def watch_tree(
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences=None,
+        include_content: bool = False,
+    ):
+        del principal, after_sequences, include_content
+
+        async def values():
+            yield ExecutionTreeEvent(
+                execution_id,
+                "agent",
+                ExecutionLineageKind.RUN,
+                None,
+                execution_id,
+                None,
+                0,
+                ExecutionStreamEvent(
+                    execution_id,
+                    1,
+                    ExecutionEventType.MODEL_REQUEST_STARTED.value,
+                    {
+                        "execution_id": execution_id,
+                        "agent_run_sequence": 2,
+                        "request_sequence": 1,
+                        "purpose": "agent",
+                        "status": "RUNNING",
+                    },
+                ),
+            )
+
+        return values()
+
+    run = _task_graph_run(
+        runtime,
+        "graph",
+        Principal("owner", "tenant"),
+        watch_tree,
+    )
+    events = [event async for event in run.watch()]
+    progress = [
+        event.event
+        for event in events
+        if isinstance(event.event, ExecutionTreeEvent)
+        and event.event.event.event_type
+        == ExecutionEventType.MODEL_REQUEST_STARTED.value
+    ]
+
+    assert len(progress) == 1
+    assert progress[0].execution_id == "execution"
+    assert progress[0].event.payload["execution_id"] == "execution"  # type: ignore[index]
+    assert progress[0].event.payload["request_sequence"] == 1  # type: ignore[index]
+
+
+@pytest.mark.asyncio
 async def test_task_graph_watch_starts_execution_before_binding_event_yield() -> None:
     started: list[str] = []
 
