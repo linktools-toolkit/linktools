@@ -17,6 +17,7 @@ from linktools.ai.core import (
     ExecutionStatus,
     JsonValue,
     OperationKind,
+    OperationLedgerRecord,
     OperationStatus,
     ResourceKind,
     SessionStatus,
@@ -38,6 +39,7 @@ from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state import _recovery_commands
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from linktools.ai.runtime.state._step_archive import StateStepArchive
 from linktools.ai.runtime.state._step_contracts import (
@@ -968,6 +970,277 @@ async def test_cancel_during_unknown_tool_effect_preserves_recovery_and_cancel_i
                 execution.execution_id
             ]
             release_tool.set()
+    finally:
+        release_tool.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_intent_replay_readback_preserves_sqlite_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / "cancel-intent-readback.db")
+    calls: list[str] = []
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        started=tool_started,
+        release=release_tool,
+    )
+    cancel_key = "cancel-probe"
+    try:
+        async with Runtime.open(
+            "cancel-intent-readback",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            await runtime.agents.get("default").create_session("session")
+            execution = await runtime.agents.get("default").session("session").start(
+                "inspect",
+                idempotency_key="turn-probe",
+            )
+            await asyncio.wait_for(tool_started.wait(), timeout=10)
+
+            first = await execution.cancel(idempotency_key=cancel_key)
+            assert first.cancelled is False
+            principal = runtime.default_principal
+            before_conflict = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            assert before_conflict is not None
+            assert before_conflict.status is ExecutionStatus.RECOVERY_REQUIRED
+
+            async def read_events() -> tuple[Any, ...]:
+                page = await state.execution.events.list(
+                    execution.execution_id,
+                    tenant_id=principal.tenant_id,
+                    after_sequence=0,
+                    limit=100,
+                )
+                return page.items
+
+            intent = await state.execution.operations.get(
+                idempotency_key_digest(cancel_key),
+                tenant_id=principal.tenant_id,
+            )
+            assert intent is not None
+            events_before_conflict = await read_events()
+
+            with pytest.raises(AIError) as conflict:
+                await execution.cancel(idempotency_key=cancel_key, force=True)
+            assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+            assert await state.execution.operations.get(
+                idempotency_key_digest(cancel_key),
+                tenant_id=principal.tenant_id,
+            ) == intent
+            assert await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            ) == before_conflict
+            assert await read_events() == events_before_conflict
+
+            target_group = state.execution.executions.state_store.storage_group
+            group_class = type(target_group)
+            original_mutate = group_class.mutate
+            original_get = state.execution.operations.get
+
+            async def cancel_with_unknown_commit(
+                key: str,
+                *,
+                unreadable: bool = False,
+                partial_projection: bool = False,
+            ) -> tuple[bool | None, ErrorCode | None]:
+                injected = False
+
+                async def uncertain_commit(group: Any, stores: Any, callback: Any) -> Any:
+                    nonlocal injected
+                    value = await original_mutate(group, stores, callback)
+                    if (
+                        group is target_group
+                        and not injected
+                        and isinstance(value, OperationLedgerRecord)
+                        and value.operation_kind is OperationKind.EXECUTION_CANCEL
+                    ):
+                        injected = True
+                        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+                    return value
+
+                async def unavailable_readback(
+                    operation_id: str,
+                    *,
+                    tenant_id: str,
+                ) -> Any:
+                    if injected:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    return await original_get(operation_id, tenant_id=tenant_id)
+
+                async def leave_projection_unchanged(
+                    transaction: Any,
+                    candidate: Any,
+                    expected_version: int,
+                ) -> None:
+                    guarded = await transaction.guard_record(
+                        candidate.key_digest,
+                        expected_storage_version=expected_version,
+                    )
+                    if guarded is None:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+                error_code = None
+                cancelled = None
+                with monkeypatch.context() as patcher:
+                    patcher.setattr(group_class, "mutate", uncertain_commit)
+                    if unreadable:
+                        patcher.setattr(
+                            state.execution.operations,
+                            "get",
+                            unavailable_readback,
+                        )
+                    if partial_projection:
+                        patcher.setattr(
+                            _recovery_commands,
+                            "_replace_checked",
+                            leave_projection_unchanged,
+                        )
+                    try:
+                        result = await execution.cancel(idempotency_key=key)
+                        cancelled = result.cancelled
+                    except AIError as error:
+                        error_code = error.code
+                assert injected
+                return cancelled, error_code
+
+            before_replay = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            events_before_replay = await read_events()
+            replayed, replay_error = await cancel_with_unknown_commit(cancel_key)
+            assert replay_error is None
+            assert replayed is False
+            assert await state.execution.operations.get(
+                idempotency_key_digest(cancel_key),
+                tenant_id=principal.tenant_id,
+            ) == intent
+            assert await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            ) == before_replay
+            assert await read_events() == events_before_replay
+
+            new_key = "cancel-new-probe"
+            before_new_intent = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            assert before_new_intent is not None
+            events_before_new_intent = await read_events()
+            new_cancelled, new_error = await cancel_with_unknown_commit(new_key)
+            assert new_error is None
+            assert new_cancelled is False
+            after_new_intent = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            assert after_new_intent is not None
+            assert after_new_intent.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert after_new_intent.revision == before_new_intent.revision + 1
+            assert after_new_intent.event_sequence == before_new_intent.event_sequence + 1
+            new_intent = await state.execution.operations.get(
+                idempotency_key_digest(new_key),
+                tenant_id=principal.tenant_id,
+            )
+            assert new_intent is not None
+            assert new_intent.operation_id != intent.operation_id
+            pending_intents = await state.execution.operations.list_pending(
+                ResourceKind.EXECUTION,
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+                limit=100,
+            )
+            assert {item.operation_id for item in pending_intents} == {
+                intent.operation_id,
+                new_intent.operation_id,
+            }
+            events_after_new_intent = await read_events()
+            assert events_after_new_intent[:-1] == events_before_new_intent
+            assert events_after_new_intent[-1].event_type == ExecutionEventType.CANCEL_REQUESTED
+            assert events_after_new_intent[-1].payload == {
+                "operation_id": new_intent.operation_id,
+            }
+
+            unknown_key = "cancel-unreadable-probe"
+            events_before_unreadable = events_after_new_intent
+            _, unreadable_error = await cancel_with_unknown_commit(
+                unknown_key,
+                unreadable=True,
+            )
+            assert unreadable_error is ErrorCode.STORAGE_COMMIT_UNKNOWN
+            after_unreadable = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            assert after_unreadable is not None
+            assert after_unreadable.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert after_unreadable.revision == after_new_intent.revision + 1
+            assert after_unreadable.event_sequence == after_new_intent.event_sequence + 1
+            unreadable_intent = await original_get(
+                idempotency_key_digest(unknown_key),
+                tenant_id=principal.tenant_id,
+            )
+            assert unreadable_intent is not None
+            pending_intents = await state.execution.operations.list_pending(
+                ResourceKind.EXECUTION,
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+                limit=100,
+            )
+            assert {item.operation_id for item in pending_intents} == {
+                intent.operation_id,
+                new_intent.operation_id,
+                unreadable_intent.operation_id,
+            }
+            assert (await read_events())[:-1] == events_before_unreadable
+            assert await state.execution.executions.get_result(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            ) is None
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id == execution.execution_id
+            assert calls == ["lookup"]
+
+            before_partial = after_unreadable
+            events_before_partial = await read_events()
+            partial_key = "cancel-partial-probe"
+            _, partial_error = await cancel_with_unknown_commit(
+                partial_key,
+                partial_projection=True,
+            )
+            assert partial_error is ErrorCode.STORAGE_INTEGRITY_ERROR
+            assert await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            ) == before_partial
+            partial_intent = await original_get(
+                idempotency_key_digest(partial_key),
+                tenant_id=principal.tenant_id,
+            )
+            assert partial_intent is not None
+            partial_events = await read_events()
+            assert partial_events[:-1] == events_before_partial
+            assert partial_events[-1].event_type == ExecutionEventType.CANCEL_REQUESTED
+            assert partial_events[-1].payload == {
+                "operation_id": partial_intent.operation_id,
+            }
     finally:
         release_tool.set()
         await state.close()
