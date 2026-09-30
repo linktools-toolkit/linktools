@@ -923,6 +923,8 @@ class TaskGraphState:
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
             raise ValueError("task graph state id is required")
+        if not isinstance(self.status, TaskStatus):
+            raise ValueError("task graph state status is invalid")
         if (
             isinstance(self.event_sequence, bool)
             or not isinstance(self.event_sequence, int)
