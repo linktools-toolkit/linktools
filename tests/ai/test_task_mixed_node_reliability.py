@@ -482,6 +482,18 @@ def test_task_definitions_keep_explicit_identity_and_contract() -> None:
     assert (definition.ref.id, definition.ref.revision) == ("example.direct", 1)
     assert definition.contract["type"] == "function"
     assert definition.contract["effect_policy"] == "none"
+    assert definition.contract["cancel"] is False
+
+    async def cancel(_context: TaskNodeContext[None]) -> None:
+        return None
+
+    cancellable = Task(
+        "example.cancellable",
+        _echo_task,
+        effect_policy="none",
+        cancel=cancel,
+    )
+    assert cancellable.contract["cancel"] is True
     assert TaskNode("node", task=definition).task == definition.ref
 
 
