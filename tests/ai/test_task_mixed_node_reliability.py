@@ -2262,6 +2262,33 @@ def test_task_graph_aggregate_obeys_failure_and_cancel_priority(
     assert _isolated_graph_status(states, nodes) is expected
 
 
+def test_cancelled_graph_projection_rejects_nonterminal_nodes() -> None:
+    nodes = (TaskNode("node"),)
+    states = (
+        TaskNodeView(
+            "invalid-cancelled-graph",
+            "node",
+            (),
+            TaskStatus.RUNNING,
+            "worker",
+            1,
+            datetime.now(timezone.utc) + timedelta(seconds=30),
+            None,
+            None,
+            None,
+        ),
+    )
+    graph = TaskGraphView(
+        "invalid-cancelled-graph",
+        TaskStatus.CANCELLED,
+        nodes,
+    )
+
+    with pytest.raises(AIError) as raised:
+        _effective_graph_status(graph, states)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_whole_graph_cancel_overrides_terminal_node_aggregate() -> None:
     nodes = (
         TaskNode("failed", failure_policy="propagate"),
