@@ -1032,29 +1032,27 @@ class LocalExecutionBackend:
         if current.status not in {
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
-        }:
+        } or current.started_at is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        checkpoint = await self._recovery.checkpoints.get(
+            current.execution_id,
+            tenant_id=self._tenant_id,
+        )
+        if checkpoint is not None:
+            if checkpoint.terminal_handoff is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if checkpoint.state is RecoveryCheckpointState.ADMITTED:
+                if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await self._finish_checkpoint(checkpoint)
+            elif checkpoint.state is not RecoveryCheckpointState.COMPLETED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.session_id is not None:
             await self._conversation.sessions.release_execution(
                 current.session_id,
                 tenant_id=self._tenant_id,
                 execution_id=current.execution_id,
             )
-        checkpoint = await self._recovery.checkpoints.get(
-            current.execution_id,
-            tenant_id=self._tenant_id,
-        )
-        if checkpoint is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if checkpoint.state is RecoveryCheckpointState.COMPLETED:
-            return
-        if (
-            checkpoint.state is not RecoveryCheckpointState.ADMITTED
-            or checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE
-            or checkpoint.terminal_handoff is not None
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._finish_checkpoint(checkpoint)
         _logger.info("start admission aborted: execution=%s", current.execution_id)
 
     def _task_done(self, execution_id: str, task: asyncio.Task[None]) -> None:
@@ -1206,28 +1204,49 @@ class LocalExecutionBackend:
             return CancelEffectOutcome.CONFIRMED
         task = self._tasks.get(execution.execution_id)
         if task is None:
-            if current is not None and current.status in {
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-                ExecutionStatus.CANCELLING,
-            }:
-                return CancelEffectOutcome.CONFIRMED
-            return CancelEffectOutcome.UNKNOWN
+            return await self._confirm_cancel_effects(current)
         self._request_worker_cancel(execution.execution_id, task)
         await self._drain_worker_task(execution.execution_id, task)
         current = await self._execution.executions.get(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
-        if current is not None and current.status in {
+        return await self._confirm_cancel_effects(current)
+
+    async def _confirm_cancel_effects(
+        self,
+        execution: ExecutionRecord | None,
+    ) -> CancelEffectOutcome:
+        if execution is None:
+            return CancelEffectOutcome.UNKNOWN
+        if execution.status in {
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
-            ExecutionStatus.CANCELLING,
+            ExecutionStatus.FINALIZING,
         }:
             return CancelEffectOutcome.CONFIRMED
-        return CancelEffectOutcome.UNKNOWN
+        if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
+            return CancelEffectOutcome.UNKNOWN
+        if execution.status not in {
+            ExecutionStatus.STARTED,
+            ExecutionStatus.CANCELLING,
+        }:
+            return CancelEffectOutcome.UNKNOWN
+        effects, pending = await self._terminal_tool_effects(
+            execution.execution_id,
+            tenant_id=self._tenant_id,
+        )
+        if effects:
+            await self._require_tool_effect_recovery(execution, effects)
+            return CancelEffectOutcome.UNKNOWN
+        if pending:
+            return CancelEffectOutcome.UNKNOWN
+        return (
+            CancelEffectOutcome.CONFIRMED
+            if execution.status is ExecutionStatus.CANCELLING
+            else CancelEffectOutcome.UNKNOWN
+        )
 
     @classmethod
     def _decode_repository_instruction_object(
@@ -1775,12 +1794,15 @@ class LocalExecutionBackend:
                     agent_run_id=handoff.source_agent_run_id,
                     execution_id=checkpoint.execution_id,
                 )
-                checkpoint = await self._run_stores[
+                agent_run_checkpoint = await self._run_stores[
                     RuntimeDomain.EXECUTION
                 ].latest_checkpoint(
                     agent_run_id=handoff.source_agent_run_id,
                 )
-                if checkpoint is None or checkpoint.state != "complete":
+                if (
+                    agent_run_checkpoint is None
+                    or agent_run_checkpoint.state != "complete"
+                ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if outcome.output is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2385,11 +2407,12 @@ class LocalExecutionBackend:
                 ExecutionStatus.SUCCEEDED,
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
+                ExecutionStatus.RECOVERY_REQUIRED,
             }:
                 self._request_worker_shutdown(execution_id, task)
             else:
                 _logger.info(
-                    "close draining terminal execution worker: execution=%s status=%s",
+                    "close draining execution worker: execution=%s status=%s",
                     execution_id,
                     current.status.value,
                 )
@@ -2697,11 +2720,13 @@ class LocalExecutionBackend:
                 recovery_run = await recovery_archive.get_agent_run(
                     agent_run_id=recovery_history_agent_run_id
                 )
-                checkpoint = await recovery_archive.latest_checkpoint(
-                    agent_run_id=recovery_history_agent_run_id,
-                    include_interrupted=True,
+                recovery_history_checkpoint = (
+                    await recovery_archive.latest_checkpoint(
+                        agent_run_id=recovery_history_agent_run_id,
+                        include_interrupted=True,
+                    )
                 )
-                if checkpoint is None:
+                if recovery_history_checkpoint is None:
                     if recovery_run is not None:
                         raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                     if (
@@ -2998,13 +3023,22 @@ class LocalExecutionBackend:
                         raise _secondary_execution_error(commit_error, error) from error
                 metric_status = current.status.value
                 metric_error_code = current.error_code
-                _logger.error(
-                    "local execution failed: execution=%s code=%s safe_error_details=%s",
-                    execution_id,
-                    current.error_code,
-                    current.safe_error_details,
-                    exc_info=True,
-                )
+                if current.status is ExecutionStatus.RECOVERY_REQUIRED:
+                    _logger.warning(
+                        "local execution requires recovery: execution=%s code=%s safe_error_details=%s",
+                        execution_id,
+                        current.error_code,
+                        current.safe_error_details,
+                        exc_info=True,
+                    )
+                else:
+                    _logger.error(
+                        "local execution failed: execution=%s code=%s safe_error_details=%s",
+                        execution_id,
+                        current.error_code,
+                        current.safe_error_details,
+                        exc_info=True,
+                    )
                 return
             if isinstance(result, DeferredToolRequests):
                 if checkpoint is None:
@@ -3075,9 +3109,19 @@ class LocalExecutionBackend:
                 else committed.status.value
             )
             metric_error_code = committed.error_code
-            _logger.debug(
-                "local execution completed: execution=%s agent_run=%s", execution_id, agent_run_id
-            )
+            if committed.status is ExecutionStatus.RECOVERY_REQUIRED:
+                _logger.warning(
+                    "local execution requires recovery: execution=%s code=%s safe_error_details=%s",
+                    execution_id,
+                    committed.error_code,
+                    committed.safe_error_details,
+                )
+            else:
+                _logger.debug(
+                    "local execution completed: execution=%s agent_run=%s",
+                    execution_id,
+                    agent_run_id,
+                )
         except asyncio.CancelledError as error:
             cleanup_details: dict[str, JsonValue] = {}
             if (
@@ -3123,7 +3167,13 @@ class LocalExecutionBackend:
                     agent_run_id=agent_run_id,
                     safe_error_details=cleanup_details,
                 )
-            if current is not None and current.status in {
+            if (
+                current is not None
+                and current.status is ExecutionStatus.RECOVERY_REQUIRED
+            ):
+                metric_status = current.status.value
+                metric_error_code = current.error_code
+            elif current is not None and current.status in {
                 ExecutionStatus.SUCCEEDED,
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
@@ -3395,6 +3445,11 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLED,
         }:
             return current
+        if current.status is ExecutionStatus.RECOVERY_REQUIRED:
+            return current
+        recovered = await self._check_terminal_tool_effects(current)
+        if recovered is not None:
+            return recovered
         payload = canonical_json_bytes(output)
         inline = StoredPayload.inline_json(output)
         output_payload = inline
@@ -3572,13 +3627,25 @@ class LocalExecutionBackend:
         *,
         tenant_id: str,
     ) -> tuple[ExecutionRecoveryEffect, ...]:
+        effects, _ = await self._terminal_tool_effects(
+            execution_id,
+            tenant_id=tenant_id,
+        )
+        return effects
+
+    async def _terminal_tool_effects(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[tuple[ExecutionRecoveryEffect, ...], int]:
         if self._tool_operations is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            return (), 0
         records = await self._tool_operations.list_by_execution(
             execution_id,
             tenant_id=tenant_id,
         )
-        return tuple(
+        effects = tuple(
             ExecutionRecoveryEffect(
                 operation_id=record.tool_operation_id,
                 execution_id=record.execution_id,
@@ -3593,6 +3660,57 @@ class LocalExecutionBackend:
             for record in records
             if record.status is ToolOperationStatus.EFFECT_UNKNOWN
         )
+        pending = sum(
+            record.status
+            in {ToolOperationStatus.PENDING, ToolOperationStatus.CLAIMED}
+            for record in records
+        )
+        return effects, pending
+
+    async def _require_tool_effect_recovery(
+        self,
+        execution: ExecutionRecord,
+        effects: tuple[ExecutionRecoveryEffect, ...],
+    ) -> ExecutionRecord:
+        details: dict[str, JsonValue] = {}
+        if len(effects) == 1:
+            details["operation_id"] = effects[0].operation_id
+        return await self._commit_recovery_required(
+            execution,
+            AIError(
+                ErrorCode.TOOL_EFFECT_UNKNOWN,
+                safe_details=details,
+            ),
+            effects,
+        )
+
+    async def _check_terminal_tool_effects(
+        self,
+        execution: ExecutionRecord,
+    ) -> ExecutionRecord | None:
+        if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
+            return execution
+        if execution.status not in {
+            ExecutionStatus.STARTED,
+            ExecutionStatus.CANCELLING,
+        }:
+            return None
+        effects, pending = await self._terminal_tool_effects(
+            execution.execution_id,
+            tenant_id=self._tenant_id,
+        )
+        if effects:
+            return await self._require_tool_effect_recovery(execution, effects)
+        if pending:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "execution_id": execution.execution_id,
+                    "phase": "tool_operations_unsettled",
+                    "pending_tool_operation_count": pending,
+                },
+            )
+        return None
 
     async def recovery_effects(
         self,
@@ -3940,18 +4058,6 @@ class LocalExecutionBackend:
         *,
         agent_run_id: str | None = None,
     ) -> ExecutionRecord:
-        unknown = _tool_effect_unknown_cause(error)
-        if unknown is not None:
-            effects = await self._recovery_failure_effects(
-                execution.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if effects:
-                return await self._commit_recovery_required(
-                    execution,
-                    unknown,
-                    effects,
-                )
         code = _execution_error_code(error)
         details = _execution_error_details(error)
         cancelled = code is ErrorCode.EXECUTION_CANCELLED
@@ -3998,6 +4104,11 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLED,
         }:
             return current
+        if current.status is ExecutionStatus.RECOVERY_REQUIRED:
+            return current
+        recovered = await self._check_terminal_tool_effects(current)
+        if recovered is not None:
+            return recovered
         if status is not ExecutionStatus.FAILED and error_diagnostics is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         now = datetime.now(timezone.utc)
@@ -4714,17 +4825,6 @@ def _execution_error_code(error: Exception) -> ErrorCode:
     if isinstance(error, AIError):
         return error.code
     return ErrorCode.INTERNAL_ERROR
-
-
-def _tool_effect_unknown_cause(error: BaseException) -> AIError | None:
-    current: BaseException | None = error
-    visited: set[int] = set()
-    while current is not None and id(current) not in visited:
-        visited.add(id(current))
-        if isinstance(current, AIError) and current.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
-            return current
-        current = current.__cause__ or current.__context__
-    return None
 
 
 def _execution_error_details(error: Exception) -> dict[str, JsonValue]:

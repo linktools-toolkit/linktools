@@ -10,7 +10,12 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
-from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
+from linktools.ai.core import (
+    ExecutionLineageKind,
+    ExecutionStatus,
+    Principal,
+    ToolOperationStatus,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import CancelEffectOutcome, ExecutionStartIdentity
@@ -147,6 +152,7 @@ def _backend() -> LocalExecutionBackend:
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
     backend._metric_recorder = None
+    backend._tool_operations = None
     backend._live_broker = SimpleNamespace(complete=lambda _execution_id: None)
     return backend
 
@@ -272,6 +278,211 @@ async def test_local_cancel_without_worker_is_unknown_for_active_execution() -> 
     backend._execution.executions.record = current
 
     assert await backend.cancel(current) is CancelEffectOutcome.UNKNOWN
+
+
+class _ToolOperations:
+    def __init__(self, records: tuple[object, ...]) -> None:
+        self.records = records
+
+    async def list_by_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[object, ...]:
+        del execution_id, tenant_id
+        return self.records
+
+
+class _FailingToolOperations:
+    async def list_by_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[object, ...]:
+        del execution_id, tenant_id
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+
+def _tool_operation(status: ToolOperationStatus) -> SimpleNamespace:
+    return SimpleNamespace(
+        tool_operation_id="tool-operation",
+        execution_id="execution",
+        agent_run_id="agent-run",
+        tool_call_id="tool-call",
+        idempotency_key_digest="key-digest",
+        tool_name="tool",
+        replay_safe=False,
+        status=status,
+        fence=1,
+        error_code=(
+            ErrorCode.TOOL_EFFECT_UNKNOWN.value
+            if status is ToolOperationStatus.EFFECT_UNKNOWN
+            else None
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_cancel_without_worker_requires_recovery_for_unknown_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _backend()
+    current = replace(_record(), status=ExecutionStatus.CANCELLING)
+    backend._execution.executions.record = current
+    backend._tool_operations = _ToolOperations(
+        (_tool_operation(ToolOperationStatus.EFFECT_UNKNOWN),)
+    )
+    observed: list[tuple[ExecutionRecord, AIError, tuple[object, ...]]] = []
+
+    async def commit_recovery(
+        execution: ExecutionRecord,
+        error: AIError,
+        effects: tuple[object, ...],
+    ) -> ExecutionRecord:
+        observed.append((execution, error, effects))
+        return replace(execution, status=ExecutionStatus.RECOVERY_REQUIRED)
+
+    monkeypatch.setattr(backend, "_commit_recovery_required", commit_recovery)
+
+    outcome = await backend.cancel(current)
+
+    assert outcome is CancelEffectOutcome.UNKNOWN
+    assert len(observed) == 1
+    assert observed[0][1].code is ErrorCode.TOOL_EFFECT_UNKNOWN
+    assert observed[0][2][0].operation_id == "tool-operation"
+
+
+@pytest.mark.asyncio
+async def test_local_failure_uses_tool_ledger_even_for_an_unrelated_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _backend()
+    current = _record()
+    backend._execution.executions.record = current
+    backend._tool_operations = _ToolOperations(
+        (_tool_operation(ToolOperationStatus.EFFECT_UNKNOWN),)
+    )
+    observed: list[tuple[ExecutionRecord, AIError, tuple[object, ...]]] = []
+
+    async def commit_recovery(
+        execution: ExecutionRecord,
+        error: AIError,
+        effects: tuple[object, ...],
+    ) -> ExecutionRecord:
+        observed.append((execution, error, effects))
+        return replace(
+            execution,
+            status=ExecutionStatus.RECOVERY_REQUIRED,
+            error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+        )
+
+    monkeypatch.setattr(backend, "_commit_recovery_required", commit_recovery)
+
+    failed = await backend._commit_failure(current, ValueError("unrelated"))
+
+    assert failed.status is ExecutionStatus.RECOVERY_REQUIRED
+    assert failed.error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
+    assert observed[0][1].code is ErrorCode.TOOL_EFFECT_UNKNOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    (ToolOperationStatus.PENDING, ToolOperationStatus.CLAIMED),
+)
+async def test_local_cancel_without_worker_does_not_confirm_unsettled_tool_call(
+    status: ToolOperationStatus,
+) -> None:
+    backend = _backend()
+    current = replace(_record(), status=ExecutionStatus.CANCELLING)
+    backend._execution.executions.record = current
+    backend._tool_operations = _ToolOperations((_tool_operation(status),))
+
+    assert await backend.cancel(current) is CancelEffectOutcome.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_local_cancel_with_tool_ledger_read_failure_is_not_confirmed() -> None:
+    backend = _backend()
+    current = replace(_record(), status=ExecutionStatus.CANCELLING)
+    backend._execution.executions.record = current
+    backend._tool_operations = _FailingToolOperations()
+
+    with pytest.raises(AIError) as raised:
+        await backend.cancel(current)
+
+    assert raised.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    assert backend._execution.executions.record.status is ExecutionStatus.CANCELLING
+
+
+class _Checkpoints:
+    def __init__(self, checkpoint: object | None) -> None:
+        self.checkpoint = checkpoint
+        self.reads = 0
+
+    async def get(self, execution_id: str, *, tenant_id: str) -> object | None:
+        del execution_id, tenant_id
+        self.reads += 1
+        return self.checkpoint
+
+
+class _Sessions:
+    def __init__(self) -> None:
+        self.releases: list[tuple[str, str, str]] = []
+
+    async def release_execution(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+    ) -> None:
+        self.releases.append((session_id, tenant_id, execution_id))
+
+
+@pytest.mark.asyncio
+async def test_abort_start_releases_its_session_when_admission_checkpoint_is_absent() -> None:
+    backend = _backend()
+    current = replace(
+        _record(),
+        session_id="session",
+        status=ExecutionStatus.FAILED,
+    )
+    backend._execution.executions.record = current
+    checkpoints = _Checkpoints(None)
+    sessions = _Sessions()
+    backend._recovery = SimpleNamespace(checkpoints=checkpoints)
+    backend._conversation = SimpleNamespace(sessions=sessions)
+
+    await backend.abort_start(current)
+
+    assert checkpoints.reads == 1
+    assert sessions.releases == [("session", "tenant", "execution")]
+
+
+@pytest.mark.asyncio
+async def test_abort_start_rejects_an_execution_that_already_started() -> None:
+    backend = _backend()
+    current = replace(
+        _record(),
+        session_id="session",
+        status=ExecutionStatus.CANCELLED,
+        started_at=datetime.now(timezone.utc),
+    )
+    backend._execution.executions.record = current
+    checkpoints = _Checkpoints(None)
+    sessions = _Sessions()
+    backend._recovery = SimpleNamespace(checkpoints=checkpoints)
+    backend._conversation = SimpleNamespace(sessions=sessions)
+
+    with pytest.raises(AIError) as raised:
+        await backend.abort_start(current)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert checkpoints.reads == 0
+    assert sessions.releases == []
 
 
 @pytest.mark.asyncio

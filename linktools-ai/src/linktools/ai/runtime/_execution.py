@@ -3034,6 +3034,17 @@ class DefaultExecutionService:
                 )
             outcome = await self._backend.cancel(cancelling)
             if outcome is CancelEffectOutcome.UNKNOWN:
+                recovery_current = await self._state.executions.get(
+                    execution_id,
+                    tenant_id=request.principal.tenant_id,
+                )
+                if recovery_current is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if recovery_current.status is ExecutionStatus.RECOVERY_REQUIRED:
+                    return await self._cancel_recovery_required(
+                        recovery_current,
+                        request,
+                    )
                 resolved = await self._resolve_cancel_race(
                     execution_id, request.principal.tenant_id, operation
                 )
@@ -3230,6 +3241,18 @@ class DefaultExecutionService:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            recovery_current = await self._state.executions.get(
+                execution_id,
+                tenant_id=request.principal.tenant_id,
+            )
+            if (
+                recovery_current is not None
+                and recovery_current.status is ExecutionStatus.RECOVERY_REQUIRED
+            ):
+                return await self._cancel_recovery_required(
+                    recovery_current,
+                    request,
+                )
             resolved = await self._resolve_cancel_race(
                 execution_id, request.principal.tenant_id, operation
             )
