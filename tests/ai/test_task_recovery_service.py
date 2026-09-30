@@ -457,7 +457,7 @@ async def test_cancel_intent_stays_unknown_until_execution_fact_is_available() -
         assert settled_cancel is not None
         assert settled_cancel.status is OperationStatus.EFFECT_UNKNOWN
         assert launcher.started == []
-        assert launcher.cancelled == ["cancel"]
+        assert launcher.cancelled == ["cancel", "cancel"]
     finally:
         await state.close()
 
@@ -523,7 +523,7 @@ async def test_effect_unknown_cancel_is_discovered_after_filesystem_reopen(
         assert cancel_operation is not None
         assert cancel_operation.status is OperationStatus.EFFECT_UNKNOWN
         assert launcher.started == []
-        assert launcher.cancelled == []
+        assert launcher.cancelled == ["cancel-reopen"]
     finally:
         await reopened.close()
 
