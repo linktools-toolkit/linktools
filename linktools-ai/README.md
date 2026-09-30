@@ -527,9 +527,17 @@ only for successful dependencies. `failure_policy="propagate"` is the default
 and includes node failures and dependency blocks in the graph's final status.
 `failure_policy="isolate"` keeps those node outcomes visible but excludes them
 from the graph's failed/blocked aggregate. It does not change scheduling,
-cancellation, recovery, or retry behavior; any cancelled node still makes the
-graph cancelled. Observer callback failures are reported as
-`TASK_OBSERVER_FAILED` and do not fail the graph or retry nodes.
+cancellation, recovery, or retry behavior; cancellation remains part of the
+normal node aggregate and is never isolated by `failure_policy`.
+
+Whole-graph cancellation is a separate durable control intent. If cancellation
+wins before the business graph reaches a terminal state, the graph converges to
+`CANCELLED` after active work settles while preserving each node's actual
+terminal outcome; `RECOVERY_REQUIRED` still takes precedence. Task cancel
+callbacks and `TaskNodeRunner.cancel()` are replay-safe control cleanup hooks:
+a `RUNNING` or `EFFECT_UNKNOWN` cancel may invoke them again after process
+loss. Observer callback failures are reported as `TASK_OBSERVER_FAILED` and do
+not fail the graph or retry nodes.
 
 Downstream code must not scan `ExecutionRecord`, codec data, `StateStore`, or
 private repositories directly. The current pre-release wire contract stores
