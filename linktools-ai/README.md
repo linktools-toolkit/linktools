@@ -553,9 +553,9 @@ An uncursored `model_interactions(include_content=False)` query is a fixed
 lifecycle page: it includes RUNNING requests and terminal requests visible when
 the query starts. RUNNING items have known `started_at`; `finished_at`,
 `duration_ns`, `usage`, and `error_code` are `None`. Usage is never shown as
-zero before it is known. Passing explicit `cutoffs` selects the existing
-terminal-only usage snapshot; `cutoffs=()` selects an empty snapshot. Cursors
-retain their query mode and high-water marks.
+zero before it is known. Passing explicit `cutoffs` fixes the same lifecycle view to those request
+high-water marks; it does not switch to a second query mode. `cutoffs=()`
+selects an empty snapshot. Cursors retain their captured high-water marks.
 
 The live event buffer can fall back to durable replay before an uncommitted
 start event is delivered. Clients that need to show every active request should

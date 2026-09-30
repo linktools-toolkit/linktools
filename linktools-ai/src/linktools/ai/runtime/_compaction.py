@@ -109,7 +109,6 @@ class _ObservedCompactionModel(WrapperModel):
     ) -> ModelResponse:
         fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
         request_sequence = fact.request_sequence
-        accepted = False
         try:
             await self._notify(
                 fact,
@@ -120,7 +119,6 @@ class _ObservedCompactionModel(WrapperModel):
                 model_settings=model_settings,
                 parameters=model_request_parameters,
             )
-            accepted = True
             try:
                 response = await self.wrapped.request(
                     messages,
@@ -178,48 +176,6 @@ class _ObservedCompactionModel(WrapperModel):
             if interrupted:
                 raise asyncio.CancelledError
             return response
-        except asyncio.CancelledError as error:
-            current = self._journal.current(request_sequence)
-            if accepted and current.status is None:
-                await self._finish(
-                    request_sequence,
-                    status="CANCELLED",
-                    phase="cancelled",
-                    response=None,
-                    error=error,
-                    messages=messages,
-                    model_settings=model_settings,
-                    parameters=model_request_parameters,
-                )
-            raise
-        except RunCancelled as error:
-            current = self._journal.current(request_sequence)
-            if accepted and current.status is None:
-                await self._finish(
-                    request_sequence,
-                    status="CANCELLED",
-                    phase="cancelled",
-                    response=None,
-                    error=error,
-                    messages=messages,
-                    model_settings=model_settings,
-                    parameters=model_request_parameters,
-                )
-            raise
-        except Exception as error:
-            current = self._journal.current(request_sequence)
-            if accepted and current.status is None:
-                await self._finish(
-                    request_sequence,
-                    status="FAILED",
-                    phase="failed",
-                    response=None,
-                    error=error,
-                    messages=messages,
-                    model_settings=model_settings,
-                    parameters=model_request_parameters,
-                )
-            raise
         finally:
             self._journal.consume(request_sequence)
 

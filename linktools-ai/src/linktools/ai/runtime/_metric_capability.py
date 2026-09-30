@@ -159,47 +159,6 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             self._stage_request(fact, request_context)
             try:
                 await self._record_request_event(fact, phase="started")
-            except asyncio.CancelledError:
-                await self._complete_request(
-                    fact,
-                    run_context,
-                    selected_model,
-                    status="CANCELLED",
-                    response=None,
-                    error_code=None,
-                    usage=None,
-                    phase="cancelled",
-                )
-                raise
-            except RunCancelled as error:
-                interrupted = await self._complete_request(
-                    fact,
-                    run_context,
-                    selected_model,
-                    status="CANCELLED",
-                    response=None,
-                    error_code=_model_error_code(error),
-                    usage=None,
-                    phase="cancelled",
-                )
-                if interrupted:
-                    raise asyncio.CancelledError from error
-                raise
-            except Exception:
-                interrupted = await self._complete_request(
-                    fact,
-                    run_context,
-                    selected_model,
-                    status="FAILED",
-                    response=None,
-                    error_code=ErrorCode.INTERNAL_ERROR.value,
-                    usage=None,
-                    phase="failed",
-                )
-                if interrupted:
-                    raise asyncio.CancelledError
-                raise
-            try:
                 await self._publish_request_event(fact, phase="started")
             except asyncio.CancelledError:
                 await self._complete_request(
@@ -282,11 +241,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     selected_model,
                     status="FAILED",
                     response=None,
-                    error_code=(
-                        _model_error_code(error)
-                        if isinstance(error, Exception)
-                        else ErrorCode.INTERNAL_ERROR.value
-                    ),
+                    error_code=_model_error_code(error),
                     usage=None,
                     phase="failed",
                 )
