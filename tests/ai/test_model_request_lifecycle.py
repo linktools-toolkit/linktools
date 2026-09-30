@@ -1236,6 +1236,8 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
                 assert [(item.request_sequence, item.status) for item in page.items] == [
                     (1, "SUCCEEDED")
                 ]
+                assert page.items[0].started_at == finished.started_at
+                assert page.items[0].finished_at == finished.finished_at
 
     asyncio.run(scenario())
 
