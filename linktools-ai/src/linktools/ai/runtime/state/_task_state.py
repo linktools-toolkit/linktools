@@ -63,5 +63,16 @@ def _effective_graph_status(
     if isolated is TaskStatus.RECOVERY_REQUIRED:
         return isolated
     if graph.status is TaskStatus.CANCELLED:
-        return TaskStatus.CANCELLED
+        if all(
+            node.status
+            in {
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
+            }
+            for node in nodes
+        ):
+            return TaskStatus.CANCELLED
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return isolated
