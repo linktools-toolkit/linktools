@@ -359,7 +359,9 @@ class ModelInteractionItem:
         if not self.content_included and (self.request or self.response is not None):
             raise ValueError("omitted model interaction content must be empty")
         if self.status == "RUNNING" and (
-            self.finished_at is not None
+            self.started_at is None
+            or self.response is not None
+            or self.finished_at is not None
             or self.duration_ns is not None
             or self.usage is not None
             or self.error_code is not None

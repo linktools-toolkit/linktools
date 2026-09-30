@@ -113,7 +113,8 @@ class StagedModelInteraction:
             )
             or self.status == "RUNNING"
             and (
-                self.response_context is not None
+                self.started_at is None
+                or self.response_context is not None
                 or self.error_code is not None
                 or self.duration_ns is not None
                 or self.usage is not None
