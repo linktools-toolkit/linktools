@@ -16,6 +16,7 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
     canonical_sha256,
     idempotency_key_digest,
+    principal_identity_payload,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state import RuntimeStorage
@@ -701,6 +702,101 @@ async def test_recover_settles_cancel_receipt_when_business_success_wins(
         assert settled.status is OperationStatus.SUCCEEDED
     finally:
         release_cancel.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_running_cancel_operation_replays_cancel_effect_after_owner_loss() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-cancel-owner-loss", tenant_id="tenant")
+    try:
+        request = _request("cancel-owner-loss")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            request.graph,
+        )
+        launcher = _Launcher()
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            launcher,
+        )
+        cancel_request = CancelGraphRequest(
+            request.principal,
+            "cancel:owner-loss",
+        )
+        request_digest = canonical_sha256(
+            {
+                "action": "task.cancel",
+                "principal": principal_identity_payload(request.principal),
+                "graph_id": request.graph.graph_id,
+                "force": cancel_request.force,
+            }
+        )
+        claimed, operation = await service._claim_cancel_operation(
+            idempotency_key_digest(cancel_request.idempotency_key),
+            "tenant",
+            request.graph.graph_id,
+            request_digest,
+        )
+        assert claimed
+        assert operation.status is OperationStatus.RUNNING
+
+        result = await service.cancel(
+            request.graph.graph_id,
+            cancel_request,
+        )
+        settled = await state.task.operations.get(
+            operation.operation_id,
+            tenant_id="tenant",
+        )
+
+        assert result.status is TaskStatus.CANCELLED
+        assert launcher.cancelled == [request.graph.graph_id]
+        assert settled is not None
+        assert settled.status is OperationStatus.SUCCEEDED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_new_cancel_after_business_terminal_preserves_terminal_status() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="task-service-late-cancel", tenant_id="tenant")
+    try:
+        request = _request("late-cancel")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(request),
+            request.graph,
+        )
+        lease = await state.task.tasks.claim(
+            request.graph.graph_id,
+            "node",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        await state.task.tasks.fail(
+            lease,
+            tenant_id="tenant",
+            error_code=ErrorCode.TASK_NODE_FAILED.value,
+            error_digest="a" * 64,
+        )
+        launcher = _Launcher()
+        service = DefaultTaskGraphService(
+            state.task,
+            TenantAuthorizationPolicy("tenant"),
+            launcher,
+        )
+
+        result = await service.cancel(
+            request.graph.graph_id,
+            CancelGraphRequest(request.principal, "cancel:late-terminal"),
+        )
+
+        assert result.status is TaskStatus.FAILED
+        assert launcher.cancelled == []
+    finally:
         await state.close()
 
 
