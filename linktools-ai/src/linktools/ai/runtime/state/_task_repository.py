@@ -2349,7 +2349,21 @@ class TaskRepositoryImpl(RepositoryBase):
                 next_values.append(node)
             next_nodes = tuple(next_values)
             isolated = _isolated_graph_status(next_nodes, before.graph.nodes)
-            next_status = isolated
+            next_status = (
+                TaskStatus.CANCELLED
+                if (
+                    isolated is not TaskStatus.RECOVERY_REQUIRED
+                    and all(
+                        value.status in _TERMINAL_TASK_STATUSES
+                        for value in next_nodes
+                    )
+                    and any(
+                        value.status is TaskStatus.CANCELLED
+                        for value in next_nodes
+                    )
+                )
+                else isolated
+            )
             return await self._apply_graph_transition(
                 transaction,
                 before,
