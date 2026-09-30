@@ -56,7 +56,12 @@ def _effective_graph_status(
     nodes: tuple[TaskNodeView, ...],
     definitions: tuple[TaskNode, ...] | None = None,
 ) -> TaskStatus:
-    return _isolated_graph_status(
+    isolated = _isolated_graph_status(
         nodes,
         graph.nodes if definitions is None else definitions,
     )
+    if isolated is TaskStatus.RECOVERY_REQUIRED:
+        return isolated
+    if graph.status is TaskStatus.CANCELLED:
+        return TaskStatus.CANCELLED
+    return isolated
