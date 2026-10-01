@@ -159,6 +159,11 @@ async def _stream_result(execution: "Execution[object]") -> int:
             if isinstance(event.payload, dict):
                 error_code = event.payload.get("error_code")
                 safe_details = event.payload.get("safe_error_details", {})
+        elif event.event_type == ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value:
+            status = ExecutionStatus.RECOVERY_REQUIRED.value
+            if isinstance(event.payload, dict):
+                error_code = event.payload.get("error_code")
+                safe_details = event.payload.get("safe_error_details", {})
 
     if wrote_text:
         console.print()

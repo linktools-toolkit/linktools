@@ -56,6 +56,7 @@ def _local_backend(current: object) -> LocalExecutionBackend:
     backend._execution_durable_tasks = {}
     backend._worker_cancel_requests = set()
     backend._worker_shutdown_requests = set()
+    backend._recovery_reconcile_tasks = {}
     backend._recovery_enabled = False
     backend._live_broker = _LiveBroker()
     backend._executor = _Executor()
@@ -240,6 +241,44 @@ async def test_local_close_drains_owned_worker_and_finalizer_before_guarding_bac
 
     release_finalizer.set()
     await close_task
+
+
+@pytest.mark.asyncio
+async def test_local_close_drains_recovery_required_worker_without_cancelling_it() -> None:
+    current = SimpleNamespace(
+        execution_id="execution",
+        tenant_id="tenant",
+        status=ExecutionStatus.RECOVERY_REQUIRED,
+    )
+    backend = _local_backend(current)
+    worker_started = asyncio.Event()
+    release_worker = asyncio.Event()
+    worker_cancelled = asyncio.Event()
+
+    async def worker() -> None:
+        worker_started.set()
+        try:
+            await release_worker.wait()
+        except asyncio.CancelledError:
+            worker_cancelled.set()
+            raise
+
+    worker_task = asyncio.create_task(worker())
+    backend._tasks["execution"] = worker_task
+    close_task = asyncio.create_task(backend.close())
+
+    await worker_started.wait()
+    await asyncio.sleep(0)
+    assert not close_task.done()
+    assert not worker_task.done()
+    assert not worker_cancelled.is_set()
+    assert backend._worker_shutdown_requests == set()
+
+    release_worker.set()
+    await close_task
+
+    assert not worker_cancelled.is_set()
+    assert backend._worker_shutdown_requests == set()
     assert backend._tasks == {}
 
 

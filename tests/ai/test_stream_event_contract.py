@@ -159,6 +159,14 @@ async def test_cli_stream_consumes_string_event_types(
             },
             "CANCELLED",
         ),
+        (
+            ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value,
+            {
+                "error_code": "TOOL_EFFECT_UNKNOWN",
+                "safe_error_details": {"operation_id": "tool-operation"},
+            },
+            "RECOVERY_REQUIRED",
+        ),
     ),
 )
 async def test_cli_stream_reads_string_terminal_failure(
@@ -181,6 +189,7 @@ async def test_cli_stream_reads_string_terminal_failure(
 
     assert f"status={expected_status}" in str(raised.value)
     assert str(payload["error_code"]) in str(raised.value)
+    assert str(payload["safe_error_details"]) in str(raised.value)
 
 
 class _ACPSchema:

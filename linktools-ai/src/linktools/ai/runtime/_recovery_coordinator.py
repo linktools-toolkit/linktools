@@ -105,6 +105,15 @@ class _RecoveryCoordinatorPort(Protocol):
         tenant_id: str,
     ) -> tuple[ExecutionRecoveryEffect, ...]: ...
 
+    async def _reconcile_tool_effects(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[tuple[ExecutionRecoveryEffect, ...], int]: ...
+
+    def _defer_recovery_reconcile(self, execution_id: str) -> None: ...
+
     async def _get_tool_operation(
         self,
         operation_id: str,
@@ -316,7 +325,7 @@ class _RecoveryCoordinatorPort(Protocol):
         barrier: RepositoryInstructionBarrier,
     ) -> RecoveryCheckpoint: ...
 
-    def _mark_recovery_relaunch(self, execution_id: str) -> None: ...
+    def _prepare_recovery_relaunch(self, execution_id: str) -> bool: ...
 
     def execution_task_set(
         self,
@@ -709,7 +718,7 @@ class _RecoveryCoordinator:
                 RecoveryCheckpointState.WAITING,
             }
         ):
-            effects = await self._port._recovery_failure_effects(
+            effects, active_claims = await self._port._reconcile_tool_effects(
                 execution.execution_id,
                 tenant_id=self._port.tenant_id,
             )
@@ -727,6 +736,29 @@ class _RecoveryCoordinator:
                         },
                     ),
                     effects,
+                )
+                return
+            if active_claims:
+                self._port._defer_recovery_reconcile(execution.execution_id)
+                _logger.info(
+                    "recovery reconciliation deferred by active tool claim: execution=%s count=%s",
+                    execution.execution_id,
+                    active_claims,
+                )
+                return
+        if (
+            execution.status in {ExecutionStatus.STARTED, ExecutionStatus.CANCELLING}
+            and checkpoint.handoff_phase is RecoveryHandoffPhase.NONE
+        ):
+            cancel_operations = await self._port._pending_cancel_operations(
+                execution.execution_id,
+                tenant_id=self._port.tenant_id,
+            )
+            if cancel_operations:
+                await self._port._complete_recovered_cancel(
+                    execution,
+                    checkpoint,
+                    cancel_operations,
                 )
                 return
         principal = Principal(
@@ -817,7 +849,8 @@ class _RecoveryCoordinator:
             thinking=execution.thinking,
             correlation=execution.correlation,
         )
-        self._port._mark_recovery_relaunch(execution.execution_id)
+        if not self._port._prepare_recovery_relaunch(execution.execution_id):
+            return
         await self._port.launch(request, execution, resume=resume)
         _logger.info(
             "local recovery execution relaunched: tenant=%s execution=%s",
@@ -839,7 +872,7 @@ class _RecoveryCoordinator:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if current.status is not ExecutionStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        unresolved = await self.recovery_effects(
+        unresolved, active_claims = await self._port._reconcile_tool_effects(
             execution_id,
             tenant_id=tenant_id,
         )
@@ -852,6 +885,15 @@ class _RecoveryCoordinator:
                     "operation_id": first.operation_id,
                     "fence": first.fence,
                     "phase": "execution_recover",
+                },
+            )
+        if active_claims:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "execution_id": execution_id,
+                    "phase": "execution_recover_tool_claims_active",
+                    "active_tool_claim_count": active_claims,
                 },
             )
         checkpoint = await self._port.load_recovery_checkpoint(
@@ -873,17 +915,17 @@ class _RecoveryCoordinator:
             tenant_id=tenant_id,
         )
         self._port._reset_local_producer(execution_id)
+        if cancel_operations:
+            return await self._port._complete_recovered_cancel(
+                current,
+                checkpoint,
+                cancel_operations,
+            )
         resumed, _ = await self._port._commit_recovery_resume(current)
         self._port._publish_recovery_resumed(
             execution_id,
             resumed.event_sequence,
         )
-        if cancel_operations:
-            return await self._port._complete_recovered_cancel(
-                resumed,
-                checkpoint,
-                cancel_operations,
-            )
         await self.reconcile_checkpoint(checkpoint)
         latest = await self._port.load_execution(
             execution_id,

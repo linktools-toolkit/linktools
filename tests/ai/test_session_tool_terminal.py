@@ -11,20 +11,35 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pytest
-from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext, ToolDefinition
-from pydantic_ai.usage import RunUsage
-from sqlalchemy.engine import URL
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-
 from linktools.ai.capability import AgentContext, CapabilityGroup
-from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
+from linktools.ai.core import (
+    ExecutionEventType,
+    ExecutionStatus,
+    JsonValue,
+    OperationKind,
+    OperationLedgerRecord,
+    OperationStatus,
+    ResourceKind,
+    SessionStatus,
+    ToolOperationStatus,
+    idempotency_key_digest,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeStorage
-from linktools.ai.runtime._tool import RuntimeToolOperationBridge
+from linktools.ai.runtime import (
+    Runtime,
+    RuntimeStorage,
+    RuntimeStoragePlan,
+    RuntimeStorageRoute,
+    ToolEffectApplied,
+    ToolEffectFailed,
+    ToolEffectNotApplied,
+)
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._tool import RuntimeToolOperationBridge
+from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state import _recovery_commands
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from linktools.ai.runtime.state._step_archive import StateStepArchive
 from linktools.ai.runtime.state._step_contracts import (
@@ -33,8 +48,8 @@ from linktools.ai.runtime.state._step_contracts import (
 )
 from linktools.ai.runtime.state._steps import RuntimeAgentRunStore
 from linktools.ai.storage import PayloadPolicy
-
 from pydantic_ai.messages import (
+    ModelMessage,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -42,6 +57,11 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.usage import RunUsage
+from sqlalchemy.engine import URL
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 
 class _ToolModelBinding:
@@ -84,6 +104,72 @@ class _ToolModels:
         return _ToolModelBinding()
 
 
+def _recovery_tool_model(
+    messages: list[ModelMessage],
+) -> ModelResponse:
+    calls = tuple(
+        part
+        for message in messages
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+        if isinstance(part, ToolCallPart) and part.tool_name == "lookup"
+    )
+    returned = {
+        part.tool_call_id
+        for message in messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, ToolReturnPart) and part.outcome != "interrupted"
+    }
+    pending = next(
+        (part for part in reversed(calls) if part.tool_call_id not in returned),
+        None,
+    )
+    if not calls or pending is not None:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    "lookup",
+                    {},
+                    tool_call_id=(
+                        "recovery-lookup" if pending is None else pending.tool_call_id
+                    ),
+                )
+            ]
+        )
+    return ModelResponse(parts=[TextPart("done")])
+
+
+class _RecoveryTestModel(TestModel):
+    def _request(self, messages: list[ModelMessage], *_args: Any) -> ModelResponse:
+        return _recovery_tool_model(messages)
+
+
+class _RecoveryToolModelBinding(_ToolModelBinding):
+    def materialize(self) -> TestModel:
+        return _RecoveryTestModel()
+
+
+class _RecoveryToolModels(_ToolModels):
+    def resolve(self, route_id: str) -> _RecoveryToolModelBinding:
+        if route_id != "default":
+            raise AssertionError(route_id)
+        return _RecoveryToolModelBinding()
+
+    def restore(
+        self,
+        payload: Mapping[str, JsonValue],
+        *,
+        route_id: str | None = None,
+    ) -> _RecoveryToolModelBinding:
+        if (
+            route_id not in {None, "default"}
+            or dict(payload) != _ToolModelBinding.contract
+        ):
+            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
+        return _RecoveryToolModelBinding()
+
+
 async def _state(
     backend: str,
     tmp_path: Path,
@@ -109,6 +195,8 @@ def _application(
     *,
     effect_policy: Literal["replay_safe", "non_replay_safe"] = "replay_safe",
     effect_log: Path | None = None,
+    started: asyncio.Event | None = None,
+    release: asyncio.Event | None = None,
 ) -> CapabilityGroup[None]:
     application: CapabilityGroup[None] = CapabilityGroup("application")
 
@@ -119,6 +207,10 @@ def _application(
                 handle.write(_ctx.execution_id + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
+        if started is not None:
+            started.set()
+        if release is not None:
+            await release.wait()
         return "tool-result"
 
     application.tool(lookup, name="lookup", effect_policy=effect_policy)
@@ -132,6 +224,19 @@ def _application(
         output_retries=0,
     )
     return application
+
+
+def _split_sqlite_storage(database: Path) -> RuntimeStorage:
+    return RuntimeStorage(
+        RuntimeStoragePlan(
+            conversation=RuntimeStorageRoute.sqlite(
+                database.with_name(f"{database.stem}-conversation.db")
+            ),
+            execution=RuntimeStorageRoute.sqlite(
+                database.with_name(f"{database.stem}-execution.db")
+            ),
+        )
+    )
 
 
 def _relevant_kinds(values: object) -> list[str]:
@@ -268,6 +373,1428 @@ async def test_session_tool_turn_commits_terminal_and_history(
         await state.close()
         if engine is not None:
             await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("storage_mode", ("same_group", "split_conversation"))
+@pytest.mark.parametrize(
+    ("rejection", "expected_code"),
+    (
+        ("busy", ErrorCode.SESSION_BUSY),
+        ("conflict", ErrorCode.SESSION_CONFLICT),
+    ),
+)
+async def test_rejected_session_start_cleans_only_its_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    storage_mode: str,
+    rejection: str,
+    expected_code: ErrorCode,
+) -> None:
+    if storage_mode == "same_group":
+        state = RuntimeStorage.sqlite(tmp_path / "same-group.db")
+    else:
+        state = RuntimeStorage(
+            RuntimeStoragePlan(
+                conversation=RuntimeStorageRoute.sqlite(
+                    tmp_path / "conversation.db"
+                ),
+                execution=RuntimeStorageRoute.sqlite(tmp_path / "execution.db"),
+            )
+        )
+    calls: list[str] = []
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    application = _application(
+        calls,
+        started=tool_started,
+        release=release_tool,
+    )
+    try:
+        async with Runtime.open(
+            "session-admission-cleanup",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            try:
+                await runtime.agents.get("default").create_session("session")
+                session = runtime.agents.get("default").session("session")
+                owner = None
+                conflict_snapshot: list[object] = []
+                if rejection == "busy":
+                    owner = await session.start(
+                        "inspect",
+                        idempotency_key="turn-owner",
+                    )
+                    await asyncio.wait_for(tool_started.wait(), timeout=10)
+                else:
+                    original_prepare_start = LocalExecutionBackend.prepare_start
+
+                    async def conflict_after_reservation(
+                        backend: LocalExecutionBackend,
+                        request: object,
+                        execution_record: object,
+                        identity: object,
+                    ) -> object:
+                        await state.conversation.sessions.transition_status(
+                            "session",
+                            tenant_id=runtime.default_principal.tenant_id,
+                            expected=frozenset({SessionStatus.OPEN}),
+                            next_status=SessionStatus.CLOSING,
+                        )
+                        conflict_snapshot.append(
+                            await state.conversation.sessions.get(
+                                "session",
+                                tenant_id=runtime.default_principal.tenant_id,
+                            )
+                        )
+                        return await original_prepare_start(
+                            backend,
+                            request,  # type: ignore[arg-type]
+                            execution_record,  # type: ignore[arg-type]
+                            identity,  # type: ignore[arg-type]
+                        )
+
+                    monkeypatch.setattr(
+                        LocalExecutionBackend,
+                        "prepare_start",
+                        conflict_after_reservation,
+                    )
+
+                session_before = None
+                if owner is not None:
+                    session_before = await state.conversation.sessions.get(
+                        "session",
+                        tenant_id=runtime.default_principal.tenant_id,
+                    )
+                    assert session_before is not None
+                    assert session_before.active_execution_id == owner.execution_id
+
+                with pytest.raises(AIError) as raised:
+                    await session.start("rejected", idempotency_key="turn-rejected")
+                assert raised.value.code is expected_code
+                if rejection == "conflict":
+                    assert len(conflict_snapshot) == 1
+                    session_before = conflict_snapshot[0]
+                assert session_before is not None
+
+                executions = await state.execution.executions.list_by_session(
+                    "session",
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                rejected = next(
+                    item
+                    for item in executions
+                    if item.error_code == expected_code.value
+                )
+                assert rejected.status is ExecutionStatus.FAILED
+                assert rejected.started_at is None
+                assert rejected.error_code == expected_code.value
+                assert (
+                    await state.execution.executions.get_result(
+                        rejected.execution_id,
+                        tenant_id=runtime.default_principal.tenant_id,
+                    )
+                ) is not None
+                identities = await state.execution.idempotency.list_by_resource(
+                    ResourceKind.EXECUTION,
+                    rejected.execution_id,
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert len(identities) == 1
+                assert identities[0].status.value == "FAILED"
+
+                checkpoint = await state.recovery.checkpoints.get(
+                    rejected.execution_id,
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                if storage_mode == "same_group":
+                    assert checkpoint is None
+                else:
+                    assert checkpoint is not None
+                    assert checkpoint.state.value == "completed"
+                    await runtime._execution_service.runtime_backend().abort_start(
+                        rejected
+                    )
+                    assert await state.recovery.checkpoints.get(
+                        rejected.execution_id,
+                        tenant_id=runtime.default_principal.tenant_id,
+                    ) == checkpoint
+
+                session_after = await state.conversation.sessions.get(
+                    "session",
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert session_after is not None
+                assert session_after.status is session_before.status
+                assert session_after.active_execution_id == session_before.active_execution_id
+                assert session_after.continuation == session_before.continuation
+
+                release_tool.set()
+                if owner is not None:
+                    result = await owner.wait(timeout_seconds=15)
+                    assert result.status is ExecutionStatus.SUCCEEDED
+            finally:
+                release_tool.set()
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_committed", (False, True))
+async def test_split_start_cleanup_failure_remains_recoverable_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    release_committed: bool,
+) -> None:
+    database = tmp_path / "start-cleanup-restart.db"
+    state = _split_sqlite_storage(database)
+    calls: list[str] = []
+    execution_id: str | None = None
+    try:
+        async with Runtime.open(
+            "start-cleanup-restart",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(_application(calls),),
+        ) as runtime:
+            original_release = state.conversation.sessions.release_execution
+
+            async def conflict_after_session_reservation(
+                _claim: Any,
+            ) -> Any:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+
+            async def fail_session_release(
+                session_id: str,
+                *,
+                tenant_id: str,
+                execution_id: str,
+            ) -> Any:
+                if release_committed:
+                    await original_release(
+                        session_id,
+                        tenant_id=tenant_id,
+                        execution_id=execution_id,
+                    )
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+            with monkeypatch.context() as scoped:
+                scoped.setattr(
+                    state.execution.executions,
+                    "claim_start",
+                    conflict_after_session_reservation,
+                )
+                scoped.setattr(
+                    state.conversation.sessions,
+                    "release_execution",
+                    fail_session_release,
+                )
+                await runtime.agents.get("default").create_session("session")
+                session = runtime.agents.get("default").session("session")
+                with pytest.raises(AIError) as rejected:
+                    await session.start(
+                        "inspect",
+                        idempotency_key="turn-cleanup-restart",
+                    )
+                assert rejected.value.code is ErrorCode.SESSION_CONFLICT
+
+                executions = await state.execution.executions.list_by_session(
+                    "session",
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                failed = next(
+                    item
+                    for item in executions
+                    if item.error_code == ErrorCode.SESSION_CONFLICT.value
+                )
+                execution_id = failed.execution_id
+                assert failed.status is ExecutionStatus.FAILED
+                assert failed.started_at is None
+                checkpoint = await state.recovery.checkpoints.get(
+                    execution_id,
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert checkpoint is not None
+                assert checkpoint.state.value == "admitted"
+                recoverable = await state.recovery.checkpoints.list_recoverable_page(
+                    tenant_id=runtime.default_principal.tenant_id,
+                    cursor=None,
+                    limit=10,
+                )
+                assert any(item.execution_id == execution_id for item in recoverable.items)
+                session_record = await state.conversation.sessions.get(
+                    "session",
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert session_record is not None
+                assert session_record.active_execution_id == (
+                    None if release_committed else execution_id
+                )
+                assert calls == []
+    finally:
+        await state.close()
+
+    assert execution_id is not None
+    reopened = _split_sqlite_storage(database)
+    try:
+        async with Runtime.open(
+            "start-cleanup-restart",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=reopened,
+            capabilities=(_application(calls),),
+        ) as runtime:
+            checkpoint = await reopened.recovery.checkpoints.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert checkpoint is not None
+            assert checkpoint.state.value == "completed"
+            session_record = await reopened.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id is None
+            assert calls == []
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_session_start_cancel_before_worker_run_commits_cancelled_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / "cancel-start-before-run.db")
+    calls: list[str] = []
+    worker_entered = asyncio.Event()
+    release_worker = asyncio.Event()
+    application = _application(calls)
+    original_run = LocalExecutionBackend._run
+
+    async def pause_worker(
+        backend: LocalExecutionBackend,
+        request: Any,
+        execution_record: Any,
+        resume: Any,
+    ) -> None:
+        worker_entered.set()
+        await release_worker.wait()
+        await original_run(backend, request, execution_record, resume)
+
+    monkeypatch.setattr(LocalExecutionBackend, "_run", pause_worker)
+    try:
+        async with Runtime.open(
+            "session-start-cancel-before-run",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            await runtime.agents.get("default").create_session("session")
+            session = runtime.agents.get("default").session("session")
+            before = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert before is not None
+            execution = await session.start("inspect", idempotency_key="turn-1")
+            await asyncio.wait_for(worker_entered.wait(), timeout=10)
+
+            admitted = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert admitted is not None
+            assert admitted.active_execution_id == execution.execution_id
+            cancelled = await runtime._execution_service.cancel(
+                execution.execution_id,
+                CancelExecutionRequest(
+                    runtime.default_principal,
+                    "cancel-before-worker-run",
+                ),
+            )
+            assert cancelled.cancelled is True
+            record = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert record is not None
+            assert record.status is ExecutionStatus.CANCELLED
+            assert record.error_code == ErrorCode.EXECUTION_CANCELLED.value
+            result = await state.execution.executions.get_result(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert result is not None
+            identities = await state.execution.idempotency.list_by_resource(
+                ResourceKind.EXECUTION,
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert len(identities) == 1
+            assert identities[0].status.value == "CANCELLED"
+            assert identities[0].error_code is None
+            assert result.output is None
+            assert result.stop_reason.value == "CANCELLED"
+            events = await execution.list_events(limit=100)
+            assert any(
+                item.event_type == ExecutionEventType.EXECUTION_CANCELLED
+                for item in events.items
+            )
+            assert not any(
+                item.event_type
+                in {
+                    ExecutionEventType.EXECUTION_SUCCEEDED,
+                    ExecutionEventType.EXECUTION_FAILED,
+                }
+                for item in events.items
+            )
+            after = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert after is not None
+            assert after.status is before.status
+            assert after.active_execution_id is None
+            assert after.continuation == before.continuation
+            replayed = await runtime._execution_service.cancel(
+                execution.execution_id,
+                CancelExecutionRequest(
+                    runtime.default_principal,
+                    "cancel-before-worker-run",
+                ),
+            )
+            assert replayed.cancelled is True
+            assert calls == []
+    finally:
+        release_worker.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("storage_mode", ("same_group", "split_conversation"))
+async def test_pending_start_cancel_commits_terminal_before_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    storage_mode: str,
+) -> None:
+    state = (
+        RuntimeStorage.sqlite(tmp_path / "pending-start-cancel.db")
+        if storage_mode == "same_group"
+        else _split_sqlite_storage(tmp_path / "pending-start-cancel.db")
+    )
+    calls: list[str] = []
+    preparing = asyncio.Event()
+    release_prepare = asyncio.Event()
+    original_prepare = LocalExecutionBackend.prepare_start
+
+    async def pause_prepare(
+        backend: LocalExecutionBackend,
+        request: Any,
+        execution_record: Any,
+        identity: Any,
+    ) -> Any:
+        preparing.set()
+        await release_prepare.wait()
+        return await original_prepare(backend, request, execution_record, identity)
+
+    monkeypatch.setattr(LocalExecutionBackend, "prepare_start", pause_prepare)
+    try:
+        async with Runtime.open(
+            f"pending-start-cancel-{storage_mode}",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(_application(calls),),
+        ) as runtime:
+            await runtime.agents.get("default").create_session("session")
+            session = runtime.agents.get("default").session("session")
+            start_task = asyncio.create_task(
+                session.start("inspect", idempotency_key="turn-pending-start")
+            )
+            await asyncio.wait_for(preparing.wait(), timeout=10)
+
+            pending = await state.execution.executions.list_by_session(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert len(pending) == 1
+            execution_record = pending[0]
+            assert execution_record.status is ExecutionStatus.PENDING_START
+            assert execution_record.started_at is None
+
+            cancellation = await runtime.executions.cancel(
+                execution_record.execution_id,
+                CancelExecutionRequest(
+                    runtime.default_principal,
+                    "cancel-pending-start",
+                ),
+            )
+            assert cancellation.cancelled is True
+            terminal = await state.execution.executions.get(
+                execution_record.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert terminal is not None
+            assert terminal.status is ExecutionStatus.CANCELLED
+            assert terminal.started_at is None
+            assert await state.execution.executions.get_result(
+                execution_record.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            ) is not None
+            checkpoint = await state.recovery.checkpoints.get(
+                execution_record.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert checkpoint is None
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id is None
+            assert calls == []
+
+            release_prepare.set()
+            try:
+                started = await start_task
+            except AIError:
+                pass
+            else:
+                assert started.execution_id == execution_record.execution_id
+            final = await state.execution.executions.get(
+                execution_record.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert final is not None
+            assert final.status is ExecutionStatus.CANCELLED
+            assert calls == []
+    finally:
+        release_prepare.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_unknown_tool_effect_preserves_recovery_and_cancel_intent(
+    tmp_path: Path,
+) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / "cancel-recovery.db")
+    calls: list[str] = []
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=tmp_path / "effects.txt",
+        started=tool_started,
+        release=release_tool,
+    )
+    try:
+        async with Runtime.open(
+            "cancel-unknown-tool-effect",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            await runtime.agents.get("default").create_session("session")
+            session = runtime.agents.get("default").session("session")
+            execution = await session.start(
+                "inspect",
+                idempotency_key="turn-1",
+            )
+            await asyncio.wait_for(tool_started.wait(), timeout=10)
+
+            first_cancel = await execution.cancel(idempotency_key="cancel-1")
+            assert first_cancel.cancelled is False
+
+            current = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert current is not None
+            assert current.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert current.error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
+            assert await state.execution.executions.get_result(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            ) is None
+
+            operations = await state.recovery.tools.list_by_execution(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert len(operations) == 1
+            assert operations[0].status.value == "EFFECT_UNKNOWN"
+
+            cancel_operations = await state.execution.operations.list_pending(
+                ResourceKind.EXECUTION,
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+                limit=100,
+            )
+            assert len(cancel_operations) == 1
+            assert cancel_operations[0].operation_kind is OperationKind.EXECUTION_CANCEL
+            assert cancel_operations[0].status is OperationStatus.PENDING
+
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id == execution.execution_id
+
+            replayed_cancel = await execution.cancel(idempotency_key="cancel-1")
+            assert replayed_cancel.cancelled is False
+            replayed_operations = await state.execution.operations.list_pending(
+                ResourceKind.EXECUTION,
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+                limit=100,
+            )
+            assert replayed_operations == cancel_operations
+
+            with pytest.raises(AIError) as raised:
+                await execution.wait(timeout_seconds=5)
+            assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+            with pytest.raises(AIError) as recover_error:
+                await execution.recover()
+            assert recover_error.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+
+            events = await execution.list_events(limit=100)
+            event_types = tuple(item.event_type for item in events.items)
+            assert ExecutionEventType.EXECUTION_RECOVERY_REQUIRED in event_types
+            assert ExecutionEventType.EXECUTION_CANCELLED not in event_types
+            assert calls == ["lookup"]
+            assert (tmp_path / "effects.txt").read_text().splitlines() == [
+                execution.execution_id
+            ]
+            release_tool.set()
+    finally:
+        release_tool.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_intent_replay_readback_preserves_sqlite_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / "cancel-intent-readback.db")
+    calls: list[str] = []
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        started=tool_started,
+        release=release_tool,
+    )
+    cancel_key = "cancel-probe"
+    try:
+        async with Runtime.open(
+            "cancel-intent-readback",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            await runtime.agents.get("default").create_session("session")
+            execution = await runtime.agents.get("default").session("session").start(
+                "inspect",
+                idempotency_key="turn-probe",
+            )
+            await asyncio.wait_for(tool_started.wait(), timeout=10)
+
+            first = await execution.cancel(idempotency_key=cancel_key)
+            assert first.cancelled is False
+            principal = runtime.default_principal
+            before_conflict = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            assert before_conflict is not None
+            assert before_conflict.status is ExecutionStatus.RECOVERY_REQUIRED
+
+            async def read_events() -> tuple[Any, ...]:
+                page = await state.execution.events.list(
+                    execution.execution_id,
+                    tenant_id=principal.tenant_id,
+                    after_sequence=0,
+                    limit=100,
+                )
+                return page.items
+
+            intent = await state.execution.operations.get(
+                idempotency_key_digest(cancel_key),
+                tenant_id=principal.tenant_id,
+            )
+            assert intent is not None
+            events_before_conflict = await read_events()
+
+            with pytest.raises(AIError) as conflict:
+                await execution.cancel(idempotency_key=cancel_key, force=True)
+            assert conflict.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+            assert await state.execution.operations.get(
+                idempotency_key_digest(cancel_key),
+                tenant_id=principal.tenant_id,
+            ) == intent
+            assert await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            ) == before_conflict
+            assert await read_events() == events_before_conflict
+
+            target_group = state.execution.executions.state_store.storage_group
+            group_class = type(target_group)
+            original_mutate = group_class.mutate
+            original_get = state.execution.operations.get
+
+            async def cancel_with_unknown_commit(
+                key: str,
+                *,
+                unreadable: bool = False,
+                partial_projection: bool = False,
+            ) -> tuple[bool | None, ErrorCode | None]:
+                injected = False
+
+                async def uncertain_commit(group: Any, stores: Any, callback: Any) -> Any:
+                    nonlocal injected
+                    value = await original_mutate(group, stores, callback)
+                    if (
+                        group is target_group
+                        and not injected
+                        and isinstance(value, OperationLedgerRecord)
+                        and value.operation_kind is OperationKind.EXECUTION_CANCEL
+                    ):
+                        injected = True
+                        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+                    return value
+
+                async def unavailable_readback(
+                    operation_id: str,
+                    *,
+                    tenant_id: str,
+                ) -> Any:
+                    if injected:
+                        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    return await original_get(operation_id, tenant_id=tenant_id)
+
+                async def leave_projection_unchanged(
+                    transaction: Any,
+                    candidate: Any,
+                    expected_version: int,
+                ) -> None:
+                    guarded = await transaction.guard_record(
+                        candidate.key_digest,
+                        expected_storage_version=expected_version,
+                    )
+                    if guarded is None:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+                error_code = None
+                cancelled = None
+                with monkeypatch.context() as patcher:
+                    patcher.setattr(group_class, "mutate", uncertain_commit)
+                    if unreadable:
+                        patcher.setattr(
+                            state.execution.operations,
+                            "get",
+                            unavailable_readback,
+                        )
+                    if partial_projection:
+                        patcher.setattr(
+                            _recovery_commands,
+                            "_replace_checked",
+                            leave_projection_unchanged,
+                        )
+                    try:
+                        result = await execution.cancel(idempotency_key=key)
+                        cancelled = result.cancelled
+                    except AIError as error:
+                        error_code = error.code
+                assert injected
+                return cancelled, error_code
+
+            before_replay = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            events_before_replay = await read_events()
+            replayed, replay_error = await cancel_with_unknown_commit(cancel_key)
+            assert replay_error is None
+            assert replayed is False
+            assert await state.execution.operations.get(
+                idempotency_key_digest(cancel_key),
+                tenant_id=principal.tenant_id,
+            ) == intent
+            assert await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            ) == before_replay
+            assert await read_events() == events_before_replay
+
+            new_key = "cancel-new-probe"
+            before_new_intent = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            assert before_new_intent is not None
+            events_before_new_intent = await read_events()
+            new_cancelled, new_error = await cancel_with_unknown_commit(new_key)
+            assert new_error is None
+            assert new_cancelled is False
+            after_new_intent = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            assert after_new_intent is not None
+            assert after_new_intent.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert after_new_intent.revision == before_new_intent.revision + 1
+            assert after_new_intent.event_sequence == before_new_intent.event_sequence + 1
+            new_intent = await state.execution.operations.get(
+                idempotency_key_digest(new_key),
+                tenant_id=principal.tenant_id,
+            )
+            assert new_intent is not None
+            assert new_intent.operation_id != intent.operation_id
+            pending_intents = await state.execution.operations.list_pending(
+                ResourceKind.EXECUTION,
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+                limit=100,
+            )
+            assert {item.operation_id for item in pending_intents} == {
+                intent.operation_id,
+                new_intent.operation_id,
+            }
+            events_after_new_intent = await read_events()
+            assert events_after_new_intent[:-1] == events_before_new_intent
+            assert events_after_new_intent[-1].event_type == ExecutionEventType.CANCEL_REQUESTED
+            assert events_after_new_intent[-1].payload == {
+                "operation_id": new_intent.operation_id,
+            }
+
+            unknown_key = "cancel-unreadable-probe"
+            events_before_unreadable = events_after_new_intent
+            _, unreadable_error = await cancel_with_unknown_commit(
+                unknown_key,
+                unreadable=True,
+            )
+            assert unreadable_error is ErrorCode.STORAGE_COMMIT_UNKNOWN
+            after_unreadable = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            assert after_unreadable is not None
+            assert after_unreadable.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert after_unreadable.revision == after_new_intent.revision + 1
+            assert after_unreadable.event_sequence == after_new_intent.event_sequence + 1
+            unreadable_intent = await original_get(
+                idempotency_key_digest(unknown_key),
+                tenant_id=principal.tenant_id,
+            )
+            assert unreadable_intent is not None
+            pending_intents = await state.execution.operations.list_pending(
+                ResourceKind.EXECUTION,
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+                limit=100,
+            )
+            assert {item.operation_id for item in pending_intents} == {
+                intent.operation_id,
+                new_intent.operation_id,
+                unreadable_intent.operation_id,
+            }
+            assert (await read_events())[:-1] == events_before_unreadable
+            assert await state.execution.executions.get_result(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            ) is None
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id == execution.execution_id
+            assert calls == ["lookup"]
+
+            before_partial = after_unreadable
+            events_before_partial = await read_events()
+            partial_key = "cancel-partial-probe"
+            _, partial_error = await cancel_with_unknown_commit(
+                partial_key,
+                partial_projection=True,
+            )
+            assert partial_error is ErrorCode.STORAGE_INTEGRITY_ERROR
+            assert await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=principal.tenant_id,
+            ) == before_partial
+            partial_intent = await original_get(
+                idempotency_key_digest(partial_key),
+                tenant_id=principal.tenant_id,
+            )
+            assert partial_intent is not None
+            partial_events = await read_events()
+            assert partial_events[:-1] == events_before_partial
+            assert partial_events[-1].event_type == ExecutionEventType.CANCEL_REQUESTED
+            assert partial_events[-1].payload == {
+                "operation_id": partial_intent.operation_id,
+            }
+    finally:
+        release_tool.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resolution", "expected_tool_status", "expected_retries"),
+    (
+        pytest.param(
+            ToolEffectApplied({"confirmed": True}),
+            ToolOperationStatus.COMPLETED,
+            0,
+            id="applied",
+        ),
+        pytest.param(
+            ToolEffectNotApplied(),
+            ToolOperationStatus.PENDING,
+            1,
+            id="not-applied",
+        ),
+        pytest.param(
+            ToolEffectFailed(),
+            ToolOperationStatus.FAILED,
+            0,
+            id="failed",
+        ),
+    ),
+)
+@pytest.mark.parametrize("with_cancel", (False, True), ids=("resume", "cancel"))
+async def test_public_recovery_converges_after_tool_effect_resolution(
+    tmp_path: Path,
+    resolution: Any,
+    expected_tool_status: ToolOperationStatus,
+    expected_retries: int,
+    with_cancel: bool,
+) -> None:
+    database = tmp_path / "recovery-resolution.db"
+    state = _split_sqlite_storage(database)
+    calls: list[str] = []
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    effect_log = tmp_path / "recovery-effects.txt"
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=effect_log,
+        started=tool_started,
+        release=release_tool,
+    )
+    try:
+        async with Runtime.open(
+            "session-tool-recovery-resolution",
+            models=_RecoveryToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            await runtime.agents.get("default").create_session("session")
+            execution = await runtime.agents.get("default").session("session").start(
+                "inspect",
+                idempotency_key="turn-resolution",
+            )
+            await asyncio.wait_for(tool_started.wait(), timeout=10)
+            execution_id = execution.execution_id
+
+            if with_cancel:
+                cancelled = await execution.cancel(
+                    idempotency_key="cancel-after-effect-recovery"
+                )
+                assert cancelled.cancelled is False
+                replayed = await execution.cancel(
+                    idempotency_key="cancel-after-effect-recovery"
+                )
+                assert replayed.cancelled is False
+            else:
+                backend = runtime._execution_service.runtime_backend()
+                worker = backend._tasks[execution_id]
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            with pytest.raises(AIError) as unknown_result:
+                await execution.wait(timeout_seconds=10)
+            assert unknown_result.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+
+            current = await state.execution.executions.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert current is not None
+            assert current.status is ExecutionStatus.RECOVERY_REQUIRED
+            with pytest.raises(AIError) as unresolved:
+                await execution.recover()
+            assert unresolved.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+
+            effects = await execution.recovery_effects()
+            assert len(effects) == 1
+            cancel_key = "cancel-after-effect-recovery"
+            checkpoint_before = await state.recovery.checkpoints.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert checkpoint_before is not None
+            assert checkpoint_before.agent_run_id is not None
+            agent_run_id = checkpoint_before.agent_run_id
+            recovery_archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
+            durable_interaction_count = await recovery_archive.model_interaction_count(
+                agent_run_id=agent_run_id
+            )
+            operation_id = effects[0].operation_id
+            fence = effects[0].fence
+
+        release_tool.set()
+        await state.close()
+        state = _split_sqlite_storage(database)
+        reopened_application = _application(
+            calls,
+            effect_policy="non_replay_safe",
+            effect_log=effect_log,
+        )
+        async with Runtime.open(
+            "session-tool-recovery-resolution",
+            models=_RecoveryToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(reopened_application,),
+        ) as runtime:
+            execution = await runtime.executions.get(execution_id)
+
+            resolution_result = await execution.resolve_tool_effect(
+                operation_id,
+                expected_fence=fence,
+                resolution=resolution,
+                idempotency_key=f"resolve-{expected_tool_status.value.lower()}",
+            )
+            assert resolution_result.status is expected_tool_status
+
+            recovered = await execution.recover()
+            assert recovered.execution_id == execution_id
+            result = await execution.wait(timeout_seconds=15)
+            expected_execution_status = (
+                ExecutionStatus.CANCELLED
+                if with_cancel
+                else ExecutionStatus.SUCCEEDED
+            )
+            assert result.status is expected_execution_status
+
+            tool = await state.recovery.tools.get_operation(
+                operation_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert tool is not None
+            expected_final_tool_status = (
+                ToolOperationStatus.COMPLETED
+                if not with_cancel
+                and expected_tool_status is ToolOperationStatus.PENDING
+                else expected_tool_status
+            )
+            assert tool.status is expected_final_tool_status
+            retry_count = 0 if with_cancel else expected_retries
+            assert calls == ["lookup"] * (1 + retry_count)
+            assert effect_log.read_text().splitlines() == [execution_id] * (
+                1 + retry_count
+            )
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id is None
+            checkpoint = await state.recovery.checkpoints.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert checkpoint is not None
+            assert checkpoint.state.value == "completed"
+
+            if with_cancel:
+                interactions_after = await state.run_store.read_store(
+                    RuntimeDomain.RECOVERY
+                ).model_interaction_count(
+                    agent_run_id=agent_run_id,
+                )
+                assert interactions_after == durable_interaction_count
+                operation = await state.execution.operations.get(
+                    idempotency_key_digest(cancel_key),
+                    tenant_id=runtime.default_principal.tenant_id,
+                )
+                assert operation is not None
+                assert operation.status is OperationStatus.SUCCEEDED
+            else:
+                assert runtime.history is not None
+                history = await runtime.history.history(
+                    execution_id,
+                    principal=runtime.default_principal,
+                    include_content=True,
+                )
+                assert history.items
+    finally:
+        release_tool.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_no_worker_cancel_intent_survives_replay_and_recovery(
+    tmp_path: Path,
+) -> None:
+    state = _split_sqlite_storage(tmp_path / "recovery-no-worker.db")
+    calls: list[str] = []
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    effect_log = tmp_path / "recovery-no-worker-effects.txt"
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=effect_log,
+        started=tool_started,
+        release=release_tool,
+    )
+    cancel_key = "cancel-while-worker-absent"
+    try:
+        async with Runtime.open(
+            "recovery-no-worker-cancel",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            await runtime.agents.get("default").create_session("session")
+            execution = await runtime.agents.get("default").session("session").start(
+                "inspect",
+                idempotency_key="turn-1",
+            )
+            await asyncio.wait_for(tool_started.wait(), timeout=10)
+            backend = runtime._execution_service.runtime_backend()
+            worker = backend._tasks.pop(execution.execution_id)
+            try:
+                first = await execution.cancel(idempotency_key=cancel_key)
+            finally:
+                backend._tasks[execution.execution_id] = worker
+            assert first.cancelled is False
+
+            cancelling = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert cancelling is not None
+            assert cancelling.status is ExecutionStatus.CANCELLING
+            await backend.cancel(cancelling)
+            release_tool.set()
+
+            recovery_required = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert recovery_required is not None
+            assert recovery_required.status is ExecutionStatus.RECOVERY_REQUIRED
+            operation = await state.execution.operations.get(
+                idempotency_key_digest(cancel_key),
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert operation is not None
+            assert operation.status is OperationStatus.EFFECT_UNKNOWN
+
+            replayed = await execution.cancel(idempotency_key=cancel_key)
+            assert replayed.cancelled is False
+            effects = await execution.recovery_effects()
+            assert len(effects) == 1
+            interactions_before = await execution.model_interactions(
+                include_content=True
+            )
+            resolution = await execution.resolve_tool_effect(
+                effects[0].operation_id,
+                expected_fence=effects[0].fence,
+                resolution=ToolEffectApplied({"confirmed": True}),
+                idempotency_key="resolve-no-worker-effect",
+            )
+            assert resolution.status is ToolOperationStatus.COMPLETED
+
+            await execution.recover()
+            result = await execution.wait(timeout_seconds=10)
+            assert result.status is ExecutionStatus.CANCELLED
+            assert calls == ["lookup"]
+            assert effect_log.read_text().splitlines() == [execution.execution_id]
+            settled = await state.execution.operations.get(
+                idempotency_key_digest(cancel_key),
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert settled is not None
+            assert settled.status is OperationStatus.SUCCEEDED
+            interactions_after = await execution.model_interactions(
+                include_content=True
+            )
+            assert interactions_after.items == interactions_before.items
+    finally:
+        release_tool.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ("unknown_write", "recovery_projection"))
+async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / f"cancel-boundary-{boundary}.db")
+    calls: list[str] = []
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    boundary_started = asyncio.Event()
+    release_boundary = asyncio.Event()
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=tmp_path / f"effects-{boundary}.txt",
+        started=tool_started,
+        release=release_tool,
+    )
+    try:
+        async with Runtime.open(
+            f"cancel-unknown-boundary-{boundary}",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            if boundary == "unknown_write":
+                repository = state.recovery.tools
+                original_mark = repository.mark_effect_unknown
+
+                async def pause_unknown_write(*args: Any, **kwargs: Any) -> Any:
+                    boundary_started.set()
+                    await release_boundary.wait()
+                    return await original_mark(*args, **kwargs)
+
+                monkeypatch.setattr(
+                    repository,
+                    "mark_effect_unknown",
+                    pause_unknown_write,
+                )
+            else:
+                original_projection = LocalExecutionBackend._commit_recovery_required
+
+                async def pause_recovery_projection(
+                    backend: LocalExecutionBackend,
+                    execution_record: Any,
+                    error: AIError,
+                    effects: Any,
+                ) -> Any:
+                    if error.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
+                        boundary_started.set()
+                        await release_boundary.wait()
+                    return await original_projection(
+                        backend,
+                        execution_record,
+                        error,
+                        effects,
+                    )
+
+                monkeypatch.setattr(
+                    LocalExecutionBackend,
+                    "_commit_recovery_required",
+                    pause_recovery_projection,
+                )
+
+            await runtime.agents.get("default").create_session("session")
+            session = runtime.agents.get("default").session("session")
+            execution = await session.start("inspect", idempotency_key="turn-1")
+            await asyncio.wait_for(tool_started.wait(), timeout=10)
+            cancel_task = asyncio.create_task(
+                execution.cancel(idempotency_key="cancel-at-boundary")
+            )
+            await asyncio.wait_for(boundary_started.wait(), timeout=10)
+
+            current = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert current is not None
+            assert current.status is ExecutionStatus.CANCELLING
+            assert await state.execution.executions.get_result(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            ) is None
+            tools = await state.recovery.tools.list_by_execution(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert len(tools) == 1
+            assert tools[0].status is (
+                ToolOperationStatus.CLAIMED
+                if boundary == "unknown_write"
+                else ToolOperationStatus.EFFECT_UNKNOWN
+            )
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id == execution.execution_id
+            cancel_intents = await state.execution.operations.list_pending(
+                ResourceKind.EXECUTION,
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+                limit=100,
+            )
+            assert len(cancel_intents) == 1
+            assert cancel_intents[0].operation_kind is OperationKind.EXECUTION_CANCEL
+            assert cancel_intents[0].status is OperationStatus.PENDING
+
+            release_boundary.set()
+            cancelled = await asyncio.wait_for(cancel_task, timeout=10)
+            assert cancelled.cancelled is False
+            recovered = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert recovered is not None
+            assert recovered.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert await state.execution.executions.get_result(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            ) is None
+            final_session = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert final_session is not None
+            assert final_session.active_execution_id == execution.execution_id
+            events = await execution.list_events(limit=100)
+            terminal_types = {
+                ExecutionEventType.EXECUTION_SUCCEEDED,
+                ExecutionEventType.EXECUTION_FAILED,
+                ExecutionEventType.EXECUTION_CANCELLED,
+            }
+            assert not any(item.event_type in terminal_types for item in events.items)
+            assert calls == ["lookup"]
+            assert (tmp_path / f"effects-{boundary}.txt").read_text().splitlines() == [
+                execution.execution_id
+            ]
+    finally:
+        release_tool.set()
+        release_boundary.set()
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("readback", "expected_error"),
+    (
+        ("claimed", ErrorCode.STORAGE_RECOVERY_REQUIRED),
+        ("unavailable", ErrorCode.STORAGE_RECOVERY_REQUIRED),
+    ),
+)
+async def test_unverified_unknown_effect_write_does_not_terminalize_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    readback: str,
+    expected_error: ErrorCode,
+) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / f"unknown-write-{readback}.db")
+    calls: list[str] = []
+    tool_started = asyncio.Event()
+    release_tool = asyncio.Event()
+    write_attempted = asyncio.Event()
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=tmp_path / f"effects-unknown-write-{readback}.txt",
+        started=tool_started,
+        release=release_tool,
+    )
+    close_failure_expected = False
+    try:
+        async with Runtime.open(
+            f"unknown-write-{readback}",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            repository = state.recovery.tools
+            original_get = repository.get_operation
+
+            async def fail_unknown_write(*args: Any, **kwargs: Any) -> Any:
+                write_attempted.set()
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+
+            async def read_unknown_write(
+                operation_id: str,
+                *,
+                tenant_id: str,
+            ) -> Any:
+                if readback == "unavailable" and write_attempted.is_set():
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                return await original_get(operation_id, tenant_id=tenant_id)
+
+            monkeypatch.setattr(repository, "mark_effect_unknown", fail_unknown_write)
+            monkeypatch.setattr(repository, "get_operation", read_unknown_write)
+
+            await runtime.agents.get("default").create_session("session")
+            session = runtime.agents.get("default").session("session")
+            execution = await session.start("inspect", idempotency_key="turn-1")
+            await asyncio.wait_for(tool_started.wait(), timeout=10)
+            cancelled = await asyncio.wait_for(
+                execution.cancel(idempotency_key="cancel-unverified-write"),
+                timeout=10,
+            )
+            assert cancelled.cancelled is False
+            assert write_attempted.is_set()
+
+            current = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert current is not None
+            assert current.status is ExecutionStatus.CANCELLING
+            assert await state.execution.executions.get_result(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            ) is None
+            tools = await state.recovery.tools.list_by_execution(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert len(tools) == 1
+            assert tools[0].status is ToolOperationStatus.CLAIMED
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id == execution.execution_id
+            backend = runtime._execution_service.runtime_backend()
+            failure = backend.worker_failure(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert failure is not None
+            assert failure.code is expected_error
+            events = await execution.list_events(limit=100)
+            terminal_types = {
+                ExecutionEventType.EXECUTION_SUCCEEDED,
+                ExecutionEventType.EXECUTION_FAILED,
+                ExecutionEventType.EXECUTION_CANCELLED,
+            }
+            assert not any(item.event_type in terminal_types for item in events.items)
+            assert calls == ["lookup"]
+            assert (
+                tmp_path / f"effects-unknown-write-{readback}.txt"
+            ).read_text().splitlines() == [execution.execution_id]
+            close_failure_expected = True
+    except AIError as close_error:
+        if not close_failure_expected:
+            raise
+        assert close_error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+    finally:
+        release_tool.set()
+        await state.close()
 
 
 @pytest.mark.asyncio
@@ -511,12 +2038,16 @@ def _crash_session_process(
     original_complete = RuntimeToolOperationBridge.complete
     original_checkpoint = RuntimeAgentRunStore.save_checkpoint
     original_success = LocalExecutionBackend._commit_success
+    original_reconcile_handoff = LocalExecutionBackend._reconcile_handoff
+    original_commit_reconciled = LocalExecutionBackend._commit_reconciled_terminal
     original_activate = RuntimeStateCommands.commit_agent_attempt_checkpoint
     original_admission = RuntimeStateCommands.commit_tool_admission
 
     async def admit(self: RuntimeStateCommands, request: Any) -> Any:
         if phase == "effect_unconfirmed":
             request = replace(request, lease_seconds=1)
+        elif phase == "effect_unconfirmed_live_lease":
+            request = replace(request, lease_seconds=5)
         return await original_admission(self, request)
 
     async def activate(self: RuntimeStateCommands, *args: Any, **kwargs: Any) -> Any:
@@ -528,7 +2059,7 @@ def _crash_session_process(
     async def complete(
         self: RuntimeToolOperationBridge, decision: Any, result: Any
     ) -> bool:
-        if phase == "effect_unconfirmed":
+        if phase in {"effect_unconfirmed", "effect_unconfirmed_live_lease"}:
             os._exit(91)
         cancelled = await original_complete(self, decision, result)
         if phase == "tool_completed":
@@ -563,15 +2094,36 @@ def _crash_session_process(
             os._exit(91)
         return result
 
+    async def reconcile_handoff(
+        self: LocalExecutionBackend,
+        checkpoint: Any,
+    ) -> Any:
+        if phase == "handoff_prepared":
+            os._exit(91)
+        return await original_reconcile_handoff(self, checkpoint)
+
+    async def commit_reconciled(
+        self: LocalExecutionBackend,
+        checkpoint: Any,
+    ) -> Any:
+        result = await original_commit_reconciled(self, checkpoint)
+        if phase == "terminal_before_handoff_complete":
+            os._exit(91)
+        return result
+
     RuntimeToolOperationBridge.complete = complete
     RuntimeStateCommands.commit_agent_attempt_checkpoint = activate
     RuntimeStateCommands.commit_tool_admission = admit
     RuntimeAgentRunStore.save_checkpoint = save_checkpoint
     LocalExecutionBackend._commit_success = commit_success
+    LocalExecutionBackend._reconcile_handoff = reconcile_handoff
+    LocalExecutionBackend._commit_reconciled_terminal = commit_reconciled
 
     async def run() -> None:
         if backend == "sqlite":
             state = RuntimeStorage.sqlite(database)
+        elif backend == "split_sqlite":
+            state = _split_sqlite_storage(Path(database))
         else:
             engine = create_async_engine(
                 URL.create("sqlite+aiosqlite", database=database)
@@ -620,7 +2172,128 @@ async def _exit_at_boundary(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("sqlite", "sql"))
+async def test_active_tool_claim_reconciles_after_restart_without_external_nudge(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "active-claim-restart.db"
+    effect_log = tmp_path / "active-claim-effects.txt"
+    await _exit_at_boundary(
+        database,
+        effect_log,
+        "sqlite",
+        "effect_unconfirmed_live_lease",
+    )
+    committed_effects = effect_log.read_text().splitlines()
+    assert len(committed_effects) == 1
+    execution_id = committed_effects[0]
+    calls: list[str] = []
+    state = RuntimeStorage.sqlite(database)
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=effect_log,
+    )
+    try:
+        async with Runtime.open(
+            "session-tool-crash",
+            models=_ToolModels(),
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            current = await state.execution.executions.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert current is not None
+            assert current.status is ExecutionStatus.STARTED
+            tools = await state.recovery.tools.list_by_execution(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert len(tools) == 1
+            assert tools[0].status is ToolOperationStatus.CLAIMED
+
+            execution = await runtime.executions.get(execution_id)
+            with pytest.raises(AIError) as raised:
+                await execution.wait(timeout_seconds=10)
+
+            assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+            recovered = await state.execution.executions.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert recovered is not None
+            assert recovered.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert calls == []
+            assert effect_log.read_text().splitlines() == committed_effects
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_idempotent_replay_during_active_tool_claim_converges_to_recovery(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "active-claim-replay.db"
+    effect_log = tmp_path / "active-claim-replay-effects.txt"
+    await _exit_at_boundary(
+        database,
+        effect_log,
+        "sqlite",
+        "effect_unconfirmed_live_lease",
+    )
+    committed_effects = effect_log.read_text().splitlines()
+    assert len(committed_effects) == 1
+    execution_id = committed_effects[0]
+    calls: list[str] = []
+    state = RuntimeStorage.sqlite(database)
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=effect_log,
+    )
+    try:
+        async with Runtime.open(
+            "session-tool-crash",
+            models=_ToolModels(),
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            tools = await state.recovery.tools.list_by_execution(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert len(tools) == 1
+            assert tools[0].status is ToolOperationStatus.CLAIMED
+
+            same = (
+                await runtime.agents.get("default")
+                .session("session")
+                .start("inspect", idempotency_key="turn-1")
+            )
+            assert same.execution_id == execution_id
+            with pytest.raises(AIError) as raised:
+                await same.wait(timeout_seconds=10)
+            assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+
+            recovered = await state.execution.executions.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert recovered is not None
+            assert recovered.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert await state.execution.executions.get_result(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            ) is None
+            assert calls == []
+            assert effect_log.read_text().splitlines() == committed_effects
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("sqlite", "sql", "split_sqlite"))
 @pytest.mark.parametrize(
     "phase",
     (
@@ -645,6 +2318,8 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     engine = None
     if backend == "sqlite":
         state = RuntimeStorage.sqlite(database)
+    elif backend == "split_sqlite":
+        state = _split_sqlite_storage(database)
     else:
         engine = create_async_engine(
             URL.create("sqlite+aiosqlite", database=str(database))
@@ -684,9 +2359,12 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
             execution_history = await runtime.history.history(
                 execution_id, principal=runtime.default_principal, include_content=True
             )
-            assert _relevant_kinds(execution_history.items) == _relevant_kinds(
-                history.items
-            )
+            execution_history_kinds = _relevant_kinds(execution_history.items)
+            session_history_kinds = _relevant_kinds(history.items)
+            if backend == "split_sqlite":
+                assert set(session_history_kinds) <= set(execution_history_kinds)
+            else:
+                assert execution_history_kinds == session_history_kinds
             interactions = await same.model_interactions(include_content=True)
             assert len(interactions.items) >= 2, interactions.items
             assert interactions.items[-1].response is not None
@@ -701,10 +2379,221 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
             )
             assert following.status is ExecutionStatus.SUCCEEDED
             assert effect_log.read_text().splitlines() == committed_effects
+            if backend == "split_sqlite":
+                repeated_history = await session.history()
+                assert _relevant_kinds(repeated_history.items) == [
+                    "user",
+                    "tool_call",
+                    "tool_result",
+                    "assistant",
+                    "user",
+                    "assistant",
+                ]
     finally:
         await state.close()
         if engine is not None:
             await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "expected_status"),
+    (
+        ("handoff_prepared", ExecutionStatus.STARTED),
+        ("terminal_before_handoff_complete", ExecutionStatus.SUCCEEDED),
+    ),
+)
+async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restart(
+    tmp_path: Path,
+    phase: str,
+    expected_status: ExecutionStatus,
+) -> None:
+    database = tmp_path / "handoff-restart.db"
+    effect_log = tmp_path / "handoff-effects.txt"
+    await _exit_at_boundary(database, effect_log, "split_sqlite", phase)
+    committed_effects = effect_log.read_text().splitlines()
+    assert len(committed_effects) == 1
+    execution_id = committed_effects[0]
+
+    inspection = _split_sqlite_storage(database)
+    await inspection.initialize(
+        namespace="session-tool-crash",
+        tenant_id="default",
+    )
+    current = await inspection.execution.executions.get(
+        execution_id,
+        tenant_id="default",
+    )
+    checkpoint = await inspection.recovery.checkpoints.get(
+        execution_id,
+        tenant_id="default",
+    )
+    assert current is not None
+    assert current.status is expected_status
+    assert checkpoint is not None
+    assert checkpoint.state.value == "handoff"
+    assert checkpoint.handoff_phase.value == "prepared"
+    await inspection.close()
+
+    state = _split_sqlite_storage(database)
+    calls: list[str] = []
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=effect_log,
+    )
+    try:
+        async with Runtime.open(
+            "session-tool-crash",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            session = runtime.agents.get("default").session("session")
+            execution = await session.start("inspect", idempotency_key="turn-1")
+            result = await execution.wait(timeout_seconds=15)
+            assert execution.execution_id == execution_id
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert calls == []
+            assert effect_log.read_text().splitlines() == committed_effects
+            completed = await state.recovery.checkpoints.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert completed is not None
+            assert completed.state.value == "completed"
+            assert completed.handoff_phase.value == "completed"
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id is None
+            history = await session.history()
+            assert _relevant_kinds(history.items) == [
+                "user",
+                "tool_call",
+                "tool_result",
+                "assistant",
+            ]
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_split_storage_success_handoff_wins_cancel_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _split_sqlite_storage(tmp_path / "handoff-cancel-race.db")
+    calls: list[str] = []
+    handoff_started = asyncio.Event()
+    release_handoff = asyncio.Event()
+    application = _application(calls)
+    original_resolve = LocalExecutionBackend._resolve_handoff_conversation
+
+    async def pause_handoff(
+        backend: LocalExecutionBackend,
+        checkpoint: Any,
+        handoff: Any,
+    ) -> None:
+        handoff_started.set()
+        await release_handoff.wait()
+        await original_resolve(backend, checkpoint, handoff)
+
+    monkeypatch.setattr(
+        LocalExecutionBackend,
+        "_resolve_handoff_conversation",
+        pause_handoff,
+    )
+    try:
+        async with Runtime.open(
+            "split-storage-handoff-cancel-race",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            assert (
+                state.execution.executions.state_store.storage_group
+                is state.recovery.checkpoints.state_store.storage_group
+            )
+            assert (
+                state.execution.executions.state_store.storage_group
+                is not state.conversation.sessions.state_store.storage_group
+            )
+            await runtime.agents.get("default").create_session("session")
+            session = runtime.agents.get("default").session("session")
+            execution = await session.start("inspect", idempotency_key="turn-1")
+            await asyncio.wait_for(handoff_started.wait(), timeout=10)
+
+            prepared = await state.recovery.checkpoints.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert prepared is not None
+            assert prepared.handoff_phase.value == "prepared"
+            current = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert current is not None
+            assert current.status is ExecutionStatus.FINALIZING
+
+            first_cancel = await execution.cancel(
+                idempotency_key="cancel-during-success-handoff"
+            )
+            assert first_cancel.cancelled is False
+            replayed_cancel = await execution.cancel(
+                idempotency_key="cancel-during-success-handoff"
+            )
+            assert replayed_cancel.cancelled is False
+
+            release_handoff.set()
+            result = await execution.wait(timeout_seconds=15)
+            assert result.status is ExecutionStatus.SUCCEEDED
+            final_execution = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert final_execution is not None
+            assert final_execution.status is ExecutionStatus.SUCCEEDED
+            completed = await state.recovery.checkpoints.get(
+                execution.execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert completed is not None
+            assert completed.state.value == "completed"
+            assert completed.handoff_phase.value == "completed"
+            events = await execution.list_events(limit=100)
+            terminal_types = [
+                item.event_type
+                for item in events.items
+                if item.event_type
+                in {
+                    ExecutionEventType.EXECUTION_SUCCEEDED,
+                    ExecutionEventType.EXECUTION_FAILED,
+                    ExecutionEventType.EXECUTION_CANCELLED,
+                }
+            ]
+            assert terminal_types == [ExecutionEventType.EXECUTION_SUCCEEDED]
+            session_record = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert session_record is not None
+            assert session_record.active_execution_id is None
+            assert session_record.continuation is not None
+            history = await session.history()
+            assert _relevant_kinds(history.items) == [
+                "user",
+                "tool_call",
+                "tool_result",
+                "assistant",
+            ]
+            assert calls == ["lookup"]
+    finally:
+        release_handoff.set()
+        await state.close()
 
 
 @pytest.mark.asyncio

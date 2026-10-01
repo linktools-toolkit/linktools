@@ -25,6 +25,7 @@ def _record(
     status: ToolOperationStatus = ToolOperationStatus.CLAIMED,
     owner: str = "tool-owner",
     fence: int = 1,
+    replay_safe: bool = True,
     result_payload: StoredPayload | None = None,
     error_code: str | None = None,
     error_payload: StoredPayload | None = None,
@@ -39,7 +40,7 @@ def _record(
         tool_name="tool",
         arguments_digest=canonical_sha256({"args": True}),
         binding_digest=canonical_sha256({"binding": True}),
-        replay_safe=True,
+        replay_safe=replay_safe,
         status=status,
         owner=owner,
         fence=fence,
@@ -124,6 +125,79 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
         )
         assert terminal.status is ToolOperationStatus.COMPLETED
         assert terminal.result_payload == payload
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_tool_claim_becomes_effect_unknown_without_replay(
+    tmp_path,
+) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / "expired-tool-claim.db")
+    await state.initialize(namespace="tool-expired-claim", tenant_id="tenant")
+    try:
+        repository = state.recovery.tools
+        expired = replace(
+            _record(replay_safe=False),
+            lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        await repository.reserve(expired)
+
+        reconciled = await repository.reconcile_expired_claim(
+            expired.tool_operation_id,
+            tenant_id="tenant",
+        )
+
+        assert reconciled.status is ToolOperationStatus.EFFECT_UNKNOWN
+        assert reconciled.owner == expired.owner
+        assert reconciled.fence == expired.fence
+        assert reconciled.lease_expires_at is None
+        assert reconciled.error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_replay_safe_claim_returns_to_pending() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="tool-expired-replay-safe", tenant_id="tenant")
+    try:
+        repository = state.recovery.tools
+        expired = replace(
+            _record(replay_safe=True),
+            lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        await repository.reserve(expired)
+
+        reconciled = await repository.reconcile_expired_claim(
+            expired.tool_operation_id,
+            tenant_id="tenant",
+        )
+
+        assert reconciled.status is ToolOperationStatus.PENDING
+        assert reconciled.owner is None
+        assert reconciled.fence == expired.fence
+        assert reconciled.lease_expires_at is None
+        assert reconciled.error_code is None
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_live_tool_claim_is_not_reconciled_early() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="tool-live-claim", tenant_id="tenant")
+    try:
+        repository = state.recovery.tools
+        claimed = _record()
+        await repository.reserve(claimed)
+
+        reconciled = await repository.reconcile_expired_claim(
+            claimed.tool_operation_id,
+            tenant_id="tenant",
+        )
+
+        assert reconciled == claimed
     finally:
         await state.close()
 

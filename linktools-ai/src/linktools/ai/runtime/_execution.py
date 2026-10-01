@@ -1628,12 +1628,13 @@ class DefaultExecutionService:
             return ExecutionHandle(execution.execution_id)
         if (
             existing.status is IdempotencyStatus.STARTED
-            and execution.status is ExecutionStatus.WAITING_DEFERRED
-        ):
-            return ExecutionHandle(execution.execution_id)
-        if (
-            existing.status is IdempotencyStatus.STARTED
-            and execution.status is ExecutionStatus.FINALIZING
+            and execution.status
+            in {
+                ExecutionStatus.WAITING_DEFERRED,
+                ExecutionStatus.FINALIZING,
+                ExecutionStatus.RECOVERY_REQUIRED,
+                ExecutionStatus.CANCELLING,
+            }
         ):
             return ExecutionHandle(execution.execution_id)
         if (
@@ -1997,6 +1998,8 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.STARTED and started.status in {
                 ExecutionStatus.WAITING_DEFERRED,
                 ExecutionStatus.FINALIZING,
+                ExecutionStatus.RECOVERY_REQUIRED,
+                ExecutionStatus.CANCELLING,
             }:
                 await self._acquire_start_dependency_hold(
                     started,
@@ -2128,7 +2131,12 @@ class DefaultExecutionService:
                 )
             elif (
                 reservation.idempotency.status is IdempotencyStatus.STARTED
-                and reservation.execution.status is ExecutionStatus.WAITING_DEFERRED
+                and reservation.execution.status
+                in {
+                    ExecutionStatus.WAITING_DEFERRED,
+                    ExecutionStatus.RECOVERY_REQUIRED,
+                    ExecutionStatus.CANCELLING,
+                }
             ):
                 await self._acquire_start_dependency_hold(
                     reservation.execution,
@@ -2432,6 +2440,7 @@ class DefaultExecutionService:
             ExecutionStatus.CANCELLING,
             ExecutionStatus.FINALIZING,
             ExecutionStatus.WAITING_DEFERRED,
+            ExecutionStatus.RECOVERY_REQUIRED,
         }:
             return
         if launch_record.status is ExecutionStatus.START_UNKNOWN:
@@ -2948,7 +2957,6 @@ class DefaultExecutionService:
                 )
                 if resolved is not None:
                     return resolved
-                return CancelExecutionResult(execution_id, False)
             if operation.status is OperationStatus.FAILED:
                 raise _stable_operation_error(operation.error_code)
         else:
@@ -2999,26 +3007,29 @@ class DefaultExecutionService:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         try:
-            try:
-                cancelling = await self._backend.commit_cancel_checkpoint(
-                    ExecutionCancelRequestCommit(
-                        execution_id=execution_id,
-                        expected_revision=execution.revision,
-                        expected_event_sequence=execution.event_sequence,
-                        operation_id=operation.operation_id,
-                        requested_at=datetime.now(timezone.utc),
-                    ),
-                    expected_status=execution.status,
-                )
-            except AIError as error:
-                if error.code is not ErrorCode.STORAGE_CONFLICT:
+            if execution.status is ExecutionStatus.CANCELLING:
+                cancelling = execution
+            else:
+                try:
+                    cancelling = await self._backend.commit_cancel_checkpoint(
+                        ExecutionCancelRequestCommit(
+                            execution_id=execution_id,
+                            expected_revision=execution.revision,
+                            expected_event_sequence=execution.event_sequence,
+                            operation_id=operation.operation_id,
+                            requested_at=datetime.now(timezone.utc),
+                        ),
+                        expected_status=execution.status,
+                    )
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    resolved = await self._resolve_cancel_race(
+                        execution_id, request.principal.tenant_id, operation
+                    )
+                    if resolved is not None:
+                        return resolved
                     raise
-                resolved = await self._resolve_cancel_race(
-                    execution_id, request.principal.tenant_id, operation
-                )
-                if resolved is not None:
-                    return resolved
-                raise
             if cancelling.status is not ExecutionStatus.CANCELLING:
                 resolved = await self._resolve_cancel_race(
                     execution_id,
@@ -3034,6 +3045,17 @@ class DefaultExecutionService:
                 )
             outcome = await self._backend.cancel(cancelling)
             if outcome is CancelEffectOutcome.UNKNOWN:
+                recovery_current = await self._state.executions.get(
+                    execution_id,
+                    tenant_id=request.principal.tenant_id,
+                )
+                if recovery_current is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if recovery_current.status is ExecutionStatus.RECOVERY_REQUIRED:
+                    return await self._cancel_recovery_required(
+                        recovery_current,
+                        request,
+                    )
                 resolved = await self._resolve_cancel_race(
                     execution_id, request.principal.tenant_id, operation
                 )
@@ -3230,6 +3252,18 @@ class DefaultExecutionService:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            recovery_current = await self._state.executions.get(
+                execution_id,
+                tenant_id=request.principal.tenant_id,
+            )
+            if (
+                recovery_current is not None
+                and recovery_current.status is ExecutionStatus.RECOVERY_REQUIRED
+            ):
+                return await self._cancel_recovery_required(
+                    recovery_current,
+                    request,
+                )
             resolved = await self._resolve_cancel_race(
                 execution_id, request.principal.tenant_id, operation
             )

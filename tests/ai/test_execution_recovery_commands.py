@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Focused durable recovery command regressions."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -24,6 +25,8 @@ from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.runtime.state._recovery_commands import RuntimeRecoveryCommands
 from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import StoredPayload
+
 from ._runtime_test_helpers import execution_owner_fields
 
 
@@ -93,6 +96,29 @@ def _commands(state: RuntimeStorage) -> RuntimeRecoveryCommands:
         state.recovery.tools,
         execution_operations=state.execution.operations,
         background_tasks=set(),
+    )
+
+
+def _resolution_operation(
+    now: datetime,
+    *,
+    operation_id: str = "resolution-operation",
+) -> OperationLedgerInput:
+    return OperationLedgerInput(
+        operation_id,
+        "tenant",
+        ResourceKind.TOOL_OPERATION,
+        "tool-operation",
+        "execution",
+        OperationKind.TOOL_EFFECT_RESOLVE,
+        OperationStatus.SUCCEEDED,
+        canonical_sha256({"resolution": "not-applied"}),
+        "tool-operation",
+        canonical_sha256({"result": "pending"}),
+        None,
+        True,
+        now,
+        now,
     )
 
 
@@ -179,10 +205,9 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
             await commands.commit_resumed(recovery)
         assert stale.value.code is ErrorCode.STORAGE_CONFLICT
 
-        resumed = await commands.commit_resumed(fresh)
-        cancelling = await commands.commit_cancel_claim(resumed)
+        cancelling = await commands.commit_cancel_claim(fresh)
         assert cancelling.status is ExecutionStatus.CANCELLING
-        assert cancelling.event_sequence == resumed.event_sequence
+        assert cancelling.event_sequence == fresh.event_sequence
 
         events = await state.execution.events.list(
             "execution",
@@ -193,8 +218,68 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
         assert tuple(value.event_type for value in events.items) == (
             ExecutionEventType.EXECUTION_RECOVERY_REQUIRED,
             ExecutionEventType.CANCEL_REQUESTED,
-            ExecutionEventType.EXECUTION_RESUMED,
         )
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_cancel_claim_reports_concurrent_intent_as_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="recovery-cancel-race", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+    execution = _execution(now)
+    try:
+        await state.execution.executions.create(execution)
+        commands = _commands(state)
+        recovery = await commands.commit_recovery_required(
+            execution,
+            error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+            safe_error_details={"operation_id": "tool-operation", "fence": 3},
+        )
+        concurrent = OperationLedgerInput(
+            "concurrent-cancel",
+            "tenant",
+            ResourceKind.EXECUTION,
+            "execution",
+            "execution",
+            OperationKind.EXECUTION_CANCEL,
+            OperationStatus.PENDING,
+            canonical_sha256({"cancel": "concurrent"}),
+            None,
+            None,
+            None,
+            True,
+            now,
+            now,
+        )
+        repository = state.execution.executions
+        original_compare_and_swap = repository.compare_and_swap
+        advanced = False
+
+        async def race_compare_and_swap(*args, **kwargs):
+            nonlocal advanced
+            if not advanced:
+                advanced = True
+                await commands.commit_cancel_intent(recovery, concurrent)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return await original_compare_and_swap(*args, **kwargs)
+
+        monkeypatch.setattr(repository, "compare_and_swap", race_compare_and_swap)
+
+        with pytest.raises(AIError) as raised:
+            await commands.commit_cancel_claim(recovery)
+
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+        current = await state.execution.executions.get(
+            "execution",
+            tenant_id="tenant",
+        )
+        assert current is not None
+        assert current.status is ExecutionStatus.RECOVERY_REQUIRED
+        assert current.event_sequence == recovery.event_sequence + 1
     finally:
         await state.close()
 
@@ -240,5 +325,104 @@ async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
         assert claimed.status is ToolOperationStatus.CLAIMED
         assert claimed.fence == 4
         assert claimed.owner == "next-worker"
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target_status", "result_payload", "error_code", "error_payload"),
+    (
+        (
+            ToolOperationStatus.COMPLETED,
+            StoredPayload.inline_json({"applied": True}),
+            None,
+            None,
+        ),
+        (
+            ToolOperationStatus.FAILED,
+            None,
+            ErrorCode.TOOL_EXECUTION_FAILED.value,
+            StoredPayload.inline_bytes(
+                b'{"version":1,"kind":"tool_call_failed","message":"failed"}'
+            ),
+        ),
+    ),
+)
+async def test_applied_and_failed_effect_resolutions_persist_tool_truth(
+    target_status: ToolOperationStatus,
+    result_payload: StoredPayload | None,
+    error_code: str | None,
+    error_payload: StoredPayload | None,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="tool-resolution-terminal", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+    try:
+        await state.recovery.tools.reserve(_tool(now))
+        operation = _resolution_operation(now)
+        resolved = await _commands(state).resolve_tool_effect(
+            operation,
+            expected_fence=3,
+            target_status=target_status,
+            result_payload=result_payload,
+            error_code=error_code,
+            error_payload=error_payload,
+        )
+
+        assert resolved.status is target_status
+        assert resolved.result_payload == result_payload
+        assert resolved.error_code == error_code
+        assert resolved.error_payload == error_payload
+        committed_operation = await state.recovery.operations.get(
+            operation.operation_id,
+            tenant_id="tenant",
+        )
+        assert committed_operation is not None
+        assert committed_operation.status is OperationStatus.SUCCEEDED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("conflict", "expected_error"),
+    (
+        ("fence", ErrorCode.TOOL_OPERATION_CONFLICT),
+        ("idempotency", ErrorCode.IDEMPOTENCY_CONFLICT),
+    ),
+)
+async def test_tool_effect_resolution_rejects_stale_fence_and_key_reuse(
+    conflict: str,
+    expected_error: ErrorCode,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="tool-resolution-conflict", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+    try:
+        await state.recovery.tools.reserve(_tool(now))
+        commands = _commands(state)
+        operation = _resolution_operation(now)
+        if conflict == "idempotency":
+            await commands.resolve_tool_effect(
+                operation,
+                expected_fence=3,
+                target_status=ToolOperationStatus.PENDING,
+            )
+            operation = replace(
+                operation,
+                request_digest=canonical_sha256({"resolution": "different"}),
+            )
+            expected_fence = 3
+        else:
+            expected_fence = 2
+
+        with pytest.raises(AIError) as raised:
+            await commands.resolve_tool_effect(
+                operation,
+                expected_fence=expected_fence,
+                target_status=ToolOperationStatus.PENDING,
+            )
+        assert raised.value.code is expected_error
     finally:
         await state.close()

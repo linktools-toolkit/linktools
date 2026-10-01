@@ -679,6 +679,57 @@ class ToolRepositoryImpl(_RepositoryBase):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
+    async def reconcile_expired_claim(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+    ) -> ToolOperationRecord:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+
+        async def attempt() -> ToolOperationRecord:
+            async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
+                record = await transaction.get_record(
+                    self._tool_key(tool_operation_id)
+                )
+                if record is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                current = await self._decode(record, ToolOperationRecord)
+                if current.status is not ToolOperationStatus.CLAIMED:
+                    return current
+                if current.lease_expires_at is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                now = await transaction.now()
+                if current.lease_expires_at > now:
+                    return current
+                reconciled = replace(
+                    current,
+                    status=(
+                        ToolOperationStatus.PENDING
+                        if current.replay_safe
+                        else ToolOperationStatus.EFFECT_UNKNOWN
+                    ),
+                    owner=None if current.replay_safe else current.owner,
+                    lease_expires_at=None,
+                    error_code=(
+                        None
+                        if current.replay_safe
+                        else ErrorCode.TOOL_EFFECT_UNKNOWN.value
+                    ),
+                    updated_at=now,
+                )
+                await self._replace_tool_in_transaction(
+                    transaction,
+                    record,
+                    reconciled,
+                )
+                return reconciled
+
+            return await self._store.mutate(mutate)
+
+        return await self._retry_storage_conflict(attempt)
+
     async def has_by_agent_run(
         self,
         agent_run_id: str,

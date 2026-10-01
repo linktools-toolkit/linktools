@@ -423,6 +423,7 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
     backend._repository_instruction_provenance = {}
     backend._worker_cancel_requests = set()
     backend._worker_shutdown_requests = set()
+    backend._recovery_reconcile_tasks = {}
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     backend._checkpoint_tasks = {task}
@@ -457,6 +458,7 @@ async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None
     backend._repository_instruction_provenance = {}
     backend._worker_cancel_requests = set()
     backend._worker_shutdown_requests = set()
+    backend._recovery_reconcile_tasks = {}
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     backend._execution_durable_tasks = {"execution": {task}}

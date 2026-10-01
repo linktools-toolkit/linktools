@@ -20,6 +20,7 @@ async def test_local_execution_close_surfaces_recorded_worker_failure() -> None:
     backend._subagent_dispatcher = None
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
+    backend._recovery_reconcile_tasks = {}
     backend._worker_failures = {
         "execution": _WorkerFailure(
             ErrorCode.STORAGE_INTEGRITY_ERROR,

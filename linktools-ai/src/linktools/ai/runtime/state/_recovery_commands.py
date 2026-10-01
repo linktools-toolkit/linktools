@@ -100,7 +100,7 @@ class RuntimeRecoveryCommands:
         )
 
     async def commit_cancel_claim(self, execution: ExecutionRecord) -> ExecutionRecord:
-        if execution.status is not ExecutionStatus.STARTED:
+        if execution.status is not ExecutionStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         target = replace(
             execution,
@@ -133,6 +133,14 @@ class RuntimeRecoveryCommands:
                     return CommitObservation(DurableCommitState.COMMITTED, value=current)
                 if current == execution:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if (
+                    current.revision > execution.revision
+                    or current.event_sequence > execution.event_sequence
+                ):
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.STORAGE_CONFLICT),
+                    )
                 return _partial()
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
@@ -176,9 +184,11 @@ class RuntimeRecoveryCommands:
             "execution",
             execution.execution_id,
         )
+        replayed_operation: OperationLedgerRecord | None = None
 
         async def durable_operation() -> OperationLedgerRecord:
             async def mutate(group: StateGroupTransaction) -> OperationLedgerRecord:
+                nonlocal replayed_operation
                 execution_tx = group.transaction(self._execution.state_store)
                 operation_tx = group.transaction(self._execution_operations.state_store)
                 current_operation = await self._execution_operations.get_in_transaction(
@@ -189,6 +199,7 @@ class RuntimeRecoveryCommands:
                 if current_operation is not None:
                     if not _same_operation_identity(current_operation, operation):
                         raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    replayed_operation = current_operation
                     return current_operation
                 stored = await execution_tx.get_record(key)
                 if stored is None:
@@ -241,13 +252,26 @@ class RuntimeRecoveryCommands:
                     operation.operation_id,
                     tenant_id=operation.tenant_id,
                 )
+                if current_operation is not None and not _same_operation_identity(
+                    current_operation,
+                    operation,
+                ):
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
+                    )
                 current_execution = await self._execution.get(
                     execution.execution_id,
                     tenant_id=self._execution.tenant_id,
                 )
                 if current_operation is not None:
-                    if not _same_operation_identity(current_operation, operation):
-                        return _partial()
+                    if replayed_operation is not None:
+                        if current_execution is None:
+                            return _partial()
+                        return CommitObservation(
+                            DurableCommitState.COMMITTED,
+                            value=current_operation,
+                        )
                     if (
                         current_execution is None
                         or current_execution.revision < execution.revision + 1
@@ -259,6 +283,8 @@ class RuntimeRecoveryCommands:
                         DurableCommitState.COMMITTED,
                         value=current_operation,
                     )
+                if replayed_operation is not None:
+                    return _partial()
                 if current_execution == execution:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 return _partial()
@@ -540,7 +566,7 @@ class RuntimeRecoveryCommands:
                     return _partial()
                 if ledger is not None:
                     if not _same_resolution_operation(ledger, operation):
-                        return _partial()
+                        return CommitObservation(DurableCommitState.NOT_COMMITTED)
                     if _resolved_tool_matches(
                         tool,
                         expected_fence=expected_fence,
@@ -551,13 +577,9 @@ class RuntimeRecoveryCommands:
                     ):
                         return CommitObservation(DurableCommitState.COMMITTED, value=tool)
                     return _partial()
-                if (
-                    tool.execution_id == operation.execution_id
-                    and tool.status is ToolOperationStatus.EFFECT_UNKNOWN
-                    and tool.fence == expected_fence
-                ):
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                return _partial()
+                if tool.execution_id != operation.execution_id:
+                    return _partial()
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                     return _partial(error)

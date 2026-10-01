@@ -591,6 +591,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     backend._worker_failures = {}
     backend._worker_cancel_requests = set()
     backend._worker_shutdown_requests = set()
+    backend._recovery_reconcile_tasks = {}
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}
