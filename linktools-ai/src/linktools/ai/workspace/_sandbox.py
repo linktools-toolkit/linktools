@@ -7,12 +7,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ..asset import AssetStoreReader, AssetVersionRef
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ._root import validate_workspace_path
+
+if TYPE_CHECKING:
+    from ..asset import AssetMaterializer
 
 
 class SandboxOperationRejected(AIError):
@@ -113,8 +116,9 @@ class SandboxResource:
         files: Mapping[str, AssetVersionRef],
         *,
         executable_bits: Mapping[str, int] | None = None,
+        materializer: "AssetMaterializer | None" = None,
     ) -> "SandboxResource | None":
-        """Expose pinned Asset files only when their backend has native paths."""
+        """Expose pinned files, optionally materializing a non-native package."""
         if not files:
             return None
         ordered = tuple(sorted(files.items()))
@@ -128,7 +132,12 @@ class SandboxResource:
         refs = tuple(ref for _relative, ref in ordered)
         paths = await reader.local_paths(tuple(ref.key for ref in refs))
         if any(path is None for path in paths):
-            return None
+            if materializer is None:
+                return None
+            materialized = await materializer.materialize(
+                reader, files, executable_bits=executable_bits
+            )
+            return cls(resource_id, materialized.root, materialized.files)
         if await reader.resolve_versions(tuple(ref.key for ref in refs)) != refs:
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         await reader.read_versions(refs)
@@ -174,6 +183,11 @@ class SandboxResource:
                 if actual != path:
                     source = None
                     break
+        if source is None and materializer is not None:
+            materialized = await materializer.materialize(
+                reader, files, executable_bits=executable_bits
+            )
+            return cls(resource_id, materialized.root, materialized.files)
         return cls(resource_id, source, local)
 
 
@@ -368,6 +382,38 @@ def _normalize_stdio_environment(
     return result
 
 
+def _stdio_resource_root(
+    resource_id: str | None,
+    resources: Sequence[SandboxResource],
+) -> Path | None:
+    if resource_id is None:
+        return None
+    if not isinstance(resource_id, str) or not resource_id:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    resource = next((item for item in resources if item.id == resource_id), None)
+    if resource is None or resource.source is None:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    source = resource.source
+    try:
+        root = source.resolve(strict=True)
+        if not source.is_absolute() or source.is_symlink() or not root.is_dir():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        for relative, path in (resource.files or {}).items():
+            expected = root.joinpath(*PurePosixPath(relative).parts).resolve(
+                strict=True
+            )
+            actual = path.resolve(strict=True)
+            if (
+                expected != actual
+                or not expected.is_relative_to(root)
+                or not expected.is_file()
+            ):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    except (OSError, RuntimeError) as error:
+        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+    return root
+
+
 @runtime_checkable
 class StdioSandboxSession(SandboxSession, Protocol):
     async def open_stdio_process(
@@ -377,7 +423,10 @@ class StdioSandboxSession(SandboxSession, Protocol):
         *,
         resources: "Sequence[SandboxResource]" = (),
         environment: "Mapping[str, str] | None" = None,
-    ) -> SandboxStdioProcess: ...
+        cwd_resource_id: str | None = None,
+    ) -> SandboxStdioProcess:
+        """Start in the Workspace or one explicitly granted resource root."""
+        ...
 
 
 def normalize_workspace_input_path(path: str) -> str:

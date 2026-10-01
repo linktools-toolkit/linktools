@@ -38,6 +38,7 @@ from ._sandbox import (
     SandboxSession,
     SandboxStdioProcess,
     _normalize_stdio_environment,
+    _stdio_resource_root,
     normalize_workspace_input_path,
 )
 from ._root import Workspace
@@ -221,6 +222,7 @@ class _LocalSandboxSession:
         *,
         resources: "Sequence[SandboxResource]" = (),
         environment: "Mapping[str, str] | None" = None,
+        cwd_resource_id: str | None = None,
     ) -> SandboxStdioProcess:
         if self._read_policy is not None:
             raise AIError(
@@ -240,9 +242,12 @@ class _LocalSandboxSession:
             self._workspace,
             tuple(resources),
         )
+        resource_root = _stdio_resource_root(cwd_resource_id, selected_resources)
         command_args = _local_stdio_command_args(args, selected_resources)
         process_environment = dict(self._environment)
         process_environment.update(_normalize_stdio_environment(environment))
+        if resource_root is not None:
+            process_environment["PWD"] = str(resource_root)
         current = asyncio.current_task()
         async with self._process_lock:
             if self._state != "OPEN":
@@ -257,7 +262,7 @@ class _LocalSandboxSession:
             if os.name == "nt":
                 job = _WindowsJob.create()
             process_kwargs: dict[str, object] = {
-                "cwd": str(self._root),
+                "cwd": str(self._root if resource_root is None else resource_root),
                 "env": process_environment,
                 "stdin": PIPE,
                 "stdout": PIPE,

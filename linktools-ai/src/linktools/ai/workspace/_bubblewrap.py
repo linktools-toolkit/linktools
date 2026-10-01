@@ -32,6 +32,7 @@ from ._sandbox import (
     SandboxStdioProcess,
     StdioSandbox,
     _normalize_stdio_environment,
+    _stdio_resource_root,
     normalize_workspace_input_path,
 )
 from ._root import Workspace, validate_workspace_path
@@ -337,6 +338,7 @@ class _BubblewrapSandboxSession:
         *,
         resources: "Sequence[SandboxResource]" = (),
         environment: "Mapping[str, str] | None" = None,
+        cwd_resource_id: str | None = None,
     ) -> SandboxStdioProcess:
         async with self._stdio_lock:
             self._ensure_open_sync()
@@ -378,6 +380,7 @@ class _BubblewrapSandboxSession:
                 command=command,
                 command_args=command_args,
                 environment=process_environment,
+                cwd_resource_id=cwd_resource_id,
             )
             runtime_pidfd = _open_runtime_pidfd()
             try:
@@ -1306,6 +1309,7 @@ def _guardian_config(
     command: str | None = None,
     command_args: tuple[str, ...] = (),
     environment: "Mapping[str, str] | None" = None,
+    cwd_resource_id: str | None = None,
 ) -> dict[str, Any]:
     resource_specs = [
         {"id": resource.id, "path": _resource_guest_path(resource.id)}
@@ -1324,6 +1328,7 @@ def _guardian_config(
         command=command,
         command_args=command_args,
         environment=environment,
+        cwd_resource_id=cwd_resource_id,
     )
     return {
         "version": PROTOCOL_VERSION,
@@ -1346,7 +1351,16 @@ def _build_bwrap_args(
     command: str | None = None,
     command_args: tuple[str, ...] = (),
     environment: "Mapping[str, str] | None" = None,
+    cwd_resource_id: str | None = None,
 ) -> list[str]:
+    if cwd_resource_id is not None and mode != "stdio":
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    resource_root = _stdio_resource_root(cwd_resource_id, resources)
+    cwd = (
+        "/workspace"
+        if cwd_resource_id is None
+        else _resource_guest_path(cwd_resource_id)
+    )
     args = [
         str(bwrap),
         "--unshare-user",
@@ -1452,12 +1466,14 @@ def _build_bwrap_args(
             "utf-8",
             "--setenv",
             "PWD",
-            "/workspace",
+            cwd,
             "--chdir",
-            "/workspace",
+            cwd,
         )
     )
     for key, value in sorted((environment or {}).items()):
+        if key == "PWD" and resource_root is not None:
+            continue
         args.extend(("--setenv", key, value))
     if mode == "worker":
         args.extend(
