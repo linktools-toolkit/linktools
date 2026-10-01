@@ -20,6 +20,7 @@ from ._domain import (
     WritableAssetBackend,
 )
 from ._filesystem import FilesystemAssetBackend, filesystem_root
+from ._materialization import AssetMaterializer, MaterializedAssets
 from ._object import AssetObjectKeyFactory
 from ._sql import SqlAssetBackend, build_asset_sql_metadata
 from ._store import AssetCacheAdapter, AssetStore, AssetStoreReader
@@ -30,6 +31,7 @@ __all__ = [
     "AssetError",
     "AssetInfo",
     "AssetKey",
+    "AssetMaterializer",
     "AssetObjectKeyFactory",
     "AssetPathAdapter",
     "AssetRoot",
@@ -39,6 +41,7 @@ __all__ = [
     "DirectoryAssetBackend",
     "FilesystemAssetBackend",
     "InMemoryAssetBackend",
+    "MaterializedAssets",
     "PrefixAssetPathAdapter",
     "SqlAssetBackend",
     "StrictConfigReader",
