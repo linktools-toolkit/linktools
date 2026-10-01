@@ -1653,7 +1653,13 @@ class LocalExecutionBackend:
                     return
                 if not self._accepting:
                     return
-                await self._recovery_coordinator.reconcile_checkpoint(checkpoint)
+                try:
+                    await self._recovery_coordinator.reconcile_checkpoint(checkpoint)
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    await asyncio.sleep(0)
+                    continue
                 current = await self._execution.executions.get(
                     execution_id,
                     tenant_id=self._tenant_id,
