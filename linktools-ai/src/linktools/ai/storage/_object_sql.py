@@ -102,7 +102,7 @@ class SqlObjectStore:
             ),
             name=f"sql-object-put-{_key_digest(self.store_id, key).hex()[:12]}",
         )
-        _track_object_task(self._background_tasks, task, "SQL object put")
+        _track_object_task(self._background_tasks, task)
         return await _finish_owned_task(task)
 
     async def _put_owned(
@@ -298,7 +298,7 @@ class SqlObjectStore:
             self._delete_owned(key, expected_digest=expected_digest),
             name=f"sql-object-delete-{_key_digest(self.store_id, key).hex()[:12]}",
         )
-        _track_object_task(self._background_tasks, task, "SQL object delete")
+        _track_object_task(self._background_tasks, task)
         return await _finish_owned_task(task)
 
     async def _delete_owned(self, key: str, *, expected_digest: str) -> bool:

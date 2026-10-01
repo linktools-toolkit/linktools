@@ -3,7 +3,6 @@
 """Disposable local projections of pinned Asset bytes."""
 
 import asyncio
-import hashlib
 import os
 import shutil
 import stat
@@ -44,7 +43,6 @@ class AssetMaterializer:
         self._roots: set[Path] = set()
         self._lock = asyncio.Lock()
         self._closing = False
-        self._closed = False
 
     async def __aenter__(self) -> "AssetMaterializer":
         self._ensure_open()
@@ -83,13 +81,6 @@ class AssetMaterializer:
             self._ensure_open()
             refs = tuple(ref for _relative, ref in ordered)
             values = await reader.read_versions(refs)
-            if len(values) != len(refs) or any(
-                not isinstance(value, bytes)
-                or len(value) != ref.size
-                or hashlib.sha256(value).hexdigest() != ref.etag
-                for ref, value in zip(refs, values)
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._ensure_open()
             try:
                 root = Path(tempfile.mkdtemp(prefix="linktools-assets-")).absolute()
@@ -99,7 +90,7 @@ class AssetMaterializer:
             try:
                 contents = tuple(
                     (relative, value)
-                    for (relative, _ref), value in zip(ordered, values)
+                    for (relative, _ref), value in zip(ordered, values, strict=True)
                 )
                 local = await _complete_task(asyncio.create_task(
                     asyncio.to_thread(_write_files, root, contents, modes)
@@ -133,14 +124,13 @@ class AssetMaterializer:
                         failure = error
             if failure is not None:
                 raise failure
-            self._closed = True
 
     async def _remove_root(self, root: Path) -> None:
         await _complete_task(asyncio.create_task(asyncio.to_thread(_remove_tree, root)))
         self._roots.discard(root)
 
     def _ensure_open(self) -> None:
-        if self._closing or self._closed:
+        if self._closing:
             raise AIError(ErrorCode.STORAGE_CLOSED)
 
 
@@ -224,9 +214,9 @@ def _remove_tree(root: Path) -> None:
             ) from None
     except OSError as error:
         raise AIError(
-                ErrorCode.STORAGE_UNAVAILABLE,
-                safe_details={"phase": "asset_materialization_cleanup"},
-            ) from error
+            ErrorCode.STORAGE_UNAVAILABLE,
+            safe_details={"phase": "asset_materialization_cleanup"},
+        ) from error
 
 
 def _remove_readonly_file(
