@@ -14,6 +14,7 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     Principal,
 )
+from linktools.ai.errors import ErrorCode
 from linktools.ai.runtime import ExecutionStreamEvent, ExecutionTreeEvent
 from linktools.cli import CommandError
 from linktools.commands.ai.run import _emit_result
@@ -269,8 +270,10 @@ def test_acp_ignores_unknown_additive_stream_event() -> None:
 class _ACPExecution:
     execution_id = "execution"
 
-    def __init__(self, event_type: str) -> None:
+    def __init__(self, event_type: str, payload: object = None) -> None:
         self._event_type = event_type
+        self._payload = {} if payload is None else payload
+        self.stream_finished = False
 
     def watch(
         self,
@@ -280,7 +283,8 @@ class _ACPExecution:
         assert include_content is True
 
         async def values() -> AsyncIterator[ExecutionTreeEvent]:
-            yield _tree_event(self._event_type, {}, sequence=1)
+            yield _tree_event(self._event_type, self._payload, sequence=1)
+            self.stream_finished = True
 
         return values()
 
@@ -344,3 +348,137 @@ async def test_acp_prompt_uses_string_terminal_stop_reason(
     )
 
     assert response["stopReason"] == expected_stop_reason
+
+
+class _ACPRequestError(Exception):
+    def __init__(self, code: int, message: str, data: object = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+    @classmethod
+    def internal_error(cls, data: object = None) -> "_ACPRequestError":
+        return cls(-32603, "Internal error", data)
+
+    @classmethod
+    def invalid_request(cls, data: object = None) -> "_ACPRequestError":
+        return cls(-32600, "Invalid request", data)
+
+    @classmethod
+    def invalid_params(cls, data: object = None) -> "_ACPRequestError":
+        return cls(-32602, "Invalid params", data)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "stored_code", "expected_code"),
+    (
+        (ExecutionEventType.EXECUTION_FAILED.value, "MODEL_TIMEOUT", ErrorCode.MODEL_TIMEOUT),
+        (ExecutionEventType.EXECUTION_FAILED.value, None, ErrorCode.EXECUTION_FAILED),
+        (ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value, "secret-invalid-code", ErrorCode.STORAGE_RECOVERY_REQUIRED),
+    ),
+)
+async def test_acp_surfaces_sanitized_execution_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+    stored_code: str | None,
+    expected_code: ErrorCode,
+) -> None:
+    execution = _ACPExecution(event_type, {
+        "error_code": stored_code,
+        "exception_message": "secret-exception",
+        "safe_error_details": {"unexpected": "secret-details"},
+    })
+    agent = ACPAgent(
+        _ACPAgentRuntime(execution),  # type: ignore[arg-type]
+        principal=Principal("principal", "tenant", "service"),
+        memory_scope="memory",
+    )
+    agent._initialized = True
+    monkeypatch.setattr(
+        "linktools.ai.acp._require_acp",
+        lambda: (SimpleNamespace(RequestError=_ACPRequestError), _ACPSchema),
+    )
+    with pytest.raises(_ACPRequestError) as error:
+        await agent.prompt("session", [SimpleNamespace(text="prompt")])  # type: ignore[list-item]
+    assert error.value.code == -32603
+    assert isinstance(error.value.data, dict)
+    assert error.value.data["code"] == expected_code.value
+    assert error.value.data["operation_id"] == "execution"
+    assert error.value.data["safe_details"] == {"execution_id": "execution"}
+    assert "secret" not in str(error.value.data)
+    assert execution.stream_finished
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "expected_code", "reason"),
+    (
+        ("initialize", -32600, "no_common_protocol_version"),
+        ("authenticate", -32602, "unknown_auth_method"),
+        ("new_session", -32600, "initialize_required"),
+    ),
+)
+@pytest.mark.parametrize("sdk", (False, True))
+async def test_acp_protocol_rejections_use_supported_error_factories(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    expected_code: int,
+    reason: str,
+    sdk: bool,
+) -> None:
+    if sdk:
+        acp = pytest.importorskip("acp")
+        schema = pytest.importorskip("acp.schema")
+    else:
+        acp = SimpleNamespace(RequestError=_ACPRequestError, PROTOCOL_VERSION=1)
+        schema = _ACPSchema
+    agent = ACPAgent(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        principal=Principal("principal", "tenant", "service"),
+        memory_scope="memory",
+    )
+    monkeypatch.setattr("linktools.ai.acp._require_acp", lambda: (acp, schema))
+    with pytest.raises(acp.RequestError) as error:
+        if operation == "initialize":
+            await agent.initialize(acp.PROTOCOL_VERSION + 1)
+        elif operation == "authenticate":
+            await agent.authenticate("unsupported")
+        else:
+            await agent.new_session("/workspace")
+    assert error.value.code == expected_code
+    assert error.value.data == {"reason": reason}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_type", (
+    ExecutionEventType.EXECUTION_SUCCEEDED.value,
+    ExecutionEventType.EXECUTION_CANCELLED.value,
+    ExecutionEventType.EXECUTION_FAILED.value,
+    ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value,
+))
+async def test_acp_optional_sdk_serializes_terminal_prompt_outcomes(
+    monkeypatch: pytest.MonkeyPatch, event_type: str,
+) -> None:
+    acp = pytest.importorskip("acp")
+    schema = pytest.importorskip("acp.schema")
+    monkeypatch.setattr("linktools.ai.acp._require_acp", lambda: (acp, schema))
+    agent = ACPAgent(
+        _ACPAgentRuntime(_ACPExecution(event_type)),  # type: ignore[arg-type]
+        principal=Principal("principal", "tenant", "service"),
+        memory_scope="memory",
+    )
+    initialized = await agent.initialize(acp.PROTOCOL_VERSION)
+    assert initialized.protocol_version == acp.PROTOCOL_VERSION
+    if event_type in {
+        ExecutionEventType.EXECUTION_FAILED.value,
+        ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value,
+    }:
+        with pytest.raises(acp.RequestError) as error:
+            await agent.prompt("session", [SimpleNamespace(text="prompt")])  # type: ignore[list-item]
+        assert error.value.to_error_obj()["code"] == -32603
+    else:
+        response = await agent.prompt("session", [SimpleNamespace(text="prompt")])  # type: ignore[list-item]
+        assert response.model_dump(by_alias=True)["stopReason"] == (
+            "cancelled" if event_type == ExecutionEventType.EXECUTION_CANCELLED.value else "end_turn"
+        )
