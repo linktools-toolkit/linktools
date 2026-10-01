@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiosqlite import Cursor
 from linktools.ai.asset import (
     AssetKey,
     AssetRoot,
@@ -725,4 +726,54 @@ async def test_sql_asset_concurrent_initialization_preserves_namespace(tmp_path:
         )
     finally:
         await asyncio.gather(*(backend.close() for backend in backends))
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_cancelled_asset_read_releases_cursor_before_followup_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'assets.db'}")
+    await provision_asset_database(engine)
+    backend = SqlAssetBackend(engine, namespace="cancelled-read")
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    key = AssetKey("resource", "example")
+    await store.put(key, b"old")
+    await store.stat(key)
+    fetching = asyncio.Event()
+    release = asyncio.Event()
+    original_fetchall = Cursor.fetchall
+
+    async def pause_fetchall(cursor: Cursor):
+        if (
+            not fetching.is_set()
+            and cursor.description
+            and "payload_json" in {column[0] for column in cursor.description}
+        ):
+            fetching.set()
+            await release.wait()
+        return await original_fetchall(cursor)
+
+    monkeypatch.setattr(Cursor, "fetchall", pause_fetchall)
+    reader = asyncio.create_task(store.get(key))
+    try:
+        await asyncio.wait_for(fetching.wait(), 5)
+        reader.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        try:
+            await reader
+        except asyncio.CancelledError:
+            await store.put(key, b"new")
+            assert await store.get(key) == b"new"
+        else:
+            pytest.fail("read cancellation was not propagated")
+    finally:
+        release.set()
+        await asyncio.gather(reader, return_exceptions=True)
+        await store.close()
         await engine.dispose()

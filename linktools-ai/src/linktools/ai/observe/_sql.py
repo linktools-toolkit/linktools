@@ -215,14 +215,14 @@ class SqlMetricStore:
                             sample_count=scanned_count, sample_sum=scanned_count,
                         ),
                     ))
-            return await execute_sql_metric_query(
+            return await self._context.run_statement(execute_sql_metric_query(
                 session,
                 namespace_key=namespace_key,
                 dialect_name=dialect_name,
                 plan=plan,
                 namespace=namespace,
                 verify=dialect_name == "sqlite",
-            )
+            ))
 
     async def _verify_query_records(
         self,
@@ -300,20 +300,20 @@ class SqlMetricStore:
         }
 
         async def write_and_read(session: "AsyncSession") -> Mapping[str, object]:
-            await self._context.dialect.insert_ignore_conflict(
+            await self._context.run_statement(self._context.dialect.insert_ignore_conflict(
                 session,
                 table=self._definitions,
                 values=cast("Mapping[str, SqlValue]", values),
                 index_elements=("namespace_digest", "metric_name", "revision"),
-            )
+            ))
             row = (
-                await session.execute(
+                await self._context.run_statement(session.execute(
                     select(self._definitions).where(
                         self._definitions.c.namespace_digest == namespace_key,
                         self._definitions.c.metric_name == definition.name,
                         self._definitions.c.revision == definition.revision,
                     )
-                )
+                ))
             ).mappings().first()
             if row is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -348,7 +348,7 @@ class SqlMetricStore:
             .limit(1)
         )
         async with self._context.sessions() as session:
-            row = (await session.execute(statement)).mappings().first()
+            row = (await self._context.run_statement(session.execute(statement))).mappings().first()
         if row is None:
             return None
         return self._decode_definition_row(namespace, namespace_key, row)
@@ -372,7 +372,7 @@ class SqlMetricStore:
             .limit(1)
         )
         async with self._context.sessions() as session:
-            row = (await session.execute(statement)).mappings().first()
+            row = (await self._context.run_statement(session.execute(statement))).mappings().first()
         if row is None:
             return None
         return self._decode_definition_row(namespace, namespace_key, row)
@@ -428,19 +428,19 @@ class SqlMetricStore:
         identities = tuple(collapsed)
 
         async def write_and_validate(session: "AsyncSession") -> None:
-            await self._context.dialect.insert_ignore_conflict_many(
+            await self._context.run_statement(self._context.dialect.insert_ignore_conflict_many(
                 session,
                 table=self._observations,
                 rows=cast("list[Mapping[str, SqlValue]]", rows),
                 index_elements=("observation_digest",),
-            )
+            ))
             result = (
-                await session.execute(
+                await self._context.run_statement(session.execute(
                     select(
                         self._observations.c.observation_digest,
                         self._observations.c.payload_digest,
                     ).where(self._observations.c.observation_digest.in_(identities))
-                )
+                ))
             ).all()
             existing = {str(row[0]): str(row[1]) for row in result}
             if len(existing) != len(collapsed):
@@ -467,7 +467,7 @@ class SqlMetricStore:
             .limit(1)
         )
         async with self._context.sessions() as session:
-            row = (await session.execute(statement)).mappings().first()
+            row = (await self._context.run_statement(session.execute(statement))).mappings().first()
         if row is None:
             return None
         observation = self._decode_observation_row(namespace, namespace_key, row)
@@ -522,7 +522,7 @@ class SqlMetricStore:
             self._observations.c.observation_digest,
         ).limit(limit + 1)
         async with self._context.sessions() as session:
-            rows = (await session.execute(statement)).mappings().all()
+            rows = (await self._context.run_statement(session.execute(statement))).mappings().all()
 
         has_more = len(rows) > limit
         selected = rows[:limit]
@@ -547,12 +547,12 @@ class SqlMetricStore:
         namespace_key = namespace_digest(namespace)
 
         async def delete_rows(session: "AsyncSession") -> int:
-            result = await session.execute(
+            result = await self._context.run_statement(session.execute(
                 delete(self._observations).where(
                     self._observations.c.namespace_digest == namespace_key,
                     self._observations.c.occurred_at < before,
                 )
-            )
+            ))
             return int(result.rowcount or 0)
 
         return await self._context.run_mutation(delete_rows, domain="metrics.prune")
