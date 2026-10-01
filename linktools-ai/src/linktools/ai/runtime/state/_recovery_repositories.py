@@ -703,19 +703,28 @@ class ToolRepositoryImpl(_RepositoryBase):
                 now = await transaction.now()
                 if current.lease_expires_at > now:
                     return current
-                unknown = replace(
+                reconciled = replace(
                     current,
-                    status=ToolOperationStatus.EFFECT_UNKNOWN,
+                    status=(
+                        ToolOperationStatus.PENDING
+                        if current.replay_safe
+                        else ToolOperationStatus.EFFECT_UNKNOWN
+                    ),
+                    owner=None if current.replay_safe else current.owner,
                     lease_expires_at=None,
-                    error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+                    error_code=(
+                        None
+                        if current.replay_safe
+                        else ErrorCode.TOOL_EFFECT_UNKNOWN.value
+                    ),
                     updated_at=now,
                 )
                 await self._replace_tool_in_transaction(
                     transaction,
                     record,
-                    unknown,
+                    reconciled,
                 )
-                return unknown
+                return reconciled
 
             return await self._store.mutate(mutate)
 

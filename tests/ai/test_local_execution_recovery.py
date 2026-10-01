@@ -342,7 +342,11 @@ class _FailingToolOperations:
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
 
-def _tool_operation(status: ToolOperationStatus) -> SimpleNamespace:
+def _tool_operation(
+    status: ToolOperationStatus,
+    *,
+    replay_safe: bool = False,
+) -> SimpleNamespace:
     return SimpleNamespace(
         tool_operation_id="tool-operation",
         execution_id="execution",
@@ -350,7 +354,7 @@ def _tool_operation(status: ToolOperationStatus) -> SimpleNamespace:
         tool_call_id="tool-call",
         idempotency_key_digest="key-digest",
         tool_name="tool",
-        replay_safe=False,
+        replay_safe=replay_safe,
         status=status,
         fence=1,
         error_code=(
@@ -430,7 +434,12 @@ async def test_local_cancel_without_worker_allows_deferred_pending_tool_call() -
     current = replace(_record(), status=ExecutionStatus.CANCELLING)
     backend._execution.executions.record = current
     backend._tool_operations = _ToolOperations(
-        (_tool_operation(ToolOperationStatus.PENDING),)
+        (
+            _tool_operation(
+                ToolOperationStatus.PENDING,
+                replay_safe=True,
+            ),
+        )
     )
 
     assert await backend.cancel(current) is CancelEffectOutcome.CONFIRMED
