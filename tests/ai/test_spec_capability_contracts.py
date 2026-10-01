@@ -422,6 +422,20 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
     assert restored == definition
 
 
+@pytest.mark.parametrize("mode", (0o2, 0o20, 0o4111))
+def test_skill_resources_reject_non_executable_permission_bits(mode: int) -> None:
+    asset = AssetVersionRef(
+        AssetKey("skill", "review/guide.md"),
+        "primary",
+        StorageEntryRevision(1),
+        "a" * 64,
+        7,
+    )
+    with pytest.raises(AIError) as error:
+        SkillResource("guide.md", asset, mode)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
     with pytest.raises(AIError) as error:
         SkillDefinition.from_contract(

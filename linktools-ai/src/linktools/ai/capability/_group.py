@@ -29,7 +29,12 @@ from ..spec import (
 from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
-from ._contribution import CapabilityContribution, _freeze_contribution
+from ._contribution import (
+    CapabilityContribution,
+    _freeze_contribution,
+    _validate_external_capability_id,
+    _validate_revision,
+)
 from ._declaration import (
     BuiltinDeclarationLoader,
     _bind_mcp_contribution,
@@ -434,20 +439,10 @@ def _capability_registration_id(
 
 
 
-def _validate_external_capability_id(value: str) -> None:
-    if value.startswith("linktools."):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
 def _validate_tool_effect_policy(effect_policy: str, plan_safe: bool) -> None:
     if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if not isinstance(plan_safe, bool):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
-def _validate_revision(value: int) -> None:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 

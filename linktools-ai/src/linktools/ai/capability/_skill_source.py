@@ -264,7 +264,7 @@ def _validate_resource_mode(mode: object) -> None:
         isinstance(mode, bool)
         or not isinstance(mode, int)
         or mode < 0
-        or mode > 0o111
+        or mode & ~0o111
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 

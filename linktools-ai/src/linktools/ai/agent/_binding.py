@@ -243,7 +243,7 @@ class AgentBindingContract:
         if (
             not isinstance(selected, list)
             or not isinstance(subagents, list)
-            or mode not in {"text", "structured"}
+            or mode not in ("text", "structured")
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:

@@ -24,7 +24,12 @@ from ..spec import (
     mcp_server_selector,
     parse_mcp_tool_selector,
 )
-from ._binding import AgentBinding, AgentBindingContract, CapabilityPin
+from ._binding import (
+    AgentBinding,
+    AgentBindingContract,
+    CapabilityPin,
+    _compiled_agent_selected_pins,
+)
 from ._compiled import CompiledAgent
 from ._output import OutputBinding, bind_output, restore_output
 
@@ -161,7 +166,7 @@ class AgentCompiler:
                 AgentSpecCodec().to_contract_payload(compiled_agent.spec)
             ),
             model_contract=dict(compiled_agent.model.contract),
-            selected=tuple(_pin(candidate) for candidate in _selected_candidates(compiled_agent)),
+            selected=_compiled_agent_selected_pins(compiled_agent),
             subagents=tuple(subagents),
             output_mode=output_binding.mode,
             output_schema=output_binding.schema_definition,
@@ -443,32 +448,6 @@ class AgentCompiler:
             tool_policy=tuple(tool_policy),
             mcp_policy=tuple(mcp_policy),
         )
-
-
-def _selected_candidates(
-    compiled_agent: CompiledAgent,
-) -> "tuple[CapabilityContribution[object], ...]":
-    return tuple(
-        (
-            *sorted(
-                (
-                    *compiled_agent.selected_tools,
-                    *compiled_agent.selected_skills,
-                    *compiled_agent.selected_mcp,
-                ),
-                key=lambda item: (item.kind, item.id),
-            ),
-            *compiled_agent.selected_capabilities,
-        )
-    )
-
-
-def _pin(candidate: CapabilityContribution[object]) -> CapabilityPin:
-    return CapabilityPin(
-        candidate.kind,
-        candidate.id,
-        candidate.contract,
-    )
 
 
 def _workspace_selector_classes(
