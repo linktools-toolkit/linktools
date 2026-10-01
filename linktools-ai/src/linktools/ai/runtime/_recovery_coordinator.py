@@ -737,14 +737,23 @@ class _RecoveryCoordinator:
                 )
                 return
             if active_claims:
-                raise AIError(
-                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                    safe_details={
-                        "execution_id": execution.execution_id,
-                        "phase": "startup_tool_claims_active",
-                        "active_tool_claim_count": active_claims,
-                    },
+                _logger.info(
+                    "recovery reconciliation deferred by active tool claim: execution=%s count=%s",
+                    execution.execution_id,
+                    active_claims,
                 )
+                return
+            cancel_operations = await self._port._pending_cancel_operations(
+                execution.execution_id,
+                tenant_id=self._port.tenant_id,
+            )
+            if cancel_operations:
+                await self._port._complete_recovered_cancel(
+                    execution,
+                    checkpoint,
+                    cancel_operations,
+                )
+                return
         principal = Principal(
             execution.principal_id,
             self._port.tenant_id,
@@ -898,17 +907,17 @@ class _RecoveryCoordinator:
             tenant_id=tenant_id,
         )
         self._port._reset_local_producer(execution_id)
+        if cancel_operations:
+            return await self._port._complete_recovered_cancel(
+                current,
+                checkpoint,
+                cancel_operations,
+            )
         resumed, _ = await self._port._commit_recovery_resume(current)
         self._port._publish_recovery_resumed(
             execution_id,
             resumed.event_sequence,
         )
-        if cancel_operations:
-            return await self._port._complete_recovered_cancel(
-                resumed,
-                checkpoint,
-                cancel_operations,
-            )
         await self.reconcile_checkpoint(checkpoint)
         latest = await self._port.load_execution(
             execution_id,

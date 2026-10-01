@@ -100,7 +100,10 @@ class RuntimeRecoveryCommands:
         )
 
     async def commit_cancel_claim(self, execution: ExecutionRecord) -> ExecutionRecord:
-        if execution.status is not ExecutionStatus.STARTED:
+        if execution.status not in {
+            ExecutionStatus.STARTED,
+            ExecutionStatus.RECOVERY_REQUIRED,
+        }:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         target = replace(
             execution,

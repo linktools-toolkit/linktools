@@ -3887,13 +3887,20 @@ class LocalExecutionBackend:
 
     async def _complete_recovered_cancel(
         self,
-        resumed: ExecutionRecord,
+        execution: ExecutionRecord,
         checkpoint: RecoveryCheckpoint,
         operations: tuple[OperationLedgerRecord, ...],
     ) -> ExecutionRecord:
-        cancelling = await self._recovery_commands_for(
-            resumed.execution_id
-        ).commit_cancel_claim(resumed)
+        cancelling = execution
+        if cancelling.status in {
+            ExecutionStatus.STARTED,
+            ExecutionStatus.RECOVERY_REQUIRED,
+        }:
+            cancelling = await self._recovery_commands_for(
+                cancelling.execution_id
+            ).commit_cancel_claim(cancelling)
+        elif cancelling.status is not ExecutionStatus.CANCELLING:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         terminal = await self._commit_terminal(
             cancelling,
             ExecutionStatus.CANCELLED,

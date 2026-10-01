@@ -205,10 +205,9 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
             await commands.commit_resumed(recovery)
         assert stale.value.code is ErrorCode.STORAGE_CONFLICT
 
-        resumed = await commands.commit_resumed(fresh)
-        cancelling = await commands.commit_cancel_claim(resumed)
+        cancelling = await commands.commit_cancel_claim(fresh)
         assert cancelling.status is ExecutionStatus.CANCELLING
-        assert cancelling.event_sequence == resumed.event_sequence
+        assert cancelling.event_sequence == fresh.event_sequence
 
         events = await state.execution.events.list(
             "execution",
@@ -219,7 +218,6 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
         assert tuple(value.event_type for value in events.items) == (
             ExecutionEventType.EXECUTION_RECOVERY_REQUIRED,
             ExecutionEventType.CANCEL_REQUESTED,
-            ExecutionEventType.EXECUTION_RESUMED,
         )
     finally:
         await state.close()

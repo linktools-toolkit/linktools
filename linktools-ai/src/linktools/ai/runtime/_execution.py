@@ -1633,6 +1633,8 @@ class DefaultExecutionService:
                 ExecutionStatus.WAITING_DEFERRED,
                 ExecutionStatus.FINALIZING,
                 ExecutionStatus.RECOVERY_REQUIRED,
+                ExecutionStatus.CANCELLING,
+                ExecutionStatus.CANCELLING,
             }
         ):
             return ExecutionHandle(execution.execution_id)
@@ -2133,6 +2135,7 @@ class DefaultExecutionService:
                 in {
                     ExecutionStatus.WAITING_DEFERRED,
                     ExecutionStatus.RECOVERY_REQUIRED,
+                    ExecutionStatus.CANCELLING,
                 }
             ):
                 await self._acquire_start_dependency_hold(
@@ -2954,7 +2957,6 @@ class DefaultExecutionService:
                 )
                 if resolved is not None:
                     return resolved
-                return CancelExecutionResult(execution_id, False)
             if operation.status is OperationStatus.FAILED:
                 raise _stable_operation_error(operation.error_code)
         else:
@@ -3005,26 +3007,29 @@ class DefaultExecutionService:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         try:
-            try:
-                cancelling = await self._backend.commit_cancel_checkpoint(
-                    ExecutionCancelRequestCommit(
-                        execution_id=execution_id,
-                        expected_revision=execution.revision,
-                        expected_event_sequence=execution.event_sequence,
-                        operation_id=operation.operation_id,
-                        requested_at=datetime.now(timezone.utc),
-                    ),
-                    expected_status=execution.status,
-                )
-            except AIError as error:
-                if error.code is not ErrorCode.STORAGE_CONFLICT:
+            if execution.status is ExecutionStatus.CANCELLING:
+                cancelling = execution
+            else:
+                try:
+                    cancelling = await self._backend.commit_cancel_checkpoint(
+                        ExecutionCancelRequestCommit(
+                            execution_id=execution_id,
+                            expected_revision=execution.revision,
+                            expected_event_sequence=execution.event_sequence,
+                            operation_id=operation.operation_id,
+                            requested_at=datetime.now(timezone.utc),
+                        ),
+                        expected_status=execution.status,
+                    )
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    resolved = await self._resolve_cancel_race(
+                        execution_id, request.principal.tenant_id, operation
+                    )
+                    if resolved is not None:
+                        return resolved
                     raise
-                resolved = await self._resolve_cancel_race(
-                    execution_id, request.principal.tenant_id, operation
-                )
-                if resolved is not None:
-                    return resolved
-                raise
             if cancelling.status is not ExecutionStatus.CANCELLING:
                 resolved = await self._resolve_cancel_race(
                     execution_id,
