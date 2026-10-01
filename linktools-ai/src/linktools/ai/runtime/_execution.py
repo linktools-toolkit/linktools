@@ -1628,12 +1628,12 @@ class DefaultExecutionService:
             return ExecutionHandle(execution.execution_id)
         if (
             existing.status is IdempotencyStatus.STARTED
-            and execution.status is ExecutionStatus.WAITING_DEFERRED
-        ):
-            return ExecutionHandle(execution.execution_id)
-        if (
-            existing.status is IdempotencyStatus.STARTED
-            and execution.status is ExecutionStatus.FINALIZING
+            and execution.status
+            in {
+                ExecutionStatus.WAITING_DEFERRED,
+                ExecutionStatus.FINALIZING,
+                ExecutionStatus.RECOVERY_REQUIRED,
+            }
         ):
             return ExecutionHandle(execution.execution_id)
         if (
@@ -1997,6 +1997,7 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.STARTED and started.status in {
                 ExecutionStatus.WAITING_DEFERRED,
                 ExecutionStatus.FINALIZING,
+                ExecutionStatus.RECOVERY_REQUIRED,
             }:
                 await self._acquire_start_dependency_hold(
                     started,
