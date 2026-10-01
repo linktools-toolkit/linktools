@@ -298,6 +298,7 @@ class _ToolOperations:
     ) -> None:
         self.records = records
         self.expired_claims = expired_claims
+        self.reconcile_calls = 0
 
     async def list_by_execution(
         self,
@@ -315,6 +316,7 @@ class _ToolOperations:
         tenant_id: str,
     ) -> object:
         del tenant_id
+        self.reconcile_calls += 1
         record = next(
             value
             for value in self.records
@@ -363,6 +365,24 @@ def _tool_operation(
             else None
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_recovery_effect_query_does_not_reconcile_claims() -> None:
+    backend = _backend()
+    operations = _ToolOperations(
+        (_tool_operation(ToolOperationStatus.CLAIMED),),
+        expired_claims=True,
+    )
+    backend._tool_operations = operations
+
+    effects = await backend._recovery_failure_effects(
+        "execution",
+        tenant_id="tenant",
+    )
+
+    assert effects == ()
+    assert operations.reconcile_calls == 0
 
 
 @pytest.mark.asyncio

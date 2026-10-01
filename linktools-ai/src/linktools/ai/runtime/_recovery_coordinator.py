@@ -105,6 +105,13 @@ class _RecoveryCoordinatorPort(Protocol):
         tenant_id: str,
     ) -> tuple[ExecutionRecoveryEffect, ...]: ...
 
+    async def _reconcile_tool_effects(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[ExecutionRecoveryEffect, ...]: ...
+
     async def _get_tool_operation(
         self,
         operation_id: str,
@@ -709,7 +716,7 @@ class _RecoveryCoordinator:
                 RecoveryCheckpointState.WAITING,
             }
         ):
-            effects = await self._port._recovery_failure_effects(
+            effects = await self._port._reconcile_tool_effects(
                 execution.execution_id,
                 tenant_id=self._port.tenant_id,
             )

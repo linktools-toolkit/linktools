@@ -1244,14 +1244,14 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLING,
         }:
             return CancelEffectOutcome.UNKNOWN
-        effects, pending = await self._terminal_tool_effects(
+        effects, active_claims = await self._terminal_tool_effects(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
         if effects:
             await self._require_tool_effect_recovery(execution, effects)
             return CancelEffectOutcome.UNKNOWN
-        if pending:
+        if active_claims:
             return CancelEffectOutcome.UNKNOWN
         return (
             CancelEffectOutcome.CONFIRMED
@@ -3636,6 +3636,34 @@ class LocalExecutionBackend:
         *,
         tenant_id: str,
     ) -> tuple[ExecutionRecoveryEffect, ...]:
+        if self._tool_operations is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        records = await self._tool_operations.list_by_execution(
+            execution_id,
+            tenant_id=tenant_id,
+        )
+        return tuple(
+            ExecutionRecoveryEffect(
+                operation_id=record.tool_operation_id,
+                execution_id=record.execution_id,
+                agent_run_id=record.agent_run_id,
+                tool_call_id=record.tool_call_id,
+                tool_name=record.tool_name,
+                fence=record.fence,
+                idempotency_key_digest=record.idempotency_key_digest,
+                replay_safe=record.replay_safe,
+                error_code=record.error_code,
+            )
+            for record in records
+            if record.status is ToolOperationStatus.EFFECT_UNKNOWN
+        )
+
+    async def _reconcile_tool_effects(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[ExecutionRecoveryEffect, ...]:
         effects, _ = await self._terminal_tool_effects(
             execution_id,
             tenant_id=tenant_id,
@@ -3724,19 +3752,19 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLING,
         }:
             return None
-        effects, pending = await self._terminal_tool_effects(
+        effects, active_claims = await self._terminal_tool_effects(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
         if effects:
             return await self._require_tool_effect_recovery(execution, effects)
-        if pending:
+        if active_claims:
             raise AIError(
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
                 safe_details={
                     "execution_id": execution.execution_id,
                     "phase": "tool_operations_unsettled",
-                    "pending_tool_operation_count": pending,
+                    "active_tool_claim_count": active_claims,
                 },
             )
         return None
