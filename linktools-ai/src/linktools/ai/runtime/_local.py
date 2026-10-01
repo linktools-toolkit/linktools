@@ -3926,7 +3926,7 @@ class LocalExecutionBackend:
                     cancelling.revision,
                     cancelling.event_sequence,
                     operation.operation_id,
-                    operation.created_at,
+                    datetime.now(timezone.utc),
                 ),
                 expected_status=ExecutionStatus.STARTED,
             )

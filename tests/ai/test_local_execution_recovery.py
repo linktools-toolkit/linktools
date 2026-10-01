@@ -23,8 +23,6 @@ from linktools.ai.runtime._local import LocalExecutionBackend, _is_infrastructur
 from linktools.ai.runtime.state._contracts import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
-    OperationLedgerRecord,
-    RecoveryCheckpoint,
     StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec
@@ -601,10 +599,7 @@ async def test_recovered_started_cancel_commits_cancel_event_before_terminal(
     backend = _backend()
     current = _record()
     backend._execution.executions.record = current
-    operation = SimpleNamespace(
-        operation_id="cancel-operation",
-        created_at=datetime.now(timezone.utc),
-    )
+    operation = SimpleNamespace(operation_id="cancel-operation")
     checkpoint = SimpleNamespace(agent_run_id="agent-run")
     calls: list[tuple[str, object]] = []
 
