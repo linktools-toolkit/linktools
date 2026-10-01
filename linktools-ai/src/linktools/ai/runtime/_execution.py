@@ -2128,7 +2128,11 @@ class DefaultExecutionService:
                 )
             elif (
                 reservation.idempotency.status is IdempotencyStatus.STARTED
-                and reservation.execution.status is ExecutionStatus.WAITING_DEFERRED
+                and reservation.execution.status
+                in {
+                    ExecutionStatus.WAITING_DEFERRED,
+                    ExecutionStatus.RECOVERY_REQUIRED,
+                }
             ):
                 await self._acquire_start_dependency_hold(
                     reservation.execution,
