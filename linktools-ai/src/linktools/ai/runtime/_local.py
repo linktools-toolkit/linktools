@@ -1657,7 +1657,28 @@ class LocalExecutionBackend:
                     return
                 if not self._accepting:
                     return
-                await self._recovery_coordinator.reconcile_checkpoint(checkpoint)
+                try:
+                    await self._recovery_coordinator.reconcile_checkpoint(checkpoint)
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    current = await self._execution.executions.get(
+                        execution_id,
+                        tenant_id=self._tenant_id,
+                    )
+                    if current is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                    if (
+                        current.status
+                        not in {
+                            ExecutionStatus.STARTED,
+                            ExecutionStatus.CANCELLING,
+                        }
+                        or self.worker_installed(execution_id)
+                    ):
+                        return
+                    await asyncio.sleep(1)
+                    continue
                 current = await self._execution.executions.get(
                     execution_id,
                     tenant_id=self._tenant_id,
