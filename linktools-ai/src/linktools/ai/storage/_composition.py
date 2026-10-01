@@ -798,6 +798,14 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             raise ValueError("idempotency_key and request_digest must be provided together")
         writer = self._require_writer()
         if isinstance(writer, BatchStorageWriter):
+            if idempotency_key is not None:
+                receipt = await writer.batch_result(idempotency_key)
+                if receipt is not None:
+                    if receipt.request_digest != request_digest:
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    self._validate_writer_batch_result(changes, receipt)
+                    self._invalidate_writer_view()
+                    return receipt
             writer_expected_revision = None
             if expected_revision is not None:
                 capture = await self._capture_metadata()
