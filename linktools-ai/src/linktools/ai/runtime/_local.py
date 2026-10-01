@@ -307,7 +307,6 @@ class LocalExecutionBackend:
         self._terminal_events: dict[str, asyncio.Event] = {}
         self._pending_audit_events: dict[str, list[ExecutionEventAppend]] = {}
         self._pending_audit_locks: dict[str, asyncio.Lock] = {}
-        self._recovery_relaunch_ids: set[str] = set()
         self._agent_run_only_worker_exits: set[str] = set()
         self._checkpoint_tasks: set[asyncio.Task[object]] = set()
         self._execution_durable_tasks: dict[
@@ -475,11 +474,11 @@ class LocalExecutionBackend:
             durable_sequence=event_sequence,
         )
 
-    def _mark_recovery_relaunch(self, execution_id: str) -> None:
+    def _mark_recovery_relaunch(self, execution_id: str) -> bool:
         if self.worker_installed(execution_id):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return False
         self._worker_failures.pop(execution_id, None)
-        self._recovery_relaunch_ids.add(execution_id)
+        return True
 
     async def _validate_start(
         self, request: ExecutionRequest, execution: ExecutionRecord
@@ -1371,7 +1370,8 @@ class LocalExecutionBackend:
             thinking=current.thinking,
             correlation=current.correlation,
         )
-        self._mark_recovery_relaunch(current.execution_id)
+        if not self._mark_recovery_relaunch(current.execution_id):
+            return
         await self.launch(request, current, resume=decision)
         _logger.info(
             "deferred execution relaunched: execution=%s",
@@ -1638,10 +1638,14 @@ class LocalExecutionBackend:
 
     async def _wait_and_reconcile_tool_claims(self, execution_id: str) -> None:
         while self._accepting:
-            effects, active_claims = await self._reconcile_tool_effects(
+            if self.worker_installed(execution_id):
+                return
+            effects, active_claims = await self._terminal_tool_effects(
                 execution_id,
                 tenant_id=self._tenant_id,
             )
+            if self.worker_installed(execution_id):
+                return
             if effects or active_claims == 0:
                 checkpoint = await self._recovery.checkpoints.get(
                     execution_id,
@@ -1653,13 +1657,7 @@ class LocalExecutionBackend:
                     return
                 if not self._accepting:
                     return
-                try:
-                    await self._recovery_coordinator.reconcile_checkpoint(checkpoint)
-                except AIError as error:
-                    if error.code is not ErrorCode.STORAGE_CONFLICT:
-                        raise
-                    await asyncio.sleep(0)
-                    continue
+                await self._recovery_coordinator.reconcile_checkpoint(checkpoint)
                 current = await self._execution.executions.get(
                     execution_id,
                     tenant_id=self._tenant_id,
@@ -2751,9 +2749,6 @@ class LocalExecutionBackend:
         checkpoint: RecoveryCheckpoint | None = None
         agent_run_id: str | None = None
         recovery_history_agent_run_id: str | None = None
-        recovery_relaunch_ids = self._recovery_relaunch_ids
-        exact_recovery_context = execution_id in recovery_relaunch_ids
-        recovery_relaunch_ids.discard(execution_id)
         metric_recorder = self._metric_recorder
         metric_id = uuid.uuid4().hex if metric_recorder is not None else None
         metric_started = monotonic_ns() if metric_id is not None else None
@@ -2888,11 +2883,33 @@ class LocalExecutionBackend:
                         }
                     )
                     if unresolved:
-                        await self._reconcile_unresolved_tool_operations(
-                            recovery_history_agent_run_id,
-                            unresolved,
-                            tenant_id=self._tenant_id,
-                        )
+                        try:
+                            await self._reconcile_unresolved_tool_operations(
+                                recovery_history_agent_run_id,
+                                unresolved,
+                                tenant_id=self._tenant_id,
+                            )
+                        except AIError as error:
+                            if error.code is not ErrorCode.TOOL_EFFECT_UNKNOWN:
+                                raise
+                            persisted = await self._execution.executions.get(
+                                execution_id,
+                                tenant_id=self._tenant_id,
+                            )
+                            if persisted is None:
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            recovered = await self._check_terminal_tool_effects(
+                                persisted
+                            )
+                            if (
+                                recovered is None
+                                or recovered.status
+                                is not ExecutionStatus.RECOVERY_REQUIRED
+                            ):
+                                raise
+                            metric_status = recovered.status.value
+                            metric_error_code = recovered.error_code
+                            return
             tool_repository = self._tool_operations
             tool_operations = (
                 RuntimeToolOperationBridge(
@@ -3797,17 +3814,6 @@ class LocalExecutionBackend:
             )
             for record in records
             if record.status is ToolOperationStatus.EFFECT_UNKNOWN
-        )
-
-    async def _reconcile_tool_effects(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> tuple[tuple[ExecutionRecoveryEffect, ...], int]:
-        return await self._terminal_tool_effects(
-            execution_id,
-            tenant_id=tenant_id,
         )
 
     async def _terminal_tool_effects(
