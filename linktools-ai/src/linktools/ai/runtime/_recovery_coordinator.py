@@ -743,6 +743,10 @@ class _RecoveryCoordinator:
                     active_claims,
                 )
                 return
+        if (
+            execution.status in {ExecutionStatus.STARTED, ExecutionStatus.CANCELLING}
+            and checkpoint.handoff_phase is RecoveryHandoffPhase.NONE
+        ):
             cancel_operations = await self._port._pending_cancel_operations(
                 execution.execution_id,
                 tenant_id=self._port.tenant_id,
