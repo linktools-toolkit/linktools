@@ -2,15 +2,16 @@
 # -*- coding: utf-8 -*-
 """Authoring adapters for Agent, Skill, and MCP declarations."""
 
+import os
+import re
 from collections.abc import Mapping
 
 from ..core import validate_logical_id
 from ..errors import AIError, ErrorCode
 from ._codec import (
     AgentSpecCodec,
+    MCPServerSpecCodec,
     SkillSpecCodec,
-    _decode_author_revision,
-    _decode_mcp_author_server,
     _parse_skill_markdown,
     _skill_revision,
     decode_author_json_mapping,
@@ -189,7 +190,8 @@ class MCPServerSpecAdapter:
     ) -> MCPServerSpec:
         return self._decode(
             decode_author_json_mapping(data),
-            package_id=package_id,
+            logical_id=package_id,
+            package=package_id is not None,
         )
 
     def decode_yaml(
@@ -200,7 +202,8 @@ class MCPServerSpecAdapter:
     ) -> MCPServerSpec:
         return self._decode(
             decode_author_yaml_mapping(data),
-            package_id=package_id,
+            logical_id=package_id,
+            package=package_id is not None,
         )
 
     def decode_config(
@@ -225,11 +228,10 @@ class MCPServerSpecAdapter:
             ):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
             result.append(
-                _decode_mcp_author_server(
+                self._decode(
                     value,
-                    identity=identity,
+                    logical_id=identity,
                     revision=revision,
-                    package=False,
                 )
             )
         return tuple(result)
@@ -238,7 +240,9 @@ class MCPServerSpecAdapter:
         self,
         raw: Mapping[str, object],
         *,
-        package_id: "str | None",
+        logical_id: "str | None" = None,
+        package: bool = False,
+        revision: int = 1,
     ) -> MCPServerSpec:
         version = raw.get("version", 1)
         if isinstance(version, bool) or not isinstance(version, int) or version != 1:
@@ -247,24 +251,88 @@ class MCPServerSpecAdapter:
                 "unsupported MCP author version",
                 safe_details={"field": "version"},
             )
-        identity = raw.get("id")
-        if package_id is None:
-            if not isinstance(identity, str) or not identity.strip():
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-            return _decode_mcp_author_server(
-                raw,
-                identity=identity,
-                revision=_decode_author_revision(raw.get("revision", 1)),
-                package=False,
-            )
-        if "id" in raw and identity != package_id:
+        if logical_id is not None and "id" in raw and raw["id"] != logical_id:
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-        return _decode_mcp_author_server(
-            raw,
-            identity=package_id,
-            revision=_decode_author_revision(raw.get("revision", 1)),
-            package=True,
+        identity = raw.get("id", logical_id)
+        if not isinstance(identity, str) or not identity.strip():
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if "type" in raw and "transport" in raw:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        transport_key = "type" if "type" in raw else "transport"
+        if transport_key in raw:
+            transport = raw[transport_key]
+        else:
+            has_command = "command" in raw
+            has_url = "url" in raw
+            if has_command == has_url:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            transport = "stdio" if has_command else "streamable-http"
+        if not isinstance(transport, str):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if transport == "http":
+            transport = "streamable-http"
+
+        payload = dict(raw)
+        payload.pop("type", None)
+        payload.update(
+            version=version,
+            id=identity,
+            revision=raw.get("revision", revision),
+            transport=transport,
         )
+        if package and transport == "stdio":
+            payload.setdefault("resource", {"kind": "mcp", "id": identity})
+        if isinstance(payload.get("url"), str):
+            payload["url"] = _expand_mcp_environment(
+                payload["url"], server_id=identity, field="url"
+            )
+        for field in ("env", "headers"):
+            values = payload.get(field)
+            if isinstance(values, Mapping):
+                payload[field] = {
+                    key: _expand_mcp_environment(
+                        value, server_id=identity, field=f"{field}.{key}"
+                    )
+                    if isinstance(key, str) and isinstance(value, str)
+                    else value
+                    for key, value in values.items()
+                }
+        return MCPServerSpecCodec().from_payload(payload)
+
+
+def _expand_mcp_environment(value: str, *, server_id: str, field: str) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(value):
+        if value.startswith("$$", index):
+            result.append("$")
+            index += 2
+        elif value.startswith("${", index):
+            end = value.find("}", index + 2)
+            expression = value[index + 2 :] if end == -1 else value[index + 2 : end]
+            name = re.match(r"[A-Za-z_][A-Za-z0-9_]*", expression)
+            details = {"server_id": server_id, "field": field}
+            if name is not None:
+                details["variable"] = name.group()
+            if end == -1 or name is None or name.end() != len(expression):
+                raise AIError(
+                    ErrorCode.OUTPUT_CONTRACT_INVALID,
+                    "MCP environment reference is invalid",
+                    safe_details=details,
+                )
+            replacement = os.environ.get(expression)
+            if replacement is None:
+                raise AIError(
+                    ErrorCode.OUTPUT_CONTRACT_INVALID,
+                    "MCP environment variable is missing",
+                    safe_details=details,
+                )
+            result.append(replacement)
+            index = end + 1
+        else:
+            result.append(value[index])
+            index += 1
+    return "".join(result)
 
 
 def _decode_agent_mapping(raw: Mapping[str, object]) -> AgentSpec:

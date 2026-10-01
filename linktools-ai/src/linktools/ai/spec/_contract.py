@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Immutable declaration contracts for Agent, Skill, and MCP specifications."""
 
+import math
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -391,14 +392,33 @@ class MCPServerSpec:
         repr=False,
         compare=False,
     )
+    init_timeout: "float | None" = field(default=None, kw_only=True, compare=False)
+    read_timeout: "float | None" = field(default=None, kw_only=True, compare=False)
     revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
         _validate_revision(self.revision)
         if not isinstance(self.id, str) or not self.id.strip():
             raise ValueError("MCP server id must be non-empty")
-        if self.transport not in {"stdio", "streamable-http", "sse"}:
+        if not isinstance(self.transport, str) or self.transport not in {
+            "stdio", "streamable-http", "sse"
+        }:
             raise ValueError("MCP server transport is invalid")
+        for name, value in (
+            ("init_timeout", self.init_timeout),
+            ("read_timeout", self.read_timeout),
+        ):
+            if value is None:
+                continue
+            message = f"MCP {name} must be finite positive seconds or None"
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(message)
+            try:
+                finite = math.isfinite(value)
+            except OverflowError:
+                raise ValueError(message) from None
+            if not finite or value <= 0:
+                raise ValueError(message)
         if isinstance(self.args, (str, bytes, bytearray)) or not isinstance(
             self.args,
             Sequence,

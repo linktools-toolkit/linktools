@@ -676,7 +676,7 @@ def test_mcp_package_resource_ignores_unrelated_fields() -> None:
     assert server.resource == AssetKey("mcp", "server")
 
 
-def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> None:
+def test_mcp_non_package_author_resource_field_preserves_execution_semantics() -> None:
     server = MCPServerSpecAdapter().decode_json(
         json.dumps(
             {
@@ -692,7 +692,7 @@ def test_mcp_non_package_author_resource_field_has_no_runtime_semantics() -> Non
         ).encode(),
     )
 
-    assert server.resource is None
+    assert server.resource == AssetKey("mcp", "server/assets")
 
 
 def test_durable_spec_readers_ignore_additive_fields() -> None:

@@ -297,6 +297,10 @@ class MCPServerSpecCodec:
             payload["url"] = value.url
             if value.headers:
                 payload["headers"] = dict(value.headers)
+        if value.init_timeout is not None:
+            payload["init_timeout"] = value.init_timeout
+        if value.read_timeout is not None:
+            payload["read_timeout"] = value.read_timeout
         return payload
 
     def to_contract_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
@@ -377,10 +381,13 @@ def _decode_mcp_wire_server(raw: Mapping[str, object]) -> MCPServerSpec:
     if (
         not isinstance(identity, str)
         or not identity.strip()
+        or not isinstance(transport, str)
         or transport not in {"stdio", "streamable-http", "sse"}
     ):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
 
+    if "type" in raw:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     try:
         if transport == "stdio":
             if "url" in raw or "headers" in raw:
@@ -409,6 +416,8 @@ def _decode_mcp_wire_server(raw: Mapping[str, object]) -> MCPServerSpec:
                 resource,
                 transport="stdio",
                 env=dict(env),
+                init_timeout=raw.get("init_timeout"),
+                read_timeout=raw.get("read_timeout"),
                 revision=revision,
             )
 
@@ -430,6 +439,8 @@ def _decode_mcp_wire_server(raw: Mapping[str, object]) -> MCPServerSpec:
             transport=transport,
             url=url,
             headers=dict(headers),
+            init_timeout=raw.get("init_timeout"),
+            read_timeout=raw.get("read_timeout"),
             revision=revision,
         )
     except AIError:
@@ -438,90 +449,14 @@ def _decode_mcp_wire_server(raw: Mapping[str, object]) -> MCPServerSpec:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
 
 
-def _decode_mcp_author_server(
-    raw: Mapping[str, object],
-    *,
-    identity: str,
-    revision: int,
-    package: bool,
-) -> MCPServerSpec:
-    if "type" in raw and "transport" in raw:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    transport_key = "type" if "type" in raw else "transport"
-    transport_value = raw.get(transport_key)
-    if transport_key in raw and transport_value is None:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    has_command = "command" in raw
-    has_url = "url" in raw
-    if transport_value is None:
-        if has_command == has_url:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        transport = "stdio" if has_command else "streamable-http"
-    elif isinstance(transport_value, str):
-        transport = "streamable-http" if transport_value in {"http", "streamable-http"} else transport_value
-    else:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    if transport not in {"stdio", "streamable-http", "sse"}:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    if package and transport != "stdio":
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-
-    if transport == "stdio":
-        if "url" in raw or "headers" in raw:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        command = raw.get("command")
-        args = raw.get("args", [])
-        env = raw.get("env", {})
-        if not isinstance(command, str) or not command.strip():
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if not isinstance(env, Mapping) or any(
-            not isinstance(key, str) or not key or not isinstance(value, str)
-            for key, value in env.items()
-        ):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        try:
-            return MCPServerSpec(
-                identity,
-                command,
-                tuple(args),
-                AssetKey("mcp", identity) if package else None,
-                transport="stdio",
-                env=dict(env),
-                revision=revision,
-            )
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-
-    if any(key in raw for key in ("command", "args", "env")):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    url = raw.get("url")
-    headers = raw.get("headers", {})
-    if not isinstance(url, str) or not url.strip():
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    if not isinstance(headers, Mapping) or any(
-        not isinstance(key, str) or not key or not isinstance(value, str)
-        for key, value in headers.items()
-    ):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    try:
-        return MCPServerSpec(
-            identity,
-            transport=transport,
-            url=url,
-            headers=dict(headers),
-            revision=revision,
-        )
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-
-
 def _decode_mcp_binding_contract(
     raw: Mapping[str, object],
 ) -> "tuple[dict[str, JsonValue], tuple[AssetVersionRef, ...] | None]":
     _require_v1(raw)
-    if any(key in raw for key in ("command", "url", "env", "headers")):
+    if any(
+        key in raw
+        for key in ("command", "url", "env", "headers", "init_timeout", "read_timeout")
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     identity = raw.get("id")
     revision = _decode_revision(raw)
@@ -531,6 +466,7 @@ def _decode_mcp_binding_contract(
     if (
         not isinstance(identity, str)
         or not identity.strip()
+        or not isinstance(transport, str)
         or transport not in {"stdio", "streamable-http", "sse"}
         or not isinstance(args, list)
         or any(not isinstance(item, str) for item in args)
@@ -577,12 +513,6 @@ def _decode_mcp_binding_contract(
     if "execution_policy" in raw:
         _execution_policy_payload(raw["execution_policy"])
     return semantic, resource_versions
-
-
-def _decode_author_revision(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    return value
 
 
 def _encode(value: "dict[str, object]") -> bytes:
