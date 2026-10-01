@@ -224,6 +224,67 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recovery_cancel_claim_reports_concurrent_intent_as_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="recovery-cancel-race", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+    execution = _execution(now)
+    try:
+        await state.execution.executions.create(execution)
+        commands = _commands(state)
+        recovery = await commands.commit_recovery_required(
+            execution,
+            error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+            safe_error_details={"operation_id": "tool-operation", "fence": 3},
+        )
+        concurrent = OperationLedgerInput(
+            "concurrent-cancel",
+            "tenant",
+            ResourceKind.EXECUTION,
+            "execution",
+            "execution",
+            OperationKind.EXECUTION_CANCEL,
+            OperationStatus.PENDING,
+            canonical_sha256({"cancel": "concurrent"}),
+            None,
+            None,
+            None,
+            True,
+            now,
+            now,
+        )
+        repository = state.execution.executions
+        original_compare_and_swap = repository.compare_and_swap
+        advanced = False
+
+        async def race_compare_and_swap(*args, **kwargs):
+            nonlocal advanced
+            if not advanced:
+                advanced = True
+                await commands.commit_cancel_intent(recovery, concurrent)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return await original_compare_and_swap(*args, **kwargs)
+
+        monkeypatch.setattr(repository, "compare_and_swap", race_compare_and_swap)
+
+        with pytest.raises(AIError) as raised:
+            await commands.commit_cancel_claim(recovery)
+
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+        current = await state.execution.executions.get(
+            "execution",
+            tenant_id="tenant",
+        )
+        assert current is not None
+        assert current.status is ExecutionStatus.RECOVERY_REQUIRED
+        assert current.event_sequence == recovery.event_sequence + 1
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="tool-resolution", tenant_id="tenant")

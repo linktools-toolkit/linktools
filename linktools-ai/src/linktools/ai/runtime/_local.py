@@ -3916,10 +3916,21 @@ class LocalExecutionBackend:
         operations: tuple[OperationLedgerRecord, ...],
     ) -> ExecutionRecord:
         cancelling = execution
-        if cancelling.status in {
-            ExecutionStatus.STARTED,
-            ExecutionStatus.RECOVERY_REQUIRED,
-        }:
+        if cancelling.status is ExecutionStatus.STARTED:
+            if not operations:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            operation = operations[0]
+            cancelling = await self.commit_cancel_checkpoint(
+                ExecutionCancelRequestCommit(
+                    cancelling.execution_id,
+                    cancelling.revision,
+                    cancelling.event_sequence,
+                    operation.operation_id,
+                    operation.created_at,
+                ),
+                expected_status=ExecutionStatus.STARTED,
+            )
+        elif cancelling.status is ExecutionStatus.RECOVERY_REQUIRED:
             cancelling = await self._recovery_commands_for(
                 cancelling.execution_id
             ).commit_cancel_claim(cancelling)

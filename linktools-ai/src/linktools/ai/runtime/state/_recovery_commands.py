@@ -136,6 +136,14 @@ class RuntimeRecoveryCommands:
                     return CommitObservation(DurableCommitState.COMMITTED, value=current)
                 if current == execution:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if (
+                    current.revision > execution.revision
+                    or current.event_sequence > execution.event_sequence
+                ):
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.STORAGE_CONFLICT),
+                    )
                 return _partial()
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:

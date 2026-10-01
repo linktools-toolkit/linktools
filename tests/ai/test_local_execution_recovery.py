@@ -20,7 +20,13 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import CancelEffectOutcome, ExecutionStartIdentity
 from linktools.ai.runtime._local import LocalExecutionBackend, _is_infrastructure_error
-from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
+from linktools.ai.runtime.state._contracts import (
+    ExecutionCancelRequestCommit,
+    ExecutionRecord,
+    OperationLedgerRecord,
+    RecoveryCheckpoint,
+    StoredUserInput,
+)
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
@@ -586,6 +592,69 @@ class _Sessions:
     ) -> object:
         self.releases.append((session_id, tenant_id, execution_id))
         return SimpleNamespace(active_execution_id=None)
+
+
+@pytest.mark.asyncio
+async def test_recovered_started_cancel_commits_cancel_event_before_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _backend()
+    current = _record()
+    backend._execution.executions.record = current
+    operation = SimpleNamespace(
+        operation_id="cancel-operation",
+        created_at=datetime.now(timezone.utc),
+    )
+    checkpoint = SimpleNamespace(agent_run_id="agent-run")
+    calls: list[tuple[str, object]] = []
+
+    async def commit_cancel_checkpoint(
+        commit: ExecutionCancelRequestCommit,
+        *,
+        expected_status: ExecutionStatus,
+    ) -> ExecutionRecord:
+        calls.append(("checkpoint", (commit, expected_status)))
+        return replace(
+            current,
+            status=ExecutionStatus.CANCELLING,
+            revision=current.revision + 1,
+            event_sequence=current.event_sequence + 1,
+        )
+
+    async def commit_terminal(
+        execution: ExecutionRecord,
+        status: ExecutionStatus,
+        output: object,
+        error_code: str | None,
+        stop_reason: object,
+        **kwargs: object,
+    ) -> ExecutionRecord:
+        del output, error_code, stop_reason, kwargs
+        calls.append(("terminal", execution))
+        return replace(execution, status=status)
+
+    async def settle_cancel_operation(
+        candidate: object,
+        execution: ExecutionRecord,
+    ) -> None:
+        calls.append(("settle", (candidate, execution)))
+
+    monkeypatch.setattr(backend, "commit_cancel_checkpoint", commit_cancel_checkpoint)
+    monkeypatch.setattr(backend, "_commit_terminal", commit_terminal)
+    monkeypatch.setattr(backend, "_settle_cancel_operation", settle_cancel_operation)
+
+    terminal = await backend._complete_recovered_cancel(
+        current,
+        checkpoint,
+        (operation,),
+    )
+
+    assert terminal.status is ExecutionStatus.CANCELLED
+    assert [name for name, _ in calls] == ["checkpoint", "terminal", "settle"]
+    commit, expected_status = calls[0][1]
+    assert isinstance(commit, ExecutionCancelRequestCommit)
+    assert commit.operation_id == operation.operation_id
+    assert expected_status is ExecutionStatus.STARTED
 
 
 @pytest.mark.asyncio
