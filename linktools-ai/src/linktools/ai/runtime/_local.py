@@ -316,6 +316,7 @@ class LocalExecutionBackend:
         ] = {}
         self._worker_cancel_requests: set[str] = set()
         self._worker_shutdown_requests: set[str] = set()
+        self._recovery_reconcile_tasks: dict[str, asyncio.Task[None]] = {}
         self._accepting = True
         execution_run_store = self._run_stores[RuntimeDomain.EXECUTION]
         conversation_run_store = self._run_stores[RuntimeDomain.CONVERSATION]
@@ -1572,6 +1573,80 @@ class LocalExecutionBackend:
     async def reconcile(self) -> None:
         await self._recovery_coordinator.reconcile()
 
+    def _defer_recovery_reconcile(self, execution_id: str) -> None:
+        task = self._recovery_reconcile_tasks.get(execution_id)
+        if task is not None and not task.done():
+            return
+        task = asyncio.create_task(
+            self._wait_and_reconcile_tool_claims(execution_id),
+            name=f"ai-recovery-reconcile-{execution_id}",
+        )
+        self._recovery_reconcile_tasks[execution_id] = task
+
+        def consume(done: asyncio.Task[None]) -> None:
+            if self._recovery_reconcile_tasks.get(execution_id) is done:
+                self._recovery_reconcile_tasks.pop(execution_id, None)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                return
+            except BaseException as error:  # noqa: BLE001
+                if isinstance(error, AIError):
+                    failure = _WorkerFailure(
+                        error.code,
+                        dict(error.safe_details),
+                        error.diagnostics,
+                        error.category,
+                        error.retryable,
+                        error.operation_id,
+                    )
+                else:
+                    failure = _WorkerFailure(
+                        ErrorCode.INTERNAL_ERROR,
+                        {"phase": "recovery_reconcile"},
+                        ErrorDiagnostics.from_exception(error),
+                    )
+                details = dict(failure.safe_details)
+                details["execution_id"] = execution_id
+                self._worker_failures[execution_id] = _WorkerFailure(
+                    failure.code,
+                    details,
+                    failure.diagnostics,
+                    failure.category,
+                    failure.retryable,
+                    failure.operation_id,
+                )
+                self._live_broker.complete(execution_id)
+                _logger.error(
+                    "deferred recovery reconciliation failed: execution=%s code=%s",
+                    execution_id,
+                    failure.code.value,
+                    exc_info=True,
+                )
+
+        task.add_done_callback(consume)
+
+    async def _wait_and_reconcile_tool_claims(self, execution_id: str) -> None:
+        while self._accepting:
+            effects, active_claims = await self._reconcile_tool_effects(
+                execution_id,
+                tenant_id=self._tenant_id,
+            )
+            if effects or active_claims == 0:
+                checkpoint = await self._recovery.checkpoints.get(
+                    execution_id,
+                    tenant_id=self._tenant_id,
+                )
+                if checkpoint is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+                    return
+                if not self._accepting:
+                    return
+                await self._recovery_coordinator.reconcile_checkpoint(checkpoint)
+                return
+            await asyncio.sleep(1)
+
     async def _reconcile_session_recovery(
         self,
         checkpoint: RecoveryCheckpoint,
@@ -2410,6 +2485,13 @@ class LocalExecutionBackend:
 
     async def close(self) -> None:
         self._accepting = False
+        recovery_tasks = tuple(self._recovery_reconcile_tasks.values())
+        for task in recovery_tasks:
+            task.cancel()
+        if recovery_tasks:
+            await asyncio.gather(*recovery_tasks, return_exceptions=True)
+        self._recovery_reconcile_tasks.clear()
+
         tasks = tuple(self._tasks.items())
         for execution_id, task in tasks:
             current = await self._execution.executions.get(
@@ -2533,6 +2615,7 @@ class LocalExecutionBackend:
         self._checkpoint_tasks.clear()
         self._worker_cancel_requests.clear()
         self._worker_shutdown_requests.clear()
+        self._recovery_reconcile_tasks.clear()
         self._execution_task_map().clear()
 
     async def release_runtime_execution(
@@ -2545,6 +2628,9 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         task = self._tasks.get(execution_id)
         if task is not None and not task.done():
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        recovery_task = self._recovery_reconcile_tasks.get(execution_id)
+        if recovery_task is not None and not recovery_task.done():
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         execution_tasks = self._execution_task_map().get(execution_id)
         pending_execution_tasks = tuple(
@@ -2569,6 +2655,7 @@ class LocalExecutionBackend:
         self._pending_audit_events.pop(execution_id, None)
         self._pending_audit_locks.pop(execution_id, None)
         self._agent_run_only_worker_exits.discard(execution_id)
+        self._recovery_reconcile_tasks.pop(execution_id, None)
         self._execution_task_map().pop(execution_id, None)
         _logger.debug(
             "local execution runtime cache released: tenant=%s execution=%s",
@@ -2605,14 +2692,19 @@ class LocalExecutionBackend:
                 }:
                     raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
                 if current.status is ToolOperationStatus.CLAIMED:
-                    expires = current.lease_expires_at
-                    if expires is None:
-                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
-                    remaining = (expires - datetime.now(timezone.utc)).total_seconds()
-                    if remaining > 0:
-                        await asyncio.sleep(min(1.0, remaining))
+                    current = await self._tool_operations.reconcile_expired_claim(
+                        current.tool_operation_id,
+                        tenant_id=tenant_id,
+                    )
+                    if current.status is ToolOperationStatus.CLAIMED:
+                        await asyncio.sleep(1)
                         continue
-                # Admission classifies expired claims in the repository transaction.
+                    if current.status in {
+                        ToolOperationStatus.EFFECT_UNKNOWN,
+                        ToolOperationStatus.CANCELLED,
+                    }:
+                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                # Admission classifies replay-safe PENDING claims on the next tool call.
                 break
         _logger.info(
             "recovery tool operations reconciled: agent_run=%s count=%s",

@@ -2045,7 +2045,7 @@ def _crash_session_process(
 
     async def admit(self: RuntimeStateCommands, request: Any) -> Any:
         if phase == "effect_unconfirmed":
-            request = replace(request, lease_seconds=1)
+            request = replace(request, lease_seconds=5)
         return await original_admission(self, request)
 
     async def activate(self: RuntimeStateCommands, *args: Any, **kwargs: Any) -> Any:
@@ -2167,6 +2167,60 @@ async def _exit_at_boundary(
             process.kill()
             await asyncio.to_thread(process.join, 5)
         process.close()
+
+
+@pytest.mark.asyncio
+async def test_active_tool_claim_reconciles_after_restart_without_external_nudge(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "active-claim-restart.db"
+    effect_log = tmp_path / "active-claim-effects.txt"
+    await _exit_at_boundary(database, effect_log, "sqlite", "effect_unconfirmed")
+    committed_effects = effect_log.read_text().splitlines()
+    assert len(committed_effects) == 1
+    execution_id = committed_effects[0]
+    calls: list[str] = []
+    state = RuntimeStorage.sqlite(database)
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=effect_log,
+    )
+    try:
+        async with Runtime.open(
+            "session-tool-crash",
+            models=_ToolModels(),
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            current = await state.execution.executions.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert current is not None
+            assert current.status is ExecutionStatus.STARTED
+            tools = await state.recovery.tools.list_by_execution(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert len(tools) == 1
+            assert tools[0].status is ToolOperationStatus.CLAIMED
+
+            execution = await runtime.executions.get(execution_id)
+            with pytest.raises(AIError) as raised:
+                await execution.wait(timeout_seconds=10)
+
+            assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+            recovered = await state.execution.executions.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert recovered is not None
+            assert recovered.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert calls == []
+            assert effect_log.read_text().splitlines() == committed_effects
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio

@@ -112,6 +112,8 @@ class _RecoveryCoordinatorPort(Protocol):
         tenant_id: str,
     ) -> tuple[tuple[ExecutionRecoveryEffect, ...], int]: ...
 
+    def _defer_recovery_reconcile(self, execution_id: str) -> None: ...
+
     async def _get_tool_operation(
         self,
         operation_id: str,
@@ -737,6 +739,7 @@ class _RecoveryCoordinator:
                 )
                 return
             if active_claims:
+                self._port._defer_recovery_reconcile(execution.execution_id)
                 _logger.info(
                     "recovery reconciliation deferred by active tool claim: execution=%s count=%s",
                     execution.execution_id,
