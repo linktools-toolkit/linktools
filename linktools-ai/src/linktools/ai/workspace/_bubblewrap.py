@@ -24,6 +24,7 @@ from linktools.core import environ
 
 from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
+from ._local_process import _finish_task
 from ._sandbox import (
     SandboxOperationRejected,
     ReadOnlySandboxPolicy,
@@ -40,6 +41,7 @@ from ._root import Workspace, validate_workspace_path
 from ._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
     ERROR_EFFECT_VALUES,
+    GUARDIAN_CHILD_TIMEOUT_SECONDS,
     GUARDIAN_EXIT_OK,
     GUARDIAN_EXIT_SESSION_FAILED,
     MAX_ACTIVE_REQUESTS,
@@ -55,7 +57,8 @@ _logger = environ.get_logger("ai.workspace.bubblewrap")
 _GUARDIAN_MODULE = "linktools.ai.workspace.sandbox_guardian"
 _WORKER_MODULE = "linktools.ai.workspace.sandbox_worker"
 _HANDSHAKE_TIMEOUT_SECONDS = 10.0
-_CLOSE_TIMEOUT_SECONDS = 5.0
+# Allow the guardian's TERM and KILL windows plus namespace teardown/reporting.
+_CLOSE_TIMEOUT_SECONDS = 3 * GUARDIAN_CHILD_TIMEOUT_SECONDS
 _MAX_RESULT_CHARS = 50_000
 _MOUNTPOINTS = (
     "workspace",
@@ -194,7 +197,7 @@ class BubblewrapSandbox:
             return session
         except asyncio.CancelledError:
             if process is not None:
-                await _abort_guardian_logged(process)
+                await _finish_task(asyncio.create_task(_abort_guardian_logged(process)))
             raise
         except AIError:
             if process is not None:
@@ -325,7 +328,7 @@ class _BubblewrapSandboxSession:
             return await asyncio.shield(task)
         except asyncio.CancelledError as cancellation:
             try:
-                await asyncio.shield(task)
+                await _finish_task(task)
             except BaseException as operation_error:
                 raise cancellation from operation_error
             raise cancellation
@@ -395,7 +398,7 @@ class _BubblewrapSandboxSession:
             except BaseException:
                 if control_fd >= 0:
                     _close_fd(control_fd)
-                await _abort_guardian(process)
+                await _finish_task(asyncio.create_task(_abort_guardian(process)))
                 raise
             if self._state != "OPEN":
                 _close_fd(control_fd)
@@ -522,7 +525,7 @@ class _BubblewrapSandboxSession:
             except asyncio.CancelledError as cancellation:
                 if sent.is_set():
                     try:
-                        await asyncio.shield(task)
+                        await _finish_task(task)
                     except BaseException as cleanup_error:
                         if not isinstance(cleanup_error, asyncio.CancelledError):
                             _logger.exception(
@@ -550,7 +553,7 @@ class _BubblewrapSandboxSession:
             await asyncio.shield(task)
         except asyncio.CancelledError as cancellation:
             try:
-                await asyncio.shield(task)
+                await _finish_task(task)
             except BaseException as cleanup_error:
                 if not isinstance(cleanup_error, asyncio.CancelledError):
                     _logger.exception(
@@ -1157,6 +1160,7 @@ class _BubblewrapStdioProcess:
         self._stdin_closed = False
         self._state = "OPEN"
         self._lock = asyncio.Lock()
+        self._stdout_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         self._on_close = on_close
         self._stderr_task = asyncio.create_task(
@@ -1185,13 +1189,14 @@ class _BubblewrapStdioProcess:
             or max_bytes < 1
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if self._state != "OPEN":
-            raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
         stdout = self._process.stdout
         if stdout is None:
             raise AIError(ErrorCode.SANDBOX_SESSION_LOST)
         try:
-            return await stdout.read(max_bytes)
+            async with self._stdout_lock:
+                if self._state != "OPEN":
+                    raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
+                return await stdout.read(max_bytes)
         except OSError as error:
             raise AIError(ErrorCode.SANDBOX_SESSION_LOST) from error
 
@@ -1203,10 +1208,6 @@ class _BubblewrapStdioProcess:
             stdin = self._process.stdin
             if stdin is not None and not stdin.is_closing():
                 stdin.close()
-                try:
-                    await stdin.wait_closed()
-                except (BrokenPipeError, ConnectionError, OSError):
-                    pass
 
     async def close(self) -> None:
         async with self._lock:
@@ -1223,7 +1224,7 @@ class _BubblewrapStdioProcess:
             await asyncio.shield(task)
         except asyncio.CancelledError as cancellation:
             try:
-                await asyncio.shield(task)
+                await _finish_task(task)
             except BaseException as cleanup_error:
                 raise cancellation from cleanup_error
             raise cancellation
@@ -1235,8 +1236,11 @@ class _BubblewrapStdioProcess:
             raise
 
     async def _close_impl(self) -> None:
+        drain_task: asyncio.Task[None] | None = None
         try:
             await self.close_stdin()
+            _request_guardian_shutdown(self._process)
+            drain_task = asyncio.create_task(self._drain_stdout())
             await _wait_guardian(
                 self._process,
                 allow_session_failure=True,
@@ -1250,11 +1254,16 @@ class _BubblewrapStdioProcess:
                 or isinstance(returncode, bool)
             ):
                 raise AIError(ErrorCode.SANDBOX_SESSION_LOST)
+            await drain_task
             await self._stderr_task
         except BaseException as error:
             if isinstance(error, AIError):
                 raise
             raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
+        finally:
+            if drain_task is not None:
+                drain_task.cancel()
+                await asyncio.gather(drain_task, return_exceptions=True)
         guardian_returncode = self._process.returncode
         _close_fd(self._control_fd)
         self._control_fd = -1
@@ -1265,6 +1274,13 @@ class _BubblewrapStdioProcess:
             guardian_returncode,
             returncode,
         )
+
+    async def _drain_stdout(self) -> None:
+        async with self._stdout_lock:
+            stdout = self._process.stdout
+            if stdout is not None:
+                while await stdout.read(65536):
+                    pass
 
     async def _drain_stderr(self, stderr: asyncio.StreamReader) -> None:
         retained = 0
@@ -1583,7 +1599,7 @@ async def _spawn_guardian(
             process = await asyncio.shield(spawn_task)
         except asyncio.CancelledError as cancellation:
             try:
-                process = await asyncio.shield(spawn_task)
+                process = await _finish_task(spawn_task)
             except BaseException as startup_error:
                 raise cancellation from startup_error
             raise cancellation
@@ -1593,6 +1609,7 @@ async def _spawn_guardian(
             await _write_pipe(write_fd, view)
         finally:
             _close_fd(write_fd)
+            write_fd = -1
             if control_write >= 0:
                 _close_fd(control_write)
                 control_write = -1
@@ -1600,15 +1617,16 @@ async def _spawn_guardian(
             os.set_blocking(control_read, False)
         return process, control_read
     except BaseException:
+        _close_fd(write_fd)
+        write_fd = -1
         if process is not None:
             try:
-                await _abort_guardian(process)
+                await _finish_task(asyncio.create_task(_abort_guardian(process)))
             except BaseException as cleanup_error:
                 _logger.exception(
                     "Bubblewrap guardian cleanup after startup failure failed",
                     exc_info=cleanup_error,
                 )
-        _close_fd(write_fd)
         _close_fd(control_read)
         _close_fd(control_write)
         raise
@@ -1677,6 +1695,7 @@ async def _abort_guardian(
     stdin = process.stdin
     if stdin is not None and not stdin.is_closing():
         stdin.close()
+    _request_guardian_shutdown(process)
     try:
         await asyncio.wait_for(
             asyncio.shield(process.wait()),
@@ -1709,6 +1728,13 @@ async def _abort_guardian(
             process,
             allow_session_failure=allow_session_failure,
         )
+
+
+def _request_guardian_shutdown(process: asyncio.subprocess.Process) -> None:
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        pass
 
 
 async def _abort_guardian_logged(

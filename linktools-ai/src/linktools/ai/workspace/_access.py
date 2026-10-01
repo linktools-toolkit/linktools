@@ -64,13 +64,10 @@ class WorkspaceAccess:
 
     async def close(self) -> None:
         async with self._lock:
-            if self._closed:
-                return
             self._closed = True
-            session = self._session
+            if self._session is not None:
+                await self._session.close()
             self._session = None
-        if session is not None:
-            await session.close()
 
 
 __all__ = ["WorkspaceAccess"]

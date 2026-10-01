@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -67,6 +68,52 @@ async def test_workspace_access_lazily_opens_one_custom_session(tmp_path: Path) 
     with pytest.raises(AIError) as raised:
         await access.read_bytes("a.bin")
     assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+
+
+@pytest.mark.asyncio
+async def test_workspace_access_retries_failed_session_cleanup(tmp_path: Path) -> None:
+    class FailingSession(_ByteSession):
+        async def close(self) -> None:
+            self.closed += 1
+            if self.closed == 1:
+                raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
+
+    session = FailingSession({"a": b"a"})
+    access = WorkspaceAccess(_ByteSandbox(session), root=tmp_path)
+    assert await access.read_bytes("a") == b"a"
+    with pytest.raises(AIError):
+        await access.close()
+    await access.close()
+    assert session.closed == 2
+    with pytest.raises(AIError) as error:
+        await access.read_bytes("a")
+    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+
+
+@pytest.mark.asyncio
+async def test_workspace_access_close_calls_share_cleanup_completion(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class WaitingSession(_ByteSession):
+        async def close(self) -> None:
+            self.closed += 1
+            entered.set()
+            await release.wait()
+
+    session = WaitingSession({"a": b"a"})
+    access = WorkspaceAccess(_ByteSandbox(session), root=tmp_path)
+    assert await access.read_bytes("a") == b"a"
+    first = asyncio.create_task(access.close())
+    await entered.wait()
+    second = asyncio.create_task(access.close())
+    try:
+        await asyncio.sleep(0)
+        assert not second.done()
+    finally:
+        release.set()
+        await asyncio.gather(first, second)
+    assert session.closed == 1
 
 
 @pytest.mark.asyncio

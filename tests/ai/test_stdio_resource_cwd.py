@@ -224,6 +224,26 @@ def test_worker_cannot_select_stdio_resource_cwd(tmp_path: Path) -> None:
     assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
+def test_guardian_wire_preserves_empty_arguments_and_environment(tmp_path: Path) -> None:
+    config = _bubblewrap._guardian_config(
+        root=tmp_path,
+        runtime_root=tmp_path / "runtime",
+        bwrap=tmp_path / "bwrap",
+        lock_root=tmp_path / "locks",
+        resources=(),
+        hidden_paths=(),
+        read_policy=None,
+        mode="stdio",
+        command="/usr/bin/python3",
+        command_args=("server.py", ""),
+        environment={"EMPTY": ""},
+    )
+    sandbox_guardian._validate_config(config)
+    args = config["bwrap_args"]
+    assert args[-3:] == ["/usr/bin/python3", "server.py", ""]
+    assert args[args.index("EMPTY") + 1] == ""
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend_kind", ("memory", "native", "remapped_native"))
 async def test_asset_resource_materialization_preserves_native_paths_when_usable(
