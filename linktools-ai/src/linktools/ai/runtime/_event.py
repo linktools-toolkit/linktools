@@ -845,51 +845,20 @@ class DefaultEventService:
         if execution.status in _OBSERVATION_BOUNDARY_STATUSES:
             if cursor >= execution.event_sequence:
                 return
-            if ephemeral_semantic_count:
-                await self._validate_unconfirmed_completion(
-                    execution_id,
-                    tenant_id=principal.tenant_id,
-                    after_sequence=cursor,
-                    minimum_events=ephemeral_semantic_count,
-                )
-                return
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            skipped = 0
+            async for event in self._stream_durable(
+                execution_id,
+                tenant_id=principal.tenant_id,
+                after_sequence=cursor,
+            ):
+                if skipped < ephemeral_semantic_count:
+                    skipped += 1
+                    continue
+                yield event
+            if skipped != ephemeral_semantic_count:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    async def _validate_unconfirmed_completion(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        after_sequence: int,
-        minimum_events: int = 1,
-    ) -> None:
-        execution = await self._executions.get(execution_id, tenant_id=tenant_id)
-        if (
-            execution is None
-            or execution.status not in _OBSERVATION_BOUNDARY_STATUSES
-            or execution.event_sequence < 1
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        # Validate the durable tail before classifying a missing live acknowledgement.
-        last_event = None
-        event_count = 0
-        async for event in self._stream_durable(
-            execution_id,
-            tenant_id=tenant_id,
-            after_sequence=min(after_sequence, execution.event_sequence - 1),
-        ):
-            last_event = event
-            event_count += 1
-        if (
-            last_event is None
-            or event_count < minimum_events
-            or last_event.durable_sequence != execution.event_sequence
-            or last_event.event_type != f"EXECUTION_{execution.status.value}"
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return
-
 
     async def _stream_durable(
         self,

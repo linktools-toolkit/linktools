@@ -572,12 +572,9 @@ class RuntimeRecoveryCommands:
                     ):
                         return CommitObservation(DurableCommitState.COMMITTED, value=tool)
                     return _partial()
-                if (
-                    tool.execution_id == operation.execution_id
-                    and tool.status is ToolOperationStatus.EFFECT_UNKNOWN
-                ):
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                return _partial()
+                if tool.execution_id != operation.execution_id:
+                    return _partial()
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                     return _partial(error)

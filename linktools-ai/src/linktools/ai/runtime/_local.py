@@ -475,6 +475,9 @@ class LocalExecutionBackend:
         )
 
     def _mark_recovery_relaunch(self, execution_id: str) -> None:
+        if self.worker_installed(execution_id):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._worker_failures.pop(execution_id, None)
         self._recovery_relaunch_ids.add(execution_id)
 
     async def _validate_start(
@@ -1634,7 +1637,6 @@ class LocalExecutionBackend:
                     committed = await self.commit_cancel_checkpoint(
                         ExecutionCancelRequestCommit(
                             execution.execution_id,
-                            self._tenant_id,
                             execution.revision,
                             execution.event_sequence,
                             operation_id,
@@ -3544,7 +3546,7 @@ class LocalExecutionBackend:
             background_tasks=self._execution_task_set(execution_id),
         )
 
-    async def _commit_recovery_required(
+    async def _commit_recovery_required_owned(
         self,
         execution: ExecutionRecord,
         error: AIError,
@@ -3628,6 +3630,25 @@ class LocalExecutionBackend:
             "execution entered recovery-required state: execution=%s",
             current.execution_id,
         )
+        return committed
+
+    async def _commit_recovery_required(
+        self,
+        execution: ExecutionRecord,
+        error: AIError,
+        effects: tuple[ExecutionRecoveryEffect, ...],
+    ) -> ExecutionRecord:
+        task = asyncio.create_task(
+            self._commit_recovery_required_owned(execution, error, effects),
+            name=f"local-recovery-required-{execution.execution_id}",
+        )
+        committed, cancellation = await self._await_checkpoint_task(
+            task,
+            label="recovery-required",
+            execution_id=execution.execution_id,
+        )
+        if cancellation is not None:
+            raise cancellation
         return committed
 
     async def _recovery_failure_effects(
@@ -3909,6 +3930,7 @@ class LocalExecutionBackend:
             StopReason.CANCELLED,
             agent_run_id=checkpoint.agent_run_id,
         )
+        self._worker_failures.pop(terminal.execution_id, None)
         for candidate in operations:
             await self._settle_cancel_operation(candidate, terminal)
         return terminal
