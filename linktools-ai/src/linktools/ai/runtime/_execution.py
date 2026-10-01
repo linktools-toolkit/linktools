@@ -2437,6 +2437,7 @@ class DefaultExecutionService:
             ExecutionStatus.CANCELLING,
             ExecutionStatus.FINALIZING,
             ExecutionStatus.WAITING_DEFERRED,
+            ExecutionStatus.RECOVERY_REQUIRED,
         }:
             return
         if launch_record.status is ExecutionStatus.START_UNKNOWN:
