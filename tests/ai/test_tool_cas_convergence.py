@@ -130,8 +130,10 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_expired_tool_claim_becomes_effect_unknown_without_replay() -> None:
-    state = RuntimeStorage.in_memory()
+async def test_expired_tool_claim_becomes_effect_unknown_without_replay(
+    tmp_path,
+) -> None:
+    state = RuntimeStorage.sqlite(tmp_path / "expired-tool-claim.db")
     await state.initialize(namespace="tool-expired-claim", tenant_id="tenant")
     try:
         repository = state.recovery.tools
