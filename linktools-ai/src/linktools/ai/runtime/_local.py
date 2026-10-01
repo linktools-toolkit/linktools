@@ -1654,7 +1654,20 @@ class LocalExecutionBackend:
                 if not self._accepting:
                     return
                 await self._recovery_coordinator.reconcile_checkpoint(checkpoint)
-                return
+                current = await self._execution.executions.get(
+                    execution_id,
+                    tenant_id=self._tenant_id,
+                )
+                if (
+                    current is None
+                    or current.status
+                    not in {
+                        ExecutionStatus.STARTED,
+                        ExecutionStatus.CANCELLING,
+                    }
+                    or self.worker_installed(execution_id)
+                ):
+                    return
             await asyncio.sleep(1)
 
     async def _reconcile_session_recovery(
