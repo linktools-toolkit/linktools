@@ -148,6 +148,13 @@ class _ToolOperationRuntimeRepository(Protocol):
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ToolOperationRecord, ...]: ...
 
+    async def reconcile_expired_claim(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+    ) -> ToolOperationRecord: ...
+
     async def existing_call_ids(
         self,
         agent_run_id: str,

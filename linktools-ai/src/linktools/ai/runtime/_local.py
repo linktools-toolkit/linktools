@@ -3459,9 +3459,6 @@ class LocalExecutionBackend:
             return current
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return current
-        recovered = await self._check_terminal_tool_effects(current)
-        if recovered is not None:
-            return recovered
         payload = canonical_json_bytes(output)
         inline = StoredPayload.inline_json(output)
         output_payload = inline
@@ -3672,44 +3669,32 @@ class LocalExecutionBackend:
             for record in records
             if record.status is ToolOperationStatus.EFFECT_UNKNOWN
         )
-        pending = 0
+        active_claims = 0
         for record in records:
-            if record.status is ToolOperationStatus.CLAIMED:
-                pending += 1
-            elif (
-                record.status is ToolOperationStatus.PENDING
-                and not await self._has_confirmed_not_applied_resolution(record)
-            ):
-                pending += 1
-        return effects, pending
-
-    async def _has_confirmed_not_applied_resolution(
-        self,
-        operation: ToolOperationRecord,
-    ) -> bool:
-        resolutions = await self._recovery.operations.list_pending(
-            ResourceKind.TOOL_OPERATION,
-            operation.tool_operation_id,
-            tenant_id=self._tenant_id,
-            limit=1000,
-            states=frozenset({OperationStatus.SUCCEEDED}),
-        )
-        result_digest = canonical_sha256(
-            {
-                "operation_id": operation.tool_operation_id,
-                "fence": operation.fence,
-                "status": ToolOperationStatus.PENDING.value,
-                "payload_digest": None,
-            }
-        )
-        return any(
-            resolution.operation_kind is OperationKind.TOOL_EFFECT_RESOLVE
-            and resolution.resource_kind is ResourceKind.TOOL_OPERATION
-            and resolution.resource_id == operation.tool_operation_id
-            and resolution.result_ref == operation.tool_operation_id
-            and resolution.result_digest == result_digest
-            for resolution in resolutions
-        )
+            if record.status is not ToolOperationStatus.CLAIMED:
+                continue
+            current = await self._tool_operations.reconcile_expired_claim(
+                record.tool_operation_id,
+                tenant_id=tenant_id,
+            )
+            if current.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                effects = (
+                    *effects,
+                    ExecutionRecoveryEffect(
+                        operation_id=current.tool_operation_id,
+                        execution_id=current.execution_id,
+                        agent_run_id=current.agent_run_id,
+                        tool_call_id=current.tool_call_id,
+                        tool_name=current.tool_name,
+                        fence=current.fence,
+                        idempotency_key_digest=current.idempotency_key_digest,
+                        replay_safe=current.replay_safe,
+                        error_code=current.error_code,
+                    ),
+                )
+            elif current.status is ToolOperationStatus.CLAIMED:
+                active_claims += 1
+        return effects, active_claims
 
     async def _require_tool_effect_recovery(
         self,

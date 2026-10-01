@@ -290,8 +290,14 @@ async def test_local_cancel_without_worker_is_unknown_for_active_execution() -> 
 
 
 class _ToolOperations:
-    def __init__(self, records: tuple[object, ...]) -> None:
+    def __init__(
+        self,
+        records: tuple[object, ...],
+        *,
+        expired_claims: bool = False,
+    ) -> None:
         self.records = records
+        self.expired_claims = expired_claims
 
     async def list_by_execution(
         self,
@@ -301,6 +307,28 @@ class _ToolOperations:
     ) -> tuple[object, ...]:
         del execution_id, tenant_id
         return self.records
+
+    async def reconcile_expired_claim(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+    ) -> object:
+        del tenant_id
+        record = next(
+            value
+            for value in self.records
+            if value.tool_operation_id == tool_operation_id
+        )
+        if not self.expired_claims:
+            return record
+        return SimpleNamespace(
+            **{
+                **vars(record),
+                "status": ToolOperationStatus.EFFECT_UNKNOWN,
+                "error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+            }
+        )
 
 
 class _FailingToolOperations:
@@ -397,19 +425,56 @@ async def test_local_failure_uses_tool_ledger_even_for_an_unrelated_exception(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "status",
-    (ToolOperationStatus.PENDING, ToolOperationStatus.CLAIMED),
-)
-async def test_local_cancel_without_worker_does_not_confirm_unsettled_tool_call(
-    status: ToolOperationStatus,
+async def test_local_cancel_without_worker_allows_deferred_pending_tool_call() -> None:
+    backend = _backend()
+    current = replace(_record(), status=ExecutionStatus.CANCELLING)
+    backend._execution.executions.record = current
+    backend._tool_operations = _ToolOperations(
+        (_tool_operation(ToolOperationStatus.PENDING),)
+    )
+
+    assert await backend.cancel(current) is CancelEffectOutcome.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_local_cancel_without_worker_does_not_confirm_live_tool_claim() -> None:
+    backend = _backend()
+    current = replace(_record(), status=ExecutionStatus.CANCELLING)
+    backend._execution.executions.record = current
+    backend._tool_operations = _ToolOperations(
+        (_tool_operation(ToolOperationStatus.CLAIMED),)
+    )
+
+    assert await backend.cancel(current) is CancelEffectOutcome.UNKNOWN
+
+
+@pytest.mark.asyncio
+async def test_local_cancel_without_worker_reconciles_expired_claim_to_recovery(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = _backend()
     current = replace(_record(), status=ExecutionStatus.CANCELLING)
     backend._execution.executions.record = current
-    backend._tool_operations = _ToolOperations((_tool_operation(status),))
+    backend._tool_operations = _ToolOperations(
+        (_tool_operation(ToolOperationStatus.CLAIMED),),
+        expired_claims=True,
+    )
+    observed: list[tuple[ExecutionRecord, tuple[object, ...]]] = []
+
+    async def commit_recovery(
+        execution: ExecutionRecord,
+        error: AIError,
+        effects: tuple[object, ...],
+    ) -> ExecutionRecord:
+        assert error.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+        observed.append((execution, effects))
+        return replace(execution, status=ExecutionStatus.RECOVERY_REQUIRED)
+
+    monkeypatch.setattr(backend, "_commit_recovery_required", commit_recovery)
 
     assert await backend.cancel(current) is CancelEffectOutcome.UNKNOWN
+    assert len(observed) == 1
+    assert observed[0][1][0].operation_id == "tool-operation"
 
 
 @pytest.mark.asyncio

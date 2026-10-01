@@ -129,6 +129,51 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_expired_tool_claim_becomes_effect_unknown_without_replay() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="tool-expired-claim", tenant_id="tenant")
+    try:
+        repository = state.recovery.tools
+        expired = replace(
+            _record(),
+            lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        await repository.reserve(expired)
+
+        reconciled = await repository.reconcile_expired_claim(
+            expired.tool_operation_id,
+            tenant_id="tenant",
+        )
+
+        assert reconciled.status is ToolOperationStatus.EFFECT_UNKNOWN
+        assert reconciled.owner == expired.owner
+        assert reconciled.fence == expired.fence
+        assert reconciled.lease_expires_at is None
+        assert reconciled.error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_live_tool_claim_is_not_reconciled_early() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="tool-live-claim", tenant_id="tenant")
+    try:
+        repository = state.recovery.tools
+        claimed = _record()
+        await repository.reserve(claimed)
+
+        reconciled = await repository.reconcile_expired_claim(
+            claimed.tool_operation_id,
+            tenant_id="tenant",
+        )
+
+        assert reconciled == claimed
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_tool_repository_retries_raw_storage_conflict() -> None:
     repository = object.__new__(ToolRepositoryImpl)
     committed = _record(
