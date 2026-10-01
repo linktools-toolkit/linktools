@@ -110,7 +110,7 @@ class _RecoveryCoordinatorPort(Protocol):
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> tuple[ExecutionRecoveryEffect, ...]: ...
+    ) -> tuple[tuple[ExecutionRecoveryEffect, ...], int]: ...
 
     async def _get_tool_operation(
         self,
@@ -716,7 +716,7 @@ class _RecoveryCoordinator:
                 RecoveryCheckpointState.WAITING,
             }
         ):
-            effects = await self._port._reconcile_tool_effects(
+            effects, active_claims = await self._port._reconcile_tool_effects(
                 execution.execution_id,
                 tenant_id=self._port.tenant_id,
             )
@@ -736,6 +736,15 @@ class _RecoveryCoordinator:
                     effects,
                 )
                 return
+            if active_claims:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "execution_id": execution.execution_id,
+                        "phase": "startup_tool_claims_active",
+                        "active_tool_claim_count": active_claims,
+                    },
+                )
         principal = Principal(
             execution.principal_id,
             self._port.tenant_id,
@@ -846,7 +855,7 @@ class _RecoveryCoordinator:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if current.status is not ExecutionStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        unresolved = await self.recovery_effects(
+        unresolved, active_claims = await self._port._reconcile_tool_effects(
             execution_id,
             tenant_id=tenant_id,
         )
@@ -859,6 +868,15 @@ class _RecoveryCoordinator:
                     "operation_id": first.operation_id,
                     "fence": first.fence,
                     "phase": "execution_recover",
+                },
+            )
+        if active_claims:
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "execution_id": execution_id,
+                    "phase": "execution_recover_tool_claims_active",
+                    "active_tool_claim_count": active_claims,
                 },
             )
         checkpoint = await self._port.load_recovery_checkpoint(

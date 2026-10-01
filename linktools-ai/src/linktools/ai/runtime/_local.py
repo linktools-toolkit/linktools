@@ -3663,12 +3663,11 @@ class LocalExecutionBackend:
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> tuple[ExecutionRecoveryEffect, ...]:
-        effects, _ = await self._terminal_tool_effects(
+    ) -> tuple[tuple[ExecutionRecoveryEffect, ...], int]:
+        return await self._terminal_tool_effects(
             execution_id,
             tenant_id=tenant_id,
         )
-        return effects
 
     async def _terminal_tool_effects(
         self,

@@ -327,8 +327,16 @@ class _ToolOperations:
         return SimpleNamespace(
             **{
                 **vars(record),
-                "status": ToolOperationStatus.EFFECT_UNKNOWN,
-                "error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+                "status": (
+                    ToolOperationStatus.PENDING
+                    if record.replay_safe
+                    else ToolOperationStatus.EFFECT_UNKNOWN
+                ),
+                "error_code": (
+                    None
+                    if record.replay_safe
+                    else ErrorCode.TOOL_EFFECT_UNKNOWN.value
+                ),
             }
         )
 
@@ -463,6 +471,26 @@ async def test_local_cancel_without_worker_allows_deferred_pending_tool_call() -
     )
 
     assert await backend.cancel(current) is CancelEffectOutcome.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_local_cancel_allows_expired_replay_safe_claim() -> None:
+    backend = _backend()
+    current = replace(_record(), status=ExecutionStatus.CANCELLING)
+    backend._execution.executions.record = current
+    operations = _ToolOperations(
+        (
+            _tool_operation(
+                ToolOperationStatus.CLAIMED,
+                replay_safe=True,
+            ),
+        ),
+        expired_claims=True,
+    )
+    backend._tool_operations = operations
+
+    assert await backend.cancel(current) is CancelEffectOutcome.CONFIRMED
+    assert operations.reconcile_calls == 1
 
 
 @pytest.mark.asyncio
