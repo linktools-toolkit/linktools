@@ -206,11 +206,13 @@ async def _load_mcp(
 
 def _bind_mcp_declaration(
     value: MCPServerSpec,
-    context: CapabilityLoadContext,
+    context: CapabilityLoadContext | None,
 ) -> CapabilityContribution[object]:
     root = value.resource
     if root is None:
         return CapabilityContribution.from_declaration(value)
+    if context is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
     resources = tuple(
         (relative, candidate.key)
@@ -233,7 +235,7 @@ def _bind_mcp_declaration(
 
 def _bind_mcp_contribution(
     contribution: CapabilityContribution[object],
-    context: CapabilityLoadContext,
+    context: CapabilityLoadContext | None,
 ) -> CapabilityContribution[object]:
     if (
         not isinstance(contribution, CapabilityContribution)
@@ -255,6 +257,8 @@ def _bind_mcp_contribution(
     root = value.resource
     if root is None:
         return CapabilityContribution.from_mcp_contract(contract, value)
+    if context is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     source_id = contract.get("asset_source_id")
     if source_id != context.group_id or versions is None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
