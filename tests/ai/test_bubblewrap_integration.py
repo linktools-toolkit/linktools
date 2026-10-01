@@ -249,12 +249,13 @@ def _runtime_mcp_client(
     init_timeout: float | None = None,
 ) -> tuple[Client, _MCPModelToolset, RunContext[None], str]:
     server_id = "security/audit"
-    client = Client(transport, init_timeout=init_timeout)
+    from linktools.ai.spec import MCPServerSpec
+
     discovery = _MCPDiscoveryToolset(
-        client,
-        id=f"mcp:{server_id}",
-        cache_tools=True,
+        transport,
+        server=MCPServerSpec(server_id, "python", init_timeout=init_timeout),
     )
+    client = discovery.client
     toolset = _MCPModelToolset(
         discovery,
         server_id,

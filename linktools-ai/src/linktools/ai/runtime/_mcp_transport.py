@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Bridge sandbox-owned stdio bytes to the public MCP client session API."""
+"""Construct explicit MCP transports and bridge sandbox-owned stdio bytes."""
 
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from typing import Any
 
 import anyio
-from fastmcp.client.transports import ClientTransport
+from fastmcp.client.transports import (
+    ClientTransport,
+    SSETransport,
+    StdioTransport,
+    StreamableHttpTransport,
+)
 from mcp import ClientSession
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
 from pydantic import TypeAdapter
 
 from ..errors import AIError, ErrorCode
+from ..spec import MCPServerSpec
 from ..workspace import (
     SandboxResource,
     SandboxResourcePath,
@@ -22,6 +28,55 @@ from ..workspace import (
 )
 
 _JSON_RPC_MESSAGE_ADAPTER = TypeAdapter(JSONRPCMessage)
+
+
+def _create_mcp_transport(
+    server: MCPServerSpec,
+    *,
+    sandboxed: bool,
+    sandbox_session: object | None,
+    host_cwd: str | None,
+    args: tuple[str | SandboxResourcePath, ...] = (),
+    resources: tuple[SandboxResource, ...] = (),
+) -> ClientTransport:
+    if server.transport == "streamable-http":
+        return StreamableHttpTransport(
+            server.url,
+            headers=dict(server.headers) or None,
+        )
+    if server.transport == "sse":
+        options = (
+            {} if server.read_timeout is None
+            else {"sse_read_timeout": server.read_timeout}
+        )
+        return SSETransport(
+            server.url,
+            headers=dict(server.headers) or None,
+            **options,
+        )
+    if server.transport != "stdio" or server.command is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if sandboxed:
+        if not isinstance(sandbox_session, StdioSandboxSession):
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+        return _SandboxMCPTransport(
+            sandbox_session,
+            server.command,
+            args,
+            resources,
+            server.env,
+        )
+    if host_cwd is None:
+        raise AIError(
+            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+            safe_details={"reason": "mcp_cwd_unavailable"},
+        )
+    return StdioTransport(
+        server.command,
+        list(args),
+        cwd=host_cwd,
+        env=dict(server.env) or None,
+    )
 
 
 class _SandboxMCPTransport(ClientTransport):

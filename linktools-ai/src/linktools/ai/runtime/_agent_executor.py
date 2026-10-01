@@ -304,13 +304,13 @@ class AgentExecutor:
                 primary_error = error
                 raise
             except AIError as error:
-                mapped = _with_sandbox_cleanup_diagnostic(error, error)
+                mapped = _with_cleanup_diagnostic(error, error)
                 primary_error = mapped
                 if mapped is error:
                     raise
                 raise mapped from error
             except Exception as error:
-                mapped = _with_sandbox_cleanup_diagnostic(
+                mapped = _with_cleanup_diagnostic(
                     _execution_error(
                         error,
                         usage_limits=usage_limits,
@@ -1282,18 +1282,21 @@ def _map_event(event: object) -> "AgentEmission | None":
     return None
 
 
-def _sandbox_cleanup_cause(error: BaseException) -> "AIError | None":
+def _cleanup_cause(error: BaseException) -> "AIError | None":
     cause = error.__cause__
-    if isinstance(cause, AIError) and cause.code is ErrorCode.SANDBOX_CLEANUP_FAILED:
+    if isinstance(cause, AIError) and cause.code in {
+        ErrorCode.SANDBOX_CLEANUP_FAILED, ErrorCode.MCP_CLEANUP_FAILED,
+    }:
         return cause
     return None
 
 
-def _with_sandbox_cleanup_diagnostic(error: AIError, source: BaseException) -> AIError:
-    if _sandbox_cleanup_cause(source) is None:
+def _with_cleanup_diagnostic(error: AIError, source: BaseException) -> AIError:
+    cleanup = _cleanup_cause(source)
+    if cleanup is None:
         return error
     details = dict(error.safe_details)
-    details[_SECONDARY_ERROR_CODE_KEY] = ErrorCode.SANDBOX_CLEANUP_FAILED.value
+    details[_SECONDARY_ERROR_CODE_KEY] = cleanup.code.value
     return AIError(
         error.code,
         str(error),
