@@ -388,7 +388,9 @@ literal secrets remain sensitive.
 
 `init_timeout` and `read_timeout` are optional keyword-only connection values
 in seconds. Each must be finite and positive; booleans are invalid. Omitted
-or `None` values preserve FastMCP Client defaults. `read_timeout` governs
+or `None` values preserve FastMCP Client defaults. An explicit `init_timeout`
+bounds the complete transport startup, including SSE endpoint negotiation;
+`None` keeps the SDK's stage-specific defaults. `read_timeout` governs
 upstream request waiting, not the total Agent or Task deadline. Legacy SSE
 also applies an explicit value to its SSE read timeout. HTTPS keeps SDK
 certificate verification. There is no automatic anonymous downgrade,
