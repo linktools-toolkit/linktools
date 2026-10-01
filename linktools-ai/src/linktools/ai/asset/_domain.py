@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Protocol, runtime_checkable
 
-from ..core import JsonValue, validate_asset_kind
+from ..core import ImmutableJsonMapping, JsonValue, validate_asset_kind
 from ..errors import AIError
 from ..storage import (
     ReadableStorageBackend,
@@ -161,7 +161,7 @@ class AssetInfo:
             raise ValueError("asset metadata is invalid")
         if self.modified_at.tzinfo is None:
             raise ValueError("asset metadata requires a timezone-aware timestamp")
-        object.__setattr__(self, "metadata", normalize_storage_metadata(self.metadata))
+        object.__setattr__(self, "metadata", ImmutableJsonMapping(normalize_storage_metadata(self.metadata)))
         if self.status is not StorageEntryStatus.NORMAL and (
             self.size != 0 or self.etag != hashlib.sha256(b"").hexdigest()
         ):

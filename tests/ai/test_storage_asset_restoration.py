@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Storage dialect and raw Asset backend contract checks."""
 
+import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -705,3 +706,23 @@ async def test_asset_snapshot_uses_v1_manifest_and_object_namespace() -> None:
             await restored.close()
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_asset_concurrent_initialization_preserves_namespace(tmp_path: Path) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'initialize.db'}")
+    backends = [SqlAssetBackend(engine, namespace="shared") for _ in range(8)]
+    try:
+        await provision_asset_database(engine)
+        await asyncio.gather(*(backend.initialize() for backend in backends))
+        first = await backends[0].put(AssetKey("resource", "one"), b"one")
+        await asyncio.gather(*(backend.initialize() for backend in backends))
+        assert all(
+            revision == first.store_revision
+            for revision in await asyncio.gather(*(backend.head_revision() for backend in backends))
+        )
+    finally:
+        await asyncio.gather(*(backend.close() for backend in backends))
+        await engine.dispose()

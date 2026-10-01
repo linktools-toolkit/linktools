@@ -304,6 +304,11 @@ class DirectoryAssetBackend:
             scan_root = self._directory / Path(*PurePosixPath(relative_root).parts)
             if not scan_root.is_dir():
                 continue
+            if (
+                not self._follow_external_symlinks
+                and scan_root.resolve() != self._directory.resolve() / relative_root
+            ):
+                continue
             for path in _iter_files(
                 scan_root,
                 follow_external_symlinks=self._follow_external_symlinks,

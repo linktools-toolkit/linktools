@@ -241,18 +241,12 @@ class SqlAssetBackend:
         table = self._metadata.tables["ai_asset_heads"]
 
         async def initialize_head(session) -> None:
-            from sqlalchemy import insert, select
-
-            existing = await session.scalar(
-                select(table.c.namespace_digest).where(table.c.namespace_digest == self._namespace_digest.hex())
+            await self._context.dialect.insert_ignore_conflict(
+                session,
+                table=table,
+                values={"namespace_digest": self._namespace_digest.hex(), "store_revision": 0},
+                index_elements=("namespace_digest",),
             )
-            if existing is None:
-                await session.execute(
-                    insert(table).values(
-                        namespace_digest=self._namespace_digest.hex(),
-                        store_revision=0,
-                    )
-                )
 
         await self._context.run_mutation(initialize_head)
         self._ready = True
@@ -487,9 +481,11 @@ class SqlAssetBackend:
                 True,
                 tuple(_unchanged(change, current[change.key], current_revision) for change in changes),
             )
-        prepared: list[tuple[StorageChange[AssetKey, bytes], AssetInfo]] = []
+        prepared: dict[AssetKey, AssetInfo] = {}
         if next_revision != current_revision:
             for change in changes:
+                if not _mutates(change, current[change.key]):
+                    continue
                 info = _next_info(change, current[change.key], next_revision, self._root)
                 if change.operation is StorageOperation.PUT:
                     content = bytes(change.value or b"")
@@ -510,7 +506,7 @@ class SqlAssetBackend:
                                 )
                             ),
                         )
-                prepared.append((change, info))
+                prepared[change.key] = info
         entries = self._metadata.tables["ai_asset_entries"]
         history = self._metadata.tables["ai_asset_changes"]
         heads = self._metadata.tables["ai_asset_heads"]
@@ -554,44 +550,42 @@ class SqlAssetBackend:
             values: list[
                 StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]
             ] = []
-            if next_revision == current_revision:
-                values.extend(
-                    _unchanged(change, current[change.key], current_revision)
-                    for change in changes
+            for change in changes:
+                info = prepared.get(change.key)
+                if info is None:
+                    values.append(_unchanged(change, current[change.key], next_revision))
+                    continue
+                data = _info_data(info)
+                key_digest = _asset_key_digest(self._namespace_digest, change.key).hex()
+                await session.execute(
+                    history.insert().values(
+                        key_digest=key_digest,
+                        entry_revision=info.revision.value,
+                        namespace_digest=self._namespace_digest.hex(),
+                        store_revision=next_revision,
+                        payload_json=data,
+                    )
                 )
-            else:
-                for change, info in prepared:
-                    data = _info_data(info)
-                    key_digest = _asset_key_digest(self._namespace_digest, change.key).hex()
-                    await session.execute(
-                        history.insert().values(
-                            key_digest=key_digest,
-                            entry_revision=info.revision.value,
-                            namespace_digest=self._namespace_digest.hex(),
-                            store_revision=next_revision,
-                            payload_json=data,
-                        )
-                    )
-                    await self._context.dialect.upsert(
-                        session,
-                        table=entries,
-                        values={
-                            "key_digest": key_digest,
-                            "namespace_digest": self._namespace_digest.hex(),
-                            "entry_revision": info.revision.value,
-                            "store_revision": next_revision,
-                            "payload_json": data,
-                        },
-                        set_values={
-                            "namespace_digest": self._namespace_digest.hex(),
-                            "entry_revision": info.revision.value,
-                            "store_revision": next_revision,
-                            "payload_json": data,
-                            "updated_at": func.current_timestamp(),
-                        },
-                        index_elements=("key_digest",),
-                    )
-                    values.append(_result(change, info, next_revision))
+                await self._context.dialect.upsert(
+                    session,
+                    table=entries,
+                    values={
+                        "key_digest": key_digest,
+                        "namespace_digest": self._namespace_digest.hex(),
+                        "entry_revision": info.revision.value,
+                        "store_revision": next_revision,
+                        "payload_json": data,
+                    },
+                    set_values={
+                        "namespace_digest": self._namespace_digest.hex(),
+                        "entry_revision": info.revision.value,
+                        "store_revision": next_revision,
+                        "payload_json": data,
+                        "updated_at": func.current_timestamp(),
+                    },
+                    index_elements=("key_digest",),
+                )
+                values.append(_result(change, info, next_revision))
             result = StorageBatchResult(
                 StorageRevision(str(next_revision)),
                 True,
@@ -936,7 +930,7 @@ def _unchanged(change: StorageChange[AssetKey, bytes], info: AssetInfo | None, s
 
 def _mutates(change: StorageChange[AssetKey, bytes], previous: AssetInfo | None) -> bool:
     if previous is None:
-        return True
+        return change.operation is StorageOperation.PUT
     if change.operation is StorageOperation.PUT:
         return (
             previous.status is not StorageEntryStatus.NORMAL
@@ -953,7 +947,8 @@ async def _put_asset_object(store: ObjectStore, key: str, value: bytes) -> None:
     digest = hashlib.sha256(value).hexdigest()
 
     async def chunks() -> AsyncIterator[bytes]:
-        yield value
+        if value:
+            yield value
 
     await store.put(key, chunks(), expected_size=len(value), expected_digest=digest)
 

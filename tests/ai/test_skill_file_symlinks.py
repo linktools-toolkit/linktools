@@ -325,3 +325,37 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
         ).read_bytes()
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ("agents", "linked/agents"))
+@pytest.mark.parametrize("follow", (False, True))
+async def test_directory_asset_kind_root_symlinks_follow_explicit_policy(
+    tmp_path: Path, prefix: str, follow: bool,
+) -> None:
+    root = tmp_path / "assets"
+    external = tmp_path / "external"
+    root.mkdir()
+    external.mkdir()
+    if prefix == "agents":
+        _symlink(external, root / "agents", directory=True)
+        target = external
+    else:
+        _symlink(external, root / "linked", directory=True)
+        target = external / "agents"
+        target.mkdir()
+    (target / "review").write_bytes(b"agent")
+    backend = DirectoryAssetBackend(
+        str(root),
+        path_adapter=PrefixAssetPathAdapter({"agent": prefix}),
+        kinds=("agent",),
+        follow_external_symlinks=follow,
+    )
+    await backend.initialize()
+    try:
+        loaded = await backend.load_metadata(None)
+        assert tuple(change.key for change in loaded.changes) == (
+            (AssetKey("agent", "review"),) if follow else ()
+        )
+    finally:
+        await backend.close()
