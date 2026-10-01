@@ -524,7 +524,12 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     policy = dict(value)
     boundary = policy.get("boundary")
-    if not isinstance(boundary, str):
+    version = policy.get("version")
+    if (
+        not isinstance(boundary, str)
+        or type(version) is not int
+        or version != 1
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     cwd = policy.pop("cwd", None)
     if cwd is not None and (cwd != "resource" or boundary == "host-network"):
@@ -548,8 +553,6 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
     hidden_paths = policy.get("hidden_paths")
     if (
         set(policy) != expected
-        or policy.get("version") != 1
-        or isinstance(policy.get("version"), bool)
         or boundary != "workspace-stdio"
         or not isinstance(workspace_access, str)
         or workspace_access not in {"read", "read_write", "none"}

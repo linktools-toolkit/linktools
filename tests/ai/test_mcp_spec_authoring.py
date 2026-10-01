@@ -4,6 +4,7 @@
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 import yaml
@@ -279,3 +280,64 @@ def test_python_and_wire_never_expand_environment(monkeypatch: pytest.MonkeyPatc
         b'{"id":"${MCP_ID}","command":"python"}'
     )
     assert declaration.id == "${MCP_ID}"
+
+
+def test_resource_working_directory_is_durable_without_physical_paths() -> None:
+    from linktools.ai.runtime._mcp import _mcp_execution_policy
+
+    server = MCPServerSpec(
+        "server", "python", ("server.py",), AssetKey("mcp", "server"),
+    )
+    codec = MCPServerSpecCodec()
+    payload = codec.to_binding_payload(
+        server, (), asset_source_id="assets",
+        execution_policy=_mcp_execution_policy(server, None),
+    )
+    assert payload["execution_policy"] == {
+        "version": 1, "boundary": "host-stdio", "cwd": "resource",
+    }
+    assert codec.decode_binding_payload(payload, declaration=server) == ()
+    assert payload["args"] == ["server.py"]
+
+
+@pytest.mark.parametrize("policy", (
+    {"version": True, "boundary": "host-stdio"},
+    {"version": 1.0, "boundary": "host-network"},
+    {"version": 1, "boundary": [], "cwd": "resource"},
+    {"version": 1, "boundary": "host-stdio", "cwd": None},
+    {"version": 1, "boundary": "host-stdio", "cwd": "/tmp/private"},
+    {"version": 1, "boundary": "host-network", "cwd": "resource"},
+))
+def test_execution_working_directory_policy_rejects_invalid_semantics(
+    policy: dict[str, object],
+) -> None:
+    with pytest.raises(AIError) as raised:
+        MCPServerSpecCodec().to_binding_payload(
+            MCPServerSpec("server", "python"), None, execution_policy=policy,
+        )
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_old_workspace_cwd_binding_cannot_silently_change_execution(
+    tmp_path: Path,
+) -> None:
+    from linktools.ai.runtime._mcp import (
+        _MCPBinding, _MCPProjection, materialize_mcp_capabilities,
+    )
+    from linktools.ai.spec import mcp_server_selector
+
+    server = MCPServerSpec(
+        "server", "python", ("server.py",), AssetKey("mcp", "server"),
+    )
+    with pytest.raises(AIError) as raised:
+        await materialize_mcp_capabilities(
+            (server,), (mcp_server_selector(server.id),),
+            sandbox=None, sandbox_session=None, host_cwd=str(tmp_path),
+            bindings={server.id: _MCPBinding(
+                (), "assets", {"version": 1, "boundary": "host-stdio"},
+            )},
+            projections={server.id: _MCPProjection(server.id, server.args, (), str(tmp_path))},
+            tool_operations=None, tool_metrics=None,
+        )
+    assert raised.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
