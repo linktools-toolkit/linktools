@@ -2045,6 +2045,8 @@ def _crash_session_process(
 
     async def admit(self: RuntimeStateCommands, request: Any) -> Any:
         if phase == "effect_unconfirmed":
+            request = replace(request, lease_seconds=1)
+        elif phase == "effect_unconfirmed_live_lease":
             request = replace(request, lease_seconds=5)
         return await original_admission(self, request)
 
@@ -2057,7 +2059,7 @@ def _crash_session_process(
     async def complete(
         self: RuntimeToolOperationBridge, decision: Any, result: Any
     ) -> bool:
-        if phase == "effect_unconfirmed":
+        if phase in {"effect_unconfirmed", "effect_unconfirmed_live_lease"}:
             os._exit(91)
         cancelled = await original_complete(self, decision, result)
         if phase == "tool_completed":
@@ -2175,7 +2177,12 @@ async def test_active_tool_claim_reconciles_after_restart_without_external_nudge
 ) -> None:
     database = tmp_path / "active-claim-restart.db"
     effect_log = tmp_path / "active-claim-effects.txt"
-    await _exit_at_boundary(database, effect_log, "sqlite", "effect_unconfirmed")
+    await _exit_at_boundary(
+        database,
+        effect_log,
+        "sqlite",
+        "effect_unconfirmed_live_lease",
+    )
     committed_effects = effect_log.read_text().splitlines()
     assert len(committed_effects) == 1
     execution_id = committed_effects[0]
