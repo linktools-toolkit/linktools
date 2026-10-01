@@ -2231,6 +2231,68 @@ async def test_active_tool_claim_reconciles_after_restart_without_external_nudge
 
 
 @pytest.mark.asyncio
+async def test_idempotent_replay_during_active_tool_claim_converges_to_recovery(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "active-claim-replay.db"
+    effect_log = tmp_path / "active-claim-replay-effects.txt"
+    await _exit_at_boundary(
+        database,
+        effect_log,
+        "sqlite",
+        "effect_unconfirmed_live_lease",
+    )
+    committed_effects = effect_log.read_text().splitlines()
+    assert len(committed_effects) == 1
+    execution_id = committed_effects[0]
+    calls: list[str] = []
+    state = RuntimeStorage.sqlite(database)
+    application = _application(
+        calls,
+        effect_policy="non_replay_safe",
+        effect_log=effect_log,
+    )
+    try:
+        async with Runtime.open(
+            "session-tool-crash",
+            models=_ToolModels(),
+            storage=state,
+            capabilities=(application,),
+        ) as runtime:
+            tools = await state.recovery.tools.list_by_execution(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert len(tools) == 1
+            assert tools[0].status is ToolOperationStatus.CLAIMED
+
+            same = (
+                await runtime.agents.get("default")
+                .session("session")
+                .start("inspect", idempotency_key="turn-1")
+            )
+            assert same.execution_id == execution_id
+            with pytest.raises(AIError) as raised:
+                await same.wait(timeout_seconds=10)
+            assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+
+            recovered = await state.execution.executions.get(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert recovered is not None
+            assert recovered.status is ExecutionStatus.RECOVERY_REQUIRED
+            assert await state.execution.executions.get_result(
+                execution_id,
+                tenant_id=runtime.default_principal.tenant_id,
+            ) is None
+            assert calls == []
+            assert effect_log.read_text().splitlines() == committed_effects
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("sqlite", "sql", "split_sqlite"))
 @pytest.mark.parametrize(
     "phase",
