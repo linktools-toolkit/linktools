@@ -82,7 +82,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 
 from ..agent import AgentBinding, CompiledAgent, AssistantTextOutput
-from ..asset import AssetStoreReader
+from ..asset import AssetMaterializer, AssetStoreReader
 from ..capability import (
     AgentContext,
     CapabilityContribution,
@@ -424,27 +424,29 @@ class AgentExecutor:
             server.transport == "stdio"
             for server in scope.binding.compiled_agent.mcp_servers
         )
-        if backend is None:
-            skill_resources: tuple[SandboxResource, ...] = ()
-            resource_keys: Mapping[str, "str | None"] = {
-                skill.id: None
-                for skill in scope.binding.compiled_agent.skill_definitions
-            }
-        else:
-            skill_resources, resource_keys = await _skill_sandbox_resources(
-                scope.binding.compiled_agent,
-                self._asset_sources,
-            )
-        mcp_projections = await prepare_mcp_projections(
-            scope.binding.compiled_agent.mcp_servers,
-            mcp_bindings,
-            asset_readers=self._asset_sources,
-            sandboxed=backend is not None,
-        )
-
+        materializer = AssetMaterializer()
         session: SandboxSession | None = None
         primary_error: BaseException | None = None
         try:
+            if backend is None:
+                skill_resources: tuple[SandboxResource, ...] = ()
+                resource_keys: Mapping[str, "str | None"] = {
+                    skill.id: None
+                    for skill in scope.binding.compiled_agent.skill_definitions
+                }
+            else:
+                skill_resources, resource_keys = await _skill_sandbox_resources(
+                    scope.binding.compiled_agent,
+                    self._asset_sources,
+                )
+            mcp_projections = await prepare_mcp_projections(
+                scope.binding.compiled_agent.mcp_servers,
+                mcp_bindings,
+                asset_readers=self._asset_sources,
+                sandboxed=backend is not None,
+                materializer=materializer,
+            )
+
             if backend is None and selected:
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
             if (
@@ -514,6 +516,7 @@ class AgentExecutor:
             await _cleanup_agent_run_resources(
                 session,
                 primary_error,
+                materializer=materializer,
             )
 
 
@@ -766,15 +769,40 @@ async def _skill_sandbox_resources(
 async def _cleanup_agent_run_resources(
     session: "SandboxSession | None",
     primary_error: BaseException | None,
+    *,
+    materializer: AssetMaterializer | None = None,
 ) -> None:
-    if session is None:
-        return
-    try:
-        await _close_sandbox_session(session)
-    except BaseException as cleanup_error:
+    cleanup_error: BaseException | None = None
+    if session is not None:
+        try:
+            await _close_sandbox_session(session)
+        except BaseException as error:
+            cleanup_error = error
+    if (
+        materializer is not None
+        and cleanup_error is None
+        and (session is not None or not _has_process_cleanup_failure(primary_error))
+    ):
+        try:
+            await materializer.close()
+        except BaseException as error:
+            cleanup_error = error
+    if cleanup_error is not None:
         if primary_error is not None and cleanup_error is not primary_error:
             raise primary_error from cleanup_error
-        raise
+        raise cleanup_error
+
+
+def _has_process_cleanup_failure(error: BaseException | None) -> bool:
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, AIError) and error.code in {
+            ErrorCode.MCP_CLEANUP_FAILED, ErrorCode.SANDBOX_CLEANUP_FAILED,
+        }:
+            return True
+        error = error.__cause__
+    return False
 
 
 def _validate_deferred_requests(requests: DeferredToolRequests) -> None:
@@ -1284,9 +1312,13 @@ def _map_event(event: object) -> "AgentEmission | None":
 
 def _cleanup_cause(error: BaseException) -> "AIError | None":
     cause = error.__cause__
-    if isinstance(cause, AIError) and cause.code in {
-        ErrorCode.SANDBOX_CLEANUP_FAILED, ErrorCode.MCP_CLEANUP_FAILED,
-    }:
+    if isinstance(cause, AIError) and (
+        cause.code in {ErrorCode.SANDBOX_CLEANUP_FAILED, ErrorCode.MCP_CLEANUP_FAILED}
+        or (
+            cause.code is ErrorCode.STORAGE_UNAVAILABLE
+            and cause.safe_details.get("phase") == "asset_materialization_cleanup"
+        )
+    ):
         return cause
     return None
 

@@ -190,3 +190,65 @@ async def test_inner_toolset_exit_does_not_swallow_cancellation(
     with pytest.raises(asyncio.CancelledError):
         await toolset.__aexit__(None, None, None)
     await toolset.close_resources()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_failure", (False, True))
+async def test_asset_projection_cleanup_follows_proven_process_shutdown(
+    session_failure: bool,
+) -> None:
+    from linktools.ai.runtime._agent_executor import _cleanup_agent_run_resources
+
+    closed: list[str] = []
+    class Session:
+        async def close(self) -> None:
+            closed.append("session")
+            if session_failure:
+                raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
+
+    class Materializer:
+        async def close(self) -> None:
+            closed.append("assets")
+
+    if session_failure:
+        with pytest.raises(AIError) as raised:
+            await _cleanup_agent_run_resources(Session(), None, materializer=Materializer())
+        assert raised.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+        assert closed == ["session"]
+    else:
+        await _cleanup_agent_run_resources(Session(), None, materializer=Materializer())
+        assert closed == ["session", "assets"]
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_host_process_cleanup_retains_asset_projection() -> None:
+    from linktools.ai.runtime._agent_executor import _cleanup_agent_run_resources
+
+    class Materializer:
+        async def close(self) -> None:
+            pytest.fail("resources may still be in use")
+
+    primary = AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+    primary.__cause__ = AIError(ErrorCode.MCP_CLEANUP_FAILED)
+    await _cleanup_agent_run_resources(None, primary, materializer=Materializer())
+
+
+@pytest.mark.asyncio
+async def test_asset_cleanup_fault_survives_safe_primary_error_serialization() -> None:
+    from linktools.ai.runtime._agent_executor import _cleanup_agent_run_resources
+
+    cleanup = AIError(
+        ErrorCode.STORAGE_UNAVAILABLE,
+        safe_details={"phase": "asset_materialization_cleanup"},
+    )
+    class Materializer:
+        async def close(self) -> None:
+            raise cleanup
+
+    primary = AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+    with pytest.raises(AIError) as raised:
+        await _cleanup_agent_run_resources(None, primary, materializer=Materializer())
+    assert raised.value is primary
+    result = _with_cleanup_diagnostic(primary, primary).to_safe_error(operation_id="run")
+    assert result.code == ErrorCode.TOOL_EFFECT_UNKNOWN.value
+    assert result.safe_details == {"secondary_error_code": ErrorCode.STORAGE_UNAVAILABLE.value}

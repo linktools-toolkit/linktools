@@ -33,7 +33,7 @@ from ..capability import (
     validate_resource_path,
     validate_resource_tree,
 )
-from ..asset import AssetStoreReader, AssetVersionRef
+from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
@@ -80,6 +80,7 @@ class _MCPProjection:
     server_id: str
     args: tuple[str | SandboxResourcePath, ...]
     resources: tuple[SandboxResource, ...]
+    resource_root: str | None = None
 
 
 class _MCPModelToolset(WrapperToolset[object]):
@@ -366,6 +367,7 @@ async def prepare_mcp_projections(
     *,
     asset_readers: Mapping[str, AssetStoreReader],
     sandboxed: bool,
+    materializer: AssetMaterializer | None = None,
 ) -> dict[str, _MCPProjection]:
     """Verify selected Asset versions and expose existing local resource files."""
     projections: dict[str, _MCPProjection] = {}
@@ -401,7 +403,11 @@ async def prepare_mcp_projections(
             server.id,
             reader,
             versions,
+            materializer=materializer,
         )
+        if resource is None and not versions and materializer is not None:
+            materialized = await materializer.materialize(reader, versions)
+            resource = SandboxResource(server.id, materialized.root)
         local_files = None if resource is None else resource.files
         arguments: list[str | SandboxResourcePath] = []
         for argument in server.args:
@@ -423,6 +429,7 @@ async def prepare_mcp_projections(
             server.id,
             tuple(arguments),
             (resource,) if sandboxed and resource is not None else (),
+            None if resource is None or resource.source is None else str(resource.source),
         )
     return projections
 
@@ -460,9 +467,17 @@ async def materialize_mcp_capabilities(
                 server,
                 sandboxed=sandbox is not None,
                 sandbox_session=sandbox_session,
-                host_cwd=host_cwd,
+                host_cwd=(
+                    host_cwd if projection is None or projection.resource_root is None
+                    else projection.resource_root
+                ),
                 args=() if projection is None else projection.args,
                 resources=() if projection is None else projection.resources,
+                cwd_resource_id=(
+                    server.id
+                    if projection is not None and projection.resource_root is not None
+                    else None
+                ),
             )
             toolset = _MCPDiscoveryToolset(transport, server=server)
             mapped = _MCPModelToolset(
@@ -594,10 +609,14 @@ def _mcp_execution_policy(
     if server.transport != "stdio":
         return {"version": 1, "boundary": "host-network"}
     if sandbox is None:
-        return {"version": 1, "boundary": "host-stdio"}
-    if not isinstance(sandbox, StdioSandbox):
-        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-    return sandbox.stdio_execution_policy()
+        policy: dict[str, JsonValue] = {"version": 1, "boundary": "host-stdio"}
+    else:
+        if not isinstance(sandbox, StdioSandbox):
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+        policy = dict(sandbox.stdio_execution_policy())
+    if server.resource is not None:
+        policy["cwd"] = "resource"
+    return policy
 
 
 __all__ = []

@@ -524,11 +524,19 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     policy = dict(value)
     boundary = policy.get("boundary")
+    if not isinstance(boundary, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    cwd = policy.pop("cwd", None)
+    if cwd is not None and (cwd != "resource" or boundary == "host-network"):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if "cwd" in value and cwd is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    cwd_policy = {} if cwd is None else {"cwd": cwd}
     if boundary in {"host-stdio", "host-network"}:
         expected = {"version": 1, "boundary": boundary}
         if policy != expected:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return expected
+        return {**expected, **cwd_policy}
     expected = {
         "version",
         "boundary",
@@ -557,6 +565,7 @@ def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
         "workspace_access": workspace_access,
         "hidden_paths": list(hidden_paths),
         "network": "isolated",
+        **cwd_policy,
     }
 
 

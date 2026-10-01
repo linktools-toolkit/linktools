@@ -230,20 +230,30 @@ references for Skill resources and read them through AssetStore when needed.
 The Sandbox exposes existing local resource files by path after verifying their
 bound Asset versions and executable bits. Resources without native file paths
 remain available through `load_skill` but cannot be executed by file path.
-No Asset resource bytes are copied to a temporary directory or Runtime ObjectStore.
+Skill resource bytes are not copied to a temporary directory or Runtime ObjectStore.
 Because the paths point to original files, external edits after verification
 can be observed by an already running process.
 
 For a stdio MCP package, the package directory supplies the default resource
 root when `resource` is omitted; an explicit resource root takes precedence.
-A remote MCP package has no resource root, and neighboring files are neither
-projected nor uploaded. Arguments whose complete
-value is `resource:<relative>` reference files below that package root.
-CapabilityGroup capture binds those files to Asset version references, rejects
-absolute paths, traversal and missing files, and Runtime preserves the refs
-without copying the bytes into Runtime storage. Outside a resource-backed MCP
-package, a string such as `resource:literal` remains an ordinary stdio
-argument.
+The resource root is also that server process's working directory, so a plain
+argument such as `server.py` works together with sibling imports and relative
+data-file reads. Native directory resources retain their verified local paths.
+For Asset backends without native file paths, Runtime materializes the captured
+Asset versions into a private temporary package tree for each run. The process
+closes before that tree is removed on success, failure, or cancellation; runs
+do not share a persistent resource cache. Materialization preserves the
+configured host-stdio or Sandbox execution boundary and does not copy resource
+bytes into Runtime ObjectStore. If process cleanup cannot establish safe
+closure, resources remain available rather than being deleted under a live
+process.
+
+The existing `resource:<relative>` argument form is also supported. Capture
+rejects absolute paths, traversal, and missing files in these references and
+binds package files to Asset version references. A Streamable HTTP or SSE MCP
+package has no resource root, and neighboring files are neither projected nor
+uploaded. Outside a resource-backed stdio package, a string such as
+`resource:literal` remains an ordinary argument.
 
 MCP connection values are live declaration data rather than durable semantic
 identity. The execution pin keeps the server id/revision, canonical transport,
@@ -287,16 +297,21 @@ headers:
   Authorization: "Bearer ${LEGACY_MCP_TOKEN}"
 ```
 
-A resource-backed stdio package keeps its existing layout and execution model:
+A stdio package can use a plain filename with any supported AssetStore:
 
 ```yaml
-# mcp/local/mcp.yaml; server.py is in the same package
+# mcp/local/mcp.yaml; server.py and its dependencies are in the same package
 command: python
 args:
-  - resource:server.py
+  - server.py
 env:
   API_KEY: "${LOCAL_MCP_API_KEY}"
 ```
+
+No explicit `resource` field, temporary-directory option, or `resource:` prefix
+is needed for this package layout. `args: [resource:server.py]` remains valid.
+Direct Python registration still needs an explicit Asset resource root when
+its files belong to an AssetStore rather than the host working directory.
 
 JSON/YAML with only `command` defaults to `stdio`; with only `url` it defaults
 to `streamable-http`. `type: http` and `transport: http` are authoring aliases
@@ -411,12 +426,12 @@ publishing, and arbitrary third-party configuration import are out of scope.
 
 Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `CapabilityGroup(..., sandbox=...)`; the Workspace can come from the same or another group. A Sandbox can also be configured without a Workspace for Skill resource paths and MCP stdio.
 
-When a Workspace is present and no Sandbox is configured, LinkTools uses its
-built-in local adapter. Without either, MCP stdio runs on the host and Skill
-locations remain virtual. LinkTools owns the stable model-visible workspace
+When no Sandbox is configured, LinkTools uses its built-in `LocalSandbox`
+adapter for supervised host processes, including stdio MCP without a Workspace.
+This does not provide OS isolation. LinkTools owns the stable model-visible workspace
 tool signatures, descriptions, metadata, and durable capability pins.
 
-A run opens a `SandboxSession` when it needs a selected Workspace filesystem/shell tool, a local Skill resource path, or a stdio MCP server assigned to that Sandbox. Workspace tool commands share that session, which is closed when the model run succeeds, fails, or is cancelled. Without a Workspace, stdio uses the host current directory captured when Runtime opens as its execution root. Streamable HTTP and SSE MCP connections use the `host-network` boundary,
+A run opens a `SandboxSession` when it needs a selected Workspace filesystem/shell tool, a local Skill resource path, or a stdio MCP server assigned to that Sandbox. Workspace tool commands share that session, which is closed when the model run succeeds, fails, or is cancelled. Resource-backed stdio uses its package directory as its process working directory; other stdio uses the Workspace execution root, or the host current directory captured when Runtime opens if no Workspace is present. Streamable HTTP and SSE MCP connections use the `host-network` boundary,
 regardless of the configured Sandbox. A remote-only Agent with no selected
 local capabilities or Skill resources does not open a Sandbox session and
 needs no Workspace or working directory. In a mixed run, stdio remains in
@@ -430,7 +445,7 @@ to Workspace files, roots, mounts, or host resources.
 
 Use `DisabledSandbox` to keep workspace tool declarations and historical binding recovery available while making runtime workspace tool materialization fail with `SANDBOX_UNAVAILABLE`. A custom Sandbox failure does not fall back to the local host environment.
 
-`LocalSandbox` runs with the selected execution root as its current directory.
+`LocalSandbox` runs Workspace commands with the selected execution root as its current directory; a resource-backed MCP process uses its own package root.
 It is an execution boundary, not an operating-system security boundary. On Linux,
 `BubblewrapSandbox` is an explicit deployment choice. It requires a non-root
 user, usable unprivileged namespaces, `bwrap >= 0.12.0`, and a trusted

@@ -38,6 +38,7 @@ def _create_mcp_transport(
     host_cwd: str | None,
     args: tuple[str | SandboxResourcePath, ...] = (),
     resources: tuple[SandboxResource, ...] = (),
+    cwd_resource_id: str | None = None,
 ) -> ClientTransport:
     if server.transport == "streamable-http":
         return StreamableHttpTransport(
@@ -65,6 +66,7 @@ def _create_mcp_transport(
             args,
             resources,
             server.env,
+            cwd_resource_id=cwd_resource_id,
         )
     if host_cwd is None:
         raise AIError(
@@ -89,12 +91,15 @@ class _SandboxMCPTransport(ClientTransport):
         args: tuple[str | SandboxResourcePath, ...],
         resources: tuple[SandboxResource, ...],
         environment: "Mapping[str, str] | None" = None,
+        *,
+        cwd_resource_id: str | None = None,
     ) -> None:
         self._session = session
         self._command = command
         self._args = args
         self._resources = resources
         self._environment = dict(environment or {})
+        self._cwd_resource_id = cwd_resource_id
         self._process: SandboxStdioProcess | None = None
 
     @asynccontextmanager
@@ -102,6 +107,8 @@ class _SandboxMCPTransport(ClientTransport):
         kwargs: dict[str, object] = {"resources": self._resources}
         if self._environment:
             kwargs["environment"] = self._environment
+        if self._cwd_resource_id is not None:
+            kwargs["cwd_resource_id"] = self._cwd_resource_id
         process = await self._session.open_stdio_process(
             self._command,
             self._args,
