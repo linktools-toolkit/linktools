@@ -1591,6 +1591,16 @@ class LocalExecutionBackend:
             except asyncio.CancelledError:
                 return
             except BaseException as error:  # noqa: BLE001
+                if (
+                    isinstance(error, AIError)
+                    and error.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
+                    and error.safe_details.get("reason") != "workspace_mismatch"
+                ):
+                    _logger.warning(
+                        "recovery reconciliation deferred: execution=%s",
+                        execution_id,
+                    )
+                    return
                 if isinstance(error, AIError):
                     failure = _WorkerFailure(
                         error.code,
@@ -2615,7 +2625,6 @@ class LocalExecutionBackend:
         self._checkpoint_tasks.clear()
         self._worker_cancel_requests.clear()
         self._worker_shutdown_requests.clear()
-        self._recovery_reconcile_tasks.clear()
         self._execution_task_map().clear()
 
     async def release_runtime_execution(
