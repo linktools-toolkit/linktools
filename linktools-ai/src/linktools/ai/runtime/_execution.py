@@ -1634,7 +1634,6 @@ class DefaultExecutionService:
                 ExecutionStatus.FINALIZING,
                 ExecutionStatus.RECOVERY_REQUIRED,
                 ExecutionStatus.CANCELLING,
-                ExecutionStatus.CANCELLING,
             }
         ):
             return ExecutionHandle(execution.execution_id)
@@ -2000,6 +1999,7 @@ class DefaultExecutionService:
                 ExecutionStatus.WAITING_DEFERRED,
                 ExecutionStatus.FINALIZING,
                 ExecutionStatus.RECOVERY_REQUIRED,
+                ExecutionStatus.CANCELLING,
             }:
                 await self._acquire_start_dependency_hold(
                     started,
