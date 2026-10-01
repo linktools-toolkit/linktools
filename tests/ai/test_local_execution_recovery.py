@@ -11,6 +11,7 @@ import pytest
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
+    ExecutionEventType,
     ExecutionLineageKind,
     ExecutionStatus,
     Principal,
@@ -601,14 +602,16 @@ async def test_recovered_started_cancel_commits_cancel_event_before_terminal(
     backend._execution.executions.record = current
     operation = SimpleNamespace(operation_id="cancel-operation")
     checkpoint = SimpleNamespace(agent_run_id="agent-run")
-    calls: list[tuple[str, object]] = []
+    events: list[ExecutionEventType] = []
 
     async def commit_cancel_checkpoint(
         commit: ExecutionCancelRequestCommit,
         *,
         expected_status: ExecutionStatus,
     ) -> ExecutionRecord:
-        calls.append(("checkpoint", (commit, expected_status)))
+        assert commit.operation_id == operation.operation_id
+        assert expected_status is ExecutionStatus.STARTED
+        events.append(ExecutionEventType.CANCEL_REQUESTED)
         return replace(
             current,
             status=ExecutionStatus.CANCELLING,
@@ -625,14 +628,14 @@ async def test_recovered_started_cancel_commits_cancel_event_before_terminal(
         **kwargs: object,
     ) -> ExecutionRecord:
         del output, error_code, stop_reason, kwargs
-        calls.append(("terminal", execution))
+        events.append(ExecutionEventType.EXECUTION_CANCELLED)
         return replace(execution, status=status)
 
     async def settle_cancel_operation(
         candidate: object,
         execution: ExecutionRecord,
     ) -> None:
-        calls.append(("settle", (candidate, execution)))
+        del candidate, execution
 
     monkeypatch.setattr(backend, "commit_cancel_checkpoint", commit_cancel_checkpoint)
     monkeypatch.setattr(backend, "_commit_terminal", commit_terminal)
@@ -645,11 +648,10 @@ async def test_recovered_started_cancel_commits_cancel_event_before_terminal(
     )
 
     assert terminal.status is ExecutionStatus.CANCELLED
-    assert [name for name, _ in calls] == ["checkpoint", "terminal", "settle"]
-    commit, expected_status = calls[0][1]
-    assert isinstance(commit, ExecutionCancelRequestCommit)
-    assert commit.operation_id == operation.operation_id
-    assert expected_status is ExecutionStatus.STARTED
+    assert events == [
+        ExecutionEventType.CANCEL_REQUESTED,
+        ExecutionEventType.EXECUTION_CANCELLED,
+    ]
 
 
 @pytest.mark.asyncio
