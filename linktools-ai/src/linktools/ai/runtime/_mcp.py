@@ -177,6 +177,7 @@ class _MCPDiscoveryToolset(MCPToolset[object]):
             init_timeout=server.init_timeout,
             read_timeout=server.read_timeout,
         )
+        self._init_timeout = server.init_timeout
         self._server_id = server.id
         self._transport_kind = server.transport
         self._cleanup_error: BaseException | None = None
@@ -190,7 +191,8 @@ class _MCPDiscoveryToolset(MCPToolset[object]):
 
     async def __aenter__(self) -> "_MCPDiscoveryToolset":
         try:
-            await super().__aenter__()
+            with anyio.fail_after(self._init_timeout):
+                await super().__aenter__()
         except BaseException as error:
             _raise_connection_failure(error, self._details("connect"))
         return self
