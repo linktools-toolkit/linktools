@@ -105,7 +105,7 @@ class _RecoveryCoordinatorPort(Protocol):
         tenant_id: str,
     ) -> tuple[ExecutionRecoveryEffect, ...]: ...
 
-    async def _terminal_tool_effects(
+    async def _reconcile_tool_effects(
         self,
         execution_id: str,
         *,
@@ -325,7 +325,7 @@ class _RecoveryCoordinatorPort(Protocol):
         barrier: RepositoryInstructionBarrier,
     ) -> RecoveryCheckpoint: ...
 
-    def _mark_recovery_relaunch(self, execution_id: str) -> bool: ...
+    def _prepare_recovery_relaunch(self, execution_id: str) -> bool: ...
 
     def execution_task_set(
         self,
@@ -718,7 +718,7 @@ class _RecoveryCoordinator:
                 RecoveryCheckpointState.WAITING,
             }
         ):
-            effects, active_claims = await self._port._terminal_tool_effects(
+            effects, active_claims = await self._port._reconcile_tool_effects(
                 execution.execution_id,
                 tenant_id=self._port.tenant_id,
             )
@@ -849,7 +849,7 @@ class _RecoveryCoordinator:
             thinking=execution.thinking,
             correlation=execution.correlation,
         )
-        if not self._port._mark_recovery_relaunch(execution.execution_id):
+        if not self._port._prepare_recovery_relaunch(execution.execution_id):
             return
         await self._port.launch(request, execution, resume=resume)
         _logger.info(
@@ -872,7 +872,7 @@ class _RecoveryCoordinator:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if current.status is not ExecutionStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        unresolved, active_claims = await self._port._terminal_tool_effects(
+        unresolved, active_claims = await self._port._reconcile_tool_effects(
             execution_id,
             tenant_id=tenant_id,
         )
