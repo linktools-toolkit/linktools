@@ -106,6 +106,12 @@ class ToolStateRepository(Protocol):
     async def list_by_execution(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ToolOperationRecord, ...]: ...
+    async def reconcile_expired_claim(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+    ) -> ToolOperationRecord: ...
     async def claim(
         self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int
     ) -> ToolOperationRecord: ...
