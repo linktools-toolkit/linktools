@@ -63,9 +63,12 @@ async def test_cancellation_during_final_cleanup_finishes_every_owned_resource(
         await asyncio.wait_for(task, 1)
     assert closed == ["first", "second"]
     if fail_close:
-        assert isinstance(raised.value.__cause__, AIError)
-        assert raised.value.__cause__.code is ErrorCode.MCP_CLEANUP_FAILED
-        assert "private" not in str(raised.value.__cause__)
+        cleanup_error: BaseException | None = raised.value
+        while cleanup_error is not None and not isinstance(cleanup_error, AIError):
+            cleanup_error = cleanup_error.__cause__ or cleanup_error.__context__
+        assert isinstance(cleanup_error, AIError)
+        assert cleanup_error.code is ErrorCode.MCP_CLEANUP_FAILED
+        assert "private" not in str(cleanup_error)
 
 
 @pytest.mark.asyncio
@@ -230,7 +233,9 @@ async def test_unconfirmed_host_process_cleanup_retains_asset_projection() -> No
 
     primary = AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
     primary.__cause__ = AIError(ErrorCode.MCP_CLEANUP_FAILED)
-    await _cleanup_agent_run_resources(None, primary, materializer=Materializer())
+    cancellation = asyncio.CancelledError()
+    cancellation.__context__ = primary
+    await _cleanup_agent_run_resources(None, cancellation, materializer=Materializer())
 
 
 @pytest.mark.asyncio

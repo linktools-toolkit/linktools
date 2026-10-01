@@ -801,7 +801,7 @@ def _has_process_cleanup_failure(error: BaseException | None) -> bool:
             ErrorCode.MCP_CLEANUP_FAILED, ErrorCode.SANDBOX_CLEANUP_FAILED,
         }:
             return True
-        error = error.__cause__
+        error = error.__cause__ or error.__context__
     return False
 
 
