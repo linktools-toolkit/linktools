@@ -3809,6 +3809,9 @@ class LocalExecutionBackend:
     ) -> ExecutionRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        task = self._tasks.get(execution_id)
+        if task is not None and not task.done():
+            await self._drain_worker_task(execution_id, task)
         return await self._recovery_coordinator.recover_execution(
             execution_id,
             tenant_id=tenant_id,
