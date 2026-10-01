@@ -474,7 +474,7 @@ class LocalExecutionBackend:
             durable_sequence=event_sequence,
         )
 
-    def _mark_recovery_relaunch(self, execution_id: str) -> bool:
+    def _prepare_recovery_relaunch(self, execution_id: str) -> bool:
         if self.worker_installed(execution_id):
             return False
         self._worker_failures.pop(execution_id, None)
@@ -1247,7 +1247,7 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLING,
         }:
             return CancelEffectOutcome.UNKNOWN
-        effects, active_claims = await self._terminal_tool_effects(
+        effects, active_claims = await self._reconcile_tool_effects(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -1370,7 +1370,7 @@ class LocalExecutionBackend:
             thinking=current.thinking,
             correlation=current.correlation,
         )
-        if not self._mark_recovery_relaunch(current.execution_id):
+        if not self._prepare_recovery_relaunch(current.execution_id):
             return
         await self.launch(request, current, resume=decision)
         _logger.info(
@@ -1640,7 +1640,7 @@ class LocalExecutionBackend:
         while self._accepting:
             if self.worker_installed(execution_id):
                 return
-            effects, active_claims = await self._terminal_tool_effects(
+            effects, active_claims = await self._reconcile_tool_effects(
                 execution_id,
                 tenant_id=self._tenant_id,
             )
@@ -2919,7 +2919,7 @@ class LocalExecutionBackend:
                             )
                             if persisted is None:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            recovered = await self._check_terminal_tool_effects(
+                            recovered = await self._check_reconcile_tool_effects(
                                 persisted
                             )
                             if (
@@ -3837,7 +3837,7 @@ class LocalExecutionBackend:
             if record.status is ToolOperationStatus.EFFECT_UNKNOWN
         )
 
-    async def _terminal_tool_effects(
+    async def _reconcile_tool_effects(
         self,
         execution_id: str,
         *,
@@ -3908,7 +3908,7 @@ class LocalExecutionBackend:
             effects,
         )
 
-    async def _check_terminal_tool_effects(
+    async def _check_reconcile_tool_effects(
         self,
         execution: ExecutionRecord,
     ) -> ExecutionRecord | None:
@@ -3919,7 +3919,7 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLING,
         }:
             return None
-        effects, active_claims = await self._terminal_tool_effects(
+        effects, active_claims = await self._reconcile_tool_effects(
             execution.execution_id,
             tenant_id=self._tenant_id,
         )
@@ -4373,7 +4373,7 @@ class LocalExecutionBackend:
             return current
         if current.status is ExecutionStatus.RECOVERY_REQUIRED:
             return current
-        recovered = await self._check_terminal_tool_effects(current)
+        recovered = await self._check_reconcile_tool_effects(current)
         if recovered is not None:
             return recovered
         if status is not ExecutionStatus.FAILED and error_diagnostics is not None:
