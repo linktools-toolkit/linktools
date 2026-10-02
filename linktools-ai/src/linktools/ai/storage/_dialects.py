@@ -42,6 +42,8 @@ if TYPE_CHECKING:
         String,
         Table,
     )
+    from sqlalchemy.dialects.postgresql import Insert as PostgreSQLInsert
+    from sqlalchemy.dialects.sqlite import Insert as SQLiteInsert
     from sqlalchemy.engine import Connection, RowMapping
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
     from sqlalchemy.sql.elements import ColumnElement
@@ -228,6 +230,11 @@ class SQLiteDialect:
 
         return func.strftime("%Y-%m-%dT%H:%M:%f", "now")
 
+    def _insert(self, table: "Table") -> "SQLiteInsert | PostgreSQLInsert":
+        from sqlalchemy.dialects.sqlite import insert
+
+        return insert(table)
+
     async def insert_ignore_conflict(
         self,
         session: "AsyncSession",
@@ -236,10 +243,8 @@ class SQLiteDialect:
         values: "Mapping[str, SqlValue]",
         index_elements: "Sequence[str]",
     ) -> InsertResult:
-        from sqlalchemy.dialects.sqlite import insert
-
         statement = (
-            insert(table)
+            self._insert(table)
             .values(dict(values))
             .on_conflict_do_nothing(index_elements=list(index_elements))
             .returning(table.c.id)
@@ -257,10 +262,9 @@ class SQLiteDialect:
     ) -> None:
         if not rows:
             return
-        from sqlalchemy.dialects.sqlite import insert
 
         statement = (
-            insert(table)
+            self._insert(table)
             .values([dict(row) for row in rows])
             .on_conflict_do_nothing(index_elements=list(index_elements))
         )
@@ -275,10 +279,8 @@ class SQLiteDialect:
         set_values: "Mapping[str, SqlValue]",
         index_elements: "Sequence[str]",
     ) -> None:
-        from sqlalchemy.dialects.sqlite import insert
-
         statement = (
-            insert(table)
+            self._insert(table)
             .values(dict(values))
             .on_conflict_do_update(
                 index_elements=list(index_elements),
@@ -298,7 +300,6 @@ class SQLiteDialect:
         step: int = 1,
     ) -> int:
         from sqlalchemy import func
-        from sqlalchemy.dialects.sqlite import insert
 
         value_column = table.c[column]
         insert_values = dict(values)
@@ -307,7 +308,7 @@ class SQLiteDialect:
         if "updated_at" in table.c:
             set_values["updated_at"] = func.current_timestamp()
         statement = (
-            insert(table)
+            self._insert(table)
             .values(insert_values)
             .on_conflict_do_update(
                 index_elements=list(index_elements),
@@ -328,9 +329,8 @@ class SQLiteDialect:
     ) -> None:
         if not rows:
             return
-        from sqlalchemy.dialects.sqlite import insert
 
-        insert_statement = insert(table).values([dict(row) for row in rows])
+        insert_statement = self._insert(table).values([dict(row) for row in rows])
         statement = insert_statement.on_conflict_do_update(
             index_elements=list(index_elements),
             set_={column: insert_statement.excluded[column] for column in set_columns},
@@ -349,10 +349,9 @@ class SQLiteDialect:
     ) -> "Mapping[str, int]":
         if not rows:
             return {}
-        from sqlalchemy.dialects.sqlite import insert
 
         value_column = table.c[column]
-        insert_statement = insert(table).values([dict(row) for row in rows])
+        insert_statement = self._insert(table).values([dict(row) for row in rows])
         set_values = {column: value_column + insert_statement.excluded[column]}
         if "updated_at" in table.c:
             from sqlalchemy import func
@@ -408,148 +407,10 @@ class PostgreSQLDialect(SQLiteDialect):
 
         return func.now()
 
-    async def insert_ignore_conflict(
-        self,
-        session: "AsyncSession",
-        *,
-        table: "Table",
-        values: "Mapping[str, SqlValue]",
-        index_elements: "Sequence[str]",
-    ) -> InsertResult:
+    def _insert(self, table: "Table") -> "PostgreSQLInsert":
         from sqlalchemy.dialects.postgresql import insert
 
-        statement = (
-            insert(table)
-            .values(dict(values))
-            .on_conflict_do_nothing(index_elements=list(index_elements))
-            .returning(table.c.id)
-        )
-        row = (await session.execute(statement)).first()
-        return InsertResult(row is not None, None if row is None else int(row[0]))
-
-    async def insert_ignore_conflict_many(
-        self,
-        session: "AsyncSession",
-        *,
-        table: "Table",
-        rows: "Sequence[Mapping[str, SqlValue]]",
-        index_elements: "Sequence[str]",
-    ) -> None:
-        if not rows:
-            return
-        from sqlalchemy.dialects.postgresql import insert
-
-        statement = (
-            insert(table)
-            .values([dict(row) for row in rows])
-            .on_conflict_do_nothing(index_elements=list(index_elements))
-        )
-        await session.execute(statement)
-
-    async def upsert(
-        self,
-        session: "AsyncSession",
-        *,
-        table: "Table",
-        values: "Mapping[str, SqlValue]",
-        set_values: "Mapping[str, SqlValue]",
-        index_elements: "Sequence[str]",
-    ) -> None:
-        from sqlalchemy.dialects.postgresql import insert
-
-        statement = (
-            insert(table)
-            .values(dict(values))
-            .on_conflict_do_update(
-                index_elements=list(index_elements),
-                set_=dict(set_values),
-            )
-        )
-        await session.execute(statement)
-
-    async def upsert_increment(
-        self,
-        session: "AsyncSession",
-        *,
-        table: "Table",
-        values: "Mapping[str, SqlValue]",
-        column: str,
-        index_elements: "Sequence[str]",
-        step: int = 1,
-    ) -> int:
-        from sqlalchemy import func
-        from sqlalchemy.dialects.postgresql import insert
-
-        value_column = table.c[column]
-        insert_values = dict(values)
-        insert_values[column] = step
-        set_values = {column: value_column + step}
-        if "updated_at" in table.c:
-            set_values["updated_at"] = func.current_timestamp()
-        statement = (
-            insert(table)
-            .values(insert_values)
-            .on_conflict_do_update(
-                index_elements=list(index_elements),
-                set_=set_values,
-            )
-            .returning(value_column)
-        )
-        return int((await session.execute(statement)).scalar_one())
-
-    async def upsert_many(
-        self,
-        session: "AsyncSession",
-        *,
-        table: "Table",
-        rows: "Sequence[Mapping[str, SqlValue]]",
-        set_columns: "Sequence[str]",
-        index_elements: "Sequence[str]",
-    ) -> None:
-        if not rows:
-            return
-        from sqlalchemy.dialects.postgresql import insert
-
-        insert_statement = insert(table).values([dict(row) for row in rows])
-        statement = insert_statement.on_conflict_do_update(
-            index_elements=list(index_elements),
-            set_={column: insert_statement.excluded[column] for column in set_columns},
-        )
-        await session.execute(statement)
-
-    async def upsert_increment_many(
-        self,
-        session: "AsyncSession",
-        *,
-        table: "Table",
-        rows: "Sequence[Mapping[str, SqlValue]]",
-        column: str,
-        index_elements: "Sequence[str]",
-        returning_key: str,
-    ) -> "Mapping[str, int]":
-        if not rows:
-            return {}
-        from sqlalchemy.dialects.postgresql import insert
-
-        value_column = table.c[column]
-        insert_statement = insert(table).values([dict(row) for row in rows])
-        set_values = {column: value_column + insert_statement.excluded[column]}
-        if "updated_at" in table.c:
-            from sqlalchemy import func
-
-            set_values["updated_at"] = func.current_timestamp()
-        statement = insert_statement.on_conflict_do_update(
-            index_elements=list(index_elements),
-            set_=set_values,
-        ).returning(table.c[returning_key], value_column)
-        result = (await session.execute(statement)).all()
-        _logger.debug(
-            "SQL batch executed: backend=%s operation=reserve_sequences "
-            "batch_size=%s statement_count=1",
-            self.name,
-            len(rows),
-        )
-        return {str(row[0]): int(row[1]) for row in result}
+        return insert(table)
 
 
 class MySQLDialect(SQLiteDialect):
