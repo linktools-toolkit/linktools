@@ -884,8 +884,6 @@ ${items.join("\n")}` : `${throwable}`;
           objectArgs.push(convert2ObjcObject(args[i2]));
         }
         event2["args"] = pretty2Json(objectArgs);
-        event2["result"] = null;
-        event2["error"] = null;
       }
       if (hookOpts.result !== false) {
         event2["result"] = null;

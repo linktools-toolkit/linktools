@@ -102,7 +102,8 @@ tasks.register('buildTools') {
         def configPath = "${assetsDir}/${configName}"
         def config = readConfig(configPath)
 
-        if (config.tools_apk == null || config.tools_apk.md5 != apkMd5) {
+        if (config.AGENT_APK == null || config.AGENT_APK.md5 != apkMd5 ||
+                !file(targetPath).isFile() || calcMd5(targetPath) != apkMd5) {
 
             copy {
                 println("copy from ${apkPath}")
