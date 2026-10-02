@@ -817,41 +817,6 @@ class LocalExecutionBackend:
         )
         return started
 
-    async def _cancel_admitted_start_if_closing(
-        self, execution: ExecutionRecord
-    ) -> bool:
-        if execution.session_id is None:
-            return False
-        session = await self._conversation.sessions.get(
-            execution.session_id,
-            tenant_id=self._tenant_id,
-        )
-        if session is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if session.status is SessionStatus.OPEN:
-            return False
-        if (
-            session.status
-            not in {
-                SessionStatus.CLOSING,
-                SessionStatus.CLEANUP_REQUIRED,
-            }
-            or session.active_execution_id != execution.execution_id
-        ):
-            raise AIError(ErrorCode.SESSION_CONFLICT)
-        await self._commit_terminal(
-            execution,
-            ExecutionStatus.CANCELLED,
-            None,
-            ErrorCode.EXECUTION_CANCELLED.value,
-            StopReason.CANCELLED,
-        )
-        _logger.info(
-            "admitted start cancelled by session close: execution=%s",
-            execution.execution_id,
-        )
-        return True
-
     async def _ensure_session_admission(self, execution: ExecutionRecord) -> None:
         if execution.session_id is None:
             return
@@ -1846,32 +1811,6 @@ class LocalExecutionBackend:
             )
             return False
         return True
-
-    def _validate_recovery_handoff_integrity(
-        self,
-        checkpoint: RecoveryCheckpoint,
-        execution: ExecutionRecord | None,
-    ) -> None:
-        handoff = checkpoint.terminal_handoff
-        if handoff is None:
-            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        outcome = handoff.outcome
-        if outcome.terminal_status in {
-            ExecutionStatus.FAILED,
-            ExecutionStatus.CANCELLED,
-        } and (handoff.conversation is not None or outcome.output is not None):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (
-            execution is not None
-            and execution.status
-            in {
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }
-            and execution.status is not outcome.terminal_status
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _validate_handoff_output(self, outcome: RecoveryTerminalOutcome) -> None:
         output = outcome.output
@@ -5071,21 +5010,6 @@ def _terminal_error_payload(
     return payload
 
 
-def _admission_matches(
-    existing: RecoveryCheckpoint, candidate: RecoveryCheckpoint
-) -> bool:
-    return (
-        existing.execution_id == candidate.execution_id
-        and existing.agent_run_id is None
-        and existing.state is RecoveryCheckpointState.ADMITTED
-        and existing.handoff_phase is RecoveryHandoffPhase.NONE
-        and existing.terminal_handoff is None
-        and existing.pending_operation_id is None
-    )
-
-
-
-
 def _execution_error_code(error: Exception) -> ErrorCode:
     if isinstance(error, ValidationError):
         return ErrorCode.OUTPUT_VALIDATION_FAILED
@@ -5139,16 +5063,6 @@ def _is_infrastructure_error(error: Exception) -> bool:
         ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
         ErrorCode.SERVICE_NOT_READY,
     }
-
-
-def _execution_operation_result(status: ExecutionStatus) -> str:
-    if status is ExecutionStatus.SUCCEEDED:
-        return "success"
-    if status is ExecutionStatus.FAILED:
-        return "failure"
-    if status in {ExecutionStatus.CANCELLED, ExecutionStatus.CANCELLING}:
-        return "cancelled"
-    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 __all__ = ["LocalExecutionBackend"]
