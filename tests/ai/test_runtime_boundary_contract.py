@@ -409,3 +409,67 @@ async def test_wait_timeout_includes_initial_authorized_read() -> None:
             timeout_seconds=0.001,
         )
     assert error.value.code is ErrorCode.EXECUTION_WAIT_TIMEOUT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denied_at", ("header", "event", "execution", None))
+async def test_event_list_authorizes_before_reading_and_preserves_page(denied_at: str | None) -> None:
+    from unittest.mock import AsyncMock
+
+    from linktools.ai.core import AuthorizationAction
+    from linktools.ai.runtime import ExecutionEvent
+
+    principal = Principal("principal", "tenant", "service")
+    header = ResourceRef(ResourceKind.EXECUTION, "execution", "tenant")
+    actions: list[AuthorizationAction] = []
+    error = AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    async def authorize(actor: Principal, action: AuthorizationAction, resource: ResourceRef) -> None:
+        assert actor is principal
+        assert resource is header
+        actions.append(action)
+        if (denied_at == "event" and action is AuthorizationAction.EVENT_READ) or (
+            denied_at == "execution" and action is AuthorizationAction.EXECUTION_READ
+        ):
+            raise error
+
+    executions = SimpleNamespace(get_header=AsyncMock(return_value=None if denied_at == "header" else header))
+    events = SimpleNamespace(list=AsyncMock(return_value=Page(
+        (ExecutionEvent("execution", 7, "EXECUTION_STARTED", {"value": "stored"}),),
+        "next-page",
+    )))
+    service = DefaultEventService(
+        executions, events, SimpleNamespace(authorize=authorize), lambda *args, **kwargs: None
+    )
+    if denied_at is not None:
+        with pytest.raises(AIError) as caught:
+            await service.list("execution", principal=principal, after_sequence=6, limit=2)
+        assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
+        if denied_at != "header":
+            assert caught.value is error
+        events.list.assert_not_awaited()
+    else:
+        page = await service.list("execution", principal=principal, after_sequence=6, limit=2)
+        assert page == events.list.return_value
+        events.list.assert_awaited_once_with("execution", tenant_id="tenant", after_sequence=6, limit=2)
+    assert actions == {
+        "header": [],
+        "event": [AuthorizationAction.EVENT_READ],
+        "execution": [AuthorizationAction.EVENT_READ, AuthorizationAction.EXECUTION_READ],
+        None: [AuthorizationAction.EVENT_READ, AuthorizationAction.EXECUTION_READ],
+    }[denied_at]
+    executions.get_header.assert_awaited_once_with("execution", tenant_id="tenant")
+
+
+@pytest.mark.asyncio
+async def test_event_list_preserves_repository_failure() -> None:
+    from unittest.mock import AsyncMock
+
+    failure = RuntimeError("durable read failed")
+    events = SimpleNamespace(list=AsyncMock(side_effect=failure))
+    service = DefaultEventService(
+        _ExecutionRepository(), events, _AllowAuthorization(), lambda *args, **kwargs: None
+    )
+    with pytest.raises(RuntimeError) as caught:
+        await service.list("execution", principal=Principal("principal", "tenant", "service"))
+    assert caught.value is failure

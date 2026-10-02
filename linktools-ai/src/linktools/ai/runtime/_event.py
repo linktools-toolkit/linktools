@@ -618,23 +618,12 @@ class DefaultEventService:
         return self._live
 
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> Page[ExecutionEvent]:
-        header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(principal, AuthorizationAction.EVENT_READ, header)
-        await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
-        page = await self._events.list(
+        await self._authorize_read(execution_id, principal)
+        return await self._read_durable(
             execution_id,
             tenant_id=principal.tenant_id,
             after_sequence=after_sequence,
             limit=limit,
-        )
-        return Page(
-            tuple(
-                ExecutionEvent(item.execution_id, item.sequence, item.event_type, item.payload)
-                for item in page.items
-            ),
-            page.next_cursor,
         )
 
     async def stream(
@@ -644,7 +633,7 @@ class DefaultEventService:
         principal: Principal,
         after_sequence: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]:
-        await self._authorize_stream(execution_id, principal)
+        await self._authorize_read(execution_id, principal)
         try:
             live = self._live.claim_local_producer(execution_id)
         except AIError as error:
@@ -673,7 +662,7 @@ class DefaultEventService:
         authorized: bool = False,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         if not authorized:
-            await self._authorize_stream(execution_id, principal)
+            await self._authorize_read(execution_id, principal)
         try:
             is_local_producer = self._live.is_local_producer(execution_id)
         except Exception as error:
@@ -920,7 +909,7 @@ class DefaultEventService:
                 await asyncio.sleep(poll_backoff)
                 poll_backoff = min(30.0, poll_backoff * 2)
 
-    async def _authorize_stream(self, execution_id: str, principal: Principal) -> None:
+    async def _authorize_read(self, execution_id: str, principal: Principal) -> None:
         header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
