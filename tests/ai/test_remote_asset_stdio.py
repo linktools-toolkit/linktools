@@ -522,4 +522,3 @@ async def test_native_directory_package_keeps_original_files(
         assert not tuple(temporary_root.iterdir())
     finally:
         await store.close()
-
