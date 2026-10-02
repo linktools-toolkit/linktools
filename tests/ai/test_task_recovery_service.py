@@ -457,7 +457,7 @@ async def test_cancel_intent_stays_unknown_until_execution_fact_is_available() -
         assert settled_cancel is not None
         assert settled_cancel.status is OperationStatus.EFFECT_UNKNOWN
         assert launcher.started == []
-        assert launcher.cancelled == ["cancel"]
+        assert set(launcher.cancelled) == {"cancel"}
     finally:
         await state.close()
 

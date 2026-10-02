@@ -175,7 +175,7 @@ async def test_remote_mcp_materialization_does_not_require_sandbox_or_cwd(
 @pytest.mark.asyncio
 async def test_mcp_cleanup_failure_keeps_the_execution_error() -> None:
     class FailedClient:
-        async def close(self) -> None:
+        async def close_resources(self) -> None:
             raise RuntimeError("process cleanup failed")
 
     capability = _MCPCapability("mcp", object(), FailedClient())
@@ -186,13 +186,13 @@ async def test_mcp_cleanup_failure_keeps_the_execution_error() -> None:
 
     assert error.value is execution_error
     assert isinstance(error.value.__cause__, AIError)
-    assert error.value.__cause__.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+    assert error.value.__cause__.code is ErrorCode.MCP_CLEANUP_FAILED
 
 
 @pytest.mark.asyncio
 async def test_mcp_cleanup_failure_is_typed_without_an_execution_error() -> None:
     class FailedClient:
-        async def close(self) -> None:
+        async def close_resources(self) -> None:
             raise RuntimeError("process cleanup failed")
 
     capability = _MCPCapability("mcp", object(), FailedClient())
@@ -200,7 +200,7 @@ async def test_mcp_cleanup_failure_is_typed_without_an_execution_error() -> None
     with pytest.raises(AIError) as error:
         await close_mcp_resources((capability,))
 
-    assert error.value.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+    assert error.value.code is ErrorCode.MCP_CLEANUP_FAILED
 
 
 @pytest.mark.asyncio
@@ -230,7 +230,7 @@ def test_mcp_initialization_cleanup_failure_keeps_the_primary_error() -> None:
 
     assert error.value is primary_error
     assert isinstance(error.value.__cause__, AIError)
-    assert error.value.__cause__.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+    assert error.value.__cause__.code is ErrorCode.MCP_CLEANUP_FAILED
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import os
 import selectors
 import select
 import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -14,6 +15,72 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.workspace import sandbox_guardian
+
+
+def test_guardian_status_option_does_not_reinterpret_argument_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = ["bwrap", "--setenv", "VALUE", "--", "--", "program", ""]
+    observed: list[str] = []
+    child = object()
+
+    def capture_process(command: list[str], **kwargs: object) -> object:
+        observed.extend(command)
+        return child
+
+    monkeypatch.setattr(sandbox_guardian.subprocess, "Popen", capture_process)
+    result, status_fd = sandbox_guardian._start_bwrap(arguments)
+    try:
+        assert result is child
+        assert observed[:2] == ["bwrap", "--json-status-fd"]
+        assert observed[3:] == arguments[1:]
+    finally:
+        os.close(status_fd)
+
+
+@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="Linux pidfd is required")
+@pytest.mark.parametrize("mode", ("worker", "stdio"))
+@pytest.mark.parametrize("tracked", (False, True))
+def test_guardian_startup_failure_terminates_started_child(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    tracked: bool,
+) -> None:
+    config_read, config_write = os.pipe()
+    control_read, control_write = os.pipe()
+    runtime_pidfd = os.pidfd_open(os.getpid())
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    monkeypatch.setattr(sandbox_guardian, "_set_child_subreaper", lambda: None)
+    monkeypatch.setattr(sandbox_guardian, "_install_signal_handlers", lambda: None)
+    monkeypatch.setattr(sandbox_guardian, "_child_process_ids", lambda: ())
+    monkeypatch.setattr(sandbox_guardian, "_read_config", lambda *args: {
+        "version": sandbox_guardian.PROTOCOL_VERSION,
+        "mode": mode,
+        "bwrap_args": ["unused", "--", "unused"],
+    })
+    monkeypatch.setattr(sandbox_guardian, "_start_bwrap", lambda args: (child, -1))
+
+    def fail_start(*args: object) -> None:
+        raise OSError("startup failed")
+
+    monkeypatch.setattr(sandbox_guardian, "_wait_bwrap_started", fail_start)
+    if not tracked:
+        monkeypatch.setattr(sandbox_guardian, "_open_child_pidfd", fail_start)
+    arguments = ["--config-fd", str(config_read), "--runtime-pidfd", str(runtime_pidfd)]
+    if mode == "stdio":
+        arguments.extend(("--stdio-control-fd", str(control_write)))
+    try:
+        assert sandbox_guardian.main(arguments) == sandbox_guardian.GUARDIAN_EXIT_SESSION_FAILED
+        assert child.poll() is not None
+    finally:
+        for fd in (config_read, config_write, control_read, control_write, runtime_pidfd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
 
 
 @pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="Linux pidfd is required")

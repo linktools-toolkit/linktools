@@ -26,6 +26,7 @@ from ..spec import (
 )
 from ._contribution import CapabilityContribution
 from ._resource_path import (
+    SKILL_DECLARATION_FILES,
     mcp_resource_path,
     validate_resource_path,
     validate_resource_tree,
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
 
 _DECLARATION_SUFFIXES = {
     "agent": ("/AGENT.md",),
-    "skill": ("/SKILL.md",),
+    "skill": tuple(f"/{name}" for name in SKILL_DECLARATION_FILES),
     "mcp": ("/mcp.json", "/mcp.yaml"),
     "rule": (".md",),
 }
@@ -130,12 +131,12 @@ async def _load_skills(
     context: CapabilityLoadContext,
 ) -> "Sequence[SkillDefinition]":
     entries = context.list(kind="skill")
-    declarations = _package_declarations(entries, ("/SKILL.md",))
+    declarations = _package_declarations(entries, _DECLARATION_SUFFIXES["skill"])
     values = await context.read_many(tuple(entry.key for entry in declarations))
     result: list[SkillDefinition] = []
     adapter = SkillSpecAdapter()
     for entry, data in zip(declarations, values, strict=True):
-        logical_id = entry.key.id[: -len("/SKILL.md")]
+        logical_id = entry.key.id.rpartition("/")[0]
         try:
             validate_logical_id(logical_id)
         except (TypeError, ValueError) as error:
@@ -147,7 +148,7 @@ async def _load_skills(
             if not candidate.key.id.startswith(prefix):
                 continue
             relative = candidate.key.id[len(prefix) :]
-            if relative == "SKILL.md":
+            if relative in SKILL_DECLARATION_FILES:
                 continue
             validate_resource_path(relative)
             resource_entries.append((relative, candidate))
@@ -206,11 +207,13 @@ async def _load_mcp(
 
 def _bind_mcp_declaration(
     value: MCPServerSpec,
-    context: CapabilityLoadContext,
+    context: CapabilityLoadContext | None,
 ) -> CapabilityContribution[object]:
     root = value.resource
     if root is None:
         return CapabilityContribution.from_declaration(value)
+    if context is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
     resources = tuple(
         (relative, candidate.key)
@@ -233,7 +236,7 @@ def _bind_mcp_declaration(
 
 def _bind_mcp_contribution(
     contribution: CapabilityContribution[object],
-    context: CapabilityLoadContext,
+    context: CapabilityLoadContext | None,
 ) -> CapabilityContribution[object]:
     if (
         not isinstance(contribution, CapabilityContribution)
@@ -255,6 +258,8 @@ def _bind_mcp_contribution(
     root = value.resource
     if root is None:
         return CapabilityContribution.from_mcp_contract(contract, value)
+    if context is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     source_id = contract.get("asset_source_id")
     if source_id != context.group_id or versions is None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)

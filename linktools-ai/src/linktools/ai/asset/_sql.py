@@ -241,18 +241,12 @@ class SqlAssetBackend:
         table = self._metadata.tables["ai_asset_heads"]
 
         async def initialize_head(session) -> None:
-            from sqlalchemy import insert, select
-
-            existing = await session.scalar(
-                select(table.c.namespace_digest).where(table.c.namespace_digest == self._namespace_digest.hex())
-            )
-            if existing is None:
-                await session.execute(
-                    insert(table).values(
-                        namespace_digest=self._namespace_digest.hex(),
-                        store_revision=0,
-                    )
-                )
+            await self._context.run_statement(self._context.dialect.insert_ignore_conflict(
+                session,
+                table=table,
+                values={"namespace_digest": self._namespace_digest.hex(), "store_revision": 0},
+                index_elements=("namespace_digest",),
+            ))
 
         await self._context.run_mutation(initialize_head)
         self._ready = True
@@ -278,9 +272,9 @@ class SqlAssetBackend:
 
             rows = (
                 (
-                    await session.execute(
+                    await self._context.run_statement(session.execute(
                         select(entries).where(entries.c.namespace_digest == self._namespace_digest.hex())
-                    )
+                    ))
                 )
                 .mappings()
                 .all()
@@ -324,12 +318,12 @@ class SqlAssetBackend:
             from sqlalchemy import select
 
             row = (
-                await session.execute(
+                await self._context.run_statement(session.execute(
                     select(entries.c.payload_json).where(
                         entries.c.key_digest == _asset_key_digest(self._namespace_digest, key).hex(),
                         entries.c.namespace_digest == self._namespace_digest.hex(),
                     )
-                )
+                ))
             ).scalar_one_or_none()
         finally:
             await session.close()
@@ -423,12 +417,12 @@ class SqlAssetBackend:
             from sqlalchemy import select
 
             row = (
-                await session.execute(
+                await self._context.run_statement(session.execute(
                     select(table.c.payload_json).where(
                         table.c.namespace_digest == self._namespace_digest.hex(),
                         table.c.idempotency_key_digest == digest,
                     )
-                )
+                ))
             ).scalar_one_or_none()
         finally:
             await session.close()
@@ -487,9 +481,11 @@ class SqlAssetBackend:
                 True,
                 tuple(_unchanged(change, current[change.key], current_revision) for change in changes),
             )
-        prepared: list[tuple[StorageChange[AssetKey, bytes], AssetInfo]] = []
+        prepared: dict[AssetKey, AssetInfo] = {}
         if next_revision != current_revision:
             for change in changes:
+                if not _mutates(change, current[change.key]):
+                    continue
                 info = _next_info(change, current[change.key], next_revision, self._root)
                 if change.operation is StorageOperation.PUT:
                     content = bytes(change.value or b"")
@@ -510,7 +506,7 @@ class SqlAssetBackend:
                                 )
                             ),
                         )
-                prepared.append((change, info))
+                prepared[change.key] = info
         entries = self._metadata.tables["ai_asset_entries"]
         history = self._metadata.tables["ai_asset_changes"]
         heads = self._metadata.tables["ai_asset_heads"]
@@ -522,12 +518,12 @@ class SqlAssetBackend:
             if idempotency_key is not None:
                 digest = batch_receipt_key_digest(idempotency_key)
                 existing_payload = (
-                    await session.execute(
+                    await self._context.run_statement(session.execute(
                         select(receipts.c.payload_json).where(
                             receipts.c.namespace_digest == self._namespace_digest.hex(),
                             receipts.c.idempotency_key_digest == digest,
                         )
-                    )
+                    ))
                 ).scalar_one_or_none()
                 if existing_payload is not None:
                     existing = decode_asset_batch_receipt(
@@ -538,7 +534,7 @@ class SqlAssetBackend:
                     if existing.request_digest != request_digest:
                         raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                     return existing
-            head_result = await session.execute(
+            head_result = await self._context.run_statement(session.execute(
                 update(heads)
                 .where(
                     heads.c.namespace_digest == self._namespace_digest.hex(),
@@ -548,50 +544,48 @@ class SqlAssetBackend:
                     store_revision=next_revision,
                     updated_at=func.current_timestamp(),
                 )
-            )
+            ))
             if head_result.rowcount != 1:
                 return None
             values: list[
                 StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]
             ] = []
-            if next_revision == current_revision:
-                values.extend(
-                    _unchanged(change, current[change.key], current_revision)
-                    for change in changes
-                )
-            else:
-                for change, info in prepared:
-                    data = _info_data(info)
-                    key_digest = _asset_key_digest(self._namespace_digest, change.key).hex()
-                    await session.execute(
-                        history.insert().values(
-                            key_digest=key_digest,
-                            entry_revision=info.revision.value,
-                            namespace_digest=self._namespace_digest.hex(),
-                            store_revision=next_revision,
-                            payload_json=data,
-                        )
+            for change in changes:
+                info = prepared.get(change.key)
+                if info is None:
+                    values.append(_unchanged(change, current[change.key], next_revision))
+                    continue
+                data = _info_data(info)
+                key_digest = _asset_key_digest(self._namespace_digest, change.key).hex()
+                await self._context.run_statement(session.execute(
+                    history.insert().values(
+                        key_digest=key_digest,
+                        entry_revision=info.revision.value,
+                        namespace_digest=self._namespace_digest.hex(),
+                        store_revision=next_revision,
+                        payload_json=data,
                     )
-                    await self._context.dialect.upsert(
-                        session,
-                        table=entries,
-                        values={
-                            "key_digest": key_digest,
-                            "namespace_digest": self._namespace_digest.hex(),
-                            "entry_revision": info.revision.value,
-                            "store_revision": next_revision,
-                            "payload_json": data,
-                        },
-                        set_values={
-                            "namespace_digest": self._namespace_digest.hex(),
-                            "entry_revision": info.revision.value,
-                            "store_revision": next_revision,
-                            "payload_json": data,
-                            "updated_at": func.current_timestamp(),
-                        },
-                        index_elements=("key_digest",),
-                    )
-                    values.append(_result(change, info, next_revision))
+                ))
+                await self._context.run_statement(self._context.dialect.upsert(
+                    session,
+                    table=entries,
+                    values={
+                        "key_digest": key_digest,
+                        "namespace_digest": self._namespace_digest.hex(),
+                        "entry_revision": info.revision.value,
+                        "store_revision": next_revision,
+                        "payload_json": data,
+                    },
+                    set_values={
+                        "namespace_digest": self._namespace_digest.hex(),
+                        "entry_revision": info.revision.value,
+                        "store_revision": next_revision,
+                        "payload_json": data,
+                        "updated_at": func.current_timestamp(),
+                    },
+                    index_elements=("key_digest",),
+                ))
+                values.append(_result(change, info, next_revision))
             result = StorageBatchResult(
                 StorageRevision(str(next_revision)),
                 True,
@@ -601,13 +595,13 @@ class SqlAssetBackend:
             )
             if idempotency_key is not None:
                 digest = batch_receipt_key_digest(idempotency_key)
-                await session.execute(
+                await self._context.run_statement(session.execute(
                     receipts.insert().values(
                         namespace_digest=self._namespace_digest.hex(),
                         idempotency_key_digest=digest,
                         payload_json=encode_asset_batch_receipt(result),
                     )
-                )
+                ))
             return result
 
         return await self._context.run_mutation(execute)
@@ -620,12 +614,12 @@ class SqlAssetBackend:
 
             digests = tuple(_asset_key_digest(self._namespace_digest, key).hex() for key in dict.fromkeys(keys))
             rows = (
-                await session.execute(
+                await self._context.run_statement(session.execute(
                     select(entries.c.key_digest, entries.c.payload_json).where(
                         entries.c.namespace_digest == self._namespace_digest.hex(),
                         entries.c.key_digest.in_(digests),
                     )
-                )
+                ))
             ).all()
         finally:
             await session.close()
@@ -641,14 +635,14 @@ class SqlAssetBackend:
 
             rows = (
                 (
-                    await session.execute(
+                    await self._context.run_statement(session.execute(
                         select(history.c.payload_json)
                         .where(
                             history.c.key_digest == _asset_key_digest(self._namespace_digest, key).hex(),
                             history.c.namespace_digest == self._namespace_digest.hex(),
                         )
                         .order_by(history.c.entry_revision)
-                    )
+                    ))
                 )
                 .scalars()
                 .all()
@@ -663,13 +657,13 @@ class SqlAssetBackend:
         try:
             from sqlalchemy import select
 
-            data = await session.scalar(
+            data = await self._context.run_statement(session.scalar(
                 select(history.c.payload_json).where(
                     history.c.key_digest == _asset_key_digest(self._namespace_digest, key).hex(),
                     history.c.entry_revision == entry_revision.value,
                     history.c.namespace_digest == self._namespace_digest.hex(),
                 )
-            )
+            ))
         finally:
             await session.close()
         if data is None:
@@ -690,9 +684,9 @@ class SqlAssetBackend:
         try:
             from sqlalchemy import select
 
-            value = await session.scalar(
+            value = await self._context.run_statement(session.scalar(
                 select(heads.c.store_revision).where(heads.c.namespace_digest == self._namespace_digest.hex())
-            )
+            ))
         finally:
             await session.close()
         if value is None:
@@ -709,7 +703,7 @@ class SqlAssetBackend:
             from sqlalchemy import select
 
             namespace = self._namespace_digest.hex()
-            head = await session.scalar(select(heads.c.store_revision).where(heads.c.namespace_digest == namespace))
+            head = await self._context.run_statement(session.scalar(select(heads.c.store_revision).where(heads.c.namespace_digest == namespace)))
             if head is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             head_revision = int(head)
@@ -717,22 +711,22 @@ class SqlAssetBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             entry_rows = (
                 (
-                    await session.execute(
+                    await self._context.run_statement(session.execute(
                         select(entries.c.key_digest, entries.c.entry_revision, entries.c.payload_json).where(
                             entries.c.namespace_digest == namespace
                         )
-                    )
+                    ))
                 )
                 .mappings()
                 .all()
             )
             history_rows = (
                 (
-                    await session.execute(
+                    await self._context.run_statement(session.execute(
                         select(history.c.key_digest, history.c.entry_revision, history.c.payload_json)
                         .where(history.c.namespace_digest == namespace)
                         .order_by(history.c.key_digest, history.c.entry_revision)
-                    )
+                    ))
                 )
                 .mappings()
                 .all()
@@ -936,7 +930,7 @@ def _unchanged(change: StorageChange[AssetKey, bytes], info: AssetInfo | None, s
 
 def _mutates(change: StorageChange[AssetKey, bytes], previous: AssetInfo | None) -> bool:
     if previous is None:
-        return True
+        return change.operation is StorageOperation.PUT
     if change.operation is StorageOperation.PUT:
         return (
             previous.status is not StorageEntryStatus.NORMAL
@@ -953,7 +947,8 @@ async def _put_asset_object(store: ObjectStore, key: str, value: bytes) -> None:
     digest = hashlib.sha256(value).hexdigest()
 
     async def chunks() -> AsyncIterator[bytes]:
-        yield value
+        if value:
+            yield value
 
     await store.put(key, chunks(), expected_size=len(value), expected_digest=digest)
 

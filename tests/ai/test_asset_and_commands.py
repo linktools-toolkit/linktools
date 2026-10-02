@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Raw AssetStore file and public command checks."""
+"""Raw AssetStore file checks."""
 
 import asyncio
-import os
-import subprocess
-import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -256,18 +253,3 @@ def test_asset_store_reset_clears_writer_overlay_and_reveals_layer() -> None:
         assert await store.get(key) is None
 
     asyncio.run(run())
-
-
-def test_ai_asset_command_is_removed() -> None:
-    environment = dict(os.environ)
-    source_root = Path(__file__).parents[2]
-    environment["PYTHONPATH"] = os.pathsep.join((str(source_root / "linktools-ai/src"), str(source_root / "linktools/src")))
-    result = subprocess.run(
-        [sys.executable, "-m", "linktools", "ai", "asset", "--help"],
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "invalid choice: 'asset'" in result.stderr

@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
+from aiosqlite import Cursor
 import linktools.ai.storage._object as object_contract
 import linktools.ai.storage._object_filesystem as object_module
 from linktools.ai.asset import (
@@ -394,3 +395,82 @@ async def test_asset_store_close_settles_detached_cache_singleflight() -> None:
     cache.release.set()
     await close_task
     assert storage._cache_tasks == {}
+
+
+@pytest.mark.parametrize("operation", ("stat", "open", "fetch"))
+async def test_sqlite_cancelled_object_read_releases_cursor_before_followup_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
+    await provision_database(engine)
+    store = SqlObjectStore(engine)
+    content = b"object" if operation != "fetch" else b"x" * (2 * 1024 * 1024 + 1)
+    digest = hashlib.sha256(content).hexdigest()
+    await store.put("old", _chunks(content), expected_size=len(content), expected_digest=digest)
+    fetching = asyncio.Event()
+    release = asyncio.Event()
+    original_fetchall = Cursor.fetchall
+    original_execute = Cursor.execute
+    original_fetchmany = Cursor.fetchmany
+    fetch_count = 0
+
+    async def pause_fetchall(cursor: Cursor):
+        if (
+            not fetching.is_set()
+            and cursor.description
+            and "object_key" in {column[0] for column in cursor.description}
+        ):
+            fetching.set()
+            await release.wait()
+        return await original_fetchall(cursor)
+
+    async def pause_execute(cursor: Cursor, statement: str, parameters=None):
+        result = await original_execute(cursor, statement, parameters)
+        if (
+            not fetching.is_set()
+            and statement.startswith("SELECT")
+            and "ai_object_chunks" in statement
+        ):
+            fetching.set()
+            await release.wait()
+        return result
+
+    async def pause_fetchmany(cursor: Cursor, size=None):
+        nonlocal fetch_count
+        fetch_count += 1
+        if fetch_count == 2:
+            fetching.set()
+            await release.wait()
+        return await original_fetchmany(cursor, size)
+
+    stream = None
+    if operation == "stat":
+        monkeypatch.setattr(Cursor, "fetchall", pause_fetchall)
+        reader = asyncio.create_task(store.stat("old"))
+    else:
+        if operation == "open":
+            monkeypatch.setattr(Cursor, "execute", pause_execute)
+        else:
+            monkeypatch.setattr(Cursor, "fetchmany", pause_fetchmany)
+        stream = store.open("old")
+        reader = asyncio.create_task(stream.__anext__())
+    try:
+        await asyncio.wait_for(fetching.wait(), 5)
+        reader.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        try:
+            await reader
+        except asyncio.CancelledError:
+            await store.put("new", _chunks(content), expected_size=len(content), expected_digest=digest)
+            assert await store.stat("new") is not None
+        else:
+            pytest.fail("read cancellation was not propagated")
+    finally:
+        release.set()
+        await asyncio.gather(reader, return_exceptions=True)
+        if stream is not None:
+            await stream.aclose()
+        await engine.dispose()

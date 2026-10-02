@@ -219,6 +219,11 @@ def _create_stdio_server(root: Path) -> SandboxResource:
                     ]
                     result = {"content": content, "isError": False}
                 else:
+                    send({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {"code": -32601, "message": "Method not found"},
+                    })
                     continue
                 send({"jsonrpc": "2.0", "id": request["id"], "result": result})
             if mode in {"hang-close", "spawn-close-child"}:
@@ -249,12 +254,13 @@ def _runtime_mcp_client(
     init_timeout: float | None = None,
 ) -> tuple[Client, _MCPModelToolset, RunContext[None], str]:
     server_id = "security/audit"
-    client = Client(transport, init_timeout=init_timeout)
+    from linktools.ai.spec import MCPServerSpec
+
     discovery = _MCPDiscoveryToolset(
-        client,
-        id=f"mcp:{server_id}",
-        cache_tools=True,
+        transport,
+        server=MCPServerSpec(server_id, "python", init_timeout=init_timeout),
     )
+    client = discovery.client
     toolset = _MCPModelToolset(
         discovery,
         server_id,

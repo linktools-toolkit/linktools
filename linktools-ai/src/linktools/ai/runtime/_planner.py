@@ -2224,17 +2224,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 execution_id,
             )
 
-        if (
-            not execution_cancelled
-            and node.effect_policy == "non_replay_safe"
-            and execution_view.task_attempt > 0
-        ):
-            await self._execution.cancel_task(
-                execution_id,
-                principal=principal,
-            )
-            return
-
         task_id, task_revision, body = _parse_node(node, request=False)
         handler = self._handler(
             task_id,

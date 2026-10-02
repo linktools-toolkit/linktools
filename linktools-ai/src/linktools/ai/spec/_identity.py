@@ -29,12 +29,8 @@ def capability_ref_payload(
     if not isinstance(contract, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _require_format_v1(contract)
-    if kind in {"agent", "skill", "mcp"}:
-        if contract.get("id") != identity:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return _ref_payload(kind, identity, _revision(contract))
-    if kind in {"tool", "capability"}:
-        return _ref_payload(kind, identity, _revision(contract))
+    if kind in {"agent", "skill", "mcp"} and contract.get("id") != identity:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _ref_payload(kind, identity, _revision(contract))
 
 

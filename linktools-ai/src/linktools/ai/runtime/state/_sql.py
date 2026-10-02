@@ -47,6 +47,8 @@ from ._store import (
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData, Table
+    from sqlalchemy.engine import Result
+    from sqlalchemy.sql import Executable
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 ValueT = TypeVar("ValueT")
@@ -401,7 +403,7 @@ class SqlStateStore:
             sequences = transaction._table("ai_state_sequences")
             sequence_rows = (
                 (
-                    await session.execute(
+                    await transaction._execute(
                         select(sequences.c.key_digest, sequences.c.value).where(
                             sequences.c.store_digest == transaction._store_hex
                         )
@@ -415,7 +417,7 @@ class SqlStateStore:
                 _row_nonnegative_int(row["value"])
             alias_rows = (
                 (
-                    await session.execute(
+                    await transaction._execute(
                         select(aliases.c.alias_digest, aliases.c.record_key_digest).where(
                             aliases.c.store_digest == transaction._store_hex
                         )
@@ -427,7 +429,7 @@ class SqlStateStore:
             for row in alias_rows:
                 _row_digest(row["alias_digest"])
                 _row_digest(row["record_key_digest"])
-            orphan_alias = await session.scalar(
+            orphan_alias = (await transaction._execute(
                 select(aliases.c.id)
                 .select_from(
                     aliases.outerjoin(
@@ -443,8 +445,8 @@ class SqlStateStore:
                     records.c.id.is_(None),
                 )
                 .limit(1)
-            )
-            orphan_fact = await session.scalar(
+            )).scalar()
+            orphan_fact = (await transaction._execute(
                 select(facts.c.id)
                 .select_from(
                     facts.outerjoin(
@@ -460,7 +462,7 @@ class SqlStateStore:
                     records.c.id.is_(None),
                 )
                 .limit(1)
-            )
+            )).scalar()
             if orphan_alias is not None or orphan_fact is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -534,9 +536,20 @@ class _SqlTransaction:
         self._sequence_cache: dict[bytes, int] = {}
         self._now: datetime | None = None
 
+    async def _execute(
+        self,
+        statement: "Executable",
+        parameters: Mapping[str, object] | Sequence[Mapping[str, object]] | None = None,
+    ) -> "Result[tuple[object, ...]]":
+        return await self._context.run_statement(
+            self._session.execute(statement, parameters)
+        )
+
     async def now(self) -> datetime:
         if self._now is None:
-            self._now = await self._context.dialect.database_now(self._session)
+            self._now = await self._context.run_statement(
+                self._context.dialect.database_now(self._session)
+            )
         return self._now
 
     async def get_record(self, key: bytes) -> StoredRecord | None:
@@ -547,7 +560,7 @@ class _SqlTransaction:
         table = self._table("ai_state_records")
         row = (
             (
-                await self._session.execute(
+                await self._execute(
                     select(table).where(
                         table.c.store_digest == self._store_hex,
                         table.c.key_digest == _hex(key),
@@ -576,7 +589,7 @@ class _SqlTransaction:
         if missing:
             rows = (
                 (
-                    await self._session.execute(
+                    await self._execute(
                         select(table).where(
                             table.c.store_digest == self._store_hex,
                             table.c.key_digest.in_(tuple(_hex(key) for key in missing))
@@ -610,7 +623,7 @@ class _SqlTransaction:
             validate_record_identity(record)
         from sqlalchemy import insert
 
-        await self._session.execute(
+        await self._execute(
             insert(self._table("ai_state_records")).values(
                 [
                     {
@@ -646,7 +659,7 @@ class _SqlTransaction:
         from sqlalchemy import update
 
         table = self._table("ai_state_records")
-        result = await self._session.execute(
+        result = await self._execute(
             update(table)
             .where(
                 table.c.store_digest == self._store_hex,
@@ -727,7 +740,7 @@ class _SqlTransaction:
         parameters = [
             _record_replacement_values(replacement) for replacement in ordered
         ]
-        result = await self._session.execute(statement, parameters)
+        result = await self._execute(statement, parameters)
         self._log_batch("replace_records", len(parameters), 1)
         if result.rowcount != len(parameters):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -758,7 +771,7 @@ class _SqlTransaction:
         if lease_expires_at is not None and lease_expires_at.tzinfo is None:
             raise ValueError("record lease is invalid")
         table = self._table("ai_state_records")
-        result = await self._session.execute(
+        result = await self._execute(
             update(table)
             .where(
                 table.c.store_digest == self._store_hex,
@@ -816,19 +829,19 @@ class _SqlTransaction:
             table.c.key_digest == _hex(key),
             table.c.storage_version == guarded.storage_version,
         )
-        await self._session.execute(
+        await self._execute(
             delete(self._table("ai_state_aliases")).where(
                 self._table("ai_state_aliases").c.store_digest == self._store_hex,
                 self._table("ai_state_aliases").c.record_key_digest == _hex(key),
             )
         )
-        await self._session.execute(
+        await self._execute(
             delete(self._table("ai_state_facts")).where(
                 self._table("ai_state_facts").c.store_digest == self._store_hex,
                 self._table("ai_state_facts").c.owner_key_digest == _hex(key),
             )
         )
-        result = await self._session.execute(statement)
+        result = await self._execute(statement)
         if result.rowcount == 1:
             self._guarded_record_keys.discard(key)
             self._record_cache[key] = None
@@ -875,7 +888,7 @@ class _SqlTransaction:
         )
         if query.limit is not None:
             statement = statement.limit(query.limit)
-        rows = (await self._session.execute(statement)).mappings().all()
+        rows = (await self._execute(statement)).mappings().all()
         values = tuple(_record_from_row(row) for row in rows)
         self._record_cache.update({value.key_digest: value for value in values})
         return values
@@ -885,7 +898,7 @@ class _SqlTransaction:
 
         table = self._table("ai_state_records")
         rows = (
-            await self._session.execute(
+            await self._execute(
                 select(table).where(table.c.store_digest == self._store_hex)
             )
         ).mappings().all()
@@ -907,7 +920,7 @@ class _SqlTransaction:
                 table.c.key_digest > _hex(after.key_digest)
             )
         statement = statement.order_by(table.c.key_digest).limit(limit)
-        rows = (await self._session.execute(statement)).mappings().all()
+        rows = (await self._execute(statement)).mappings().all()
         values = tuple(_record_from_row(row) for row in rows)
         self._record_cache.update({value.key_digest: value for value in values})
         return values
@@ -927,7 +940,7 @@ class _SqlTransaction:
             records = self._table("ai_state_records")
             rows = (
                 (
-                    await self._session.execute(
+                    await self._execute(
                         select(
                             table.c.alias_digest,
                             table.c.record_key_digest,
@@ -974,7 +987,7 @@ class _SqlTransaction:
 
         table = self._table("ai_state_aliases")
         rows = (
-            await self._session.execute(
+            await self._execute(
                 select(table)
                 .where(table.c.store_digest == self._store_hex)
                 .order_by(table.c.alias_digest)
@@ -1002,7 +1015,7 @@ class _SqlTransaction:
         if after is not None:
             statement = statement.where(table.c.alias_digest > _hex(after))
         rows = (
-            await self._session.execute(
+            await self._execute(
                 statement.order_by(table.c.alias_digest).limit(limit)
             )
         ).mappings().all()
@@ -1054,7 +1067,7 @@ class _SqlTransaction:
         if rows:
             from sqlalchemy import insert
 
-            await self._session.execute(
+            await self._execute(
                 insert(self._table("ai_state_aliases")).values(rows)
             )
         self._log_batch("insert_aliases", len(values), 1 if rows else 0)
@@ -1078,7 +1091,7 @@ class _SqlTransaction:
         if missing:
             rows = (
                 (
-                    await self._session.execute(
+                    await self._execute(
                         select(table).where(
                             table.c.store_digest == self._store_hex,
                             table.c.key_digest.in_(tuple(_hex(key) for key in missing))
@@ -1103,7 +1116,7 @@ class _SqlTransaction:
 
         table = self._table("ai_state_sequences")
         rows = (
-            await self._session.execute(
+            await self._execute(
                 select(table)
                 .where(table.c.store_digest == self._store_hex)
                 .order_by(table.c.key_digest)
@@ -1128,7 +1141,7 @@ class _SqlTransaction:
         if after is not None:
             statement = statement.where(table.c.key_digest > _hex(after))
         rows = (
-            await self._session.execute(
+            await self._execute(
                 statement.order_by(table.c.key_digest).limit(limit)
             )
         ).mappings().all()
@@ -1162,14 +1175,14 @@ class _SqlTransaction:
             }
             for key in sorted(requests)
         ]
-        values = await self._context.dialect.upsert_increment_many(
+        values = await self._context.run_statement(self._context.dialect.upsert_increment_many(
             self._session,
             table=table,
             rows=rows,
             column="value",
             index_elements=("store_digest", "key_digest"),
             returning_key="key_digest",
-        )
+        ))
         result = {
             _row_digest(key): _row_nonnegative_int(value)
             for key, value in values.items()
@@ -1183,7 +1196,7 @@ class _SqlTransaction:
         from sqlalchemy import func, update
 
         table = self._table("ai_state_sequences")
-        result = await self._session.execute(
+        result = await self._execute(
             update(table)
             .where(
                 table.c.store_digest == self._store_hex,
@@ -1205,7 +1218,7 @@ class _SqlTransaction:
             return
         from sqlalchemy import delete
 
-        await self._session.execute(
+        await self._execute(
             delete(self._table("ai_state_sequences")).where(
                 self._table("ai_state_sequences").c.store_digest == self._store_hex,
                 self._table("ai_state_sequences").c.key_digest.in_(
@@ -1229,7 +1242,7 @@ class _SqlTransaction:
             raise RuntimeError("fact owner must be guarded in the current transaction")
         from sqlalchemy import insert
 
-        await self._session.execute(
+        await self._execute(
             insert(self._table("ai_state_facts")).values(
                 [
                     {**_fact_values(fact), "store_digest": self._store_hex}
@@ -1277,7 +1290,7 @@ class _SqlTransaction:
             statement = statement.limit(1 if query.latest else query.limit)
         elif query.latest:
             statement = statement.limit(1)
-        rows = (await self._session.execute(statement)).mappings().all()
+        rows = (await self._execute(statement)).mappings().all()
         return tuple(_fact_from_row(row) for row in rows)
 
     async def scan_facts(self) -> tuple[StoredFact, ...]:
@@ -1285,7 +1298,7 @@ class _SqlTransaction:
 
         table = self._table("ai_state_facts")
         rows = (
-            await self._session.execute(
+            await self._execute(
                 select(table).where(table.c.store_digest == self._store_hex)
             )
         ).mappings().all()
@@ -1318,13 +1331,13 @@ class _SqlTransaction:
             .order_by(table.c.stream_digest, table.c.sequence)
             .limit(limit)
         )
-        rows = (await self._session.execute(statement)).mappings().all()
+        rows = (await self._execute(statement)).mappings().all()
         return tuple(_fact_from_row(row) for row in rows)
 
     async def delete_fact_streams(self, owner_key: bytes) -> None:
         from sqlalchemy import delete
 
-        await self._session.execute(
+        await self._execute(
             delete(self._table("ai_state_facts")).where(
                 self._table("ai_state_facts").c.store_digest == self._store_hex,
                 self._table("ai_state_facts").c.owner_key_digest == _hex(owner_key),
@@ -1334,7 +1347,7 @@ class _SqlTransaction:
     async def insert_operation(self, value: StoredOperation) -> None:
         from sqlalchemy import insert
 
-        await self._session.execute(
+        await self._execute(
             insert(self._table("ai_state_operations")).values(
                 {**_operation_values(value), "store_digest": self._store_hex}
             )
@@ -1346,7 +1359,7 @@ class _SqlTransaction:
         table = self._table("ai_state_operations")
         row = (
             (
-                await self._session.execute(
+                await self._execute(
                     select(table).where(
                         table.c.store_digest == self._store_hex,
                         table.c.key_digest == _hex(key),
@@ -1368,7 +1381,7 @@ class _SqlTransaction:
         from sqlalchemy import update
 
         table = self._table("ai_state_operations")
-        result = await self._session.execute(
+        result = await self._execute(
             update(table)
             .where(
                 table.c.store_digest == self._store_hex,
@@ -1401,7 +1414,7 @@ class _SqlTransaction:
         )
         if query.limit is not None:
             statement = statement.limit(query.limit)
-        rows = (await self._session.execute(statement)).mappings().all()
+        rows = (await self._execute(statement)).mappings().all()
         return tuple(_operation_from_row(row) for row in rows)
 
     async def scan_operations(self) -> tuple[StoredOperation, ...]:
@@ -1409,7 +1422,7 @@ class _SqlTransaction:
 
         table = self._table("ai_state_operations")
         rows = (
-            await self._session.execute(
+            await self._execute(
                 select(table).where(table.c.store_digest == self._store_hex)
             )
         ).mappings().all()
@@ -1429,7 +1442,7 @@ class _SqlTransaction:
         if after is not None:
             statement = statement.where(table.c.key_digest > _hex(after.key_digest))
         statement = statement.order_by(table.c.key_digest).limit(limit)
-        rows = (await self._session.execute(statement)).mappings().all()
+        rows = (await self._execute(statement)).mappings().all()
         return tuple(_operation_from_row(row) for row in rows)
 
     async def delete_operations(
@@ -1439,7 +1452,7 @@ class _SqlTransaction:
         from sqlalchemy import delete
 
         if values:
-            await self._session.execute(
+            await self._execute(
                 delete(self._table("ai_state_operations")).where(
                     self._table("ai_state_operations").c.store_digest == self._store_hex,
                     self._table("ai_state_operations").c.key_digest.in_(

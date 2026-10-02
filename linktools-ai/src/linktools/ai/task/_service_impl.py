@@ -2089,16 +2089,6 @@ class DefaultTaskGraphService(TaskGraphService):
                     error,
                 )
 
-        if view.status is TaskStatus.RECOVERY_REQUIRED:
-            if operation.status is OperationStatus.RUNNING:
-                await self._record_effect_unknown(operation, tenant_id)
-            _logger.info(
-                "task graph cancel deferred for recovery: tenant=%s graph=%s",
-                tenant_id,
-                graph_id,
-            )
-            return view
-
         if drive_cancel and not late_terminal and (
             not _terminal(view.status)
             or view.status is TaskStatus.CANCELLED

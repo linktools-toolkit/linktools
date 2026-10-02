@@ -72,6 +72,30 @@ class SqlStorageContext:
                 self._closed = False
                 raise
 
+    async def run_statement(self, operation: Awaitable[ValueT]) -> ValueT:
+        """Settle SQLite statement I/O before propagating caller cancellation.
+
+        Use for buffered calls or owned stream acquisition, not transaction callbacks.
+        """
+        if not self.dialect.single_writer:
+            return await operation
+        # An interrupted SQLite fetch can retain its cursor and lock in the
+        # cancellation traceback. Finish statement I/O before unwinding the session.
+        task = asyncio.ensure_future(operation)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as cancelled:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                task.result()
+            except BaseException as error:
+                raise cancelled from error
+            raise
+
     async def run_mutation(
         self,
         callback: Callable[["AsyncSession"], Awaitable[ValueT]],

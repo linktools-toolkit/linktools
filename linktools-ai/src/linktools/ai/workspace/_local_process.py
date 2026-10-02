@@ -11,11 +11,23 @@ import signal
 import sys
 from collections import deque
 from pathlib import Path
+from typing import TypeVar
 
 from ..errors import AIError, ErrorCode
 
 _MAX_OUTPUT_CHARS = 50_000
 _MAX_RENDERED_CHARS = 50_000
+_ResultT = TypeVar("_ResultT")
+
+
+async def _finish_task(task: "asyncio.Task[_ResultT]") -> _ResultT:
+    """Finish owned work before propagating an already caught cancellation."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
 
 
 class _WindowsJob:

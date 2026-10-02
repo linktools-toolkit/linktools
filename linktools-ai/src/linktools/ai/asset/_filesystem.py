@@ -847,7 +847,8 @@ class FilesystemAssetBackend:
 
 
 async def _one(value: bytes):
-    yield value
+    if value:
+        yield value
 
 
 def _json_bytes(value: Mapping[str, object]) -> bytes:

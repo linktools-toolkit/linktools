@@ -26,6 +26,7 @@ from typing import Any
 
 from ._sandbox_protocol import (
     GUARDIAN_EXIT_CLEANUP_FAILED,
+    GUARDIAN_CHILD_TIMEOUT_SECONDS,
     GUARDIAN_EXIT_OK,
     GUARDIAN_EXIT_SESSION_FAILED,
     PROTOCOL_VERSION,
@@ -34,7 +35,7 @@ from ._sandbox_protocol import (
 
 _MAX_CONFIG_BYTES = 1 * 1024 * 1024
 _MAX_BUFFER_BYTES = 16 * 1024 * 1024
-_CLOSE_SECONDS = 5.0
+_CLOSE_SECONDS = GUARDIAN_CHILD_TIMEOUT_SECONDS
 _PR_SET_CHILD_SUBREAPER = 36
 _shutdown_requested = False
 
@@ -94,9 +95,12 @@ def main(argv: list[str] | None = None) -> int:
             _write_control(stdio_control_fd, {"event": "failed"})
         exit_code = GUARDIAN_EXIT_SESSION_FAILED
     finally:
-        if child is not None and child_pidfd >= 0:
+        if child is not None:
             try:
-                _cleanup_child(child, child_pidfd)
+                if child_pidfd >= 0:
+                    _cleanup_child(child, child_pidfd)
+                else:
+                    _cleanup_untracked_child(child)
             except BaseException as error:
                 _write_diagnostic(error)
                 exit_code = GUARDIAN_EXIT_CLEANUP_FAILED
@@ -107,12 +111,6 @@ def main(argv: list[str] | None = None) -> int:
                     stdio_control_fd,
                     {"event": "child_exit", "returncode": returncode},
                 )
-        elif child is not None:
-            try:
-                _cleanup_untracked_child(child)
-            except BaseException as error:
-                _write_diagnostic(error)
-                exit_code = GUARDIAN_EXIT_CLEANUP_FAILED
         if selector is not None:
             selector.close()
         _close_fd(status_fd)
@@ -489,27 +487,17 @@ def _relay_stdio(
     finally:
         for fd in fds:
             _unregister(selector, fd)
-def _start_bwrap(arguments: Any) -> tuple[subprocess.Popen[bytes], int]:
-    if (
-        not isinstance(arguments, list)
-        or not arguments
-        or any(not isinstance(value, str) or not value for value in arguments)
-    ):
-        raise RuntimeError("Bubblewrap command is invalid")
+def _start_bwrap(arguments: list[str]) -> tuple[subprocess.Popen[bytes], int]:
     status_read = -1
     status_write = -1
     try:
         status_read, status_write = os.pipe()
         os.set_inheritable(status_write, True)
-        try:
-            separator = arguments.index("--")
-        except ValueError as error:
-            raise RuntimeError("Bubblewrap command has no command separator") from error
         command = [
-            *arguments[:separator],
+            arguments[0],
             "--json-status-fd",
             str(status_write),
-            *arguments[separator:],
+            *arguments[1:],
         ]
         process = subprocess.Popen(
             command,
@@ -861,7 +849,8 @@ def _validate_config(value: Mapping[str, Any]) -> None:
         or value.get("mode") not in {"worker", "stdio"}
         or not isinstance(arguments, list)
         or not arguments
-        or any(not isinstance(argument, str) or not argument for argument in arguments)
+        or not arguments[0]
+        or any(not isinstance(argument, str) for argument in arguments)
     ):
         raise RuntimeError("guardian config version is unsupported")
 

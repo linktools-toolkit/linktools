@@ -133,7 +133,7 @@ def _decode_result(
         info = _decode_info(payload.get("info"))
         entry_revision = StorageEntryRevision(_integer(payload.get("entry_revision"), minimum=1))
         changed = _boolean(payload.get("changed"))
-        if info.revision != entry_revision or info.store_revision != store_revision:
+        if info.revision != entry_revision or changed and info.store_revision != store_revision:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return StoragePutResult(info, entry_revision, store_revision, changed)
     if kind == "delete":

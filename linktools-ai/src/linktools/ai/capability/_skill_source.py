@@ -16,7 +16,7 @@ from ..core import (
     validate_logical_id,
 )
 from ..errors import AIError, ErrorCode
-from ._resource_path import require_resource_path
+from ._resource_path import SKILL_DECLARATION_FILES, require_resource_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +135,7 @@ class LocalSkillSource:
             for name in file_names:
                 path = base / name
                 relative = path.relative_to(package).as_posix()
-                if relative == "SKILL.md" or DEFAULT_DISCOVERY_POLICY.ignores(relative):
+                if relative in SKILL_DECLARATION_FILES or DEFAULT_DISCOVERY_POLICY.ignores(relative):
                     continue
                 try:
                     _resolve_contained_file(package, path)
@@ -264,7 +264,7 @@ def _validate_resource_mode(mode: object) -> None:
         isinstance(mode, bool)
         or not isinstance(mode, int)
         or mode < 0
-        or mode > 0o111
+        or mode & ~0o111
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 

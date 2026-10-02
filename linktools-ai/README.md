@@ -182,8 +182,8 @@ layout but does not implement a second version store. No additional
 Registry/Provider abstraction is required.
 
 The built-in file layouts are deliberately small: Agents use
-`<id>/AGENT.md`, Skills use `<id>/SKILL.md`, and resource-backed MCP servers
-use `<id>/mcp.json` or `<id>/mcp.yaml`. Flat Agent/Skill/MCP declaration
+`<id>/AGENT.md`, Skills use `<id>/SKILL.md` or `<id>/skill.md`, and MCP servers
+use `<id>/mcp.json` or `<id>/mcp.yaml` for every supported transport. Flat Agent/Skill/MCP declaration
 files are not a second built-in authoring path. Authoring adapters validate the fields they consume without rejecting unrelated
 ordinary fields. `AgentSpecAdapter`, `SkillSpecAdapter`, and
 `MCPServerSpecAdapter` convert supported authoring inputs into their matching
@@ -191,6 +191,14 @@ Spec values, while the corresponding `*SpecCodec` classes own durable
 serialization and contract projections. Custom source kinds such as `worker`
 can use `AgentDeclarationLoader("worker", defaults=...)`; explicit Agent
 fields still override validated defaults.
+
+Skill filenames accept the two spellings supported by the Agent Skills
+[reference parser](https://github.com/agentskills/agentskills/blob/69ef37e9424c0a7ea9dd2293b559e43ec8176379/skills-ref/src/skills_ref/parser.py).
+Use `SKILL.md` for portability: other clients may require that exact spelling.
+Both files in one package are rejected as conflicting declarations, just like
+multiple MCP declarations; LinkTools does not silently prefer one. Other
+declaration filenames, package IDs, resource paths, and field names retain
+their existing case-sensitive matching.
 
 `AGENT.md` and `SKILL.md` may include a `metadata` map. Skill metadata is
 not shown to the model. The optional `metadata.linktools-revision` value may
@@ -202,8 +210,9 @@ Shared MCP configuration uses the common `mcpServers` JSON shape through
 `MCPServerSpecAdapter.decode_config(data, revision=...)`. LinkTools does not
 auto-discover a project `.mcp.json` or treat arbitrary flat MCP JSON Assets as
 shared configuration. The host or a custom `CapabilityLoader` explicitly
-chooses the source and revision, then returns the resulting
-`MCPServerSpec` declarations into the same `CapabilityGroup.capture()` path.
+chooses the source and revision, then registers each resulting
+`MCPServerSpec` with `CapabilityGroup.mcp(server)` (or returns it from a
+loader) into the same `CapabilityGroup.capture()` path.
 Supported transports are stdio, Streamable HTTP (`http` and
 `streamable-http` authoring names), and explicit legacy `sse`; LinkTools
 does not fall back from one remote transport to another.
@@ -229,41 +238,224 @@ references for Skill resources and read them through AssetStore when needed.
 The Sandbox exposes existing local resource files by path after verifying their
 bound Asset versions and executable bits. Resources without native file paths
 remain available through `load_skill` but cannot be executed by file path.
-No Asset resource bytes are copied to a temporary directory or Runtime ObjectStore.
+Skill resource bytes are not copied to a temporary directory or Runtime ObjectStore.
 Because the paths point to original files, external edits after verification
 can be observed by an already running process.
 
-For an MCP package, the package directory is the resource root; authors do
-not declare an Asset key or Asset version reference. Arguments whose complete
-value is `resource:<relative>` reference files below that package root.
-CapabilityGroup capture binds those files to Asset version references, rejects
-absolute paths, traversal and missing files, and Runtime preserves the refs
-without copying the bytes into Runtime storage. Outside a resource-backed MCP
-package, a string such as `resource:literal` remains an ordinary stdio
-argument.
+For a stdio MCP package, the package directory supplies the default resource
+root when `resource` is omitted; an explicit resource root takes precedence.
+The resource root is also that server process's working directory, so a plain
+argument such as `server.py` works together with sibling imports and relative
+data-file reads. Native directory resources retain their verified local paths.
+For Asset backends without native file paths, Runtime materializes the captured
+Asset versions into a private temporary package tree for each run. The process
+closes before that tree is removed on success, failure, or cancellation; runs
+do not share a persistent resource cache. Materialization preserves the
+configured host-stdio or Sandbox execution boundary and does not copy resource
+bytes into Runtime ObjectStore. If process cleanup cannot establish safe
+closure, resources remain available rather than being deleted under a live
+process.
+
+The existing `resource:<relative>` argument form is also supported. Capture
+rejects absolute paths, traversal, and missing files in these references and
+binds package files to Asset version references. A Streamable HTTP or SSE MCP
+package has no resource root, and neighboring files are neither projected nor
+uploaded. Outside a resource-backed stdio package, a string such as
+`resource:literal` remains an ordinary argument.
 
 MCP connection values are live declaration data rather than durable semantic
 identity. The execution pin keeps the server id/revision, canonical transport,
 semantic args, resource refs and execution policy, but excludes
-`command`, remote `url`, `env` and `headers`. Recovery therefore requires
+`command`, remote `url`, `env`, `headers`, `init_timeout` and `read_timeout`. Recovery therefore requires
 the host to supply the current declaration with the same MCP id/revision;
 connection values may change under that identity, while transport, semantic
 args or resource semantics require a revision change.
+
+### MCP files, Python registration, and shared configuration
+
+All three entry points produce the same `MCPServerSpec` and use the same
+selection, effect tracking, metrics, and recovery boundaries. Registration and
+capture do not connect to servers; only servers selected by an Agent connect.
+Every loaded declaration must still be valid, including its environment
+references, even if an Agent does not select it.
+
+The CLI reads its explicitly configured AssetStore. Its standard MCP location is
+`workspace.storage_root / "mcp" / "<id>" / "mcp.yaml"` (or `mcp.json`);
+custom stores choose physical paths through their path adapter. It does not
+scan home directories, other workspaces, or `.mcp.json` implicitly.
+
+Streamable HTTP needs only a URL. Use environment references for credentials:
+
+```yaml
+# mcp/security/mcp.yaml
+url: https://mcp.example.internal/mcp
+headers:
+  Authorization: "Bearer ${MCP_TOKEN}"
+init_timeout: 10
+read_timeout: 60
+```
+
+Legacy HTTP+SSE must be explicit; a URL ending in `/sse` does not select it:
+
+```yaml
+# mcp/legacy/mcp.yaml
+transport: sse
+url: https://legacy.example.internal/events
+headers:
+  Authorization: "Bearer ${LEGACY_MCP_TOKEN}"
+```
+
+A stdio package can use a plain filename with any supported AssetStore:
+
+```yaml
+# mcp/local/mcp.yaml; server.py and its dependencies are in the same package
+command: python
+args:
+  - server.py
+env:
+  API_KEY: "${LOCAL_MCP_API_KEY}"
+```
+
+No explicit `resource` field, temporary-directory option, or `resource:` prefix
+is needed for this package layout. `args: [resource:server.py]` remains valid.
+Direct Python registration still needs an explicit Asset resource root when
+its files belong to an AssetStore rather than the host working directory.
+
+JSON/YAML with only `command` defaults to `stdio`; with only `url` it defaults
+to `streamable-http`. `type: http` and `transport: http` are authoring aliases
+for `streamable-http`. Supplying both `type` and `transport`, an unknown
+transport, or incompatible connection fields fails validation. Remote
+servers cannot carry stdio `command`, `args`, `env`, or `resource` values.
+An explicit declaration ID must match its package or shared-config entry ID.
+
+Direct registration does not need an AssetStore unless the declaration has
+local resources. Python preserves the existing `transport="stdio"` default,
+so specify the transport for remote servers:
+
+```python
+import os
+from linktools.ai import CapabilityGroup
+from linktools.ai.spec import MCPServerSpec, mcp_server_selector
+
+group = CapabilityGroup("services")
+server = group.mcp(MCPServerSpec(
+    "security",
+    transport="streamable-http",
+    url="https://mcp.example.internal/mcp",
+    headers={"Authorization": f"Bearer {os.environ['MCP_TOKEN']}"},
+    init_timeout=10,
+    read_timeout=60,
+))
+assert server.id == "security"
+group.agent("reviewer", allow_tools=(mcp_server_selector("security"),))
+# Pass capabilities=(group,) to Runtime.open(...).
+```
+
+Import a shared configuration explicitly, then register its declarations:
+
+```python
+from pathlib import Path
+from linktools.ai import CapabilityGroup
+from linktools.ai.spec import MCPServerSpecAdapter
+
+group = CapabilityGroup("services")
+servers = MCPServerSpecAdapter().decode_config(
+    Path("services.json").read_bytes(), revision=1,
+)
+for server in servers:
+    group.mcp(server)
+```
+
+```json
+{
+  "mcpServers": {
+    "security": {
+      "url": "https://mcp.example.internal/mcp",
+      "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+    }
+  }
+}
+```
+
+Environment expansion belongs only to the authoring adapter and only to
+`url`, header values, and environment values. `${NAME}` expands once; `$$`
+escapes a literal dollar sign. Expansion is not recursive, ordinary `$NAME`
+is literal, and shell/default-value expressions and `.env` discovery are not
+supported. Missing variables or malformed references fail with
+`OUTPUT_CONTRACT_INVALID` without exposing their values. IDs, revisions,
+commands, arguments, keys, and resource paths are never expanded. Python
+Specs and durable wire decoding preserve strings literally.
+
+Capture freezes the resolved connection configuration. Rebuild the capture
+and Runtime to rotate credentials; calls do not reread the environment or
+configuration. Static headers are service credentials, not credentials
+inherited from a Principal or incoming request. Wire declarations contain the
+connection configuration, but Runtime binding/history does not copy resolved
+credentials into durable MCP contracts. Source files and backups containing
+literal secrets remain sensitive.
+
+`init_timeout` and `read_timeout` are optional keyword-only connection values
+in seconds. Each must be finite and positive; booleans are invalid. Omitted
+or `None` values preserve FastMCP Client defaults. An explicit `init_timeout`
+bounds the complete transport startup, including SSE endpoint negotiation;
+`None` keeps the SDK's stage-specific defaults. `read_timeout` governs
+upstream request waiting, not the total Agent or Task deadline. Legacy SSE
+also applies an explicit value to its SSE read timeout. HTTPS keeps SDK
+certificate verification. There is no automatic anonymous downgrade,
+OAuth login/refresh, transport fallback, or custom TLS/proxy interface.
+
+Each selected MCP gets an independent Client per run. Connections are not
+shared across concurrent runs, Subagents, tenants, or Runtimes. The SDK owns
+protocol negotiation and supported tool-list cache invalidation; LinkTools
+keeps its own tool names, selection, and `non_replay_safe` effect policy.
+A server's replay-safety hints do not grant permission to replay writes.
+
+Expected connection, negotiation, and discovery failures become
+`MCP_CONNECTION_FAILED`; final Client destruction failures become
+`MCP_CLEANUP_FAILED`. Safe diagnostics identify the server, transport, phase,
+and available HTTP status, without recording URLs, headers, response bodies,
+or credentials. Existing typed sandbox errors and cancellation retain their
+meaning. Cleanup attempts every owned connection and does not replace a
+primary failure with a cleanup failure.
+
+A disconnect, timeout, or cancellation after a tool begins can leave its
+external result unknown. Existing ToolOperation recovery requires confirming
+that result before resuming; closing a connection is not a remote rollback.
+A durable confirmed result is reused even when later cleanup fails. Recovery
+creates a new Client from the currently supplied same-ID/revision declaration;
+network session IDs, SSE cursors, and Client objects are not persisted.
+
+Changing an address or credential under the same ID/revision must still reach
+the same logical service, data domain, and behavior. Changing tenant, scope,
+tool behavior, transport, or other semantic meaning requires a new ID or
+revision. Asset capture does not freeze a remote server's implementation.
+Resources/prompts APIs, OAuth, dynamic end-user credentials, mTLS, server
+publishing, and arbitrary third-party configuration import are out of scope.
 
 ### Execution sandbox
 
 Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `CapabilityGroup(..., sandbox=...)`; the Workspace can come from the same or another group. A Sandbox can also be configured without a Workspace for Skill resource paths and MCP stdio.
 
-When a Workspace is present and no Sandbox is configured, LinkTools uses its
-built-in local adapter. Without either, MCP stdio runs on the host and Skill
-locations remain virtual. LinkTools owns the stable model-visible workspace
+When no Sandbox is configured, LinkTools uses its built-in `LocalSandbox`
+adapter for supervised host processes, including stdio MCP without a Workspace.
+This does not provide OS isolation. LinkTools owns the stable model-visible workspace
 tool signatures, descriptions, metadata, and durable capability pins.
 
-A run opens a `SandboxSession` when it needs a selected Workspace filesystem/shell tool, a local Skill resource path, or a stdio MCP server assigned to that Sandbox. Workspace tool commands share that session, which is closed when the model run succeeds, fails, or is cancelled. Without a Workspace, stdio uses the host current directory captured when Runtime opens as its execution root. Streamable HTTP and SSE MCP connections are opened by the Runtime host and do not inherit Sandbox filesystem or network isolation claims.
+A run opens a `SandboxSession` when it needs a selected Workspace filesystem/shell tool, a local Skill resource path, or a stdio MCP server assigned to that Sandbox. Workspace tool commands share that session, which is closed when the model run succeeds, fails, or is cancelled. Resource-backed stdio uses its package directory as its process working directory; other stdio uses the Workspace execution root, or the host current directory captured when Runtime opens if no Workspace is present. Streamable HTTP and SSE MCP connections use the `host-network` boundary,
+regardless of the configured Sandbox. A remote-only Agent with no selected
+local capabilities or Skill resources does not open a Sandbox session and
+needs no Workspace or working directory. In a mixed run, stdio remains in
+its configured `host-stdio` or `workspace-stdio` boundary while HTTP remains
+in the Runtime process network. Here "host" means the environment where
+Runtime actually runs: in a container, `localhost` refers to that container.
+A Bubblewrap network restriction does not revoke an Agent's explicitly
+selected remote capabilities. Use capability sources and `allow_tools` to
+withhold them. Remote tools receive explicit arguments, not automatic access
+to Workspace files, roots, mounts, or host resources.
 
 Use `DisabledSandbox` to keep workspace tool declarations and historical binding recovery available while making runtime workspace tool materialization fail with `SANDBOX_UNAVAILABLE`. A custom Sandbox failure does not fall back to the local host environment.
 
-`LocalSandbox` runs with the selected execution root as its current directory.
+`LocalSandbox` runs Workspace commands with the selected execution root as its current directory; a resource-backed MCP process uses its own package root.
 It is an execution boundary, not an operating-system security boundary. On Linux,
 `BubblewrapSandbox` is an explicit deployment choice. It requires a non-root
 user, usable unprivileged namespaces, `bwrap >= 0.12.0`, and a trusted

@@ -75,7 +75,9 @@ class AssetStoreReader(Protocol):
     async def read_versions(
         self,
         refs: Sequence[AssetVersionRef],
-    ) -> "tuple[bytes, ...]": ...
+    ) -> "tuple[bytes, ...]":
+        """Return one byte value per reference, verifying each size and digest."""
+        ...
 
 
 class AssetCacheAdapter:
@@ -557,7 +559,8 @@ def _make_cursor(
 
 
 async def _single_object_chunk(value: bytes):
-    yield value
+    if value:
+        yield value
 
 
 async def _put_snapshot_object(

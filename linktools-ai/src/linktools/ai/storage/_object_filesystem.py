@@ -87,7 +87,7 @@ class FilesystemObjectStore:
             ),
             name=f"filesystem-object-put-{_key_digest(self.store_id, key).hex()[:12]}",
         )
-        _track_object_task(self._background_tasks, task, "filesystem object put")
+        _track_object_task(self._background_tasks, task)
         return await _finish_owned_task(task)
 
     async def _put_owned(
@@ -207,7 +207,7 @@ class FilesystemObjectStore:
             ),
             name=f"filesystem-object-delete-{_key_digest(self.store_id, key).hex()[:12]}",
         )
-        _track_object_task(self._background_tasks, task, "filesystem object delete")
+        _track_object_task(self._background_tasks, task)
         return await _finish_owned_task(task)
 
     async def _delete_owned(
@@ -253,25 +253,17 @@ class FilesystemObjectStore:
         digest = hashlib.sha256()
         size = 0
         open_task = asyncio.create_task(asyncio.to_thread(data_path.open, "rb"))
-        _track_object_task(self._background_tasks, open_task, "filesystem object open")
+        _track_object_task(self._background_tasks, open_task)
         handle, cancelled = await _settle_task(open_task)
         if cancelled:
             close_task = asyncio.create_task(asyncio.to_thread(handle.close))
-            _track_object_task(
-                self._background_tasks,
-                close_task,
-                "filesystem object close cleanup",
-            )
+            _track_object_task(self._background_tasks, close_task)
             await _finish_owned_task(close_task)
             raise asyncio.CancelledError
         try:
             while True:
                 read_task = asyncio.create_task(asyncio.to_thread(handle.read, _CHUNK_SIZE))
-                _track_object_task(
-                    self._background_tasks,
-                    read_task,
-                    "filesystem object read",
-                )
+                _track_object_task(self._background_tasks, read_task)
                 chunk, cancelled = await _settle_task(read_task)
                 if cancelled:
                     raise asyncio.CancelledError
@@ -287,11 +279,7 @@ class FilesystemObjectStore:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         finally:
             close_task = asyncio.create_task(asyncio.to_thread(handle.close))
-            _track_object_task(
-                self._background_tasks,
-                close_task,
-                "filesystem object close cleanup",
-            )
+            _track_object_task(self._background_tasks, close_task)
             await _finish_owned_task(close_task)
 
     def open(self, key: str) -> AsyncIterator[bytes]:

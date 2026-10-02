@@ -168,9 +168,7 @@ async def _spool_file(
 def _track_object_task(
     tasks: set[asyncio.Task[Any]],
     task: asyncio.Task[Any],
-    label: str,
 ) -> None:
-    del label
     tasks.add(task)
     task.add_done_callback(tasks.discard)
 

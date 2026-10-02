@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from aiosqlite import Cursor
 from linktools.ai.agent import AgentBindingContract
 from linktools.ai.core import (
     OperationKind,
@@ -147,6 +148,102 @@ async def test_sql_state_group_maps_programming_failure_to_internal(
         assert raised.value.safe_details == {"phase": "runtime_storage_sql_mutation"}
     finally:
         await state.close()
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("cancel_count", (1, 2))
+@pytest.mark.parametrize("operation", ("read", "integrity", "sequence"))
+async def test_sql_cancelled_read_releases_cursor_before_followup_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_count: int,
+    operation: str,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}")
+    await provision_database(engine)
+    store = SqlStateStore(engine)
+    await store.initialize()
+    key = b"s" * 32
+    await store.mutate(lambda transaction: transaction.reserve_sequence(key, 1))
+    fetching = asyncio.Event()
+    release = asyncio.Event()
+    original_fetchall = Cursor.fetchall
+
+    async def pause_fetchall(cursor: Cursor):
+        if (
+            not fetching.is_set()
+            and cursor.description
+            and {"key_digest", "value"}
+            <= {column[0] for column in cursor.description}
+        ):
+            fetching.set()
+            await release.wait()
+        return await original_fetchall(cursor)
+
+    monkeypatch.setattr(Cursor, "fetchall", pause_fetchall)
+    if operation == "integrity":
+        read = store.validate_integrity()
+    elif operation == "sequence":
+        read = store.mutate(lambda transaction: transaction.reserve_sequence(key, 1))
+    else:
+        read = store.read(lambda transaction: transaction.get_sequence(key))
+    reader = asyncio.create_task(read)
+    try:
+        await asyncio.wait_for(fetching.wait(), 5)
+        for _ in range(cancel_count):
+            reader.cancel("stop reading")
+            await asyncio.sleep(0)
+        release.set()
+        try:
+            await reader
+        except asyncio.CancelledError as cancelled:
+            while isinstance(cancelled.__context__, asyncio.CancelledError):
+                cancelled = cancelled.__context__
+            assert cancelled.args == ("stop reading",)
+            # The interrupted CLI writes its cancel intent while this traceback
+            # is still alive, so cursor cleanup must not depend on collection.
+            assert await store.mutate(
+                lambda transaction: transaction.reserve_sequence(key, 1)
+            ) == 2
+        else:
+            pytest.fail("read cancellation was not propagated")
+    finally:
+        release.set()
+        await asyncio.gather(reader, return_exceptions=True)
+        await store.close()
+        await engine.dispose()
+
+
+async def test_sql_read_callback_remains_cancellable_outside_database_io(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'state.db'}")
+    await provision_database(engine)
+    store = SqlStateStore(engine)
+    await store.initialize()
+    waiting = asyncio.Event()
+    release = asyncio.Event()
+    key = b"s" * 32
+
+    async def read(transaction: StateTransaction) -> None:
+        await transaction.get_sequence(key)
+        waiting.set()
+        await release.wait()
+
+    reader = asyncio.create_task(store.read(read))
+    try:
+        await asyncio.wait_for(waiting.wait(), 5)
+        reader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(reader), 5)
+        assert await store.mutate(
+            lambda transaction: transaction.reserve_sequence(key, 1)
+        ) == 1
+    finally:
+        release.set()
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+        await store.close()
         await engine.dispose()
 
 

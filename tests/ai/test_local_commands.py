@@ -110,7 +110,7 @@ def test_ai_run_translates_invalid_model_configuration(
         run_command.run(args)
 
 
-def test_ai_asset_command_is_removed() -> None:
+def test_ai_cli_rejects_unknown_commands() -> None:
     environment = dict(os.environ)
     source_root = Path(__file__).parents[2]
     environment["PYTHONPATH"] = os.pathsep.join(
@@ -118,11 +118,11 @@ def test_ai_asset_command_is_removed() -> None:
     )
     environment["DEBUG"] = "false"
     result = subprocess.run(
-        [sys.executable, "-m", "linktools", "ai", "asset", "--help"],
+        [sys.executable, "-m", "linktools", "ai", "unknown-command", "--help"],
         env=environment,
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode != 0
-    assert "invalid choice: 'asset'" in result.stderr
+    assert "invalid choice: 'unknown-command'" in result.stderr

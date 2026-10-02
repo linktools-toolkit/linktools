@@ -6,10 +6,17 @@ import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from types import TracebackType
 from typing import Any, NoReturn
 
-from fastmcp import Client
+import anyio
+import httpx
+from fastmcp.client.transports import ClientTransport
+from fastmcp.exceptions import McpError
+
+from httpx2 import HTTPError as HTTPErrorV2, HTTPStatusError as HTTPStatusErrorV2
 from linktools.core import environ
+from pydantic import ValidationError
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.toolsets import (
@@ -26,7 +33,7 @@ from ..capability import (
     validate_resource_path,
     validate_resource_tree,
 )
-from ..asset import AssetStoreReader, AssetVersionRef
+from ..asset import AssetMaterializer, AssetStoreReader, AssetVersionRef
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
@@ -38,9 +45,7 @@ from ..workspace import (
     Sandbox,
     SandboxResource,
     SandboxResourcePath,
-    SandboxStdioProcess,
     StdioSandbox,
-    StdioSandboxSession,
 )
 from ._tool import ToolOperationBridge
 from ._tool_boundary import (
@@ -48,7 +53,7 @@ from ._tool_boundary import (
     managed_tool_descriptor_from_metadata,
 )
 from ._tool_metrics import _ToolMetricContext
-from ._mcp_transport import _SandboxMCPTransport
+from ._mcp_transport import _create_mcp_transport
 
 _logger = environ.get_logger("ai.runtime.mcp")
 _MCP_TOOL_METADATA = tool_metadata(
@@ -75,6 +80,7 @@ class _MCPProjection:
     server_id: str
     args: tuple[str | SandboxResourcePath, ...]
     resources: tuple[SandboxResource, ...]
+    resource_root: str | None = None
 
 
 class _MCPModelToolset(WrapperToolset[object]):
@@ -164,12 +170,75 @@ class _MCPModelToolset(WrapperToolset[object]):
 
 
 class _MCPDiscoveryToolset(MCPToolset[object]):
+    def __init__(self, transport: ClientTransport, *, server: MCPServerSpec) -> None:
+        super().__init__(
+            transport,
+            id=f"mcp:{server.id}",
+            cache_tools=True,
+            init_timeout=server.init_timeout,
+            read_timeout=server.read_timeout,
+        )
+        self._init_timeout = server.init_timeout
+        self._server_id = server.id
+        self._transport_kind = server.transport
+        self._cleanup_error: BaseException | None = None
+
+    def _details(self, phase: str) -> dict[str, JsonValue]:
+        return {
+            "server_id": self._server_id,
+            "transport": self._transport_kind,
+            "phase": phase,
+        }
+
+    async def __aenter__(self) -> "_MCPDiscoveryToolset":
+        try:
+            with anyio.fail_after(self._init_timeout):
+                await super().__aenter__()
+        except BaseException as error:
+            _raise_connection_failure(error, self._details("connect"))
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        try:
+            return await super().__aexit__(exc_type, exc_value, traceback)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as error:
+            try:
+                _raise_cleanup_failure(error, self._details("close"))
+            except BaseException as cleanup_error:
+                # Upstream wrapper exits may discard the primary exception.
+                # Final owned cleanup still has it and can report both safely.
+                if self._cleanup_error is None:
+                    self._cleanup_error = cleanup_error
+            return None
+
     async def list_tools(self) -> list[MCPTool]:
-        tools = await super().list_tools()
+        try:
+            tools = await super().list_tools()
+        except BaseException as error:
+            _raise_connection_failure(error, self._details("tools/list"))
         names = tuple(tool.name for tool in tools)
         if len(names) != len(set(names)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         return tools
+
+    async def close_resources(self) -> None:
+        try:
+            await self.client.close()
+        except BaseException as error:
+            try:
+                _raise_cleanup_failure(error, self._details("close"))
+            except BaseException as cleanup_error:
+                if self._cleanup_error is None:
+                    self._cleanup_error = cleanup_error
+        if self._cleanup_error is not None:
+            raise self._cleanup_error
 
 
 class _MCPCapability(AbstractCapability[AgentContext[object]]):
@@ -177,42 +246,107 @@ class _MCPCapability(AbstractCapability[AgentContext[object]]):
         self,
         capability_id: str,
         toolset: AbstractToolset[AgentContext[object]],
-        client: Client,
+        owned_toolset: _MCPDiscoveryToolset,
     ) -> None:
         self.id = capability_id
         self._toolset = toolset
-        self._client: Client | None = client
+        self._owned_toolset: _MCPDiscoveryToolset | None = owned_toolset
 
     def get_toolset(self) -> AbstractToolset[AgentContext[object]]:
         return self._toolset
 
     async def close_resources(self) -> None:
-        client = self._client
-        if client is not None:
-            await client.close()
-            self._client = None
+        toolset = self._owned_toolset
+        if toolset is not None:
+            await toolset.close_resources()
+            self._owned_toolset = None
 
 
 async def close_mcp_resources(
     capabilities: Sequence[AbstractCapability[AgentContext[object]]],
 ) -> None:
-    """Close selected MCP client processes."""
-    failure: BaseException | None = None
-    for capability in capabilities:
-        if isinstance(capability, _MCPCapability):
+    """Finish owned MCP cleanup before propagating caller cancellation."""
+    async def close_owned() -> BaseException | None:
+        failure: BaseException | None = None
+        for capability in capabilities:
+            if isinstance(capability, _MCPCapability):
+                try:
+                    await capability.close_resources()
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+        return failure
+
+    task = asyncio.create_task(close_owned())
+    cancelled: asyncio.CancelledError | None = None
+    with anyio.CancelScope(shield=True):
+        while not task.done():
             try:
-                await capability.close_resources()
-            except BaseException as error:
-                if failure is None:
-                    failure = error
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                cancelled = error
+    failure = task.result()
+    if cancelled is not None:
+        if failure is not None:
+            _raise_primary_after_cleanup(cancelled, failure)
+        raise cancelled
     if failure is not None:
         _raise_cleanup_failure(failure)
 
 
-def _raise_cleanup_failure(error: BaseException) -> None:
+def _raise_cleanup_failure(
+    error: BaseException,
+    details: Mapping[str, JsonValue] | None = None,
+) -> NoReturn:
     if isinstance(error, (AIError, asyncio.CancelledError)):
         raise error
-    raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
+    raise AIError(ErrorCode.MCP_CLEANUP_FAILED, safe_details=details) from None
+
+
+def _connection_errors(error: BaseException) -> tuple[BaseException, ...] | None:
+    if isinstance(error, (AIError, asyncio.CancelledError)):
+        raise error
+    nested = getattr(error, "exceptions", None)
+    if isinstance(nested, tuple):
+        values: list[BaseException] = []
+        for child in nested:
+            result = _connection_errors(child)
+            if result is None:
+                return None
+            values.extend(result)
+        return tuple(values) if values else None
+    if isinstance(error, (
+        OSError, TimeoutError, httpx.HTTPError, HTTPErrorV2, McpError, ValidationError,
+        anyio.EndOfStream, anyio.ClosedResourceError, anyio.BrokenResourceError,
+    )):
+        return (error,)
+    if type(error) is RuntimeError:
+        if error.__cause__ is not None:
+            return _connection_errors(error.__cause__)
+        # SDK negotiation failures have no public error type, and transport
+        # exception-group unwrapping can remove their original timeout cause.
+        message = str(error)
+        if message in {
+            "Failed to initialize server session",
+            "Server session was closed unexpectedly",
+        } or message.startswith("Unsupported protocol version from the server:"):
+            return (error,)
+    return None
+
+
+def _raise_connection_failure(
+    error: BaseException,
+    details: Mapping[str, JsonValue],
+) -> NoReturn:
+    failures = _connection_errors(error)
+    if failures is None:
+        raise error
+    safe_details = dict(details)
+    for failure in failures:
+        if isinstance(failure, (httpx.HTTPStatusError, HTTPStatusErrorV2)):
+            safe_details["status_code"] = failure.response.status_code
+            break
+    raise AIError(ErrorCode.MCP_CONNECTION_FAILED, safe_details=safe_details) from None
 
 
 def _raise_primary_after_cleanup(
@@ -233,10 +367,13 @@ async def prepare_mcp_projections(
     *,
     asset_readers: Mapping[str, AssetStoreReader],
     sandboxed: bool,
+    materializer: AssetMaterializer | None = None,
 ) -> dict[str, _MCPProjection]:
     """Verify selected Asset versions and expose existing local resource files."""
     projections: dict[str, _MCPProjection] = {}
     for server in servers:
+        if server.transport != "stdio":
+            continue
         binding = bindings.get(server.id)
         if binding is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -266,7 +403,11 @@ async def prepare_mcp_projections(
             server.id,
             reader,
             versions,
+            materializer=materializer,
         )
+        if resource is None and not versions and materializer is not None:
+            materialized = await materializer.materialize(reader, versions)
+            resource = SandboxResource(server.id, materialized.root)
         local_files = None if resource is None else resource.files
         arguments: list[str | SandboxResourcePath] = []
         for argument in server.args:
@@ -288,6 +429,7 @@ async def prepare_mcp_projections(
             server.id,
             tuple(arguments),
             (resource,) if sandboxed and resource is not None else (),
+            None if resource is None or resource.source is None else str(resource.source),
         )
     return projections
 
@@ -305,12 +447,6 @@ async def materialize_mcp_capabilities(
     tool_metrics: "_ToolMetricContext | None",
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Materialize compiler-selected MCP servers."""
-    from fastmcp.client.transports import (
-        SSETransport,
-        StdioTransport,
-        StreamableHttpTransport,
-    )
-
     policy, required = _selector_policy(selectors)
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
     values: list[AbstractCapability[AgentContext[object]]] = []
@@ -320,64 +456,30 @@ async def materialize_mcp_capabilities(
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             binding = bindings.get(server.id)
             projection = projections.get(server.id)
-            if binding is None or projection is None:
+            if binding is None or (server.transport == "stdio" and projection is None):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             current_policy = _mcp_execution_policy(server, sandbox)
             if dict(binding.execution_policy) != dict(current_policy):
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             allowed = policy[server.id]
 
-            if server.transport == "stdio":
-                if sandbox is None:
-                    if host_cwd is None:
-                        raise AIError(
-                            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                            safe_details={"reason": "mcp_cwd_unavailable"},
-                        )
-                    if server.command is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    transport = StdioTransport(
-                        server.command,
-                        list(projection.args),
-                        cwd=host_cwd,
-                        env=dict(server.env) or None,
-                    )
-                else:
-                    if (
-                        not isinstance(sandbox_session, StdioSandboxSession)
-                        or server.command is None
-                    ):
-                        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-                    transport = _SandboxMCPTransport(
-                        sandbox_session,
-                        server.command,
-                        projection.args,
-                        projection.resources,
-                        server.env,
-                    )
-            elif server.transport == "streamable-http":
-                if server.url is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                transport = StreamableHttpTransport(
-                    server.url,
-                    headers=dict(server.headers) or None,
-                )
-            elif server.transport == "sse":
-                if server.url is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                transport = SSETransport(
-                    server.url,
-                    headers=dict(server.headers) or None,
-                )
-            else:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-            client = Client(transport)
-            toolset = _MCPDiscoveryToolset(
-                client,
-                id=f"mcp:{server.id}",
-                cache_tools=True,
+            transport = _create_mcp_transport(
+                server,
+                sandboxed=sandbox is not None,
+                sandbox_session=sandbox_session,
+                host_cwd=(
+                    host_cwd if projection is None or projection.resource_root is None
+                    else projection.resource_root
+                ),
+                args=() if projection is None else projection.args,
+                resources=() if projection is None else projection.resources,
+                cwd_resource_id=(
+                    server.id
+                    if projection is not None and projection.resource_root is not None
+                    else None
+                ),
             )
+            toolset = _MCPDiscoveryToolset(transport, server=server)
             mapped = _MCPModelToolset(
                 toolset,
                 server.id,
@@ -396,7 +498,7 @@ async def materialize_mcp_capabilities(
                 _MCPCapability(
                     f"linktools.ai.mcp.{server.id}",
                     boundary,
-                    client,
+                    toolset,
                 )
             )
             _logger.debug(
@@ -507,10 +609,14 @@ def _mcp_execution_policy(
     if server.transport != "stdio":
         return {"version": 1, "boundary": "host-network"}
     if sandbox is None:
-        return {"version": 1, "boundary": "host-stdio"}
-    if not isinstance(sandbox, StdioSandbox):
-        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-    return sandbox.stdio_execution_policy()
+        policy: dict[str, JsonValue] = {"version": 1, "boundary": "host-stdio"}
+    else:
+        if not isinstance(sandbox, StdioSandbox):
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+        policy = dict(sandbox.stdio_execution_policy())
+    if server.resource is not None:
+        policy["cwd"] = "resource"
+    return policy
 
 
 __all__ = []

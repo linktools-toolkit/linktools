@@ -38,6 +38,7 @@ from ._sandbox import (
     SandboxSession,
     SandboxStdioProcess,
     _normalize_stdio_environment,
+    _stdio_resource_root,
     normalize_workspace_input_path,
 )
 from ._root import Workspace
@@ -46,6 +47,7 @@ from ._local_process import (
     _ProcessState,
     _WindowsJob,
     _command_result,
+    _finish_task,
     _stop_process,
     _stop_process_state,
     _terminate_unregistered_process,
@@ -168,7 +170,7 @@ class _LocalSandboxSession:
             int, tuple[asyncio.subprocess.Process, _WindowsJob | None]
         ] = {}
         self._operations: set[asyncio.Task[object]] = set()
-        self._starting_tasks: set[asyncio.Task[object]] = set()
+        self._starting_operations: set[asyncio.Future[None]] = set()
         self._starting_background = 0
         self._process_lock = asyncio.Lock()
 
@@ -221,6 +223,7 @@ class _LocalSandboxSession:
         *,
         resources: "Sequence[SandboxResource]" = (),
         environment: "Mapping[str, str] | None" = None,
+        cwd_resource_id: str | None = None,
     ) -> SandboxStdioProcess:
         if self._read_policy is not None:
             raise AIError(
@@ -240,15 +243,17 @@ class _LocalSandboxSession:
             self._workspace,
             tuple(resources),
         )
+        resource_root = _stdio_resource_root(cwd_resource_id, selected_resources)
         command_args = _local_stdio_command_args(args, selected_resources)
         process_environment = dict(self._environment)
         process_environment.update(_normalize_stdio_environment(environment))
-        current = asyncio.current_task()
+        if resource_root is not None:
+            process_environment["PWD"] = str(resource_root)
+        started = asyncio.get_running_loop().create_future()
         async with self._process_lock:
             if self._state != "OPEN":
                 raise AIError(_session_state_error(self._state))
-            if current is not None:
-                self._starting_tasks.add(current)
+            self._starting_operations.add(started)
 
         job: _WindowsJob | None = None
         process: asyncio.subprocess.Process | None = None
@@ -257,7 +262,7 @@ class _LocalSandboxSession:
             if os.name == "nt":
                 job = _WindowsJob.create()
             process_kwargs: dict[str, object] = {
-                "cwd": str(self._root),
+                "cwd": str(self._root if resource_root is None else resource_root),
                 "env": process_environment,
                 "stdin": PIPE,
                 "stdout": PIPE,
@@ -280,7 +285,7 @@ class _LocalSandboxSession:
                 process = await asyncio.shield(process_task)
             except asyncio.CancelledError as cancellation:
                 try:
-                    process = await asyncio.shield(process_task)
+                    process = await _finish_task(process_task)
                 except BaseException:
                     if job is not None:
                         job.close()
@@ -288,7 +293,9 @@ class _LocalSandboxSession:
                 process_key = id(process)
                 self._pending_processes[process_key] = (process, job)
                 try:
-                    await _terminate_unregistered_process(process, job)
+                    await _finish_task(asyncio.create_task(
+                        _terminate_unregistered_process(process, job)
+                    ))
                 except BaseException as cleanup_error:
                     if process.returncode is not None:
                         self._pending_processes.pop(process_key, None)
@@ -328,8 +335,8 @@ class _LocalSandboxSession:
                 self._pending_processes.pop(process_key, None)
             return stdio_process
         finally:
-            if current is not None:
-                self._starting_tasks.discard(current)
+            started.set_result(None)
+            self._starting_operations.discard(started)
 
     async def canonicalize_path(self, path: str) -> str:
         """Normalize one logical Workspace path without applying operation policy."""
@@ -868,7 +875,9 @@ class _LocalSandboxSession:
             return _command_result(process)
         except asyncio.CancelledError as cancellation:
             try:
-                await _stop_process(process, force=True)
+                await _finish_task(asyncio.create_task(
+                    _stop_process(process, force=True)
+                ))
             except BaseException as cleanup_error:
                 cleanup_succeeded = False
                 _logger.exception(
@@ -949,7 +958,7 @@ class _LocalSandboxSession:
             await asyncio.shield(task)
         except asyncio.CancelledError as cancellation:
             try:
-                await asyncio.shield(task)
+                await _finish_task(task)
             except BaseException as cleanup_error:
                 if not isinstance(cleanup_error, asyncio.CancelledError):
                     _logger.exception(
@@ -961,12 +970,11 @@ class _LocalSandboxSession:
 
     async def _close_impl(self) -> None:
         cleanup_error: BaseException | None = None
-        for wait in (self._wait_operations, self._wait_starting_tasks):
-            try:
-                await wait()
-            except BaseException as error:
-                cleanup_error = cleanup_error or error
-                _logger.exception("local sandbox cleanup wait failed")
+        try:
+            await self._wait_operations()
+        except BaseException as error:
+            cleanup_error = error
+            _logger.exception("local sandbox cleanup wait failed")
         async with self._process_lock:
             processes = tuple(self._processes.values())
             stdio_processes = tuple(self._stdio_processes)
@@ -1015,34 +1023,11 @@ class _LocalSandboxSession:
             raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
 
     async def _wait_operations(self) -> None:
-        current = asyncio.current_task()
-        while True:
-            operations = tuple(
-                task
-                for task in self._operations
-                if task is not current and not task.done()
-            )
-            if not operations:
-                return
-            await asyncio.gather(
-                *(asyncio.shield(task) for task in operations),
-                return_exceptions=True,
-            )
-
-    async def _wait_starting_tasks(self) -> None:
-        current = asyncio.current_task()
-        while True:
-            tasks = tuple(
-                task
-                for task in self._starting_tasks
-                if task is not current and not task.done()
-            )
-            if not tasks:
-                return
-            await asyncio.gather(
-                *(asyncio.shield(task) for task in tasks),
-                return_exceptions=True,
-            )
+        operations = (*self._operations, *self._starting_operations)
+        await asyncio.gather(
+            *(asyncio.shield(task) for task in operations),
+            return_exceptions=True,
+        )
 
     async def _ensure_open(self) -> None:
         async with self._state_lock:
@@ -1169,7 +1154,6 @@ class _LocalSandboxSession:
             raise AIError(code)
 
     async def _run_sync(self, operation: Callable[[], str]) -> str:
-        current = asyncio.current_task()
         async with self._state_lock:
             if self._state != "OPEN":
                 code = (
@@ -1178,14 +1162,13 @@ class _LocalSandboxSession:
                     else ErrorCode.SANDBOX_SESSION_CLOSED
                 )
                 raise AIError(code)
-            if current is not None:
-                self._operations.add(current)
-        task = asyncio.create_task(asyncio.to_thread(operation))
+            task = asyncio.create_task(asyncio.to_thread(operation))
+            self._operations.add(task)
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
             try:
-                await asyncio.shield(task)
+                await _finish_task(task)
             except BaseException as error:
                 _logger.exception(
                     "cancelled local sandbox operation completed with an error",
@@ -1193,8 +1176,7 @@ class _LocalSandboxSession:
                 )
             raise
         finally:
-            if current is not None:
-                self._operations.discard(current)
+            self._operations.discard(task)
 
     def _resolve_path(
         self,
@@ -1255,17 +1237,16 @@ class _LocalSandboxSession:
         return candidate
 
     async def _start_process(self, command: str) -> "_ProcessState":
-        current = asyncio.current_task()
+        started = asyncio.get_running_loop().create_future()
         async with self._process_lock:
             if self._state != "OPEN":
                 raise AIError(_session_state_error(self._state))
-            if current is not None:
-                self._starting_tasks.add(current)
+            self._starting_operations.add(started)
         try:
             return await self._spawn_process(command)
         finally:
-            if current is not None:
-                self._starting_tasks.discard(current)
+            started.set_result(None)
+            self._starting_operations.discard(started)
 
     async def _spawn_process(self, command: str) -> "_ProcessState":
         await self._ensure_open()
@@ -1313,7 +1294,7 @@ class _LocalSandboxSession:
             process = await asyncio.shield(process_task)
         except asyncio.CancelledError as cancellation:
             try:
-                process = await asyncio.shield(process_task)
+                process = await _finish_task(process_task)
             except BaseException:
                 if job is not None:
                     job.close()
@@ -1321,7 +1302,9 @@ class _LocalSandboxSession:
             process_key = id(process)
             self._pending_processes[process_key] = (process, job)
             try:
-                await _terminate_unregistered_process(process, job)
+                await _finish_task(asyncio.create_task(
+                    _terminate_unregistered_process(process, job)
+                ))
             except BaseException as cleanup_error:
                 _logger.exception(
                     "cancelled local process cleanup failed",
@@ -1473,10 +1456,6 @@ class _LocalStdioProcess:
             stdin = self._process.stdin
             if stdin is not None and not stdin.is_closing():
                 stdin.close()
-                try:
-                    await stdin.wait_closed()
-                except (BrokenPipeError, ConnectionError, OSError):
-                    pass
 
     async def close(self) -> None:
         async with self._lock:
@@ -1493,7 +1472,7 @@ class _LocalStdioProcess:
             await asyncio.shield(task)
         except asyncio.CancelledError as cancellation:
             try:
-                await asyncio.shield(task)
+                await _finish_task(task)
             except BaseException as cleanup_error:
                 raise cancellation from cleanup_error
             raise cancellation

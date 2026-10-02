@@ -29,11 +29,15 @@ from ..spec import (
 from ..storage import StorageRevision
 from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
-from ._contribution import CapabilityContribution, _freeze_contribution
+from ._contribution import (
+    CapabilityContribution,
+    _freeze_contribution,
+    _validate_external_capability_id,
+    _validate_revision,
+)
 from ._declaration import (
     BuiltinDeclarationLoader,
     _bind_mcp_contribution,
-    _bind_mcp_declaration,
 )
 from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillDefinition
@@ -244,6 +248,13 @@ class CapabilityGroup(Generic[AppT]):
         self._contributions.append(CapabilityContribution.from_declaration(spec))
         return spec
 
+    def mcp(self, server: MCPServerSpec) -> MCPServerSpec:
+        """Register an MCP declaration, binding any resources during capture."""
+        if not isinstance(server, MCPServerSpec):
+            raise TypeError("server must be MCPServerSpec")
+        self._contributions.append(CapabilityContribution.from_declaration(server))
+        return server
+
     def loader(
         self,
         kind: str,
@@ -266,6 +277,7 @@ class CapabilityGroup(Generic[AppT]):
         instruction_documents: list[RepositoryInstructionDocument] = []
         loaders = tuple(self._loaders.items())
         store = self._store
+        context: CapabilityLoadContext | None = None
         source_revision: StorageRevision | None = None
         asset_reader: AssetStoreReader | None = None
         if store is not None:
@@ -274,16 +286,10 @@ class CapabilityGroup(Generic[AppT]):
                 loaded = await loader.load(context)
                 for value in loaded:
                     _validate_skill_source(value, context)
-                    if isinstance(value, MCPServerSpec):
-                        item = _bind_mcp_declaration(value, context)
-                    elif isinstance(value, (AgentSpec, SkillDefinition)):
+                    if isinstance(value, (AgentSpec, SkillDefinition, MCPServerSpec)):
                         item = CapabilityContribution.from_declaration(value)
                     elif isinstance(value, CapabilityContribution):
-                        item = (
-                            _bind_mcp_contribution(value, context)
-                            if value.kind == "mcp"
-                            else value
-                        )
+                        item = value
                     elif isinstance(value, RepositoryInstructionDocument):
                         instruction_documents.append(value)
                         continue
@@ -296,7 +302,12 @@ class CapabilityGroup(Generic[AppT]):
         elif loaders:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         captured_items = tuple(
-            _freeze_contribution(item) for item in contributions
+            _freeze_contribution(
+                _bind_mcp_contribution(item, context)
+                if item.kind == "mcp"
+                else item
+            )
+            for item in contributions
         )
         _validate_unique(captured_items)
         generic = [item for item in captured_items if item.kind == "capability"]
@@ -428,20 +439,10 @@ def _capability_registration_id(
 
 
 
-def _validate_external_capability_id(value: str) -> None:
-    if value.startswith("linktools."):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
 def _validate_tool_effect_policy(effect_policy: str, plan_safe: bool) -> None:
     if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if not isinstance(plan_safe, bool):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
-def _validate_revision(value: int) -> None:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 

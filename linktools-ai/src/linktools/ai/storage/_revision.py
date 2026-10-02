@@ -164,6 +164,9 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
     def apply_write(self, key: KeyT, info: InfoT, revision: StorageRevision) -> None:
         if self._state is None:
             return
+        if self._state.revision != revision:
+            self.invalidate()
+            return
         entries = dict(self._state.entries)
         entries[key] = info
         self._state = MetadataState(revision, entries)

@@ -3,7 +3,7 @@
 """Transport-only ACP adapter over the public Runtime."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from types import ModuleType
 from typing import Protocol
 from uuid import uuid4
@@ -25,7 +25,7 @@ from .core import (
     Principal,
     validate_memory_scope,
 )
-from .errors import AIError
+from .errors import AIError, ErrorCode
 from .model import ModelRegistry
 from .runtime import (
     CancelExecutionRequest,
@@ -66,7 +66,7 @@ class ACPAgent:
     async def initialize(self, protocol_version: int, **kwargs: JsonValue) -> JsonValue:
         acp, schema = _require_acp()
         if protocol_version != acp.PROTOCOL_VERSION:
-            raise acp.RequestError("no_common_protocol_version")
+            raise acp.RequestError.invalid_request({"reason": "no_common_protocol_version"})
         self._initialized = True
         return schema.InitializeResponse(protocolVersion=protocol_version, agentCapabilities=schema.AgentCapabilities(loadSession=True), authMethods=[], agentInfo=schema.Implementation(name="linktools-ai", version="0.1"))
 
@@ -124,11 +124,11 @@ class ACPAgent:
 
     async def authenticate(self, method_id: str, **kwargs: JsonValue) -> None:
         acp, _ = _require_acp()
-        raise acp.RequestError("unknown_auth_method")
+        raise acp.RequestError.invalid_params({"reason": "unknown_auth_method"})
 
     async def prompt(self, session_id: str, prompt: "list[ACPTextContent]", **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
-        _, schema = _require_acp()
+        acp, schema = _require_acp()
         text = "".join(item.text for item in prompt)
         loaded = await self._runtime.sessions.get(session_id, principal=self._principal)
         execution = await self._runtime.agents.get(loaded.agent_id).start(
@@ -138,16 +138,35 @@ class ACPAgent:
             memory_scope=self._memory_scope,
         )
         stop_reason = "end_turn"
+        failure: AIError | None = None
         async for item in execution.watch(include_content=True):
             if item.depth != 0:
                 continue
             event = item.event
             if event.event_type == ExecutionEventType.EXECUTION_CANCELLED.value:
                 stop_reason = "cancelled"
+            elif event.event_type in {
+                ExecutionEventType.EXECUTION_FAILED.value,
+                ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value,
+            }:
+                raw_code = event.payload.get("error_code") if isinstance(event.payload, dict) else None
+                try:
+                    code = ErrorCode(raw_code)
+                except (TypeError, ValueError):
+                    code = (
+                        ErrorCode.EXECUTION_FAILED
+                        if event.event_type == ExecutionEventType.EXECUTION_FAILED.value
+                        else ErrorCode.STORAGE_RECOVERY_REQUIRED
+                    )
+                failure = AIError(code, safe_details={"execution_id": execution.execution_id})
             if self._connection is not None:
                 update = _acp_update(schema, event.event_type, event.payload)
                 if update is not None:
                     await self._connection.session_update(session_id, update)
+        if failure is not None:
+            raise acp.RequestError.internal_error(asdict(
+                failure.to_safe_error(operation_id=execution.execution_id)
+            ))
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
@@ -171,7 +190,7 @@ class ACPAgent:
     def _require_initialized(self) -> None:
         if not self._initialized:
             acp, _ = _require_acp()
-            raise acp.RequestError("initialize_required")
+            raise acp.RequestError.invalid_request({"reason": "initialize_required"})
 
 
 @dataclass(frozen=True, slots=True)
