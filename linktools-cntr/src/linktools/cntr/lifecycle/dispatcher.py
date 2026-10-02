@@ -3,16 +3,33 @@
 """Lifecycle event dispatch."""
 import contextlib
 import inspect
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from linktools.types import MISSING
+from ..container import ContainerError
 from .hooks import HookPhase
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator, Sequence
     from typing import Any
+    from ..container import BaseContainer
     from ..context import EventContext
     from ..manager import ContainerManager
+
+
+@dataclass(frozen=True)
+class LifecycleStep:
+    """One callback and/or registry bucket; ``container=None`` means manager.
+
+    Callback names are resolved only during dispatch, so describing a
+    lifecycle never invokes container code or snapshots its mutable hooks.
+    """
+
+    container: "BaseContainer | None" = None
+    phase: "HookPhase | None" = None
+    callback: "str | None" = None
+    reverse: bool = False
 
 
 class LifecycleDispatcher:
@@ -35,45 +52,67 @@ class LifecycleDispatcher:
         else:
             return func(context)
 
+    @classmethod
+    def iter_steps(
+            cls,
+            action: str,
+            containers: "Sequence[BaseContainer]",
+            after: "bool | None" = None,
+    ) -> "Iterator[LifecycleStep]":
+        """Describe dispatch order without preparing containers or calling hooks.
+
+        ``after`` selects one side of the runtime operation; the default
+        describes both. Registry contents stay live until each step is
+        consumed, including hooks registered by earlier callbacks.
+        """
+        if action == "restart":
+            yield from cls.iter_steps("down", containers, after=after)
+            yield from cls.iter_steps("up", containers, after=after)
+        elif action == "up":
+            if after is not True:
+                for container in containers:
+                    yield LifecycleStep(container, HookPhase.CHECK, "on_check")
+                # Every on_starting may register hooks on another container.
+                # Finish all callbacks before looking up BEFORE_START buckets.
+                for container in containers:
+                    yield LifecycleStep(container, callback="on_starting")
+                for container in containers:
+                    yield LifecycleStep(container, HookPhase.BEFORE_START)
+                yield LifecycleStep(phase=HookPhase.BEFORE_START)
+            if after is not False:
+                for container in reversed(containers):
+                    yield LifecycleStep(container, HookPhase.AFTER_START, "on_started", reverse=True)
+        elif action == "down":
+            if after is not True:
+                for container in reversed(containers):
+                    yield LifecycleStep(container, HookPhase.BEFORE_STOP, "on_stopping", reverse=True)
+                yield LifecycleStep(phase=HookPhase.BEFORE_STOP)
+            if after is not False:
+                for container in containers:
+                    yield LifecycleStep(container, HookPhase.AFTER_STOP, "on_stopped")
+                yield LifecycleStep(phase=HookPhase.AFTER_STOP)
+        else:
+            raise ContainerError(f"Unsupported lifecycle action: {action!r}; expected up/restart/down")
+
+    def _dispatch_steps(self, steps: "Iterable[LifecycleStep]", context: "EventContext") -> None:
+        for step in steps:
+            if step.callback is not None:
+                self._invoke_callback(getattr(step.container, step.callback), context)
+            if step.phase is not None:
+                owner = step.container if step.container is not None else self.manager
+                owner.hooks.call(step.phase, context, reverse=step.reverse)
+
     @contextlib.contextmanager
     def notify_start(self, context: "EventContext") -> "Iterator[None]":
-        for container in context.target_containers:
-            self._invoke_callback(container.on_check, context)
-            container.hooks.call(HookPhase.CHECK, context)
-
-        for container in context.target_containers:
-            self._invoke_callback(container.on_starting, context)
-
-        # Legacy start_hooks == container.hooks.legacy_view(BEFORE_START); a
-        # hook registered directly through the registry (not via the legacy
-        # `.append()` view) is picked up here too, in the same ordered bucket.
-        for container in context.target_containers:
-            container.hooks.call(HookPhase.BEFORE_START, context)
-
-        self.manager.hooks.call(HookPhase.BEFORE_START, context)
-
+        self._dispatch_steps(self.iter_steps("up", context.target_containers, after=False), context)
         yield
-
-        for container in reversed(context.target_containers):
-            self._invoke_callback(container.on_started, context)
-            container.hooks.call(HookPhase.AFTER_START, context, reverse=True)
+        self._dispatch_steps(self.iter_steps("up", context.target_containers, after=True), context)
 
     @contextlib.contextmanager
     def notify_stop(self, context: "EventContext") -> "Iterator[None]":
-        for container in reversed(context.target_containers):
-            self._invoke_callback(container.on_stopping, context)
-            container.hooks.call(HookPhase.BEFORE_STOP, context, reverse=True)
-
-        self.manager.hooks.call(HookPhase.BEFORE_STOP, context)
-
+        self._dispatch_steps(self.iter_steps("down", context.target_containers, after=False), context)
         yield
-
-        for container in context.target_containers:
-            self._invoke_callback(container.on_stopped, context)
-            # Legacy stop_hooks == container.hooks.legacy_view(AFTER_STOP).
-            container.hooks.call(HookPhase.AFTER_STOP, context)
-
-        self.manager.hooks.call(HookPhase.AFTER_STOP, context)
+        self._dispatch_steps(self.iter_steps("down", context.target_containers, after=True), context)
 
     @contextlib.contextmanager
     def notify_remove(self, context: "EventContext") -> "Iterator[None]":
