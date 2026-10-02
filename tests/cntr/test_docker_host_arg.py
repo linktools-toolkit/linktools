@@ -79,3 +79,24 @@ def test_podman_container_type_raises_explicit_error_not_silent_fallback(fresh_m
         fresh_manager.runtime.create_docker_process("ps")
 
     assert calls == []
+
+
+@pytest.mark.parametrize("container_type", ["docker", "docker-rootless"])
+@pytest.mark.parametrize("configured,display,args", [
+    (None, "/var/run/docker.sock", ()),
+    ("", "/var/run/docker.sock", ()),
+    ("/var/run/docker.sock", "/var/run/docker.sock", ()),
+    ("unix:///var/run/docker.sock", "/var/run/docker.sock", ("-H", "unix:///var/run/docker.sock")),
+    ("/custom/docker.sock", "/custom/docker.sock", ("-H", "unix:///custom/docker.sock")),
+    ("tcp://daemon.example:2376", "daemon.example:2376", ("-H", "tcp://daemon.example:2376")),
+    ("ssh://docker@daemon.example", "docker@daemon.example", ("-H", "ssh://docker@daemon.example")),
+])
+def test_display_host_and_connection_endpoint_keep_distinct_semantics(
+        fresh_manager, monkeypatch, container_type, configured, display, args):
+    fresh_manager.env_config.set("DOCKER_TYPE", container_type)
+    _override_docker_host(monkeypatch, fresh_manager, configured)
+
+    assert fresh_manager.container_host == display
+    spec = fresh_manager.runtime.docker_args("ps")
+    assert spec.args == ("docker", *args, "ps")
+    assert spec.privilege is (container_type == "docker")

@@ -13,6 +13,7 @@ from linktools.core import AliasProvider, ConfigField, LazyProvider, PromptProvi
 from linktools.decorator import cached_property
 
 from .container import BaseContainer, ContainerError, NoContainerInstalledError
+from .runtime.process import DEFAULT_DOCKER_HOST
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,7 +95,7 @@ class ContainerManager:
                 PromptProvider(),
                 LazyProvider(lambda r: get_lan_ip()),
             ),
-            DOCKER_HOST="/var/run/docker.sock",
+            DOCKER_HOST=DEFAULT_DOCKER_HOST,
 
             COMPOSE_PROJECT_NAME=self.name,
             SERVICE_RESTART_POLICY="unless-stopped",
@@ -152,7 +153,7 @@ class ContainerManager:
         if host:
             left, sep, right = host.partition("://")
             return right or left
-        return "/var/run/docker.sock"
+        return DEFAULT_DOCKER_HOST
 
     @property
     def host(self) -> str:
