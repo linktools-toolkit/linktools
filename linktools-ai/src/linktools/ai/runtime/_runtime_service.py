@@ -81,6 +81,7 @@ from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeS
 from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInputBuilder
 from ._context import RuntimeContext
+from ._input_contract import normalize_input_files
 from ._input import CanonicalUserInput
 from ._metrics import (
     MetricFlushResult,
@@ -257,18 +258,6 @@ def _overlay_request_correlation(
         return overlay_correlation(base, overlay)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-
-
-def _request_files(value: Sequence[str]) -> tuple[str, ...]:
-    if not isinstance(value, Sequence) or isinstance(
-        value,
-        (str, bytes, bytearray),
-    ):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    result = tuple(value)
-    if any(not isinstance(item, str) or not item for item in result):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return result
 
 
 class Runtime(Generic[AppT]):
@@ -623,7 +612,7 @@ class Runtime(Generic[AppT]):
             self.correlation,
             correlation,
         )
-        resolved_files = _request_files(files)
+        resolved_files = normalize_input_files(files)
         compiled_agent = self._compiled_agent(agent_id, agent_revision, compiled_agent)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
             compiled_agent,
@@ -708,7 +697,7 @@ class Runtime(Generic[AppT]):
             principal=principal,
             idempotency_key=idempotency_key or secrets.token_urlsafe(32),
             correlation=_request_correlation(correlation),
-            files=_request_files(files),
+            files=normalize_input_files(files),
         )
         handle = await self.executions.retry(execution_id, request)
         return Execution(
@@ -734,7 +723,7 @@ class Runtime(Generic[AppT]):
             principal=principal,
             idempotency_key=idempotency_key or secrets.token_urlsafe(32),
             correlation=_request_correlation(correlation),
-            files=_request_files(files),
+            files=normalize_input_files(files),
         )
         handle = await self.executions.fork(execution_id, request)
         return Execution(

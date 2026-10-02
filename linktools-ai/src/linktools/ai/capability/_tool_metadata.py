@@ -3,7 +3,7 @@
 """Shared Tool metadata keys and strict metadata parsing."""
 
 from collections.abc import Mapping, Sequence
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 from ..errors import AIError, ErrorCode
 
@@ -26,15 +26,19 @@ ToolClass = Literal[
 ]
 ToolContextDedupe = Literal["workspace_file_read_v1"]
 
-_TOOL_EFFECTS = {"none", "replay_safe", "non_replay_safe"}
-_TOOL_CLASSES = {
-    "business",
-    "filesystem.read",
-    "filesystem.write",
-    "shell",
-    "mcp",
-}
+_TOOL_EFFECTS = frozenset(get_args(ToolEffectPolicy))
+_TOOL_CLASSES = frozenset(get_args(ToolClass))
 _TOOL_CONTEXT_DEDUPE = "workspace_file_read_v1"
+
+
+def is_tool_effect_policy(value: str) -> bool:
+    """Test a Tool effect policy without applying caller-specific errors."""
+    return value in _TOOL_EFFECTS
+
+
+def is_tool_class(value: str) -> bool:
+    """Test a Tool class without applying caller-specific errors."""
+    return value in _TOOL_CLASSES
 
 
 def tool_metadata(
@@ -85,7 +89,7 @@ def validate_tool_metadata(
 
     effect_policy = metadata.get(TOOL_EFFECT_POLICY_METADATA_KEY)
     if effect_policy is not None or TOOL_EFFECT_POLICY_METADATA_KEY in metadata:
-        if not isinstance(effect_policy, str) or effect_policy not in _TOOL_EFFECTS:
+        if not isinstance(effect_policy, str) or not is_tool_effect_policy(effect_policy):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     elif require_effect_policy:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -99,7 +103,7 @@ def validate_tool_metadata(
 
     tool_class = metadata.get(TOOL_CLASS_METADATA_KEY)
     if tool_class is not None or TOOL_CLASS_METADATA_KEY in metadata:
-        if not isinstance(tool_class, str) or tool_class not in _TOOL_CLASSES:
+        if not isinstance(tool_class, str) or not is_tool_class(tool_class):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     elif require_tool_class:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -192,6 +196,8 @@ __all__ = [
     "ToolClass",
     "ToolContextDedupe",
     "ToolEffectPolicy",
+    "is_tool_class",
+    "is_tool_effect_policy",
     "tool_class_from_metadata",
     "tool_compaction_keep_result_from_metadata",
     "tool_context_dedupe_from_metadata",

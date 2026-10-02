@@ -38,6 +38,7 @@ from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
     MCPServerSpec,
+    mcp_server_name_token,
     mcp_tool_selector,
     parse_mcp_tool_selector,
 )
@@ -584,13 +585,7 @@ def _selector_policy(
 
 def _model_tool_name(server_id: str, tool_name: str) -> str:
     mcp_tool_selector(server_id, tool_name)
-    server_token = canonical_sha256(
-        {
-            "version": 1,
-            "kind": "mcp-server-name",
-            "server_id": server_id,
-        }
-    )[:24]
+    server_token = mcp_server_name_token(server_id)
     tool_token = canonical_sha256(
         {
             "version": 1,

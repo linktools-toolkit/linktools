@@ -47,7 +47,11 @@ from ._store import (
     StoredOperation,
     StoredRecord,
 )
-from ._snapshot import SnapshotLimits
+from ._snapshot import (
+    SnapshotLimits,
+    snapshot_object_ref_payload as _object_ref_payload,
+    snapshot_object_ref_from_payload as _object_ref_from_payload,
+)
 from ._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from ._codec import (
     _decode_enveloped_domain,
@@ -966,41 +970,6 @@ def _normalize_path(value: "str | Path") -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise ValueError("RuntimeStorage path is required")
     return Path(value).expanduser().resolve(strict=False)
-
-
-def _object_ref_payload(ref: ObjectRef) -> dict[str, object]:
-    return {
-        "store_id": RUNTIME_OBJECT_STORE_ID,
-        "key": ref.key,
-        "digest": ref.digest,
-        "size": ref.size,
-    }
-
-
-def _object_ref_from_payload(value: object) -> ObjectRef:
-    required = {"store_id", "key", "digest", "size"}
-    if not isinstance(value, Mapping) or set(value) != required:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    store_id = value["store_id"]
-    key = value["key"]
-    digest = value["digest"]
-    size = value["size"]
-    if (
-        store_id != RUNTIME_OBJECT_STORE_ID
-        or not isinstance(key, str)
-        or not key
-        or not isinstance(digest, str)
-        or len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
-        or isinstance(size, bool)
-        or not isinstance(size, int)
-        or size < 0
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        return ObjectRef(store_id, key, digest, size)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _decode_snapshot_digest(value: object) -> bytes:

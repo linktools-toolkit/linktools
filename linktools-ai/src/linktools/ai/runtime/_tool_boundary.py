@@ -21,6 +21,10 @@ from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
 
 from ..capability import (
     AgentContext,
+    ToolClass,
+    ToolEffectPolicy,
+    is_tool_class,
+    is_tool_effect_policy,
     ToolCallFailed,
     ToolCallRetry,
     tool_class_from_metadata,
@@ -56,28 +60,16 @@ class RepositoryInstructionBoundary(Protocol):
 @dataclass(frozen=True, slots=True)
 class ManagedToolDescriptor:
     effect_owner: Literal["none", "tool_operation"]
-    effect_policy: Literal["none", "replay_safe", "non_replay_safe"]
-    tool_class: Literal[
-        "business",
-        "filesystem.read",
-        "filesystem.write",
-        "shell",
-        "mcp",
-    ]
+    effect_policy: ToolEffectPolicy
+    tool_class: ToolClass
     workspace_path_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.effect_owner not in {"none", "tool_operation"}:
             raise ValueError("effect owner is invalid")
-        if self.effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
+        if not is_tool_effect_policy(self.effect_policy):
             raise ValueError("effect policy is invalid")
-        if self.tool_class not in {
-            "business",
-            "filesystem.read",
-            "filesystem.write",
-            "shell",
-            "mcp",
-        }:
+        if not is_tool_class(self.tool_class):
             raise ValueError("tool class is invalid")
         if any(
             not isinstance(field, str) or not field

@@ -34,7 +34,13 @@ from ..storage import (
     read_object,
 )
 from ._runtime_history import RuntimeHistory
-from .state import SnapshotExclusiveGuard, RuntimeStorage, SnapshotLimits
+from .state import (
+    SnapshotExclusiveGuard,
+    RuntimeStorage,
+    SnapshotLimits,
+    snapshot_object_ref_payload as _object_ref_payload,
+    snapshot_object_ref_from_payload as _object_ref_from_payload,
+)
 
 if TYPE_CHECKING:
     from ..workspace import Workspace
@@ -1250,41 +1256,6 @@ def _require_snapshot_format_version(value: object) -> None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if value != 1:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-
-def _object_ref_payload(ref: ObjectRef) -> dict[str, JsonValue]:
-    return {
-        "store_id": "runtime",
-        "key": ref.key,
-        "digest": ref.digest,
-        "size": ref.size,
-    }
-
-
-def _object_ref_from_payload(value: object) -> ObjectRef:
-    required = {"store_id", "key", "digest", "size"}
-    if not isinstance(value, Mapping) or set(value) != required:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    store_id = value["store_id"]
-    key = value["key"]
-    digest = value["digest"]
-    size = value["size"]
-    if (
-        store_id != RUNTIME_OBJECT_STORE_ID
-        or not isinstance(key, str)
-        or not key
-        or not isinstance(digest, str)
-        or len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
-        or isinstance(size, bool)
-        or not isinstance(size, int)
-        or size < 0
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        return ObjectRef(store_id, key, digest, size)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _digest_bytes(value: bytes) -> str:

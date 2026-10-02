@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime service protocols and transport-neutral request values."""
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,7 +33,11 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent
-from ._input_contract import UserPromptInput, validate_user_input
+from ._input_contract import (
+    UserPromptInput,
+    normalize_input_files,
+    validate_user_input,
+)
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -54,18 +58,6 @@ def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
         return normalize_correlation(value)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-
-
-def _request_files(value: Sequence[str]) -> tuple[str, ...]:
-    if not isinstance(value, Sequence) or isinstance(
-        value,
-        (str, bytes, bytearray),
-    ):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    files = tuple(value)
-    if any(not isinstance(item, str) or not item for item in files):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return files
 
 
 def _is_digest(value: object) -> bool:
@@ -90,7 +82,7 @@ class ExecutionRequest:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
-        files = _request_files(self.files)
+        files = normalize_input_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)
@@ -114,7 +106,7 @@ class RetryExecutionRequest:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
-        files = _request_files(self.files)
+        files = normalize_input_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
         object.__setattr__(self, "files", files)
@@ -130,7 +122,7 @@ class ForkExecutionRequest:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
-        files = _request_files(self.files)
+        files = normalize_input_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         object.__setattr__(self, "correlation", _request_correlation(self.correlation))
         object.__setattr__(self, "files", files)
@@ -690,7 +682,7 @@ class ResumeSessionRequest:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
-        files = _request_files(self.files)
+        files = normalize_input_files(self.files)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)

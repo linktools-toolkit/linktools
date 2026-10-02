@@ -17,7 +17,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
-import linktools.ai.agent._compiler as agent_compiler
+import linktools.ai.spec._naming as mcp_naming
 import linktools.ai.runtime._mcp as mcp_runtime
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
@@ -52,6 +52,7 @@ from linktools.ai.runtime._mcp import (
 )
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
+    managed_tool_descriptor_from_metadata,
     BoundaryToolset,
 )
 from linktools.ai.runtime.state import (
@@ -71,6 +72,7 @@ from linktools.ai.spec import (
     SkillSpecCodec,
     canonical_selectors,
     capability_ref_payload,
+    mcp_server_name_token,
     mcp_server_selector,
     mcp_tool_selector,
     parse_mcp_tool_selector,
@@ -346,14 +348,15 @@ async def test_mcp_global_wildcard_still_requires_explicit_tool() -> None:
 def test_mcp_server_token_collision_fails_at_compiler_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original = agent_compiler.canonical_sha256
+    original = mcp_naming.canonical_sha256
 
     def collide(value: object) -> str:
         if isinstance(value, dict) and value.get("kind") == "mcp-server-name":
             return "a" * 64
         return original(value)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(agent_compiler, "canonical_sha256", collide)
+    monkeypatch.setattr(mcp_naming, "canonical_sha256", collide)
+    assert mcp_runtime._model_tool_name("first", "probe").split("__")[1] == "a" * 24
     first = MCPServerSpec("first", "python")
     second = MCPServerSpec("second", "python")
     candidates = (
@@ -1318,3 +1321,84 @@ async def test_runtime_tool_boundary_does_not_rewrite_explicit_descriptor() -> N
     assert await boundary.call_tool(
         "_business", {"value": "ok"}, context, tools["_business"]
     ) == "ok"
+
+
+@pytest.mark.parametrize("server_id", ("server", "security/audit", "mcp:unicode-审计"))
+def test_mcp_server_token_preserves_model_name_projection(server_id: str) -> None:
+    expected = _expected_mcp_tool_name(server_id, "scan:file")
+    assert mcp_server_name_token(server_id) == expected.split("__")[1]
+    assert mcp_runtime._model_tool_name(server_id, "scan:file") == expected
+
+
+@pytest.mark.parametrize("effect_policy", ("none", "replay_safe", "non_replay_safe"))
+def test_registered_tool_effect_policy_reaches_runtime_boundary(effect_policy: str) -> None:
+    group = CapabilityGroup[None]("business")
+    tool = group.tool(_business, effect_policy=effect_policy)
+    descriptor = managed_tool_descriptor_from_metadata(tool.tool_def.metadata)
+    assert descriptor == ManagedToolDescriptor(
+        effect_owner="none" if effect_policy == "none" else "tool_operation",
+        effect_policy=effect_policy,
+        tool_class="business",
+    )
+
+
+@pytest.mark.parametrize("effect_policy", ("none", "replay_safe", "non_replay_safe"))
+@pytest.mark.parametrize("tool_class", ("business", "filesystem.read", "filesystem.write", "shell", "mcp"))
+def test_tool_metadata_vocabulary_reaches_runtime_boundary(
+    effect_policy: str, tool_class: str,
+) -> None:
+    descriptor = managed_tool_descriptor_from_metadata(
+        tool_metadata(effect_policy=effect_policy, tool_class=tool_class)
+    )
+    assert descriptor.effect_policy == effect_policy
+    assert descriptor.tool_class == tool_class
+    assert descriptor.effect_owner == (
+        "none" if effect_policy == "none" else "tool_operation"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (("effect_policy", "invalid", "effect policy is invalid"),
+     ("tool_class", "invalid", "tool class is invalid")),
+)
+def test_invalid_tool_vocabulary_preserves_boundary_errors(
+    field: str, value: str, message: str,
+) -> None:
+    metadata = {"effect_policy": "none", "tool_class": "business", field: value}
+    with pytest.raises(AIError) as raised:
+        tool_metadata(**metadata)
+    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    with pytest.raises(ValueError, match=message):
+        ManagedToolDescriptor(effect_owner="none", **metadata)
+    if field == "effect_policy":
+        with pytest.raises(AIError) as raised:
+            CapabilityGroup[None]("business").tool(_business, effect_policy=value)
+        assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+@pytest.mark.parametrize(
+    ("owner", "policy", "message"),
+    (("unknown", "none", "effect owner is invalid"),
+     ("none", "replay_safe", "effect-free tools must use effect_policy=none"),
+     ("none", "non_replay_safe", "effect-free tools must use effect_policy=none"),
+     ("tool_operation", "none", "tool-operation tools require an effect policy")),
+)
+def test_tool_descriptor_preserves_effect_owner_constraints(
+    owner: str, policy: str, message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        ManagedToolDescriptor(owner, policy, "business")
+
+
+@pytest.mark.parametrize("field", ("effect_policy", "tool_class"))
+def test_tool_vocabulary_preserves_unhashable_input_error_boundaries(field: str) -> None:
+    values = {"effect_policy": "none", "tool_class": "business", field: []}
+    with pytest.raises(AIError) as raised:
+        tool_metadata(**values)
+    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    with pytest.raises(TypeError):
+        ManagedToolDescriptor(effect_owner="none", **values)
+    if field == "effect_policy":
+        with pytest.raises(TypeError):
+            CapabilityGroup[None]("business").tool(_business, effect_policy=[])

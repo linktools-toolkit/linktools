@@ -42,6 +42,8 @@ from ._declaration import (
 from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillDefinition
 from ._tool_metadata import (
+    ToolEffectPolicy,
+    is_tool_effect_policy,
     tool_metadata,
     validate_tool_metadata,
 )
@@ -156,7 +158,7 @@ class CapabilityGroup(Generic[AppT]):
         *,
         name: "str | None" = None,
         revision: int = 1,
-        effect_policy: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
+        effect_policy: ToolEffectPolicy = "non_replay_safe",
         plan_safe: bool = False,
     ) -> "Tool[AgentContext[AppT]]":
         """Register one ordinary model-visible Python tool."""
@@ -440,7 +442,7 @@ def _capability_registration_id(
 
 
 def _validate_tool_effect_policy(effect_policy: str, plan_safe: bool) -> None:
-    if effect_policy not in {"none", "replay_safe", "non_replay_safe"}:
+    if not is_tool_effect_policy(effect_policy):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if not isinstance(plan_safe, bool):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)

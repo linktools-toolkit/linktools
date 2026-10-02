@@ -32,6 +32,7 @@ from ._identity import (
     binding_digest_payload,
     capability_ref_payload,
 )
+from ._naming import mcp_server_name_token
 from ._schema import canonicalize_json_schema, canonicalize_pydantic_model_schema
 
 __all__ = [
@@ -63,6 +64,7 @@ __all__ = [
     "ThinkingValue",
     "canonical_selectors",
     "normalize_thinking",
+    "mcp_server_name_token",
     "mcp_server_selector",
     "mcp_tool_selector",
     "parse_mcp_tool_selector",

@@ -689,3 +689,33 @@ def test_snapshot_rejects_truncated_execution_event_stream() -> None:
         )
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize(
+    "codec",
+    (runtime_snapshot_module, runtime_storage_root_module),
+)
+def test_snapshot_object_ref_round_trip_keeps_logical_owner(codec) -> None:
+    physical = ObjectRef("physical", "snapshot/key", "a" * 64, 0)
+    wire = codec._object_ref_payload(physical)
+    assert wire == {
+        "store_id": "runtime", "key": "snapshot/key", "digest": "a" * 64, "size": 0,
+    }
+    assert codec._object_ref_from_payload(wire) == ObjectRef(
+        "runtime", "snapshot/key", "a" * 64, 0,
+    )
+
+
+@pytest.mark.parametrize("codec", (runtime_snapshot_module, runtime_storage_root_module))
+@pytest.mark.parametrize(
+    "change",
+    ({"extra": 1}, {"size": True}, {"size": -1}, {"size": 1.0},
+     {"digest": "A" * 64}, {"digest": "a" * 63}, {"key": ""},
+     {"key": "snapshot\x00key"}, {"key": 1}),
+)
+def test_snapshot_object_refs_reject_malformed_known_fields(codec, change) -> None:
+    wire = {"store_id": "runtime", "key": "snapshot", "digest": "a" * 64, "size": 1}
+    wire.update(change)
+    with pytest.raises(AIError) as raised:
+        codec._object_ref_from_payload(wire)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
