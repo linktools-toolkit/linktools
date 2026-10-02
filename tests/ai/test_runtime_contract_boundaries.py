@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for the remaining runtime audit boundaries."""
 
+import json
 import os
 import subprocess
 import sys
@@ -266,26 +267,37 @@ def test_tool_ref_contains_named_revision_without_contract_payload() -> None:
     }
 
 
-def test_tool_argument_set_digest_is_stable_across_hash_seeds() -> None:
-    script = (
-        "from linktools.ai.core import canonical_sha256;"
-        "from linktools.ai.runtime._tool import _portable_arguments;"
-        "print(canonical_sha256(_portable_arguments("
-        "{'values': {'alpha', 'beta', 'gamma'}})))"
-    )
-    values = []
+def test_tool_argument_and_return_digests_are_stable_across_hash_seeds() -> None:
+    script = """
+import json
+from pydantic import create_model
+from linktools.ai.core import canonical_sha256
+from linktools.ai.runtime._tool import _portable_arguments
+from linktools.ai.runtime._tool_return_codec import tool_return_content_digest
+
+Result = create_model("Result", values=(set[str], ...))
+values = {"alpha", "beta", "gamma"}
+print(json.dumps({
+    "arguments": canonical_sha256(_portable_arguments({"values": values})),
+    "return_mapping": tool_return_content_digest({"values": values}),
+    "return_model": tool_return_content_digest(Result(values=values)),
+}))
+"""
+    digests = []
     for seed in ("1", "2"):
         env = dict(os.environ)
         env["PYTHONHASHSEED"] = seed
-        values.append(
-            subprocess.check_output(
+        digests.append(
+            json.loads(subprocess.check_output(
                 [sys.executable, "-c", script],
                 env=env,
                 text=True,
-            ).strip()
+            ))
         )
 
-    assert len(set(values)) == 1
+    for contract in ("arguments", "return_mapping", "return_model"):
+        assert digests[0][contract] is not None, contract
+        assert digests[0][contract] == digests[1][contract], contract
 
 
 def test_agent_tool_retry_default_matches_v1_contract() -> None:
