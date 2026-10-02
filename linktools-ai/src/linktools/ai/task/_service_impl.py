@@ -551,7 +551,11 @@ class DefaultTaskGraphService(TaskGraphService):
         request: RecoverGraphRequest,
     ) -> TaskGraphResult:
         tenant_id = request.principal.tenant_id
-        await self._authorize_recovery(graph_id, principal=request.principal)
+        await self._authorize_graph(
+            graph_id,
+            AuthorizationAction.TASK_RUN,
+            principal=request.principal,
+        )
         initial = await self._persistence.tasks.get_graph(
             graph_id,
             tenant_id=tenant_id,
@@ -824,9 +828,10 @@ class DefaultTaskGraphService(TaskGraphService):
             self._preflight.validate_recovery(state)
         return admission
 
-    async def _authorize_recovery(
+    async def _authorize_graph(
         self,
         graph_id: str,
+        action: AuthorizationAction,
         *,
         principal: Principal,
     ) -> None:
@@ -838,7 +843,7 @@ class DefaultTaskGraphService(TaskGraphService):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(
             principal,
-            AuthorizationAction.TASK_RUN,
+            action,
             header,
         )
 
@@ -848,7 +853,11 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         principal: Principal,
     ) -> tuple[TaskNodeInfo, ...]:
-        await self._authorize_recovery(graph_id, principal=principal)
+        await self._authorize_graph(
+            graph_id,
+            AuthorizationAction.TASK_RUN,
+            principal=principal,
+        )
         state = await self._persistence.tasks.graph_state(
             graph_id,
             tenant_id=principal.tenant_id,
@@ -864,16 +873,10 @@ class DefaultTaskGraphService(TaskGraphService):
         request: TaskInputSupplyRequest,
     ) -> TaskGraphResult:
         tenant_id = request.principal.tenant_id
-        header = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            request.principal,
             AuthorizationAction.TASK_RUN,
-            header,
+            principal=request.principal,
         )
         graph_state = await self._persistence.tasks.graph_state(
             graph_id,
@@ -1068,16 +1071,10 @@ class DefaultTaskGraphService(TaskGraphService):
         request: TaskEffectResolutionRequest,
     ) -> TaskGraphResult:
         tenant_id = request.principal.tenant_id
-        header = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            request.principal,
             AuthorizationAction.TASK_RUN,
-            header,
+            principal=request.principal,
         )
         graph_state = await self._persistence.tasks.graph_state(
             graph_id,
@@ -1368,16 +1365,10 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         principal: Principal,
     ) -> TaskGraphView:
-        header = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=principal.tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            principal,
             AuthorizationAction.TASK_READ,
-            header,
+            principal=principal,
         )
         view = await self._persistence.tasks.get_graph(
             graph_id,
@@ -1393,16 +1384,10 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         principal: Principal,
     ) -> TaskGraphState:
-        header = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=principal.tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            principal,
             AuthorizationAction.TASK_READ,
-            header,
+            principal=principal,
         )
         state = await self._persistence.tasks.graph_state(
             graph_id,
@@ -1418,16 +1403,10 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         principal: Principal,
     ) -> tuple[TaskGraph, int]:
-        resource = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=principal.tenant_id,
-        )
-        if resource is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            principal,
             AuthorizationAction.TASK_READ,
-            resource,
+            principal=principal,
         )
         result_header = await self._persistence.tasks.result_header(
             graph_id,
@@ -1444,16 +1423,10 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         principal: Principal,
     ) -> tuple[TaskNodeView, ...]:
-        resource = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=principal.tenant_id,
-        )
-        if resource is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            principal,
             AuthorizationAction.TASK_READ,
-            resource,
+            principal=principal,
         )
         states = await self._persistence.tasks.get_node_states(
             graph_id,
@@ -1474,16 +1447,10 @@ class DefaultTaskGraphService(TaskGraphService):
     ) -> Page[TaskEvent]:
         _validate_event_window(after_sequence, limit)
         tenant_id = principal.tenant_id
-        header = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            principal,
             AuthorizationAction.TASK_READ,
-            header,
+            principal=principal,
         )
         page = await self._persistence.tasks.list_events(
             graph_id,
@@ -1527,16 +1494,10 @@ class DefaultTaskGraphService(TaskGraphService):
     ) -> AsyncIterator[TaskEvent]:
         _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
         tenant_id = principal.tenant_id
-        header = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            principal,
             AuthorizationAction.TASK_READ,
-            header,
+            principal=principal,
         )
         async for event in self._observe_graph_events_authorized(
             graph_id,
@@ -1660,16 +1621,10 @@ class DefaultTaskGraphService(TaskGraphService):
 
         async def consume() -> TaskGraphResult:
             tenant_id = principal.tenant_id
-            header = await self._persistence.tasks.get_header(
+            await self._authorize_graph(
                 graph_id,
-                tenant_id=tenant_id,
-            )
-            if header is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            await self._authorization.authorize(
-                principal,
                 AuthorizationAction.TASK_READ,
-                header,
+                principal=principal,
             )
             fallback_backoff = 1.0
             while True:
@@ -1741,16 +1696,10 @@ class DefaultTaskGraphService(TaskGraphService):
         cancel_confirmed: bool | None,
     ) -> TaskGraphView:
         tenant_id = request.principal.tenant_id
-        header = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            request.principal,
             AuthorizationAction.TASK_CANCEL,
-            header,
+            principal=request.principal,
         )
         request_digest = canonical_sha256(
             {
@@ -1886,16 +1835,10 @@ class DefaultTaskGraphService(TaskGraphService):
         request: CancelGraphRequest,
     ) -> TaskGraphView:
         tenant_id = request.principal.tenant_id
-        header = await self._persistence.tasks.get_header(
+        await self._authorize_graph(
             graph_id,
-            tenant_id=tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            request.principal,
             AuthorizationAction.TASK_CANCEL,
-            header,
+            principal=request.principal,
         )
         request_digest = canonical_sha256(
             {
