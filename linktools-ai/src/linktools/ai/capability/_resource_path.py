@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 from ..asset import AssetKey
 from ..errors import AIError, ErrorCode
 
+SKILL_DECLARATION_FILES = ("SKILL.md", "skill.md")
 _MCP_DECLARATION_FILES = frozenset({"mcp.json", "mcp.yaml"})
 
 
@@ -70,6 +71,7 @@ def mcp_resource_path(key: AssetKey, root: AssetKey) -> "str | None":
 
 
 __all__ = [
+    "SKILL_DECLARATION_FILES",
     "mcp_resource_path",
     "validate_resource_path",
     "validate_resource_tree",

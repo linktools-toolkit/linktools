@@ -182,7 +182,7 @@ layout but does not implement a second version store. No additional
 Registry/Provider abstraction is required.
 
 The built-in file layouts are deliberately small: Agents use
-`<id>/AGENT.md`, Skills use `<id>/SKILL.md`, and MCP servers
+`<id>/AGENT.md`, Skills use `<id>/SKILL.md` or `<id>/skill.md`, and MCP servers
 use `<id>/mcp.json` or `<id>/mcp.yaml` for every supported transport. Flat Agent/Skill/MCP declaration
 files are not a second built-in authoring path. Authoring adapters validate the fields they consume without rejecting unrelated
 ordinary fields. `AgentSpecAdapter`, `SkillSpecAdapter`, and
@@ -191,6 +191,14 @@ Spec values, while the corresponding `*SpecCodec` classes own durable
 serialization and contract projections. Custom source kinds such as `worker`
 can use `AgentDeclarationLoader("worker", defaults=...)`; explicit Agent
 fields still override validated defaults.
+
+Skill filenames accept the two spellings supported by the Agent Skills
+[reference parser](https://github.com/agentskills/agentskills/blob/69ef37e9424c0a7ea9dd2293b559e43ec8176379/skills-ref/src/skills_ref/parser.py).
+Use `SKILL.md` for portability: other clients may require that exact spelling.
+Both files in one package are rejected as conflicting declarations, just like
+multiple MCP declarations; LinkTools does not silently prefer one. Other
+declaration filenames, package IDs, resource paths, and field names retain
+their existing case-sensitive matching.
 
 `AGENT.md` and `SKILL.md` may include a `metadata` map. Skill metadata is
 not shown to the model. The optional `metadata.linktools-revision` value may

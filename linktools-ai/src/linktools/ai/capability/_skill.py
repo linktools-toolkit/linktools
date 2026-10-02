@@ -13,6 +13,7 @@ from ..asset import AssetVersionRef
 from ..errors import AIError, ErrorCode
 from ..spec import SkillSpec, SkillSpecCodec
 from ._context import AgentContext
+from ._resource_path import SKILL_DECLARATION_FILES
 from ._skill_source import (
     SkillLocation,
     SkillResource,
@@ -287,7 +288,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         if path is None:
             return await self._load_root(definition)
         relative = require_skill_resource_path(path)
-        if relative == "SKILL.md":
+        if relative in SKILL_DECLARATION_FILES:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         source_ref = definition.source_ref
         if source_ref is None:
