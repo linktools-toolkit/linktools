@@ -7,6 +7,8 @@ from types import FrameType
 
 import pytest
 
+pytest.register_assert_rewrite("tests.ai._session_tool_test_helpers")
+
 pytest_plugins = (
     "tests.ai.test_metrics_server_read_integrity",
     "tests.ai.test_metrics_sql_server_sums",

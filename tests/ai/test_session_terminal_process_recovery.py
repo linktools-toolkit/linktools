@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Session tool result recovery across process termination boundaries."""
+"""Session tool result recovery around terminal commit process exits."""
 
 from pathlib import Path
 
@@ -13,11 +13,8 @@ from ._session_tool_test_helpers import (
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("sqlite", "sql", "split_sqlite"))
-@pytest.mark.parametrize(
-    "phase",
-    ("tool_completed", "tool_checkpoint", "projected_tool_checkpoint"),
-)
-async def test_session_tool_turn_recovers_after_process_exit_without_replaying_effect(
+@pytest.mark.parametrize("phase", ("before_terminal", "after_terminal"))
+async def test_session_tool_turn_recovers_at_terminal_commit_without_replaying_effect(
     tmp_path: Path,
     backend: str,
     phase: str,
