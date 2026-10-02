@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """An already-persisted value must outrank a field's provider, even one
 without cached=True.
@@ -33,12 +34,14 @@ def test_host_does_not_reprompt_once_persisted(monkeypatch, fresh_manager):
     assert fresh_manager.env_config.get("HOST") == "203.0.113.5"
 
 
-def test_host_still_resolves_via_provider_when_unset(fresh_manager):
-    # Sanity: without a persisted value, HOST still falls through to its
-    # provider chain (PromptProvider -> LazyProvider(get_lan_ip) in the
-    # deterministic test harness) rather than raising.
-    value = fresh_manager.env_config.get("HOST")
-    assert value  # some non-empty IP-like string from the fallback chain
+def test_host_still_resolves_via_provider_when_unset(fresh_manager, monkeypatch):
+    # LAN detection can legitimately return None on an offline host. Test
+    # provider fallback independently of this machine's network interfaces.
+    calls = []
+    monkeypatch.setattr("linktools.cntr.manager.get_lan_ip", lambda: calls.append(1) or "192.0.2.10")
+    fresh_manager.env_config.reload()
+    assert fresh_manager.env_config.get("HOST") == "192.0.2.10"
+    assert calls == [1]
 
 
 def test_cached_provider_still_reuses_after_first_compute(tmp_path):
