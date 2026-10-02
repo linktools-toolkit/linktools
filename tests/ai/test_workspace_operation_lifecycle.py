@@ -146,30 +146,32 @@ async def test_stdio_close_terminates_child_with_full_unread_input(
 ) -> None:
     session = await LocalSandbox().open(root=tmp_path)
     assert isinstance(session, StdioSandboxSession)
-    process = await session.open_stdio_process(
-        sys.executable,
-        ("-c", "import sys,time; print('ready', flush=True); "
-         + ("sys.stdout.write('x' * (20 * 1024 * 1024)); sys.stdout.flush(); "
-            if unread_output else "")
-         + "time.sleep(60)"),
-    )
-    assert await asyncio.wait_for(process.read_stdout(6), 5) == b"ready\n"
-    if unread_output:
-        async def wait_for_backpressure() -> None:
-            while not process._process.stdout._paused:
-                await asyncio.sleep(0)
-        await asyncio.wait_for(wait_for_backpressure(), 5)
-    writing = asyncio.create_task(process.write_stdin(b"x" * (2 * 1024 * 1024)))
-    await asyncio.sleep(0)
-    closing = asyncio.create_task(process.close())
     try:
-        done, _ = await asyncio.wait((closing,), timeout=5)
-        assert closing in done
-        closing.result()
+        process = await session.open_stdio_process(
+            sys.executable,
+            ("-c", "import sys,time; print('r', end='', flush=True); "
+             + ("sys.stdout.write('x' * (20 * 1024 * 1024)); sys.stdout.flush(); "
+                if unread_output else "")
+             + "time.sleep(60)"),
+        )
+        assert await asyncio.wait_for(process.read_stdout(1), 5) == b"r"
+        if unread_output:
+            async def wait_for_backpressure() -> None:
+                while not process._process.stdout._paused:
+                    await asyncio.sleep(0)
+            await asyncio.wait_for(wait_for_backpressure(), 5)
+        writing = asyncio.create_task(process.write_stdin(b"x" * (2 * 1024 * 1024)))
+        await asyncio.sleep(0)
+        closing = asyncio.create_task(process.close())
+        try:
+            done, _ = await asyncio.wait((closing,), timeout=5)
+            assert closing in done
+            closing.result()
+        finally:
+            if not closing.done():
+                process._process.kill()
+            await asyncio.gather(writing, closing, return_exceptions=True)
     finally:
-        if not closing.done():
-            process._process.kill()
-        await asyncio.gather(writing, closing, return_exceptions=True)
         await session.close()
 
 
