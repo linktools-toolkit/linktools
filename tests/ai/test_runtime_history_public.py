@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public read-only Runtime history composition coverage."""
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -29,6 +30,7 @@ from linktools.ai.runtime import (
     Page,
     TranscriptItem,
     RuntimeStorage,
+    TaskGraphRun,
     UsageSummary,
 )
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
@@ -694,3 +696,171 @@ async def test_runtime_history_reads_execution_task_results_and_artifacts() -> N
     assert reference.result_digest == canonical_sha256(None)
     assert task_result is None
     assert artifacts.items == (ArtifactView("artifact", "execution", 3),)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api", ("history-result", "history-ref", "live-result", "live-ref"))
+@pytest.mark.parametrize(
+    "corruption",
+    ("execution", "digest", "missing-result", "missing-execution", "none"),
+)
+async def test_task_result_requires_matching_durable_execution(
+    api: str,
+    corruption: str,
+) -> None:
+    principal = Principal("caller", "tenant", "service")
+    tasks = _TaskResults()
+    executions = _ResultExecutions()
+    execution_reads: list[str] = []
+    if corruption == "execution":
+        tasks.record = replace(tasks.record, execution_id="other-execution")
+    elif corruption == "digest":
+        tasks.record = replace(tasks.record, result_digest=canonical_sha256("other"))
+    elif corruption == "missing-execution":
+        tasks._graph_state = replace(
+            tasks._graph_state,
+            node_states=(replace(tasks._graph_state.node_states[0], execution_id=None),),
+        )
+
+    async def get_results(
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> dict[str, TaskResultRecord]:
+        assert (graph_id, node_ids, tenant_id) == ("graph", ("node",), "tenant")
+        return {} if corruption == "missing-result" else {"node": tasks.record}
+
+    async def get_header(execution_id: str, *, tenant_id: str) -> ResourceRef:
+        assert tenant_id == "tenant"
+        execution_reads.append(execution_id)
+        return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
+
+    async def get(execution_id: str, *, tenant_id: str) -> object:
+        assert tenant_id == "tenant"
+        execution_reads.append(execution_id)
+        return SimpleNamespace(**{
+            **vars(executions.record),
+            "execution_id": execution_id,
+            "root_execution_id": execution_id,
+        })
+
+    async def get_result(execution_id: str, *, tenant_id: str) -> object:
+        assert tenant_id == "tenant"
+        execution_reads.append(execution_id)
+        return executions.result
+
+    tasks.get_results = get_results
+    executions.get_header = get_header
+    executions.get = get
+    executions.get_result = get_result
+    history = RuntimeHistory(
+        SimpleNamespace(),
+        tenant_id="tenant",
+        namespace="workspace",
+        executions=executions,  # type: ignore[arg-type]
+        tasks=tasks,  # type: ignore[arg-type]
+        authorization=TenantAuthorizationPolicy("tenant"),
+    )
+
+    async def graph_state(graph_id: str, *, principal: Principal) -> TaskGraphState:
+        assert (graph_id, principal.tenant_id) == ("graph", "tenant")
+        return tasks._graph_state
+
+    async def get_result_record(
+        graph_id: str, node_id: str, *, tenant_id: str
+    ) -> TaskResultRecord | None:
+        return (await get_results(graph_id, (node_id,), tenant_id=tenant_id)).get(node_id)
+
+    async def read_result_record(record: TaskResultRecord, *, principal: Principal) -> object:
+        return (await history.result(record.execution_id, principal=principal)).output
+
+    task_runtime = SimpleNamespace(
+        get_result_record=get_result_record,
+        read_result_record=read_result_record,
+    )
+    live = TaskGraphRun(
+        SimpleNamespace(
+            namespace="workspace",
+            _require_task_node_runtime=lambda: task_runtime,
+        ),
+        SimpleNamespace(state=graph_state),
+        "graph",
+        principal,
+        None,
+    )
+    if api == "history-result":
+        request = history.task_result("graph", "node", principal=principal)
+    elif api == "history-ref":
+        request = history.task_result_ref("graph", "node", principal=principal)
+    elif api == "live-result":
+        request = live.result("node")
+    else:
+        request = live.result_ref("node")
+    if corruption == "none":
+        result = await request
+        if api.endswith("-result"):
+            assert result is None
+            assert execution_reads and set(execution_reads) == {"execution"}
+        else:
+            assert result.result_digest == canonical_sha256(None)
+            assert execution_reads == []
+    else:
+        with pytest.raises(AIError) as raised:
+            await request
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert raised.value.safe_details == {}
+        assert execution_reads == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference", (False, True))
+@pytest.mark.parametrize(
+    "status, error_code, details",
+    (
+        (TaskStatus.READY, ErrorCode.TASK_NOT_READY, {}),
+        (TaskStatus.FAILED, ErrorCode.TASK_NODE_FAILED, {
+            "graph_id": "graph", "node_id": "node", "status": "FAILED", "error_code": "failed",
+        }),
+    ),
+)
+async def test_history_task_result_preserves_unready_and_failed_error_details(
+    reference: bool,
+    status: TaskStatus,
+    error_code: ErrorCode,
+    details: dict[str, str],
+) -> None:
+    tasks = _TaskResults()
+    tasks._graph_state = replace(
+        tasks._graph_state,
+        node_states=(replace(tasks._graph_state.node_states[0], status=status, error_code="failed"),),
+    )
+    history = RuntimeHistory(
+        SimpleNamespace(), tenant_id="tenant", namespace="workspace",
+        tasks=tasks, authorization=TenantAuthorizationPolicy("tenant"),
+    )
+    read = history.task_result_ref if reference else history.task_result
+    with pytest.raises(AIError) as raised:
+        await read("graph", "node", principal=Principal("caller", "tenant", "service"))
+    assert raised.value.code is error_code
+    assert raised.value.safe_details == details
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference", (False, True))
+async def test_history_task_result_authorizes_before_reading_records(reference: bool) -> None:
+    class DeniedTasks(_TaskResults):
+        async def graph_state(self, *args: object, **kwargs: object) -> TaskGraphState:
+            raise AssertionError("unauthorized graph must not be read")
+
+        async def get_results(self, *args: object, **kwargs: object) -> dict[str, TaskResultRecord]:
+            raise AssertionError("unauthorized result must not be read")
+
+    history = RuntimeHistory(
+        SimpleNamespace(), tenant_id="tenant", namespace="workspace",
+        tasks=DeniedTasks(), authorization=TenantAuthorizationPolicy("tenant"),
+    )
+    read = history.task_result_ref if reference else history.task_result
+    with pytest.raises(AIError) as raised:
+        await read("graph", "node", principal=Principal("caller", "other-tenant", "service"))
+    assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
