@@ -219,6 +219,11 @@ def _create_stdio_server(root: Path) -> SandboxResource:
                     ]
                     result = {"content": content, "isError": False}
                 else:
+                    send({
+                        "jsonrpc": "2.0",
+                        "id": request["id"],
+                        "error": {"code": -32601, "message": "Method not found"},
+                    })
                     continue
                 send({"jsonrpc": "2.0", "id": request["id"], "result": result})
             if mode in {"hang-close", "spawn-close-child"}:

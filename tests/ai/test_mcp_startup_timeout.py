@@ -26,11 +26,13 @@ async def test_sse_startup_timeout_closes_invalid_endpoint_stream_and_client_tas
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     async with _serve("sse") as remote:
         original_app = remote.app
+        stream_started = asyncio.Event()
         stream_closed = asyncio.Event()
         keep_stream_open = asyncio.Event()
 
         async def events() -> AsyncIterator[bytes]:
             try:
+                stream_started.set()
                 yield (
                     b"event: endpoint\n"
                     b"data: https://different.invalid/messages?private-endpoint-token\n\n"
@@ -51,7 +53,7 @@ async def test_sse_startup_timeout_closes_invalid_endpoint_stream_and_client_tas
         baseline_tasks = asyncio.all_tasks()
 
         async def connect() -> None:
-            async with _toolsets(_spec(remote, init_timeout=0.05)):
+            async with _toolsets(_spec(remote, init_timeout=1)):
                 pytest.fail("invalid SSE endpoint must not establish a session")
 
         try:
@@ -63,6 +65,7 @@ async def test_sse_startup_timeout_closes_invalid_endpoint_stream_and_client_tas
                 "server_id": "remote", "transport": "sse", "phase": "connect",
             }
             assert "private-endpoint-token" not in str(error)
+            assert stream_started.is_set(), "startup deadline expired before the SSE stream opened"
             await asyncio.wait_for(stream_closed.wait(), timeout=5)
             await _wait_closed(remote)
             assert remote.active_requests == 0

@@ -4,6 +4,7 @@
 
 from dataclasses import replace
 from datetime import datetime, timezone
+from functools import cache
 
 import pytest
 
@@ -93,6 +94,7 @@ class _CandidateRepository:
         return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
 
 
+@cache
 def _binding(agent_id: str) -> AgentBindingContract:
     output = bind_output()
     return AgentBindingContract(
