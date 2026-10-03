@@ -10,15 +10,15 @@ from typing import TYPE_CHECKING
 from ..agent import AgentBindingContract, AgentInputCaptureRef
 from ..asset import AssetVersionRef
 from ..capability import tool_effect_policy_from_metadata
-from ..core import JsonValue, Principal
+from ..core import JsonValue, Principal, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..evaluation import (
     AgentCaseInput, CandidateContract, CandidateSpec, CaseContract, CaseSpec,
     EvaluationPolicy, GraphCaseInput, GraphInputContract, GraphTargetContract, InlineValue,
-    ScorerContract, ScorerSpec, ScoreBundle, TaskCaseInput,
+    ScorerContract, ScorerSpec, ScoreBundle, TaskCaseInput, capture_mapping,
 )
 from ..spec import canonicalize_pydantic_model_schema
-from ..task import TaskGraph, TaskGraphTemplate, TaskNode, TaskNodeResultRef, TaskRef
+from ..task import TaskGraph, TaskNode, TaskNodeResultRef, TaskRef, TaskInvocationInputRef
 from ._agent_task_input import AgentTaskInput
 
 if TYPE_CHECKING:
@@ -32,8 +32,9 @@ def task_contract(engine: "TaskEngine", ref: TaskRef) -> dict[str, JsonValue]:
 
 
 class EvaluationCompiler:
-    def __init__(self, captures: "RuntimeInputCaptures") -> None:
+    def __init__(self, captures: "RuntimeInputCaptures", namespace: str) -> None:
         self._captures = captures
+        self._namespace = namespace
 
     async def case(self, spec: CaseSpec, *, principal: Principal, content_expires_at: datetime | None = None) -> CaseContract:
         identity = f"evaluation-case:{spec.ref.dataset_id}:{spec.ref.case_id}:{spec.ref.revision}"
@@ -71,7 +72,7 @@ class EvaluationCompiler:
 
     async def candidate(
         self, spec: CandidateSpec, *, engine: "TaskEngine", principal: Principal,
-        policy: EvaluationPolicy, key: str,
+        policy: EvaluationPolicy,
     ) -> CandidateContract:
         if spec.task is not None:
             definition = task_contract(engine, spec.task)
@@ -107,10 +108,9 @@ class EvaluationCompiler:
             raise AIError(ErrorCode.BINDING_CONFLICT)
         template = replace(template, task_contracts=definitions,
                            expander_contracts=expander_contracts)
-        reference = await self._captures.create_graph_template(
-            replace(template, limits=limits), principal=principal, idempotency_key=key)
         return CandidateContract(spec.slot_id, None,
-                                 GraphTargetContract(reference, target.outputs, target.selector, limits),
+                                 GraphTargetContract(replace(template, limits=limits), self._namespace,
+                                                     principal.tenant_id, target.outputs, target.selector, limits),
                                  definitions)
 
     def scorer(self, spec: ScorerSpec, *, engine: "TaskEngine", policy: EvaluationPolicy) -> ScorerContract:
@@ -167,17 +167,21 @@ class EvaluationCompiler:
 
     async def graph(
         self, candidate: CandidateContract, case: CaseContract, *, graph_id: str,
-        principal: Principal, input_mode: str,
+        principal: Principal, input_mode: str, owner_id: str,
+        materialize: bool = True, owned_captures: list[TaskInvocationInputRef] | None = None,
     ) -> TaskGraph:
         if candidate.task is not None:
             node = await self._node_input(TaskNode("target", task=candidate.task), case.input,
-                                          principal=principal, input_mode=input_mode)
+                                          principal=principal, input_mode=input_mode, owner_id=owner_id,
+                                          materialize=materialize, owned_captures=owned_captures)
             return TaskGraph(graph_id, (node,))
         target = candidate.graph_template
         assert target is not None
         if not isinstance(case.input, GraphInputContract):
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
-        template = await self._captures.read_graph(target.template_ref, principal=principal)
+        template = target.template
+        if template is None:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         mapping = case.input.node_mapping
         inputs = {mapping.get(name, name): value for name, value in case.input.inputs.items()}
         if len(inputs) != len(case.input.inputs) or set(inputs) - {node.node_id for node in template.nodes}:
@@ -185,18 +189,27 @@ class EvaluationCompiler:
         nodes = []
         for node in template.nodes:
             value = inputs.get(node.node_id)
+            if value is None and input_mode == "reproject_input":
+                if node.input_capture is not None:
+                    value = TaskCaseInput(capture=node.input_capture)
+                elif node.original_input is not None:
+                    value = TaskCaseInput(input={})
             nodes.append(node if value is None else await self._node_input(
-                node, value, principal=principal, input_mode=input_mode))
+                node, value, principal=principal, input_mode=input_mode, owner_id=owner_id,
+                materialize=materialize, owned_captures=owned_captures))
         return TaskGraph(graph_id, tuple(nodes))
 
     async def _node_input(
         self, node: TaskNode,
         value: AgentInputCaptureRef | AgentCaseInput | TaskCaseInput | GraphCaseInput,
-        *, principal: Principal, input_mode: str,
+        *, principal: Principal, input_mode: str, owner_id: str, materialize: bool,
+        owned_captures: list[TaskInvocationInputRef] | None,
     ) -> TaskNode:
         if isinstance(value, AgentCaseInput):
             value = value.capture
         capture = None
+        contract = None
+        captured_from = None
         references = node.input_refs
         excluded = tuple(sorted(set(node.dependencies) | {
             name for name, ref in references.items() if isinstance(ref, TaskNodeResultRef)
@@ -204,7 +217,8 @@ class EvaluationCompiler:
         if isinstance(value, AgentInputCaptureRef):
             agent = await self._captures.read_agent(value, principal=principal)
             if agent.task_input is not None:
-                capture = await self._captures.task_input(value, principal=principal, input_mode=input_mode,
+                captured_from = value
+                contract = await self._captures.resolve_task_input(value, principal=principal, input_mode=input_mode,
                                                           exclude_dependencies=excluded)
                 data = {}
             elif input_mode == "reproject_input" and value.source_execution_id is not None:
@@ -217,22 +231,52 @@ class EvaluationCompiler:
                     data["capture_fixed_input"] = True
         elif isinstance(value, TaskCaseInput):
             if value.capture is not None:
-                capture = await self._captures.task_input(value.capture, principal=principal, input_mode=input_mode,
+                captured_from = value.capture
+                contract = await self._captures.resolve_task_input(value.capture, principal=principal, input_mode=input_mode,
                                                           exclude_dependencies=excluded)
                 data = {}
             else:
-                data = dict(node.input)
+                if node.input_capture is not None:
+                    if not value.input and not value.input_refs and input_mode == "fixed_input":
+                        return node
+                    captured_from = node.input_capture
+                    contract = await self._captures.resolve_task_input(node.input_capture, principal=principal,
+                        input_mode=input_mode, exclude_dependencies=(*excluded, *value.input_refs))
+                data = dict((node.original_input if input_mode == "reproject_input" and node.original_input is not None else node.input)
+                            if contract is None else contract.input)
                 if any(name in data and data[name] != item for name, item in value.input.items()):
                     raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "node input has conflicting owners")
                 data.update(value.input)
+                if contract is not None:
+                    contract = replace(contract, original_input={**contract.original_input, **value.input})
                 if any(name in references and references[name] != ref for name, ref in value.input_refs.items()):
                     raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "input alias has two owners")
                 references = {**references, **value.input_refs}
         else:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
+        if contract is not None:
+            if data:
+                contract = replace(contract, input=data)
+            key = "evaluation:" + owner_id + ":" + canonical_sha256({
+                "source": capture_mapping(captured_from), "input": dict(contract.input),
+                "original_input": dict(contract.original_input), "mode": contract.input_mode,
+                "excluded": list(contract.excluded_dependencies),
+            })
+            capture = await self._captures.describe_task_input(
+                contract, source_capture=captured_from, principal=principal, idempotency_key=key)
+            if materialize:
+                if owned_captures is None or capture not in owned_captures:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "input capture has no evaluation owner")
+                await self._captures.create_task_input(
+                    contract, source_capture=captured_from, principal=principal, idempotency_key=key)
+            elif owned_captures is not None:
+                owned_captures.append(capture)
+            data = {}
         return TaskNode.from_resolved(
             node.node_id, node.dependencies, task=node.task, input=data,
-            input_refs=references, input_capture=capture, original_input=None, budget_cost=node.budget_cost,
+            input_refs=references, input_capture=capture,
+            original_input=node.original_input if capture is None and input_mode == "fixed_input" else None,
+            budget_cost=node.budget_cost,
             expander=node.expander, timeout_seconds=node.timeout_seconds,
             max_attempts=node.max_attempts, retry_delay_seconds=node.retry_delay_seconds,
             output_contract=node.output_contract, effect_policy=node.effect_policy,

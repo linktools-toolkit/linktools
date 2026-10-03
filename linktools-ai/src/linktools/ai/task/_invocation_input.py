@@ -72,5 +72,27 @@ class TaskGraphTemplate:
         if self.limits is not None and not isinstance(self.limits, TaskGraphLimits):
             raise TypeError("template limits must be TaskGraphLimits")
 
+    def to_mapping(self) -> dict[str, JsonValue]:
+        """Project the reusable graph's Task-owned execution semantics."""
+        if any(node.output_type is not None for node in self.nodes):
+            raise ValueError("graph template nodes require resolved output contracts")
+        limits = self.limits
+        return {
+            "contract": "task-graph-template-v1",
+            "nodes": [
+                node.to_mapping()
+                for node in sorted(self.nodes, key=lambda item: item.node_id)
+            ],
+            "limits": None if limits is None else {
+                "max_concurrency": limits.max_concurrency,
+                "max_depth": limits.max_depth,
+                "max_nodes": limits.max_nodes,
+                "max_budget": limits.max_budget,
+            },
+            "task_contracts": [dict(value) for value in self.task_contracts],
+            "expander_contracts": [dict(value) for value in self.expander_contracts],
+            "context_policy": self.context_policy,
+        }
+
 
 __all__ = ["TaskDependencyCapture", "TaskInvocationInputContract", "TaskGraphTemplate"]

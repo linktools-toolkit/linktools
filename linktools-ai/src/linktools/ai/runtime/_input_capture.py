@@ -133,23 +133,28 @@ class RuntimeInputCaptures:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, ResourceRef(kind, id, principal.tenant_id, owner_principal_id))
 
-    async def _publish(self, kind: str, principal: Principal, key: str, payload: Mapping[str, JsonValue],
-                       *, expires_at: datetime | None = None) -> tuple[str, str]:
+    def _publication(self, kind: str, principal: Principal, key: str, payload: Mapping[str, JsonValue],
+                     *, expires_at: datetime | None = None) -> tuple[str, Mapping[str, JsonValue]]:
         if principal.tenant_id != self._storage.tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if self._storage.plan.route(RuntimeDomain.TASK).retention is RuntimeRetentionMode.TRANSIENT:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         validate_idempotency_key(key)
         identity = canonical_sha256({"kind": kind, "key": key})
-        object_key = self._key(principal.tenant_id, kind, identity)
         if expires_at is not None and (expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc)):
-            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
-        if await self._objects.stat(input_capture_expiry_key(object_key)) is not None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         value = {"kind": kind, "version": 1, "namespace": self._namespace,
                  "tenant_id": principal.tenant_id, "principal": principal_identity_payload(principal), "payload": dict(payload)}
         if expires_at is not None:
             value["expires_at"] = expires_at.isoformat()
+        return identity, value
+
+    async def _publish(self, kind: str, principal: Principal, key: str, payload: Mapping[str, JsonValue],
+                       *, expires_at: datetime | None = None) -> tuple[str, str]:
+        identity, value = self._publication(kind, principal, key, payload, expires_at=expires_at)
+        object_key = self._key(principal.tenant_id, kind, identity)
+        if await self._objects.stat(input_capture_expiry_key(object_key)) is not None:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         digest = await self._put(object_key, value)
         return identity, digest
 
@@ -242,31 +247,48 @@ class RuntimeInputCaptures:
                 "tenant_id": principal.tenant_id, "capture_key": key, "expired_at": expires_at.isoformat()})
         return tuple(candidates)
 
-    async def expire_templates(
-        self, references: tuple[TaskGraphTemplateRef, ...], *, principal: Principal, now: datetime,
+    async def task_input_objects(
+        self, references: tuple[TaskInvocationInputRef, ...], *, principal: Principal,
     ) -> tuple[ObjectRef, ...]:
-        """Expire template copies owned by an evaluation whose gate is closed."""
+        """Resolve owned derivations for cleanup without revoking other retained references."""
         candidates = []
         for reference in references:
             if reference.namespace != self._namespace or reference.tenant_id != principal.tenant_id:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            key = self._key(principal.tenant_id, "template", reference.capture_id)
+            key = self._key(principal.tenant_id, "task", reference.capture_id)
             stat = await self._objects.stat(key)
-            if stat is None:
-                continue
-            value = await self._get(key, reference.digest)
-            if (not isinstance(value, Mapping) or value.get("namespace") != self._namespace
-                    or value.get("tenant_id") != principal.tenant_id or not isinstance(value.get("principal"), Mapping)
-                    or not isinstance(value["principal"].get("principal_id"), str)
-                    or value["principal"].get("tenant_id") != principal.tenant_id):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            owner_principal_id = principal.principal_id
+            if stat is not None:
+                value = await self._get(key, reference.digest)
+                if (not isinstance(value, Mapping) or value.get("kind") != "task"
+                        or value.get("namespace") != self._namespace or value.get("tenant_id") != principal.tenant_id
+                        or not isinstance(value.get("principal"), Mapping)
+                        or not isinstance(value["principal"].get("principal_id"), str)
+                        or value["principal"].get("tenant_id") != principal.tenant_id):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                owner_principal_id = value["principal"]["principal_id"]
             await self._authorize(principal, ResourceKind.EVALUATION, reference.capture_id,
-                                  AuthorizationAction.EVALUATION_PURGE, value["principal"]["principal_id"])
-            if await self._objects.stat(input_capture_expiry_key(key)) is None:
-                await self._put(input_capture_expiry_key(key), {"namespace": self._namespace,
-                    "tenant_id": principal.tenant_id, "capture_key": key, "expired_at": now.isoformat()})
-            candidates.append(ObjectRef(self._objects.store_id, key, stat.digest, stat.size))
+                                  AuthorizationAction.EVALUATION_PURGE, owner_principal_id)
+            candidates.append(ObjectRef(self._objects.store_id, key, reference.digest, 0 if stat is None else stat.size))
         return tuple(candidates)
+
+    async def expire_task_input_objects(
+        self, references: tuple[ObjectRef, ...], *, principal: Principal, now: datetime,
+    ) -> None:
+        """Fence deleted or missing inputs from authorized cleanup receipts under offline exclusivity."""
+        if now.tzinfo is None:
+            raise ValueError("capture expiry time must be timezone-aware")
+        for reference in references:
+            if not reference.key.startswith("v1/input-capture/task/"):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._authorize(principal, ResourceKind.EVALUATION, reference.key,
+                                  AuthorizationAction.EVALUATION_PURGE, principal.principal_id)
+            if await self._objects.stat(reference.key) is not None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT, safe_details={"reason": "input_capture_still_retained"})
+            expiry_key = input_capture_expiry_key(reference.key)
+            if await self._objects.stat(expiry_key) is None:
+                await self._put(expiry_key, {"namespace": self._namespace,
+                    "tenant_id": principal.tenant_id, "capture_key": reference.key, "expired_at": now.isoformat()})
 
     async def record_invocation(self, execution_id: str, invocation: TaskNodeInvocation) -> None:
         state = await self._storage.task.tasks.graph_state(invocation.graph_id, tenant_id=invocation.principal.tenant_id)
@@ -468,8 +490,8 @@ class RuntimeInputCaptures:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         return value
 
-    async def task_input(self, reference: ExecutionInputCaptureRef, *, principal: Principal,
-                         input_mode: str = "fixed_input", exclude_dependencies: tuple[str, ...] = ()) -> TaskInvocationInputRef:
+    async def resolve_task_input(self, reference: ExecutionInputCaptureRef, *, principal: Principal,
+                                 input_mode: str = "fixed_input", exclude_dependencies: tuple[str, ...] = ()) -> TaskInvocationInputContract:
         if input_mode not in {"fixed_input", "reproject_input"}:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if isinstance(reference, AgentInputCaptureRef):
@@ -477,22 +499,27 @@ class RuntimeInputCaptures:
             if agent.task_input is None:
                 raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
             contract = agent.task_input
+            original_input = dict(contract.original_input)
+            if original_input.get("files"):
+                original_input["capture_files"] = contract.input.get("capture_files") or task_prompt_draft(
+                    captured_input_files(agent.prompt, len(original_input["files"])))
+                original_input["files"] = []
+            original_input["session_id"] = None
+            original_input["memory_scope"] = None
+            original_input.pop("capture_context", None)
+            if agent.input_context is not None:
+                original_input["capture_context"] = agent.input_context.to_payload()
+            contract = replace(contract, original_input=original_input)
             if input_mode == "fixed_input":
                 from ._agent_task_input import AgentTaskInput
-                normalized = dict(AgentTaskInput(agent.prompt, planning=False, thinking=False))
+                normalized = dict(AgentTaskInput(agent.prompt, planning=False, thinking=False,
+                                                input_context=agent.input_context))
                 normalized["capture_fixed_input"] = True
             else:
-                normalized = dict(contract.original_input)
-                if normalized.get("files"):
-                    normalized["capture_files"] = contract.input.get("capture_files") or task_prompt_draft(captured_input_files(agent.prompt, len(normalized["files"])))
-                    normalized["files"] = []
+                normalized = original_input
         else:
             contract = await self.read_task(reference, principal=principal)
             normalized = dict(contract.input if input_mode == "fixed_input" else contract.original_input)
-        if isinstance(reference, AgentInputCaptureRef):
-            normalized.pop("capture_context", None)
-            if agent.input_context is not None:
-                normalized["capture_context"] = agent.input_context.to_payload()
         # A new invocation never inherits a source session or its memory scope.
         if normalized.get("kind") == "agent-task-input":
             normalized["session_id"] = None
@@ -501,9 +528,45 @@ class RuntimeInputCaptures:
         contract = replace(contract, input=normalized, input_mode=input_mode,
                            dependencies=tuple(item for item in contract.dependencies if item.name not in excluded),
                            excluded_dependencies=excluded)
-        identity, digest = await self._publish("task", principal, "capture:" + reference.digest + ":" + input_mode + ":" + canonical_sha256(list(excluded)),
-                                               {"contract": encode_domain(contract)})
+        return contract
+
+    async def _validate_task_input_derivation(
+        self, contract: TaskInvocationInputContract, source_capture: ExecutionInputCaptureRef,
+        principal: Principal,
+    ) -> None:
+        if isinstance(source_capture, AgentInputCaptureRef):
+            source = (await self.read_agent(source_capture, principal=principal)).task_input
+            if source is None:
+                raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
+        else:
+            source = await self.read_task(source_capture, principal=principal)
+        dependencies = {item.name: item for item in source.dependencies}
+        if (contract.source_execution_id != source.source_execution_id or contract.task_ref != source.task_ref
+                or dict(contract.binding) != dict(source.binding)
+                or any(dependencies.get(item.name) != item for item in contract.dependencies)):
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "input_capture_derivation_changed"})
+
+    async def describe_task_input(self, contract: TaskInvocationInputContract, *, principal: Principal,
+                                  source_capture: ExecutionInputCaptureRef, idempotency_key: str) -> TaskInvocationInputRef:
+        await self._validate_task_input_derivation(contract, source_capture, principal)
+        identity, value = self._publication("task", principal, idempotency_key, {"contract": encode_domain(contract)})
+        return TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, canonical_sha256(value),
+                                      contract.source_execution_id)
+
+    async def create_task_input(self, contract: TaskInvocationInputContract, *, principal: Principal,
+                                source_capture: ExecutionInputCaptureRef, idempotency_key: str) -> TaskInvocationInputRef:
+        await self._validate_task_input_derivation(contract, source_capture, principal)
+        identity, digest = await self._publish("task", principal, idempotency_key, {"contract": encode_domain(contract)})
         return TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, contract.source_execution_id)
+
+    async def task_input(self, reference: ExecutionInputCaptureRef, *, principal: Principal,
+                         input_mode: str = "fixed_input", exclude_dependencies: tuple[str, ...] = (),
+                         idempotency_key: str | None = None) -> TaskInvocationInputRef:
+        contract = await self.resolve_task_input(reference, principal=principal, input_mode=input_mode,
+                                                exclude_dependencies=exclude_dependencies)
+        key = idempotency_key if idempotency_key is not None else (
+            "capture:" + reference.digest + ":" + input_mode + ":" + canonical_sha256(list(contract.excluded_dependencies)))
+        return await self.create_task_input(contract, principal=principal, source_capture=reference, idempotency_key=key)
 
     async def capture_graph(self, graph_id: str, request: CaptureGraphRequest) -> TaskGraphCaptureRef:
         principal = request.principal
@@ -546,19 +609,50 @@ class RuntimeInputCaptures:
                 else:
                     frozen_refs[name] = reference
             body = dict(node.input)
-            node_context = None
+            original_input = node.original_input
+            input_capture = node.input_capture
             declaration = {} if node.task is None else bindings.tasks.get((node.task.id, node.task.revision), {})
-            if declaration.get("type") == "agent" and request.context_policy == "captured":
+            if declaration.get("type") == "agent":
                 source = next((item.execution_id for item in state.node_states if item.node_id == node.node_id), None)
                 if source is None:
-                    raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "graph_node_never_started"})
-                reference = await self.capture_input(source, CaptureInputRequest(principal, request.idempotency_key + ":context:" + node.node_id))
-                node_context = (await self.read_agent(reference, principal=principal)).input_context
+                    if request.context_policy == "captured":
+                        raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "graph_node_never_started"})
+                    if declaration["config"]["input_mode"] == "projected":
+                        raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "graph_node_never_started"})
+                    original_input = dict(node.original_input if node.original_input is not None else node.input)
+                    original_input.pop("capture_context", None)
+                    original_input["session_id"] = None
+                    original_input["memory_scope"] = None
+                else:
+                    from ._agent_task_input import AgentTaskInput
+                    reference = await self.capture_input(source, CaptureInputRequest(
+                        principal, request.idempotency_key + ":input:" + node.node_id, request.context_policy))
+                    agent = await self.read_agent(reference, principal=principal)
+                    original_input = dict(agent.task_input.original_input if agent.task_input is not None
+                                          else node.original_input if node.original_input is not None else node.input)
+                    if original_input.get("files"):
+                        previous_input = agent.task_input.input if agent.task_input is not None else node.input
+                        original_input["capture_files"] = previous_input.get("capture_files") or task_prompt_draft(
+                            captured_input_files(agent.prompt, len(original_input["files"])))
+                        original_input["files"] = []
+                    original_input["session_id"] = None
+                    original_input["memory_scope"] = None
+                    original_input.pop("capture_context", None)
+                    body = dict(AgentTaskInput(agent.prompt, planning=False, thinking=False,
+                                              input_context=agent.input_context))
+                    body["capture_fixed_input"] = True
+                    if agent.input_context is not None:
+                        original_input["capture_context"] = agent.input_context.to_payload()
+                    if input_capture is not None:
+                        previous = await self.read_task(input_capture, principal=principal)
+                        contract = replace(previous, input=body, original_input=original_input, input_mode="fixed_input")
+                        identity, digest = await self._publish("task", principal,
+                            request.idempotency_key + ":context-input:" + node.node_id, {"contract": encode_domain(contract)})
+                        input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, contract.source_execution_id)
+                        body = {}
             if body.get("kind") == "agent-task-input":
                 if request.context_policy == "clean":
                     body.pop("capture_context", None)
-                elif node_context is not None:
-                    body["capture_context"] = node_context.to_payload()
                 body["session_id"] = None
                 body["memory_scope"] = None
                 prompt = body.get("prompt")
@@ -566,19 +660,14 @@ class RuntimeInputCaptures:
                     stored = decode_domain(prompt["value"], StoredUserInput)
                     value = await self._payload(stored.payload, RuntimeDomain.TASK)
                     stored = replace(stored, payload=StoredPayload.inline_text(value) if stored.codec == "text" else StoredPayload.inline_json(value))
-                    body["prompt"] = task_prompt_draft(await self._materializer.restore(stored))
+                    accepted_prompt = await self._materializer.restore(stored)
+                    body["prompt"] = task_prompt_draft(accepted_prompt)
                     body["files"] = []
-            input_capture = node.input_capture
-            if input_capture is not None and declaration.get("type") == "agent":
-                previous = await self.read_task(input_capture, principal=principal)
-                captured_body = {**previous.input, "session_id": None, "memory_scope": None}
-                if request.context_policy == "clean":
-                    captured_body.pop("capture_context", None)
-                elif node_context is not None:
-                    captured_body["capture_context"] = node_context.to_payload()
-                contract = replace(previous, input=captured_body)
-                identity, digest = await self._publish("task", principal, request.idempotency_key + ":context-input:" + node.node_id, {"contract": encode_domain(contract)})
-                input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, contract.source_execution_id)
+                    if original_input is not None and original_input.get("files"):
+                        original_input = dict(original_input)
+                        original_input["capture_files"] = task_prompt_draft(
+                            captured_input_files(accepted_prompt, len(original_input["files"])))
+                        original_input["files"] = []
             if frozen_refs:
                 frozen_node = TaskNode(node.node_id, task=node.task, input_refs=frozen_refs, input_capture=input_capture)
                 dependencies = await self._capture_dependencies(frozen_node, graph_id, {}, principal)
@@ -586,20 +675,28 @@ class RuntimeInputCaptures:
                     previous = await self.read_task(input_capture, principal=principal)
                     body = dict(previous.input)
                 source_id = next((item.execution_id for item in state.node_states if item.node_id == node.node_id), None) or "graph:" + graph_id + ":" + node.node_id
-                contract = TaskInvocationInputContract(source_id, node.task, body, body, {}, dependencies)
+                contract = TaskInvocationInputContract(source_id, node.task, body,
+                    original_input if original_input is not None else body, {}, dependencies)
                 identity, digest = await self._publish("task", principal, request.idempotency_key + ":" + node.node_id,
                                                        {"contract": encode_domain(contract)})
                 input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, source_id)
                 body = {}
             captured_nodes.append(TaskNode.from_resolved(node.node_id, node.dependencies, task=node.task, input=body,
-                input_capture=input_capture, original_input=node.original_input, budget_cost=node.budget_cost,
+                input_capture=input_capture, original_input=original_input, budget_cost=node.budget_cost,
                 expander=None if request.mode == "materialized_graph" else node.expander,
                 input_refs=input_refs, timeout_seconds=node.timeout_seconds, max_attempts=node.max_attempts,
                 retry_delay_seconds=node.retry_delay_seconds, output_contract=node.output_contract,
                 effect_policy=node.effect_policy, reconcile=node.reconcile,
                 dependency_policy=node.dependency_policy, failure_policy=node.failure_policy))
+        if request.mode == "materialized_graph":
+            required_tasks = {(node.task.id, node.task.revision) for node in captured_nodes if node.task is not None}
+            task_contracts = tuple(value for identity, value in bindings.tasks.items() if identity in required_tasks)
+            expander_contracts = ()
+        else:
+            task_contracts = tuple(bindings.tasks.values())
+            expander_contracts = tuple(bindings.expanders.values())
         template = TaskGraphTemplate(tuple(captured_nodes), admission.limits,
-                                     tuple(bindings.tasks.values()), tuple(bindings.expanders.values()), request.context_policy)
+                                     task_contracts, expander_contracts, request.context_policy)
         identity, digest = await self._publish("graph", principal, request.idempotency_key,
             {"source_graph_id": graph_id, "mode": request.mode, "template": encode_domain(template)})
         return TaskGraphCaptureRef(self._namespace, principal.tenant_id, identity, digest, graph_id)

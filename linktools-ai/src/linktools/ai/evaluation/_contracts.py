@@ -599,18 +599,25 @@ class DatasetContract:
 
 @dataclass(frozen=True, slots=True)
 class GraphTargetContract:
-    template_ref: TaskGraphTemplateRef
+    template: TaskGraphTemplate | None
+    namespace: str
+    tenant_id: str
     outputs: Mapping[str, str]
     selector: Literal["terminal_sinks"] | None
     limits: TaskGraphLimits
 
     def __post_init__(self) -> None:
+        _name(self.namespace)
+        _name(self.tenant_id)
+        if self.template is not None and self.template.limits != self.limits:
+            raise ValueError("graph template limits must match its execution contract")
         if bool(self.outputs) == (self.selector is not None) or self.selector not in (None, "terminal_sinks"):
             raise ValueError("graph contract requires exactly one output selection")
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
 
     def to_mapping(self) -> dict[str, JsonValue]:
-        return {"template_ref": capture_mapping(self.template_ref), "outputs": dict(self.outputs),
+        return {"template": None if self.template is None else self.template.to_mapping(),
+                "namespace": self.namespace, "tenant_id": self.tenant_id, "outputs": dict(self.outputs),
                 "selector": self.selector, "limits": _limits_mapping(self.limits)}
 
 

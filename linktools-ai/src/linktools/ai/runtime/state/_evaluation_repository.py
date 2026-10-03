@@ -213,7 +213,8 @@ class EvaluationRepositoryImpl(RepositoryBase):
                 return value
             if (changed.manifest != value.manifest or
                     changed.request_digest != value.request_digest or
-                    changed.manifest_digest != value.manifest_digest):
+                    changed.manifest_digest != value.manifest_digest or
+                    changed.owned_input_captures != value.owned_input_captures):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             changed = replace(changed, revision=value.revision + 1,
                               updated_at=datetime.now(timezone.utc))
@@ -332,6 +333,22 @@ class EvaluationRepositoryImpl(RepositoryBase):
         return tuple(found)
 
     async def _source_expired(self, transaction: StateTransaction, record: EvaluationRecord, now: datetime) -> bool:
+        source_id = record.manifest.source_experiment_id
+        seen = {record.evaluation_id}
+        while source_id is not None:
+            if source_id in seen:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            seen.add(source_id)
+            row = await transaction.get_record(self._key("evaluation", source_id))
+            if row is None:
+                return True
+            source = await self._decode(row, EvaluationRecord)
+            if source.content_deleted_at is not None or any(
+                deadline is not None and deadline <= now
+                for deadline in (source.content_expires_at, source.metadata_expires_at)
+            ):
+                return True
+            source_id = source.manifest.source_experiment_id
         ref = record.manifest.dataset
         row = await transaction.get_record(self._key("evaluation_dataset", [ref.id, ref.revision]))
         if row is None:
@@ -433,7 +450,10 @@ class EvaluationRepositoryImpl(RepositoryBase):
                            for scorer in record.manifest.scorers))
                 dispositions = tuple(EvaluationSlotDisposition(slot,
                     SlotDispositionView("permanent_unavailable", "evidence_deleted", True, False, now)) for slot in slots)
-                changed = replace(record, intents=(), evidence=(), scores=scores, human_decisions=decisions,
+                candidates = tuple(replace(candidate, graph_template=replace(candidate.graph_template, template=None))
+                    if candidate.graph_template is not None else candidate for candidate in record.manifest.candidates)
+                changed = replace(record, manifest=replace(record.manifest, candidates=candidates),
+                                  owned_input_captures=(), intents=(), evidence=(), scores=scores, human_decisions=decisions,
                                   dispositions=dispositions, content_deleted_at=now,
                                   revision=record.revision + 1, updated_at=now)
                 await replace_checked(transaction, projected_record(self, stored, changed), stored.storage_version)

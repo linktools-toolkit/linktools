@@ -56,6 +56,15 @@ def iter_input_capture_dependencies(value: JsonValue, *, namespace: str, tenant_
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 yield input_capture_key(captured.source_ref.namespace, captured.source_ref.tenant_id, "result", captured.body_digest), captured.body_digest
             return
+        if wire_id == "evaluation_record":
+            # Reservations own cleanup, not content that must already exist.
+            fields = value.get("fields")
+            if not isinstance(fields, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for reference in decode_domain(fields.get("owned_input_captures"), tuple[TaskInvocationInputRef, ...]):
+                if validate_scope and (reference.namespace != namespace or reference.tenant_id != tenant_id):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value = {name: item for name, item in fields.items() if name != "owned_input_captures"}
         for item in value.values():
             yield from iter_input_capture_dependencies(item, namespace=namespace, tenant_id=tenant_id, validate_scope=validate_scope)
 

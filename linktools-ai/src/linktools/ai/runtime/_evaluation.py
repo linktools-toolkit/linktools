@@ -119,7 +119,7 @@ class RuntimeEvaluations:
         self._graph = graph
         self._history = history
         self._captures = captures
-        self._compiler = EvaluationCompiler(captures)
+        self._compiler = EvaluationCompiler(captures, namespace)
         self._objects = storage.object_store(RuntimeDomain.EVALUATION)
         self._object_keys = RuntimeObjectKeyFactory(namespace)
         self._cursor_signer = cursor_signer
@@ -166,6 +166,19 @@ class RuntimeEvaluations:
         if not allow_expired and record.metadata_expires_at is not None and record.metadata_expires_at <= _now():
             raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE, safe_details={"reason": "metadata_expired"})
         return record
+
+    async def _require_content(self, record: EvaluationRecord, principal: Principal) -> None:
+        seen: set[str] = set()
+        now = _now()
+        while True:
+            if record.evaluation_id in seen:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            seen.add(record.evaluation_id)
+            require_evaluation_content(record, now=now)
+            source = record.manifest.source_experiment_id
+            if source is None:
+                return
+            record = await self._record(source, principal, allow_expired=True)
 
     async def publish_dataset(
         self, spec: DatasetSpec, *, principal: Principal, idempotency_key: str,
@@ -272,7 +285,7 @@ class RuntimeEvaluations:
         if total > spec.policy.max_trials:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "trial limit exceeded")
         candidates = tuple([await self._compiler.candidate(candidate, engine=bound, principal=principal,
-            policy=spec.policy, key=f"evaluation:{identity}:{candidate.slot_id}") for candidate in spec.candidates])
+            policy=spec.policy) for candidate in spec.candidates])
         scorers = tuple(self._compiler.scorer(scorer, engine=bound, policy=spec.policy) for scorer in spec.scorers)
         for scorer in scorers:
             if scorer.rubric is not None:
@@ -280,11 +293,13 @@ class RuntimeEvaluations:
         plans = tuple(TrialPlan(canonical_sha256({"case": case.ref.to_mapping(), "candidate": candidate.slot_id,
             "repetition": repetition}), case.ref, candidate.slot_id, repetition)
             for case in cases for candidate in candidates for repetition in range(1, spec.repetitions + 1))
+        experiment_id = uuid.uuid4().hex if previous is None else previous.resource_id
+        owned_captures = []
         for candidate in candidates:
             for case in cases:
                 await self._compiler.graph(candidate, case, graph_id="evaluation-preflight", principal=principal,
-                                           input_mode=spec.input_mode)
-        manifest = EvaluationManifest(uuid.uuid4().hex, "experiment", None, spec.dataset,
+                    input_mode=spec.input_mode, owner_id=experiment_id, materialize=False, owned_captures=owned_captures)
+        manifest = EvaluationManifest(experiment_id, "experiment", None, spec.dataset,
             candidates, scorers, plans, (), spec.policy, spec.input_mode, principal)
         payload = manifest.to_mapping()
         payload.pop("experiment_id")
@@ -296,7 +311,8 @@ class RuntimeEvaluations:
         record = await self._state.reserve_experiment(EvaluationRecord(
             manifest, manifest.digest, digest, identity, "open", 0, now, now,
             content_expires_at=min(deadlines) if deadlines else None,
-            metadata_expires_at=None if spec.policy.metadata_retention_seconds is None else now + timedelta(seconds=spec.policy.metadata_retention_seconds)))
+            metadata_expires_at=None if spec.policy.metadata_retention_seconds is None else now + timedelta(seconds=spec.policy.metadata_retention_seconds),
+            owned_input_captures=tuple(dict.fromkeys(owned_captures))))
         self._watch(record.evaluation_id, bound, principal)
         return EvaluationRun(self, record.evaluation_id, principal)
 
@@ -345,7 +361,9 @@ class RuntimeEvaluations:
         for candidate in manifest.candidates if manifest.kind == "experiment" else ():
             if candidate.graph_template is None:
                 continue
-            template = await self._captures.read_graph(candidate.graph_template.template_ref, principal=manifest.principal)
+            template = candidate.graph_template.template
+            if template is None:
+                raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
             if any(node.expander is not None for node in template.nodes):
                 definitions = tuple(task_contract(engine, task.ref) for task in engine.definitions)
                 expanders = tuple({"version": 1, "id": item.id, "revision": item.revision} for item in engine.expanders)
@@ -363,6 +381,14 @@ class RuntimeEvaluations:
         try:
             while not self._closed:
                 await self._tick(experiment_id, engine, principal)
+                record = await self._record(experiment_id, principal, allow_expired=True)
+                if record.gate != "open" and all(item.released for item in record.intents):
+                    try:
+                        await self._require_content(record, principal)
+                    except AIError as error:
+                        if error.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE:
+                            return
+                        raise
                 view = await self._inspect(experiment_id, principal)
                 if view.completion in {"complete", "cancelled", "needs_attention"}:
                     return
@@ -551,13 +577,15 @@ class RuntimeEvaluations:
         self, experiment_id: str, principal: Principal,
     ) -> tuple[EvaluationRecord, EvaluationReport]:
         record = await self._record(experiment_id, principal)
-        require_evaluation_content(record, now=_now())
+        await self._require_content(record, principal)
         trials, revisions = await self._trials(record, principal)
         scores = await self._scores(record, trials, revisions)
         revisions[f"evaluation:{experiment_id}"] = record.revision
         blocked = False
-        usage_complete = all([(await self.read_evidence(item.evidence_ref, principal=principal)).usage_complete
-                              for item in record.evidence])
+        target_usage = {item.trial.trial_id: item.subject is None and item.graph_ref is None for item in trials}
+        for item in record.evidence:
+            target_usage[item.trial.trial_id] = (await self.read_evidence(item.evidence_ref, principal=principal)).usage_complete
+        scorer_usage = {scorer.slot_id: {item.trial.trial_id: True for item in trials} for scorer in record.manifest.scorers}
         for intent in record.intents:
             if intent.scorer_slot_id is not None:
                 state = await self._graph_state(intent, principal)
@@ -566,12 +594,12 @@ class RuntimeEvaluations:
                     blocked |= state.status is TaskStatus.RECOVERY_REQUIRED
                     summary = await self._history.graph_usage(state.graph_id, principal=principal)
                     _, complete = await self._model_usage(summary, principal)
-                    usage_complete &= complete
+                    scorer_usage[intent.scorer_slot_id][intent.trial.trial_id] = complete
         cutoff = EvaluationReadCutoff(experiment_id, record.manifest_digest, revisions,
             score_selections=tuple(ScoreSelection(scorer.slot_id, dimension.name, experiment_id)
                 for scorer in record.manifest.scorers for dimension in scorer.dimensions),
             source_evidence_refs=tuple(item.evidence_ref for item in record.evidence),
-            usage_complete=usage_complete)
+            target_usage_complete=target_usage, scorer_usage_complete=scorer_usage)
         cases = tuple([await self._case(ref) for ref in
                        (await self.get_dataset(record.manifest.dataset, principal=principal)).ordered_case_refs])
         report = build_evaluation_report(record.manifest, cases, trials, scores, cutoff=cutoff,
@@ -590,7 +618,7 @@ class RuntimeEvaluations:
                      *(cutoff.experiment_id for cutoff in report.cutoff.scoring)))
         for experiment_id in ids:
             source = await self._record(experiment_id, principal)
-            require_evaluation_content(source, now=_now())
+            await self._require_content(source, principal)
         return report
 
     async def compare(self, spec: ComparisonSpec, *, principal: Principal) -> ComparisonReport:
@@ -615,7 +643,7 @@ class RuntimeEvaluations:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND, "selected report snapshot is unavailable")
                 snapshots[identity] = record, snapshot
         for record, _report in snapshots.values():
-            require_evaluation_content(record, now=_now())
+            await self._require_content(record, principal)
         left, left_report = snapshots[spec.baseline.experiment_id]
         right, right_report = snapshots[spec.candidate.experiment_id]
         scoring = tuple(report.cutoff for identity, (_, report) in snapshots.items()
@@ -634,9 +662,26 @@ class RuntimeEvaluations:
             report_id=uuid.uuid4().hex, created_at=_now(),
             scoring_manifests=tuple(record.manifest for record, _ in snapshots.values()),
             completions={identity: snapshot.completion for identity, (_, snapshot) in snapshots.items()},
-            usage_complete=all(snapshot.cutoff.usage_complete for _, snapshot in snapshots.values()))
+            usage_complete=self._comparison_usage_complete(spec, snapshots))
         await self._state.publish_report(report)
         return report
+
+    def _comparison_usage_complete(
+        self, spec: ComparisonSpec, snapshots: Mapping[str, tuple[EvaluationRecord, EvaluationReport]],
+    ) -> bool:
+        for side, selections in ((spec.baseline, (item.baseline for item in spec.scores)),
+                                 (spec.candidate, (item.candidate for item in spec.scores))):
+            target = snapshots[side.experiment_id][1]
+            trials = {item.trial for item in target.trials if item.candidate_slot_id == side.slot_id}
+            if any(not target.cutoff.target_usage_complete.get(item.trial_id, False) for item in trials):
+                return False
+            for selection in selections:
+                scoring = snapshots[selection.scoring_experiment_id or side.experiment_id][1]
+                planned = {item.trial for item in scoring.trials}
+                observations = scoring.cutoff.scorer_usage_complete.get(selection.scorer_slot_id, {})
+                if any(not observations.get(item.trial_id, False) for item in trials & planned):
+                    return False
+        return True
 
     def _cursor(self, kind: str, digest: str, position: str, principal: Principal) -> str:
         return self._cursor_signer.encode(CursorPayload(1, principal.tenant_id, kind, digest,
@@ -697,7 +742,7 @@ class RuntimeEvaluations:
         record = await self._record(experiment_id, principal, allow_expired=True)
         expired = False
         try:
-            require_evaluation_content(record, now=_now())
+            await self._require_content(record, principal)
         except AIError as error:
             if error.code is not ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE:
                 raise
@@ -725,20 +770,27 @@ class RuntimeEvaluations:
         record = await self._record(experiment_id, principal, allow_expired=True)
         if record.gate == "open" and await self._budget_exhausted(record, principal):
             record = await self._state.close_reservation_gate(experiment_id, budget=True)
-        trials, _ = await self._trials(record, principal)
         if record.gate != "open":
             for intent in record.intents:
                 if not intent.released:
                     await self._cancel_intent(record, intent, principal)
+            record = await self._record(experiment_id, principal, allow_expired=True)
+            intents = {item.slot_id: item for item in record.intents}
+            scored = {(item.trial, item.scorer_slot_id) for item in record.scores}
+            trials = (record.manifest.source_trials if record.manifest.kind == "score_only" else
+                      tuple(TargetTrialRef(experiment_id, item.trial_id) for item in record.manifest.trials))
             for trial in trials:
-                if not _terminal(trial) and trial.graph_ref is None:
-                    await self._disposition(experiment_id, _target_slot(trial.trial), record.gate, cancelled=True)
+                if record.manifest.kind == "experiment" and _target_slot(trial) not in intents:
+                    await self._disposition(experiment_id, _target_slot(trial), record.gate, cancelled=True)
                 for scorer in record.manifest.scorers:
-                    slot = _score_slot(trial.trial, scorer.slot_id)
-                    if not any(item.slot_id == slot for item in record.intents):
-                        await self._disposition(experiment_id, slot, record.gate, cancelled=True)
+                    slot = _score_slot(trial, scorer.slot_id)
+                    intent = intents.get(slot)
+                    if intent is None or intent.released and (trial, scorer.slot_id) not in scored:
+                        await self._disposition(experiment_id, slot,
+                            "evidence_expired" if expired else record.gate, cancelled=True)
             return
         assert engine is not None
+        trials, _ = await self._trials(record, principal)
         dispositions = {item.slot_id: item.disposition for item in record.dispositions}
         intents = {item.slot_id: item for item in record.intents}
         cases = {trial.case_ref: await self._case(trial.case_ref) for trial in trials}
@@ -749,7 +801,8 @@ class RuntimeEvaluations:
                 try:
                     graph = await self._compiler.graph(candidates[trial.candidate_slot_id], cases[trial.case_ref],
                         graph_id=canonical_sha256({"experiment": experiment_id, "slot": slot}),
-                        principal=record.manifest.principal, input_mode=record.manifest.input_mode)
+                        principal=record.manifest.principal, input_mode=record.manifest.input_mode, owner_id=record.evaluation_id,
+                        owned_captures=list(record.owned_input_captures))
                     candidate = candidates[trial.candidate_slot_id]
                     limits = (record.manifest.policy.target_graph_limits if candidate.graph_template is None
                               else candidate.graph_template.limits)
@@ -1042,7 +1095,7 @@ class RuntimeEvaluations:
 
     async def _record_score(self, context: TaskNodeContext[AppT]) -> JsonValue:
         identity, slot = context.input["experiment_id"], context.input["slot_id"]
-        record = await self._record(identity, context.principal)
+        record = await self._record(identity, context.principal, allow_expired=True)
         intent = next(item for item in record.intents if item.slot_id == slot)
         if intent.submission.graph.graph_id != context.graph_id or intent.scorer_slot_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1053,12 +1106,18 @@ class RuntimeEvaluations:
     async def _collect_score(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
     ) -> None:
-        record = await self._record(record.evaluation_id, record.manifest.principal)
+        record = await self._record(record.evaluation_id, record.manifest.principal, allow_expired=True)
         if any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in record.scores):
             return
         node = next(item for item in state.node_states if item.node_id == "score")
         if node.status not in _TERMINAL:
             return
+        try:
+            await self._require_content(record, record.manifest.principal)
+        except AIError as error:
+            if error.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE:
+                return
+            raise
         scorer = next(item for item in record.manifest.scorers if item.slot_id == intent.scorer_slot_id)
         source = next((item for item in record.evidence if item.trial == intent.trial), None)
         if source is None:
@@ -1165,6 +1224,7 @@ class RuntimeEvaluations:
         source = await self._record(experiment_id, principal, AuthorizationAction.EVALUATION_RESCORE)
         if source.manifest.kind != "experiment":
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "rescore requires a target experiment")
+        await self._require_content(source, principal)
         bound = self._engine(engine)
         trials, _ = await self._trials(source, principal)
         selected = tuple(item for item in trials if request.trial_ids is None or item.trial.trial_id in request.trial_ids)
@@ -1185,9 +1245,11 @@ class RuntimeEvaluations:
         evidence = tuple(EvaluationTrialEvidence(item.trial, item.evidence_ref) for item in selected)
         data["evidence"] = [item.evidence_ref.to_mapping() for item in evidence]
         now = _now()
+        source_deadlines = tuple(value for value in (source.content_expires_at, source.metadata_expires_at)
+                                 if value is not None)
         record = await self._state.reserve_experiment(EvaluationRecord(manifest, manifest.digest,
             canonical_sha256(data), idempotency_key_digest(request.idempotency_key), "open", 0, now, now, evidence=evidence,
-            content_expires_at=source.content_expires_at,
+            content_expires_at=min(source_deadlines) if source_deadlines else None,
             metadata_expires_at=None if source.manifest.policy.metadata_retention_seconds is None else
             now + timedelta(seconds=source.manifest.policy.metadata_retention_seconds)))
         self._watch(record.evaluation_id, bound, principal)
@@ -1197,7 +1259,7 @@ class RuntimeEvaluations:
         self, experiment_id: str, principal: Principal, request: HumanScoreRequest,
     ) -> ScoreAttemptView:
         record = await self._record(experiment_id, principal, AuthorizationAction.EVALUATION_HUMAN_SCORE)
-        require_evaluation_content(record, now=_now())
+        await self._require_content(record, principal)
         intent = next((item for item in record.intents if item.trial.trial_id == request.trial_id and
                        item.scorer_slot_id == request.scorer_slot_id), None)
         if intent is None:

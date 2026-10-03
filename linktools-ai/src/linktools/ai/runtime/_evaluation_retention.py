@@ -94,10 +94,8 @@ class EvaluationRetention:
                         stat = await source.stat(key)
                         if stat is not None:
                             objects.append((RuntimeDomain.TASK, ObjectRef(source.store_id, key, stat.digest, stat.size)))
-                templates = tuple(candidate.graph_template.template_ref for candidate in record.manifest.candidates
-                                  if candidate.graph_template is not None and record.manifest.kind == "experiment")
-                if templates:
-                    references = await self._captures.expire_templates(templates, principal=principal, now=now)
+                if record.owned_input_captures:
+                    references = await self._captures.task_input_objects(record.owned_input_captures, principal=principal)
                     objects.extend((RuntimeDomain.TASK, reference) for reference in references)
                 await repository.purge(record.evaluation_id, now=now, objects=tuple(objects))
                 purged.append(record.evaluation_id)
@@ -113,6 +111,10 @@ class EvaluationRetention:
                  *((RuntimeDomain.TASK, reference) for reference in expired_inputs)),
                 exclusive=_HeldExclusive(), limit=limit)
             completed = (*result.deleted, *result.missing)
+            deleted_inputs = tuple(reference for domain, reference in completed
+                if domain is RuntimeDomain.TASK and reference.key.startswith("v1/input-capture/task/"))
+            if deleted_inputs:
+                await self._captures.expire_task_input_objects(deleted_inputs, principal=principal, now=now)
             for receipt in pending:
                 done = tuple(candidate for candidate in receipt.objects if candidate in completed)
                 if done:

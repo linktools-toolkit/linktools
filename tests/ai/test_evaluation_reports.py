@@ -321,26 +321,27 @@ def test_allowed_model_change_does_not_allow_prompt_or_environment_changes() -> 
                     spec=spec).compatibility == "incompatible"
 
 
-def test_identical_graph_templates_compare_by_content_not_capture_locator() -> None:
+def test_identical_graph_templates_compare_by_content_and_preserve_scope() -> None:
     from linktools.ai.evaluation import GraphTargetContract
-    from linktools.ai.task import TaskGraphLimits, TaskGraphTemplateRef
+    from linktools.ai.task import TaskGraphLimits, TaskGraphTemplate, TaskNode
 
     left = _manifest("base")
-    template = GraphTargetContract(TaskGraphTemplateRef("test", "tenant", "first-capture", "a" * 64),
-                                   {"answer": "target"}, None, TaskGraphLimits())
+    graph = TaskGraphTemplate((TaskNode("target", task=left.candidates[0].task),), limits=TaskGraphLimits())
+    template = GraphTargetContract(graph, "test", "tenant", {"answer": "target"}, None, graph.limits)
     candidate = replace(left.candidates[0], task=None, graph_template=template)
     left = replace(left, candidates=(candidate,))
-    other_capture = replace(template, template_ref=replace(template.template_ref, capture_id="second-capture"))
+    other_capture = replace(template, template=replace(graph))
     right = replace(_manifest("candidate"), candidates=(replace(candidate, graph_template=other_capture),))
     report = _compare(left=left, right=right, policy=GatePolicy(minimum_coverage=0.5))
     assert report.compatibility == "compatible"
     assert report.gate == "pass"
     assert report.differences == ()
     for different in (
-        replace(other_capture, template_ref=replace(other_capture.template_ref, digest="b" * 64)),
+        replace(other_capture, template=replace(graph, nodes=(TaskNode("target", task=graph.nodes[0].task, input={"changed": True}),))),
         replace(other_capture, outputs={"different": "target"}),
         replace(other_capture, outputs={}, selector="terminal_sinks"),
-        replace(other_capture, limits=TaskGraphLimits(max_concurrency=1)),
+        replace(other_capture, template=replace(graph, limits=TaskGraphLimits(max_concurrency=1)),
+                limits=TaskGraphLimits(max_concurrency=1)),
     ):
         changed = replace(right, candidates=(replace(candidate, graph_template=different),))
         report = _compare(left=left, right=changed)
@@ -349,7 +350,7 @@ def test_identical_graph_templates_compare_by_content_not_capture_locator() -> N
     allowed = ComparisonSpec(CandidateSlotRef("base", "model"), CandidateSlotRef("candidate", "model"),
                              (SELECTION,), allowed_changes=("graph_definition",))
     for scope in ({"namespace": "another"}, {"tenant_id": "another"}):
-        wrong_scope = replace(other_capture, template_ref=replace(other_capture.template_ref, **scope))
+        wrong_scope = replace(other_capture, **scope)
         changed = replace(right, candidates=(replace(candidate, graph_template=wrong_scope),))
         report = _compare(left=left, right=changed, spec=allowed)
         assert report.compatibility == "incompatible"

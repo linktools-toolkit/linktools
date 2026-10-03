@@ -15,7 +15,7 @@ from ...evaluation import (
     SlotDispositionView,
     TargetTrialRef,
 )
-from ...task import TaskGraphSubmission
+from ...task import TaskGraphSubmission, TaskInvocationInputRef
 from ...storage import ObjectRef
 from ._plan import RuntimeDomain
 
@@ -88,6 +88,14 @@ class EvaluationRecord:
     content_expires_at: datetime | None = None
     metadata_expires_at: datetime | None = None
     content_deleted_at: datetime | None = None
+    owned_input_captures: tuple[TaskInvocationInputRef, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.content_deleted_at is None and any(
+            candidate.graph_template is not None and candidate.graph_template.template is None
+            for candidate in self.manifest.candidates
+        ):
+            raise ValueError("live evaluation requires its graph template content")
 
     @property
     def evaluation_id(self) -> str:

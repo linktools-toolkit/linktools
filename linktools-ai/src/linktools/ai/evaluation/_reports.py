@@ -93,14 +93,27 @@ class EvaluationReadCutoff:
     state_revisions: Mapping[str, int] = field(default_factory=dict)
     score_selections: tuple[ScoreSelection, ...] = ()
     source_evidence_refs: tuple[EvidenceRef, ...] = ()
-    usage_complete: bool = False
+    target_usage_complete: Mapping[str, bool] = field(default_factory=dict)
+    scorer_usage_complete: Mapping[str, Mapping[str, bool]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.usage_complete, bool):
-            raise ValueError("usage completeness must be boolean")
+        values = (self.target_usage_complete, *self.scorer_usage_complete.values())
+        if any(not isinstance(name, str) or not name for name in self.scorer_usage_complete) or any(
+            not isinstance(name, str) or not name or not isinstance(complete, bool)
+            for value in values for name, complete in value.items()
+        ):
+            raise ValueError("usage completeness requires named boolean observations")
         object.__setattr__(self, "state_revisions", MappingProxyType(dict(self.state_revisions)))
         object.__setattr__(self, "score_selections", tuple(self.score_selections))
         object.__setattr__(self, "source_evidence_refs", tuple(self.source_evidence_refs))
+        object.__setattr__(self, "target_usage_complete", MappingProxyType(dict(self.target_usage_complete)))
+        object.__setattr__(self, "scorer_usage_complete", MappingProxyType({
+            name: MappingProxyType(dict(values)) for name, values in self.scorer_usage_complete.items()}))
+
+    @property
+    def usage_complete(self) -> bool:
+        return bool(self.target_usage_complete) and all(self.target_usage_complete.values()) and all(
+            complete for values in self.scorer_usage_complete.values() for complete in values.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,7 +454,8 @@ def _candidate_parts(candidate: CandidateContract) -> dict[str, JsonValue]:
     graph = None
     if candidate.graph_template is not None:
         graph = candidate.graph_template.to_mapping()
-        graph["template_ref"] = {"digest": candidate.graph_template.template_ref.digest}
+        graph.pop("namespace")
+        graph.pop("tenant_id")
     return {
         "task_definition": {"task": None if candidate.task is None else
                             {"id": candidate.task.id, "revision": candidate.task.revision},
@@ -485,7 +499,7 @@ def build_comparison_report(
     compare("input_mode", baseline_manifest.input_mode, candidate_manifest.input_mode)
     compare("policy", baseline_manifest.policy.to_mapping(), candidate_manifest.policy.to_mapping())
     if left_candidate.graph_template is not None and right_candidate.graph_template is not None:
-        left_ref, right_ref = left_candidate.graph_template.template_ref, right_candidate.graph_template.template_ref
+        left_ref, right_ref = left_candidate.graph_template, right_candidate.graph_template
         compare("graph_scope", {"namespace": left_ref.namespace, "tenant_id": left_ref.tenant_id},
                 {"namespace": right_ref.namespace, "tenant_id": right_ref.tenant_id})
     left_parts, right_parts = _candidate_parts(left_candidate), _candidate_parts(right_candidate)
