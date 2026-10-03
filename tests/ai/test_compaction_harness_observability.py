@@ -3,6 +3,7 @@
 """Harness summarization must remain visible to Runtime request observability."""
 
 from collections.abc import Sequence
+from copy import deepcopy
 
 import pytest
 from linktools.ai.core import PromptLimits
@@ -63,6 +64,8 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
         messages.append(
             ModelResponse(parts=[TextPart(f"assistant {index} " + "y" * 200)])
         )
+    original_messages = deepcopy(messages)
+    ctx.messages = list(messages)
     request_context = ModelRequestContext(
         model=model,
         messages=list(messages),
@@ -122,7 +125,8 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
     assert projections[-1][0] == tuple(messages)
     assert projections[-1][1] is not None
     assert len(provider_context.messages) < len(messages)
-    assert request_context.messages == messages
+    assert request_context.messages == original_messages
+    assert ctx.messages == original_messages
     compaction_sequence = observed[-1][1].request_sequence
     with pytest.raises(RuntimeError, match="missing"):
         journal.current(compaction_sequence)

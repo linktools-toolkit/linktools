@@ -242,7 +242,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     high_water = await target_recovery.model_interaction_count(
                         agent_run_id=target_agent_run.agent_run_id
                     )
-                    staged = await self._staging.list_model_interactions(
+                    staged = await self._terminal_staged_interactions(
                         agent_run_id=target_agent_run.agent_run_id,
                         after_request_sequence=high_water,
                     )
@@ -391,26 +391,8 @@ class RuntimeAgentRunStore(AgentRunStore):
 
     async def model_interaction_count(self, *, agent_run_id: str) -> int:
         await self._ensure_business()
-        staged = await self._staging.list_model_interactions(agent_run_id=agent_run_id)
-        if any(not isinstance(value, StagedModelInteraction) for value in staged):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        terminal = [
-            value
-            for value in staged
-            if isinstance(value, StagedModelInteraction)
-            and value.status != "RUNNING"
-        ]
-        if any(
-            value.status != "RUNNING"
-            for value in staged[len(terminal) :]
-            if isinstance(value, StagedModelInteraction)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        terminal = await self._terminal_staged_interactions(agent_run_id=agent_run_id)
         staged_sequences = tuple(value.request_sequence for value in terminal)
-        if staged_sequences and staged_sequences != tuple(
-            range(staged_sequences[0], staged_sequences[0] + len(staged_sequences))
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         staged_high_water = staged_sequences[-1] if staged_sequences else 0
         recovery = self._archives.get(RuntimeDomain.RECOVERY)
         durable_high_water = (
@@ -421,6 +403,33 @@ class RuntimeAgentRunStore(AgentRunStore):
         if staged_sequences and staged_sequences[0] > durable_high_water + 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return max(staged_high_water, durable_high_water)
+
+    async def _terminal_staged_interactions(
+        self,
+        *,
+        agent_run_id: str,
+        after_request_sequence: int | None = None,
+    ) -> tuple[StagedModelInteraction, ...]:
+        staged = await self._staging.list_model_interactions(
+            agent_run_id=agent_run_id,
+            after_request_sequence=after_request_sequence,
+        )
+        terminal: list[StagedModelInteraction] = []
+        running_seen = False
+        previous_sequence: int | None = None
+        for value in staged:
+            if not isinstance(value, StagedModelInteraction):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if previous_sequence is not None and value.request_sequence != previous_sequence + 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            previous_sequence = value.request_sequence
+            if value.status == "RUNNING":
+                running_seen = True
+            elif running_seen:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            else:
+                terminal.append(value)
+        return tuple(terminal)
 
     async def resolve_model_interaction(self, interaction: object) -> object:
         values = await self.resolve_model_interactions((interaction,))
@@ -750,7 +759,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             if isinstance(archive, StateStepArchive):
                 checkpoint = await archive.relocate_run_checkpoint(run, checkpoint)
             await _materialize_checkpoint(archive, run, checkpoint)
-            interactions = await self._staging.list_model_interactions(
+            interactions = await self._terminal_staged_interactions(
                 agent_run_id=agent_run_id
             )
             if interactions and isinstance(archive, StateStepArchive):
