@@ -48,6 +48,8 @@ class _InteractionStagingPort(Protocol):
 
     def stage_model_interaction(self, interaction: object) -> None: ...
 
+    def prepare_model_interaction(self, interaction: object) -> None: ...
+
 
 class AgentRunRecorder:
     """Own one agent attempt's stable inputs and staged persistence facts."""
@@ -283,6 +285,40 @@ class AgentRunRecorder:
         model_id: str | None = None,
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
+        self._stage_model_interaction(
+            fact, model, messages, model_settings, parameters, streaming,
+            model_id, source_messages, prepared=False,
+        )
+
+    def prepare_model_interaction(
+        self,
+        fact: ModelRequestFact,
+        model: Model,
+        messages: Sequence[ModelMessage],
+        model_settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+        streaming: bool,
+        model_id: str | None = None,
+        source_messages: Sequence[ModelMessage] | None = None,
+    ) -> None:
+        self._stage_model_interaction(
+            fact, model, messages, model_settings, parameters, streaming,
+            model_id, source_messages, prepared=True,
+        )
+
+    def _stage_model_interaction(
+        self,
+        fact: ModelRequestFact,
+        model: Model,
+        messages: Sequence[ModelMessage],
+        model_settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+        streaming: bool,
+        model_id: str | None,
+        source_messages: Sequence[ModelMessage] | None,
+        *,
+        prepared: bool,
+    ) -> None:
         frozen = freeze_model_messages(messages)
         if source_messages is None:
             source = tuple(self._source_messages)
@@ -310,25 +346,27 @@ class AgentRunRecorder:
             self._agent_run_id,
             envelope_bytes,
         )
-        self._interaction_projections[fact.request_sequence] = projection
-        self._interaction_payloads[fact.request_sequence] = digest
-        self._interaction_models[fact.request_sequence] = model_identity(
+        model_value = model_identity(
             model,
             route_id=model_id,
         )
-        self._interaction_attachments[fact.request_sequence] = request_attachment_facts(
+        attachments = request_attachment_facts(
             frozen,
             self._initial_attachments,
             accepted_attachment_ids=self._accepted_attachment_ids,
         )
-        self._interaction_store.stage_model_interaction(
+        stage = (
+            self._interaction_store.prepare_model_interaction
+            if prepared else self._interaction_store.stage_model_interaction
+        )
+        stage(
             StagedModelInteraction(
                 agent_run_id=self._agent_run_id,
                 step_index=fact.step_index,
                 request_sequence=fact.request_sequence,
                 purpose=fact.purpose,
                 output_retry_index=fact.output_retry_index,
-                model=self._interaction_models[fact.request_sequence],
+                model=model_value,
                 request_context=projection,
                 request_envelope_digest=digest,
                 response_context=None,
@@ -336,11 +374,15 @@ class AgentRunRecorder:
                 error_code=None,
                 duration_ns=None,
                 usage=None,
-                attachments=self._interaction_attachments[fact.request_sequence],
+                attachments=attachments,
                 started_at=fact.started_at,
                 finished_at=None,
             )
         )
+        self._interaction_projections[fact.request_sequence] = projection
+        self._interaction_payloads[fact.request_sequence] = digest
+        self._interaction_models[fact.request_sequence] = model_value
+        self._interaction_attachments[fact.request_sequence] = attachments
 
     def finish_model_interaction(
         self,

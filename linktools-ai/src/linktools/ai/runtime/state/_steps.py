@@ -323,6 +323,12 @@ class RuntimeAgentRunStore(AgentRunStore):
             raise TypeError("staged model interaction has no AgentRun identity")
         self._projection_dirty.add(agent_run_id)
 
+    def prepare_model_interaction(self, interaction: object) -> None:
+        self._staging.prepare_model_interaction(interaction)
+        if not isinstance(interaction, StagedModelInteraction):
+            raise TypeError("staged model interaction is invalid")
+        self._projection_dirty.add(interaction.agent_run_id)
+
     async def model_interaction_history_high_water(
         self,
         *,
