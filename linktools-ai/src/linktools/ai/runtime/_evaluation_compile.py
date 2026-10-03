@@ -37,7 +37,7 @@ class EvaluationCompiler:
         self._namespace = namespace
 
     async def case(self, spec: CaseSpec, *, principal: Principal, content_expires_at: datetime | None = None) -> CaseContract:
-        identity = f"evaluation-case:{spec.ref.dataset_id}:{spec.ref.case_id}:{spec.ref.revision}"
+        identity = "evaluation-case:" + canonical_sha256(spec.ref.to_mapping())
         value = await self._input(spec.input, principal=principal, key=identity, expires_at=content_expires_at)
         expected = None if not spec.expected_present else (
             spec.expected if isinstance(spec.expected, AssetVersionRef)
