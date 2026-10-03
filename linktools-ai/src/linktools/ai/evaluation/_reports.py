@@ -14,7 +14,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Literal, cast
 
-from ..core import JsonValue, normalize_json_value
+from ..core import JsonValue, canonical_sha256, normalize_json_value
 from ._contracts import (
     CandidateContract, CaseContract, CaseRef, DatasetContract, DatasetRef,
     EvaluationManifest, ScorerContract, TargetTrialRef,
@@ -454,6 +454,7 @@ def _candidate_parts(candidate: CandidateContract) -> dict[str, JsonValue]:
     graph = None
     if candidate.graph_template is not None:
         graph = candidate.graph_template.to_mapping()
+        graph["template"] = {"digest": canonical_sha256(graph["template"])}
         graph.pop("namespace")
         graph.pop("tenant_id")
     return {

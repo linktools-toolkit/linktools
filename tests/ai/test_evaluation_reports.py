@@ -337,7 +337,7 @@ def test_identical_graph_templates_compare_by_content_and_preserve_scope() -> No
     assert report.gate == "pass"
     assert report.differences == ()
     for different in (
-        replace(other_capture, template=replace(graph, nodes=(TaskNode("target", task=graph.nodes[0].task, input={"changed": True}),))),
+        replace(other_capture, template=replace(graph, nodes=(TaskNode("target", task=graph.nodes[0].task, input={"changed": "PRIVATE GRAPH INPUT"}),))),
         replace(other_capture, outputs={"different": "target"}),
         replace(other_capture, outputs={}, selector="terminal_sinks"),
         replace(other_capture, template=replace(graph, limits=TaskGraphLimits(max_concurrency=1)),
@@ -347,6 +347,7 @@ def test_identical_graph_templates_compare_by_content_and_preserve_scope() -> No
         report = _compare(left=left, right=changed)
         assert report.compatibility == "incompatible"
         assert any(item.path == "graph_definition" and not item.allowed for item in report.differences)
+        assert "PRIVATE GRAPH INPUT" not in export_report(report)
     allowed = ComparisonSpec(CandidateSlotRef("base", "model"), CandidateSlotRef("candidate", "model"),
                              (SELECTION,), allowed_changes=("graph_definition",))
     for scope in ({"namespace": "another"}, {"tenant_id": "another"}):
