@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Session tool recovery across process termination with local SQLite state."""
+"""Session tool recovery across process termination with split SQLite state."""
 
 from pathlib import Path
 
@@ -20,4 +20,4 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     tmp_path: Path,
     phase: str,
 ) -> None:
-    await _assert_tool_turn_recovers_without_replaying_effect(tmp_path, "sqlite", phase)
+    await _assert_tool_turn_recovers_without_replaying_effect(tmp_path, "split_sqlite", phase)
