@@ -287,6 +287,7 @@ class _ExecutionRuntimePort(ExecutionBackend, Protocol):
         commit: ExecutionTerminalCommit,
         *,
         session_id: str | None,
+        expected_execution: ExecutionRecord | None = None,
     ) -> ExecutionTerminalCommitResult: ...
 
     async def verify_terminal_projection(
@@ -2364,6 +2365,7 @@ class DefaultExecutionService:
                         ),
                     ),
                     session_id=None,
+                    expected_execution=current,
                 )
             except AIError as commit_error:
                 if commit_error.code not in {
@@ -3235,6 +3237,7 @@ class DefaultExecutionService:
                 await self._terminal_committer.commit_terminal_checkpoint(
                     terminal_commit,
                     session_id=cancelling_current.session_id,
+                    expected_execution=cancelling_current,
                 )
             except AIError as error:
                 if error.code not in {

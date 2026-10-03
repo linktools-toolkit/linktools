@@ -613,6 +613,7 @@ class LocalExecutionBackend:
         commit: ExecutionTerminalCommit,
         *,
         session_id: str | None,
+        expected_execution: ExecutionRecord | None = None,
     ) -> ExecutionTerminalCommitResult:
         execution_id = commit.execution.execution_id
         async with self._audit_lock(execution_id):
@@ -620,6 +621,7 @@ class LocalExecutionBackend:
             committed = await self._runtime_commands.commit_terminal_checkpoint(
                 commit,
                 session_id=session_id,
+                expected_execution=expected_execution,
                 audit_events=pending,
                 background_tasks=self._execution_task_set(execution_id),
             )
@@ -644,11 +646,13 @@ class LocalExecutionBackend:
         commit: ExecutionTerminalCommit,
         *,
         session_id: str | None,
+        expected_execution: ExecutionRecord | None = None,
     ) -> ExecutionTerminalCommitResult:
         task = asyncio.create_task(
             self._commit_terminal_checkpoint_owned(
                 commit,
                 session_id=session_id,
+                expected_execution=expected_execution,
             ),
             name=f"local-terminal-checkpoint-{commit.execution.execution_id}",
         )
@@ -4980,6 +4984,7 @@ class LocalExecutionBackend:
             next_cursor = ConversationCursor(agent_run_id, history_id=history_id)
         committed = await self._runtime_commands.commit_terminal_checkpoint(
             commit,
+            expected_execution=current,
             session_id=current.session_id,
             expected_cursor=expected_cursor,
             next_cursor=next_cursor,

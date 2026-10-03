@@ -78,6 +78,21 @@ from ._store import StateGroupTransaction, StateStore, StateTransaction
 _logger = environ.get_logger("ai.runtime.state.commands")
 
 
+def _same_execution_except_hold_metadata(
+    current: ExecutionRecord, expected: ExecutionRecord,
+) -> bool:
+    """Holds share the revision counter without changing execution semantics."""
+    return (
+        current.revision >= expected.revision
+        and replace(
+            current,
+            revision=expected.revision,
+            updated_at=expected.updated_at,
+            dependency_hold_ids=expected.dependency_hold_ids,
+        ) == expected
+    )
+
+
 def _timeline_turn_message_range(
     history: ConversationHistoryRecord,
     prepared: PreparedAgentRunCheckpointBatch,
@@ -1417,6 +1432,7 @@ class RuntimeStateCommands:
         self,
         commit: ExecutionTerminalCommit,
         *,
+        expected_execution: ExecutionRecord | None = None,
         session_id: str | None = None,
         expected_cursor: ConversationCursor | None = None,
         next_cursor: ConversationCursor | None = None,
@@ -1432,6 +1448,13 @@ class RuntimeStateCommands:
         audit_events: Sequence[ExecutionEventAppend] = (),
         background_tasks: "set[asyncio.Task[object]] | None" = None,
     ) -> ExecutionTerminalCommitResult:
+        if expected_execution is not None and (
+            expected_execution.execution_id != commit.execution.execution_id
+            or expected_execution.revision != commit.expected_revision
+            or expected_execution.event_sequence != commit.expected_event_sequence
+        ):
+            raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+        effective_commit = commit
         if execution_projections and (
             self._execution_run_store is None or execution_run is None
         ):
@@ -1555,6 +1578,7 @@ class RuntimeStateCommands:
             stores.append(self._recovery_run_store.state_store)
         if _same_group(stores):
             async def callback(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
+                nonlocal effective_commit
                 execution_transaction = group.transaction(self._execution.state_store)
                 head, head_record = await self._execution.require_open_history_head_in_transaction(
                     execution_transaction,
@@ -1563,6 +1587,7 @@ class RuntimeStateCommands:
                 effective_commit = await self._effective_terminal_commit(
                     execution_transaction,
                     commit,
+                    expected_execution=expected_execution,
                 )
                 if session_id is not None:
                     conversation_transaction = group.transaction(self._conversation.state_store)
@@ -1680,7 +1705,8 @@ class RuntimeStateCommands:
             async def readback() -> CommitObservation[ExecutionTerminalCommitResult]:
                 try:
                     visible = await self._terminal_targets_visible(
-                        commit,
+                        effective_commit,
+                        expected_execution=expected_execution,
                         pending_event_count=len(audit_events),
                         session_id=session_id,
                         next_cursor=next_cursor,
@@ -1714,6 +1740,8 @@ class RuntimeStateCommands:
                         ),
                     )
                 except AIError as error:
+                    if error.code is ErrorCode.EXECUTION_RESULT_CONFLICT:
+                        return CommitObservation(DurableCommitState.NOT_COMMITTED, error=error)
                     if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                         return CommitObservation(
                             DurableCommitState.PARTIAL_INTEGRITY_ERROR,
@@ -1755,7 +1783,8 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if actual_recovery == recovery_checkpoint:
                 if not await self._terminal_targets_visible(
-                    commit,
+                    effective_commit,
+                    expected_execution=expected_execution,
                     pending_event_count=len(audit_events),
                     session_id=session_id,
                     next_cursor=next_cursor,
@@ -1942,12 +1971,15 @@ class RuntimeStateCommands:
         execution_run_store_in_transaction = False
 
         async def commit_execution(group: StateGroupTransaction) -> ExecutionTerminalCommitResult:
+            nonlocal effective_commit
             execution_transaction = group.transaction(self._execution.state_store)
             head, head_record = await self._execution.require_open_history_head_in_transaction(
                 execution_transaction,
                 commit.execution.execution_id,
             )
-            effective_commit = await self._effective_terminal_commit(execution_transaction, commit)
+            effective_commit = await self._effective_terminal_commit(
+                execution_transaction, commit, expected_execution=expected_execution,
+            )
             if execution_run is not None and execution_run_store_in_transaction:
                 execution_transaction_for_steps = group.transaction(
                     self._execution_run_store.state_store
@@ -2015,22 +2047,25 @@ class RuntimeStateCommands:
 
         async def execution_target_visible() -> bool:
             return await self._terminal_targets_visible(
-                commit,
+                effective_commit,
+                expected_execution=expected_execution,
                 pending_event_count=len(audit_events),
                 session_id=session_id,
                 next_cursor=next_cursor,
                 conversation_agent_run=conversation_agent_run,
                 conversation_checkpoint=conversation_checkpoint,
-                recovery_checkpoint=None,
-                recovery_run=None,
-                recovery_agent_run_checkpoint=None,
+                recovery_checkpoint=recovery_checkpoint if recovery_state_merged else None,
+                recovery_run=recovery_run if recovery_run_store_merged else None,
+                recovery_agent_run_checkpoint=(
+                    recovery_agent_run_checkpoint if recovery_run_store_merged else None
+                ),
                 execution_run=execution_run,
                 execution_events=execution_events,
                 execution_checkpoints=execution_checkpoints,
                 execution_projections=execution_projections,
                 audit_events=audit_events,
                 require_session_release=False,
-                require_recovery=False,
+                require_recovery=recovery_state_merged,
             )
 
         async def commit_execution_with_reconciliation(
@@ -2059,6 +2094,8 @@ class RuntimeStateCommands:
                         ),
                     )
                 except AIError as error:
+                    if error.code is ErrorCode.EXECUTION_RESULT_CONFLICT:
+                        return CommitObservation(DurableCommitState.NOT_COMMITTED, error=error)
                     if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                         return CommitObservation(
                             DurableCommitState.PARTIAL_INTEGRITY_ERROR,
@@ -2422,7 +2459,24 @@ class RuntimeStateCommands:
         self,
         transaction: StateTransaction,
         commit: ExecutionTerminalCommit,
+        *,
+        expected_execution: ExecutionRecord | None = None,
     ) -> ExecutionTerminalCommit:
+        if expected_execution is not None:
+            current = await self._execution.get_in_transaction(
+                transaction, commit.execution.execution_id, tenant_id=self._tenant_id,
+            )
+            if current is None or not _same_execution_except_hold_metadata(current, expected_execution):
+                raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+            commit = replace(
+                commit,
+                expected_revision=current.revision,
+                execution=replace(
+                    commit.execution,
+                    dependency_hold_ids=current.dependency_hold_ids,
+                    updated_at=max(commit.execution.updated_at, current.updated_at),
+                ),
+            )
         if commit.idempotency is not None:
             return commit
         return replace(
@@ -2503,6 +2557,7 @@ class RuntimeStateCommands:
         self,
         commit: ExecutionTerminalCommit,
         *,
+        expected_execution: ExecutionRecord | None = None,
         pending_event_count: int,
         session_id: str | None,
         next_cursor: ConversationCursor | None,
@@ -2526,18 +2581,39 @@ class RuntimeStateCommands:
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
-            execution.revision == commit.expected_revision
+            execution.status not in {
+                ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+            }
+            if expected_execution is not None
+            else execution.revision == commit.expected_revision
             and execution.event_sequence == commit.expected_event_sequence
         ):
+            head = await self._execution.get_history_head(
+                execution.execution_id, tenant_id=self._tenant_id,
+            )
+            seal = await self._execution.get_history_seal(
+                execution.execution_id, tenant_id=self._tenant_id,
+            )
+            if head is None or head.state is not ExecutionHistoryState.OPEN or seal is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if recovery_checkpoint is not None and require_recovery:
+                recovery = await self._recovery.get(
+                    execution.execution_id, tenant_id=self._tenant_id,
+                )
+                if recovery == recovery_checkpoint:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if expected_execution is not None and not _same_execution_except_hold_metadata(execution, expected_execution):
+                raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
             return False
         expected_revision = commit.expected_revision + pending_event_count + 1
         expected_sequence = commit.expected_event_sequence + pending_event_count + 1
-        if (
-            execution.status is not commit.execution.status
-            or execution.revision != expected_revision
-            or execution.event_sequence != expected_sequence
-            or execution.result != commit.result
-        ):
+        expected_terminal = replace(
+            commit.execution,
+            revision=expected_revision,
+            event_sequence=expected_sequence,
+            result=commit.result,
+        )
+        if not _same_execution_except_hold_metadata(execution, expected_terminal):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         history_seal = await self._execution.get_history_seal(
             commit.execution.execution_id,
