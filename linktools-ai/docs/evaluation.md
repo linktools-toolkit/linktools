@@ -268,7 +268,11 @@ available and compatible. Mixed original bindings need explicit grouping.
 - `EvaluationSpec.input_mode="fixed_input"` is the default: reuse the prepared
   historical target input. `"reproject_input"` applies the candidate's input
   projection to retained original parameters. It requires the original input
-  contract; unavailable raw file projection is rejected
+  contract; unavailable raw file projection is rejected. Workspace attachments
+  supplied through `files` or inline `WorkspaceFileInput` occurrences use their
+  accepted bytes. If a custom projection discarded an original file occurrence
+  and its bytes cannot be matched, `reproject_input` rejects that input while
+  `fixed_input` remains available
 
 Standalone Task captures preserve explicit dependency results and failure
 states. Their implementation still comes from a Task bound to the engine.

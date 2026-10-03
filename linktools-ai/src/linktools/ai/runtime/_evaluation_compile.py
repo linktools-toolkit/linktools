@@ -254,6 +254,8 @@ class EvaluationCompiler:
                 references = {**references, **value.input_refs}
         else:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
+        if input_mode == "reproject_input" and node.original_input is not None and contract is None:
+            self._captures.require_reprojectable_input(data)
         if contract is not None:
             if data:
                 contract = replace(contract, input=data)

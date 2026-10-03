@@ -8,7 +8,7 @@ import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from linktools.ai.capability import CapabilityGroup
-from linktools.ai.core import JsonValue, TaskStatus
+from linktools.ai.core import JsonValue, TaskStatus, WorkspaceFileInput
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
     EvaluationSpec, GraphTargetSpec, ScoreBundle, ScoringInput, StartEvaluationRequest,
@@ -231,6 +231,8 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
     work.mkdir()
     attachment = work / "file.txt"
     attachment.write_text("ORIGINAL", encoding="utf-8")
+    inline = work / "inline.txt"
+    inline.write_text("INLINE ORIGINAL", encoding="utf-8")
     models = FixtureModels()
     group = CapabilityGroup("unstarted-literal")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
@@ -249,13 +251,14 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
         engine = runtime.tasks.bind(producer, target, scorer)
         source = await engine.start(TaskGraph("source", (
             TaskNode("prepare", task=producer),
-            TaskNode("agent", ("prepare",), task=target, input=AgentTaskInput("Question", files=("file.txt",))),
+            TaskNode("agent", ("prepare",), task=target, input=AgentTaskInput(("Question", WorkspaceFileInput("inline.txt")), files=("file.txt",))),
         )), principal=PRINCIPAL, idempotency_key="source")
         assert (await source.wait(timeout_seconds=15)).status is TaskStatus.FAILED
         assert not models.prompts
         capture = await runtime.tasks.capture_graph(source.graph_id,
             CaptureGraphRequest(PRINCIPAL, "capture", context_policy="clean"))
         attachment.unlink()
+        inline.unlink()
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), (
             CaseSpec.graph(CaseRef("data", "case", 1), inputs={"prepare": TaskCaseInput(input={"succeed": True})}),
         )), principal=PRINCIPAL, idempotency_key="dataset")
@@ -265,5 +268,5 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "evaluate"), engine=engine)
         assert (await run.wait(timeout_seconds=20)).completion == "complete"
         assert (await run.report()).scores[0].valid == 1
-        assert models.attachments == [b"ORIGINAL"]
+        assert models.attachments == [b"INLINE ORIGINAL", b"ORIGINAL"]
         assert models.prompts[0].startswith("Question")

@@ -12,7 +12,7 @@ from typing import TypeAlias
 from ..agent import AgentBindingContract, AgentInputCaptureRef
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, ImmutableJsonMapping, JsonValue,
-    Principal, ResourceKind, ResourceRef, TaskStatus, canonical_json_bytes,
+    Principal, ResourceKind, ResourceRef, TaskStatus, WorkspaceFileInput, canonical_json_bytes,
     canonical_sha256, validate_idempotency_key, principal_identity_payload, validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
@@ -25,7 +25,7 @@ from ..task import (
 )
 from ._input import (
     CanonicalUserInput, ExecutionInputMaterializer, UserPromptInput,
-    captured_input_files, decode_task_prompt_draft, task_prompt_draft,
+    captured_input_files, captured_input_prompt, decode_task_prompt_draft, task_prompt_draft,
 )
 from ._execution_context import ExecutionInputContext
 from ._input_contract import MaterializedUserContent
@@ -490,6 +490,40 @@ class RuntimeInputCaptures:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         return value
 
+    def _captured_original_input(
+        self, original: Mapping[str, JsonValue], accepted: CanonicalUserInput,
+        previous: Mapping[str, JsonValue], context: ExecutionInputContext | None,
+    ) -> dict[str, JsonValue]:
+        normalized = dict(original)
+        prompt = normalized.get("prompt")
+        if isinstance(prompt, Mapping) and prompt.get("kind") != "stored-user-content-v1":
+            original_prompt = decode_task_prompt_draft(prompt)
+            frozen_prompt = captured_input_prompt(original_prompt, accepted)
+            if frozen_prompt is not original_prompt:
+                normalized["prompt"] = task_prompt_draft(frozen_prompt)
+        if normalized.get("files"):
+            normalized["capture_files"] = previous.get("capture_files") or task_prompt_draft(
+                captured_input_files(accepted, len(normalized["files"])))
+            normalized["files"] = []
+        normalized["session_id"] = None
+        normalized["memory_scope"] = None
+        normalized.pop("capture_context", None)
+        if context is not None:
+            normalized["capture_context"] = context.to_payload()
+        return normalized
+
+    def require_reprojectable_input(self, value: Mapping[str, JsonValue]) -> None:
+        if value.get("kind") != "agent-task-input":
+            return
+        prompt = value.get("prompt")
+        if not isinstance(prompt, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        original = decode_task_prompt_draft(prompt)
+        if value.get("files") or (not isinstance(original, str)
+                and any(isinstance(item, WorkspaceFileInput) for item in original)):
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE,
+                          safe_details={"reason": "accepted_workspace_input_not_retained"})
+
     async def resolve_task_input(self, reference: ExecutionInputCaptureRef, *, principal: Principal,
                                  input_mode: str = "fixed_input", exclude_dependencies: tuple[str, ...] = ()) -> TaskInvocationInputContract:
         if input_mode not in {"fixed_input", "reproject_input"}:
@@ -499,16 +533,8 @@ class RuntimeInputCaptures:
             if agent.task_input is None:
                 raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
             contract = agent.task_input
-            original_input = dict(contract.original_input)
-            if original_input.get("files"):
-                original_input["capture_files"] = contract.input.get("capture_files") or task_prompt_draft(
-                    captured_input_files(agent.prompt, len(original_input["files"])))
-                original_input["files"] = []
-            original_input["session_id"] = None
-            original_input["memory_scope"] = None
-            original_input.pop("capture_context", None)
-            if agent.input_context is not None:
-                original_input["capture_context"] = agent.input_context.to_payload()
+            original_input = self._captured_original_input(
+                contract.original_input, agent.prompt, contract.input, agent.input_context)
             contract = replace(contract, original_input=original_input)
             if input_mode == "fixed_input":
                 from ._agent_task_input import AgentTaskInput
@@ -520,6 +546,8 @@ class RuntimeInputCaptures:
         else:
             contract = await self.read_task(reference, principal=principal)
             normalized = dict(contract.input if input_mode == "fixed_input" else contract.original_input)
+        if input_mode == "reproject_input":
+            self.require_reprojectable_input(normalized)
         # A new invocation never inherits a source session or its memory scope.
         if normalized.get("kind") == "agent-task-input":
             normalized["session_id"] = None
@@ -628,21 +656,14 @@ class RuntimeInputCaptures:
                     reference = await self.capture_input(source, CaptureInputRequest(
                         principal, request.idempotency_key + ":input:" + node.node_id, request.context_policy))
                     agent = await self.read_agent(reference, principal=principal)
-                    original_input = dict(agent.task_input.original_input if agent.task_input is not None
-                                          else node.original_input if node.original_input is not None else node.input)
-                    if original_input.get("files"):
-                        previous_input = agent.task_input.input if agent.task_input is not None else node.input
-                        original_input["capture_files"] = previous_input.get("capture_files") or task_prompt_draft(
-                            captured_input_files(agent.prompt, len(original_input["files"])))
-                        original_input["files"] = []
-                    original_input["session_id"] = None
-                    original_input["memory_scope"] = None
-                    original_input.pop("capture_context", None)
+                    original_input = self._captured_original_input(
+                        agent.task_input.original_input if agent.task_input is not None
+                        else node.original_input if node.original_input is not None else node.input,
+                        agent.prompt, agent.task_input.input if agent.task_input is not None else node.input,
+                        agent.input_context)
                     body = dict(AgentTaskInput(agent.prompt, planning=False, thinking=False,
                                               input_context=agent.input_context))
                     body["capture_fixed_input"] = True
-                    if agent.input_context is not None:
-                        original_input["capture_context"] = agent.input_context.to_payload()
                     if input_capture is not None:
                         previous = await self.read_task(input_capture, principal=principal)
                         contract = replace(previous, input=body, original_input=original_input, input_mode="fixed_input")
@@ -663,11 +684,8 @@ class RuntimeInputCaptures:
                     accepted_prompt = await self._materializer.restore(stored)
                     body["prompt"] = task_prompt_draft(accepted_prompt)
                     body["files"] = []
-                    if original_input is not None and original_input.get("files"):
-                        original_input = dict(original_input)
-                        original_input["capture_files"] = task_prompt_draft(
-                            captured_input_files(accepted_prompt, len(original_input["files"])))
-                        original_input["files"] = []
+                    if original_input is not None:
+                        original_input = self._captured_original_input(original_input, accepted_prompt, body, None)
             if frozen_refs:
                 frozen_node = TaskNode(node.node_id, task=node.task, input_refs=frozen_refs, input_capture=input_capture)
                 dependencies = await self._capture_dependencies(frozen_node, graph_id, {}, principal)
