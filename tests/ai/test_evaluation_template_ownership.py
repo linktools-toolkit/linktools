@@ -24,6 +24,8 @@ from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, Runti
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import Task, TaskGraph, TaskGraphTemplate, TaskNode, TaskNodeResultRef, TaskRef, TaskNodeContext
 
+from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS
+
 
 PRINCIPAL = service_principal("template-owner", "owner")
 CONTEXT = RuntimeContext(None, tenant_id=PRINCIPAL.tenant_id)
@@ -105,7 +107,7 @@ async def test_graph_case_merges_preserve_captured_parameters_and_dependencies(t
         spec = EvaluationSpec(dataset, (CandidateSpec("candidate", graph_template=GraphTargetSpec(capture=template, outputs={"answer": "consume"})),),
             (ScorerSpec("score", scorer.ref, (DIMENSION,)),))
         run = await runtime.evaluations.start(StartEvaluationRequest(spec, PRINCIPAL, "evaluate"), engine=engine)
-        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         for trial in (await run.trials()).items:
             evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
             output = evidence.target.outputs["answer"].value.value
@@ -219,7 +221,7 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
     async with Runtime.open("snapshot", models=ModelRegistry(), storage=restored_storage, context=CONTEXT) as runtime:
         run = await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(task, scorer),
             principal=PRINCIPAL, idempotency_key="resume")
-        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         record = await restored_storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.owned_input_captures == (owned,)
         assert await restored_storage.object_store(RuntimeDomain.TASK).stat(key) is not None
@@ -288,7 +290,7 @@ async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", task=task.ref),), (ScorerSpec("score", scorer.ref, (DIMENSION,)),),
             policy=EvaluationPolicy(content_retention_seconds=60)), PRINCIPAL, "start"), engine=engine)
-        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         trial = (await run.trials()).items[0]
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         owned = record.owned_input_captures[0]
@@ -337,7 +339,7 @@ async def test_function_task_capture_keeps_agent_shaped_business_json(tmp_path: 
         for mode in ("fixed_input", "reproject_input"):
             run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (candidate,),
                 (ScorerSpec("score", scorer.ref, (DIMENSION,)),), input_mode=mode), PRINCIPAL, mode), engine=engine)
-            assert (await run.wait(timeout_seconds=30)).completion == "complete"
+            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
             trial = (await run.trials()).items[0]
             evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
             actual = evidence.target.output.value if route == "input" else evidence.target.outputs["answer"].value.value

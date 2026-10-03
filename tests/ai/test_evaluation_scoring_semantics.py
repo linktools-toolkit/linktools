@@ -26,7 +26,7 @@ from linktools.ai.task import (
     Task, TaskGraph, TaskGraphTemplate, TaskInputSupplyRequest, TaskNode, TaskNodeContext, TaskNodeResultRef, TaskRef,
 )
 
-from .test_evaluation_consumers import CONTEXT, DIMENSION, PRINCIPAL, FixtureModels, echo, rule_scorer
+from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS, CONTEXT, DIMENSION, PRINCIPAL, FixtureModels, echo, rule_scorer
 
 
 def capabilities() -> CapabilityGroup[None]:
@@ -75,7 +75,7 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
             (CandidateSpec("candidate", task=target.ref),), scorers,
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"),
             engine=runtime.tasks.bind(target, rule, judge))
-        assert (await run.wait(timeout_seconds=10)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         assert len(received) == 1
         scores = (await run.scores()).items
         assert all(item.status == "valid" for item in scores)
@@ -115,7 +115,7 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
             (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"),
             engine=runtime.tasks.bind(target, scorer))
-        assert (await run.wait(timeout_seconds=10)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         assert received == [{"kind": "agent_input", "prompt": {"kind": "text", "text": models.prompts[0]}}]
         assert models.prompts == ["Prepared question: accepted input"]
 
@@ -147,7 +147,7 @@ async def test_graph_evidence_retains_merged_task_inputs_and_dependency_values(t
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", graph_template=GraphTargetSpec(template=template, outputs={"answer": "finish"})),),
             (rule_scorer(scorer),)), PRINCIPAL, "start"), engine=runtime.tasks.bind(first, second, scorer))
-        assert (await run.wait(timeout_seconds=10)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         assert len(received) == 1
         assert received[0]["inputs"]["prepare"]["input"] == {"fixed": "template data", "question": "original"}
         assert set(received[0]["inputs"]["finish"]["dependencies"]) == {"prepared"}
@@ -203,7 +203,7 @@ async def test_accepted_human_decision_is_consumed_after_deferred_input_becomes_
             assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         finally:
             release.set()
-        assert (await run.wait(timeout_seconds=10)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         accepted = (await run.scores()).items[0]
         assert accepted.status == "valid" and accepted.decision_id is not None
         assert (await run.submit_human_score(request)).decision_id == accepted.decision_id
@@ -300,7 +300,7 @@ async def test_same_human_decision_handles_concurrent_native_resume(
         request = HumanScoreRequest(pending.trial.trial_id, "human", pending.evidence_ref,
                                    ScoreBundle(dimensions={"exact_match": 1.0}), "decision")
         await run.submit_human_score(request)
-        assert (await run.wait(timeout_seconds=10)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         accepted = (await run.scores()).items[0]
         assert accepted.status == "valid" and accepted.decision_id is not None
         assert (await run.submit_human_score(request)).decision_id == accepted.decision_id
@@ -370,7 +370,7 @@ async def test_new_human_decision_is_rejected_after_its_slot_times_out(tmp_path:
             (CandidateSpec("candidate", task=target.ref),), (scorer,),
             policy=EvaluationPolicy(human_timeout_seconds=0.2)), PRINCIPAL, "start"),
             engine=runtime.tasks.bind(target))
-        assert (await run.wait(timeout_seconds=10)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         expired = (await run.scores()).items[0]
         assert expired.status == "error" and expired.reason == "unanswered"
         with pytest.raises(AIError) as raised:
@@ -405,9 +405,9 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
             tuple(CandidateSpec(slot, task=target.ref) for slot in ("baseline", "candidate")),
             (rule_scorer(rule if score_only else judge),),
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"), engine=engine)
-        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         scoring = await run.rescore(RescoreRequest((rule_scorer(judge),), "rescore"), engine=engine) if score_only else run
-        assert (await scoring.wait(timeout_seconds=30)).completion == "complete"
+        assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         scorer_usage = [await runtime.history.graph_usage(item.scorer_graph.graph_id, principal=PRINCIPAL)
                         for item in (await scoring.scores()).items]
         assert any(item.unknown_usage_requests for item in scorer_usage) is unknown_usage

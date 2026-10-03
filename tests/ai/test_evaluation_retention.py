@@ -17,6 +17,9 @@ from linktools.ai.runtime.state._codec import encode_domain
 from linktools.ai.runtime.state._object_cleanup import purge_unreferenced_objects
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
+from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS
+
+
 NOW = datetime.now(timezone.utc)
 
 
@@ -176,7 +179,7 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
             (ScorerSpec("score", tasks[1].ref, dimensions=(DimensionContract("quality", "number", "higher"),), rubric="private rubric"),),
             policy=policy), principal, "start")
         run = await runtime.evaluations.start(request, engine=engine)
-        assert (await run.wait(timeout_seconds=10)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         report = await run.report()
         trial = (await run.trials()).items[0]
         evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=principal)

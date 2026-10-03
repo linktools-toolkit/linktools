@@ -19,6 +19,8 @@ from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeStorage
 from linktools.ai.task import Task, TaskGraphSubmission
 
+from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS
+
 
 class Offline:
     @asynccontextmanager
@@ -201,7 +203,7 @@ async def test_interrupted_preparation_has_recoverable_owner(
         if action == "resume":
             await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(*tasks),
                                                 principal=owner, idempotency_key="resume")
-            assert (await run.wait(timeout_seconds=20)).completion == "complete"
+            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
             assert calls == [{"secret": "recoverable private input"}]
         else:
             assert (await run.cancel(idempotency_key="cancel")).completion == "cancelled"

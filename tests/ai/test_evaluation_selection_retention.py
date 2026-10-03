@@ -23,7 +23,7 @@ from linktools.ai.runtime import _evaluation as evaluation_module
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.task import Task, TaskNodeContext, TaskRef
 
-from .test_evaluation_consumers import CONTEXT, DIMENSION, PRINCIPAL, FixtureModels, echo, rule_scorer
+from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS, CONTEXT, DIMENSION, PRINCIPAL, FixtureModels, echo, rule_scorer
 from .test_evaluation_retention import Offline
 from .test_evaluation_scoring_semantics import UsageModels, capabilities
 
@@ -76,9 +76,9 @@ async def test_usage_gate_uses_only_selected_scoring_work(monkeypatch: pytest.Mo
             tuple(CandidateSpec(name, task=target.ref) for name in ("baseline", "candidate")),
             (rule_scorer(judge, slot="failing"), rule_scorer(rule, slot="rule")),
             policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "run"), engine=engine)
-        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         scoring = await run.rescore(RescoreRequest((rule_scorer(rule, slot="rule"),), "rescore"), engine=engine)
-        assert (await scoring.wait(timeout_seconds=30)).completion == "complete"
+        assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         selection = ScoreSelection("failing" if selected == "failing" else "rule", "exact_match",
                                    scoring.experiment_id if selected == "rescore" else None)
         spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"), CandidateSlotRef(run.experiment_id, "candidate"),
@@ -118,9 +118,9 @@ async def test_selected_rescore_cannot_hide_unknown_target_usage() -> None:
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             tuple(CandidateSpec(name, task=target.ref) for name in ("baseline", "candidate")), (scorer,),
             policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "run"), engine=engine)
-        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         rescored = await run.rescore(RescoreRequest((scorer,), "rescore"), engine=engine)
-        assert (await rescored.wait(timeout_seconds=30)).completion == "complete"
+        assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         selection = ScoreSelection("exact", "exact_match", rescored.experiment_id)
         report = await runtime.evaluations.compare(ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"),
             CandidateSlotRef(run.experiment_id, "candidate"), (ScoreComparisonSelection(selection, selection),),
@@ -158,7 +158,7 @@ async def test_usage_gate_excludes_an_unselected_candidate() -> None:
              CandidateSpec("unselected", task=unrelated.ref)), (rule_scorer(judge),),
             policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "run"),
             engine=runtime.tasks.bind(target, unrelated, judge))
-        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         assert not (await run.report()).cutoff.usage_complete
         selection = ScoreSelection("exact", "exact_match")
         report = await runtime.evaluations.compare(ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"),
@@ -184,10 +184,10 @@ async def test_saved_rescore_reports_expire_with_the_source_and_are_purged(
         )), principal=PRINCIPAL, idempotency_key="dataset")
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", task=target.ref),), (rule_scorer(rule),), policy=policy), PRINCIPAL, "run"), engine=engine)
-        assert (await run.wait(timeout_seconds=10)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         clock.advance(30)
         scoring = await run.rescore(RescoreRequest((rule_scorer(rule),), "rescore"), engine=engine)
-        assert (await scoring.wait(timeout_seconds=10)).completion == "complete"
+        assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         saved = await scoring.report()
         assert await runtime.evaluations.get_report(saved.report_id, principal=PRINCIPAL) == saved
         clock.advance(31)
@@ -220,7 +220,7 @@ async def test_waiting_rescore_settles_when_its_source_lifetime_ends(
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", task=target.ref),), (rule_scorer(rule),),
             policy=EvaluationPolicy(allow_volatile=True, **{deadline + "_retention_seconds": 60})), PRINCIPAL, "run"), engine=engine)
-        assert (await run.wait(timeout_seconds=10)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         clock.advance(30)
         rescored = await run.rescore(RescoreRequest((ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,)),), "human"), engine=engine)
 
@@ -295,7 +295,7 @@ async def test_expired_launched_scoring_reaches_a_terminal_disposition_without_e
         graph = await asyncio.wait_for(ready(), 10)
         if state == "terminal":
             release.set()
-            assert (await run.wait(timeout_seconds=10)).completion == "complete"
+            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         clock.advance(61)
 
         async def no_expired_evidence(*args, **kwargs):

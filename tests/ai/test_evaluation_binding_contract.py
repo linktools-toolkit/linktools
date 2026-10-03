@@ -18,7 +18,7 @@ from linktools.ai.evaluation import (
 from linktools.ai.runtime import CaptureInputRequest, Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskGraph, TaskGraphTemplate, TaskNode, TaskNodeContext, TaskNodeResultRef
 
-from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels, echo, exact, rule_scorer
+from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS, CONTEXT, PRINCIPAL, FixtureModels, echo, exact, rule_scorer
 
 
 @pytest.mark.asyncio
@@ -45,7 +45,7 @@ async def test_historical_agent_capture_restores_original_structured_output_bind
             (CandidateSpec("historical", task=historical.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start-historical"),
             engine=runtime.tasks.bind(historical, scorer))
-        view = await run.wait(timeout_seconds=10)
+        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
         assert view.completion == "complete", view.needs_attention
         report = await run.report()
         assert report.scores[0].valid == 1 and report.scores[0].mean == 1.0
@@ -79,7 +79,7 @@ async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunn
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("current", task=original.ref),), (rule_scorer(scorer),)), PRINCIPAL, "start-drift"),
             engine=runtime.tasks.bind(original, scorer))
-        view = await run.wait(timeout_seconds=10)
+        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
         assert view.completion == "complete", view.needs_attention
         with pytest.raises(AIError) as raised:
             await runtime.evaluations.reconcile(run.experiment_id, engine=runtime.tasks.bind(changed, scorer),
@@ -102,7 +102,7 @@ async def test_strict_comparison_cannot_mix_datasets_even_when_both_scores_pass(
             )), principal=PRINCIPAL, idempotency_key=f"publish-{name}")
             run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, f"start-{name}"), engine=engine)
-            view = await run.wait(timeout_seconds=10)
+            view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
             assert view.completion == "complete", view.needs_attention
             assert (await run.report()).scores[0].mean == 1.0
             runs.append(run)
@@ -155,7 +155,7 @@ async def test_two_graph_cases_keep_frozen_or_rerun_dependency_values_separate(t
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("workflow", graph_template=GraphTargetSpec(template=template, outputs={"answer": "B"})),),
             (rule_scorer(scorer),)), PRINCIPAL, "start-captured-graphs"), engine=engine)
-        view = await run.wait(timeout_seconds=10)
+        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
         assert view.completion == "complete", view.needs_attention
         trials = (await run.trials()).items
         assert all(trial.execution_status is TaskStatus.SUCCEEDED for trial in trials), [(trial.case_ref.case_id, trial.execution_status, trial.disposition.reason_code if trial.disposition else trial.error_code) for trial in trials]
@@ -217,7 +217,7 @@ async def test_rerun_dependency_failure_never_falls_back_to_captured_success(tmp
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("workflow", graph_template=GraphTargetSpec(template=template, outputs={"answer": "B"})),),
             (rule_scorer(scorer),)), PRINCIPAL, "start-rerun-failure"), engine=engine)
-        view = await run.wait(timeout_seconds=10)
+        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
         assert view.completion == "complete", view.needs_attention
         assert observed == [TaskStatus.SUCCEEDED, TaskStatus.FAILED]
         report = await run.report()

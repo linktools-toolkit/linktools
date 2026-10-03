@@ -16,7 +16,7 @@ from linktools.ai.evaluation import (
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.task import Task, TaskExpander, TaskGraphTemplate, TaskNode, TaskNodeContext
 
-from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels, exact, rule_scorer
+from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS, CONTEXT, PRINCIPAL, FixtureModels, exact, rule_scorer
 
 
 @pytest.mark.asyncio
@@ -89,7 +89,7 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("expanded", graph_template=GraphTargetSpec(template=template, selector="terminal_sinks")),),
             (rule_scorer(scorer),)), PRINCIPAL, "run"), engine=runtime.tasks.bind(*definitions))
-        view = await run.wait(timeout_seconds=10)
+        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
         assert view.completion == "complete", view.needs_attention
         assert (await run.report()).scores[0].mean == 1.0
         trial = (await run.trials()).items[0]
@@ -115,5 +115,5 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
             assert rejected.value.code is ErrorCode.BINDING_CONFLICT
         recovered = await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(*definitions),
             principal=PRINCIPAL, idempotency_key="unchanged")
-        assert (await recovered.wait(timeout_seconds=10)).completion == "complete"
+        assert (await recovered.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         assert calls == ["seed", "middle", "yes"]

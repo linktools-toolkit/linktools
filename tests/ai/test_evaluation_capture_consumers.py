@@ -22,7 +22,7 @@ from linktools.ai.runtime import CaptureGraphRequest, CaptureInputRequest, Runti
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext, TaskNodeResultRef
 from linktools.ai.workspace import Workspace
 
-from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels, exact, rule_scorer
+from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS, CONTEXT, PRINCIPAL, FixtureModels, exact, rule_scorer
 
 
 class DelegatingModels(FixtureModels):
@@ -104,7 +104,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
             (CandidateSpec("historical-child", task=historical.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "evaluate-tool-child"),
             engine=runtime.tasks.bind(historical, scorer))
-        view = await run.wait(timeout_seconds=15)
+        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
         assert view.completion == "complete", view.needs_attention
         report = await run.report()
         assert report.scores[0].valid == 1 and report.scores[0].mean == 1.0
@@ -175,7 +175,7 @@ async def test_graph_capture_ref_evaluates_new_inputs_after_reopen(tmp_path: Pat
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("captured-workflow", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "answer"})),),
             (rule_scorer(scorer),)), PRINCIPAL, "evaluate-captured-graph-ref"), engine=engine)
-        view = await run.wait(timeout_seconds=15)
+        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
         assert view.completion == "complete", view.needs_attention
         report = await run.report()
         assert report.scores[0].valid == 1 and report.scores[0].mean == 1.0
