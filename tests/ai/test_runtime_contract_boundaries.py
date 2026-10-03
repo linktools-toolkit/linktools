@@ -37,6 +37,7 @@ from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
     capability_ref_payload,
+    canonicalize_json_schema,
 )
 from ._runtime_test_helpers import tool_with_metadata
 
@@ -235,6 +236,59 @@ def test_output_schema_is_independent_of_mapping_insertion_order() -> None:
     }
 
     assert canonicalize_output_schema_v1(first) == canonicalize_output_schema_v1(second)
+
+
+@pytest.mark.parametrize("padding_size", (0, 128 * 1024))
+def test_schema_validation_rechecks_changed_raw_input(padding_size: int) -> None:
+    schema = {
+        "type": "object",
+        "description": "x" * padding_size,
+        "$defs": {"Unused": {"type": "string"}},
+    }
+    expected = {"type": "object", "description": "x" * padding_size}
+    assert canonicalize_json_schema(schema) == expected
+
+    schema["$defs"]["Unused"]["type"] = "invalid-type"
+    for _ in range(2):
+        with pytest.raises(AIError) as raised:
+            canonicalize_json_schema(schema)
+        assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+    schema["$defs"]["Unused"]["type"] = "integer"
+    assert canonicalize_json_schema(schema) == expected
+
+
+def test_schema_canonicalization_returns_detached_mutable_results() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+        "x-contract": {"literal": ["original"]},
+    }
+    first = canonicalize_json_schema(schema)
+    first["properties"]["value"]["type"] = "integer"
+    first["required"].append("other")
+    first["x-contract"]["literal"].append("changed")
+
+    assert canonicalize_json_schema(schema) == schema
+    assert schema["properties"]["value"]["type"] == "string"
+    assert schema["required"] == ["value"]
+    assert schema["x-contract"]["literal"] == ["original"]
+
+
+def test_schema_title_provenance_is_applied_on_each_canonicalization() -> None:
+    schema = {
+        "type": "object",
+        "title": "model-title",
+        "properties": {"value": {"type": "string", "title": "field-title"}},
+    }
+    assert canonicalize_json_schema(schema) == schema
+    generated = canonicalize_json_schema(
+        schema, generated_title_paths=frozenset({("title",)}),
+    )
+    assert "title" not in generated
+    assert generated["properties"]["value"]["title"] == "field-title"
+    assert canonicalize_json_schema(schema) == schema
 
 
 def test_tool_ref_contains_named_revision_without_contract_payload() -> None:
