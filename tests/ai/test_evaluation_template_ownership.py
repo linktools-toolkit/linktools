@@ -306,3 +306,39 @@ async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_
         assert await readonly.export_snapshot(object_store=snapshot, limits=SnapshotLimits(max_entries=10000, max_bytes=20 * 1024 * 1024))
     finally:
         await readonly.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["input", "graph"])
+async def test_function_task_capture_keeps_agent_shaped_business_json(tmp_path: Path, route: str) -> None:
+    payload = {"kind": "agent-task-input", "prompt": "business literal", "session_id": "business-session",
+               "memory_scope": "business-memory", "capture_context": {"business": True}, "files": ["business-file"]}
+
+    async def target(context: TaskNodeContext[None]) -> JsonValue:
+        return dict(context.input)
+
+    async with Runtime.open("business-json", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+        task, scorer = Task("business.target", target, effect_policy="none"), Task("business.score", score, effect_policy="none")
+        engine = runtime.tasks.bind(task, scorer)
+        source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input=payload),)),
+            principal=PRINCIPAL, idempotency_key="source")
+        await source.wait()
+        if route == "input":
+            execution = await source.execution("target")
+            captured = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(PRINCIPAL, "capture"))
+            case = CaseSpec.from_capture(CaseRef("data", "one", 1), capture=captured)
+            candidate = CandidateSpec("candidate", task=task.ref)
+        else:
+            captured = await runtime.tasks.capture_graph("source", CaptureGraphRequest(PRINCIPAL, "capture", context_policy="clean"))
+            case = CaseSpec.graph(CaseRef("data", "one", 1), inputs={})
+            candidate = CandidateSpec("candidate", graph_template=GraphTargetSpec(capture=captured, outputs={"answer": "target"}))
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), cases=(case,)),
+            principal=PRINCIPAL, idempotency_key="dataset")
+        for mode in ("fixed_input", "reproject_input"):
+            run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (candidate,),
+                (ScorerSpec("score", scorer.ref, (DIMENSION,)),), input_mode=mode), PRINCIPAL, mode), engine=engine)
+            assert (await run.wait(timeout_seconds=30)).completion == "complete"
+            trial = (await run.trials()).items[0]
+            evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
+            actual = evidence.target.output.value if route == "input" else evidence.target.outputs["answer"].value.value
+            assert actual == payload

@@ -546,10 +546,11 @@ class RuntimeInputCaptures:
         else:
             contract = await self.read_task(reference, principal=principal)
             normalized = dict(contract.input if input_mode == "fixed_input" else contract.original_input)
-        if input_mode == "reproject_input":
+        agent_input = isinstance(reference, AgentInputCaptureRef) or contract.binding.get("type") == "agent"
+        if agent_input and input_mode == "reproject_input":
             self.require_reprojectable_input(normalized)
-        # A new invocation never inherits a source session or its memory scope.
-        if normalized.get("kind") == "agent-task-input":
+        # A new Agent invocation never inherits its source session or memory scope.
+        if agent_input and normalized.get("kind") == "agent-task-input":
             normalized["session_id"] = None
             normalized["memory_scope"] = None
         excluded = tuple(sorted(set(contract.excluded_dependencies) | set(exclude_dependencies)))
@@ -671,7 +672,7 @@ class RuntimeInputCaptures:
                             request.idempotency_key + ":context-input:" + node.node_id, {"contract": encode_domain(contract)})
                         input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, contract.source_execution_id)
                         body = {}
-            if body.get("kind") == "agent-task-input":
+            if declaration.get("type") == "agent" and body.get("kind") == "agent-task-input":
                 if request.context_policy == "clean":
                     body.pop("capture_context", None)
                 body["session_id"] = None
@@ -694,7 +695,7 @@ class RuntimeInputCaptures:
                     body = dict(previous.input)
                 source_id = next((item.execution_id for item in state.node_states if item.node_id == node.node_id), None) or "graph:" + graph_id + ":" + node.node_id
                 contract = TaskInvocationInputContract(source_id, node.task, body,
-                    original_input if original_input is not None else body, {}, dependencies)
+                    original_input if original_input is not None else body, declaration, dependencies)
                 identity, digest = await self._publish("task", principal, request.idempotency_key + ":" + node.node_id,
                                                        {"contract": encode_domain(contract)})
                 input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, source_id)

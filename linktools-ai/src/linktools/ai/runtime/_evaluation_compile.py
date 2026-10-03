@@ -187,6 +187,7 @@ class EvaluationCompiler:
         if len(inputs) != len(case.input.inputs) or set(inputs) - {node.node_id for node in template.nodes}:
             raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
         nodes = []
+        agent_tasks = {TaskRef(item["id"], item["revision"]) for item in candidate.definition_contracts if item["type"] == "agent"}
         for node in template.nodes:
             value = inputs.get(node.node_id)
             if value is None and input_mode == "reproject_input":
@@ -196,14 +197,14 @@ class EvaluationCompiler:
                     value = TaskCaseInput(input={})
             nodes.append(node if value is None else await self._node_input(
                 node, value, principal=principal, input_mode=input_mode, owner_id=owner_id,
-                materialize=materialize, owned_captures=owned_captures))
+                materialize=materialize, owned_captures=owned_captures, agent_input=node.task in agent_tasks))
         return TaskGraph(graph_id, tuple(nodes))
 
     async def _node_input(
         self, node: TaskNode,
         value: AgentInputCaptureRef | AgentCaseInput | TaskCaseInput | GraphCaseInput,
         *, principal: Principal, input_mode: str, owner_id: str, materialize: bool,
-        owned_captures: list[TaskInvocationInputRef] | None,
+        owned_captures: list[TaskInvocationInputRef] | None, agent_input: bool = False,
     ) -> TaskNode:
         if isinstance(value, AgentCaseInput):
             value = value.capture
@@ -254,7 +255,7 @@ class EvaluationCompiler:
                 references = {**references, **value.input_refs}
         else:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
-        if input_mode == "reproject_input" and node.original_input is not None and contract is None:
+        if agent_input and input_mode == "reproject_input" and node.original_input is not None and contract is None:
             self._captures.require_reprojectable_input(data)
         if contract is not None:
             if data:
