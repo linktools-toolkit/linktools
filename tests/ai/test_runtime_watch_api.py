@@ -1435,6 +1435,7 @@ def test_runtime_domain_facades_match_the_supported_method_sets() -> None:
         "transcript",
         "history",
         "model_interactions",
+        "capture_input",
     }
     assert session_methods == {
         "get",
