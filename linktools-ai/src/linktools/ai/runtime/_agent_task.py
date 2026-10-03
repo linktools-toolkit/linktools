@@ -27,7 +27,7 @@ from ..task import (
     TaskNodeRunResult,
     TaskResultRef,
 )
-from ._input import task_prompt_draft
+from ._input import decode_task_prompt_draft, task_prompt_draft
 from .state._contracts import StoredUserInput, TaskPreparedInputRecord
 from ._agent_task_input import (
     AgentTaskInput,
@@ -168,6 +168,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 prompt = await self._restore_prepared_prompt(task_input.stored_prompt)
                 files = ()
+            prompt = _append_captured_files(prompt, task_input)
         else:
             callback = self._build_input
             if callback is None:
@@ -235,6 +236,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
                         ErrorCode.TASK_INPUT_PROJECTION_FAILED,
                         safe_details={"cause_type": type(error).__name__},
                     ) from error
+                prompt = _append_captured_files(prompt, task_input)
                 stored = await self._store_prepared_prompt(
                     prompt,
                     files=task_input.files,
@@ -431,6 +433,18 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
             return
         execution = await self._get_execution(execution_id, invocation.principal)
         await execution.cancel()
+
+
+def _append_captured_files(prompt: CanonicalUserInput, task_input: AgentTaskInput) -> CanonicalUserInput:
+    payload = task_input.get("capture_files")
+    if payload is None:
+        return prompt
+    if not isinstance(payload, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    files = decode_task_prompt_draft(payload)
+    if isinstance(files, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return (*((prompt,) if isinstance(prompt, str) else prompt), *files)
 
 
 def _node_output_contract(invocation: TaskNodeInvocation) -> dict[str, JsonValue] | None:

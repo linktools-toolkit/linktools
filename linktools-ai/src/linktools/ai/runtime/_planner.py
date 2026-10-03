@@ -1399,7 +1399,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     else _normalize_handler_body(handler.normalize(contract.original_input))
                 )
             elif contract.input_mode == "reproject_input" and isinstance(handler, _TaskRunnerAdapter):
-                body = _normalize_handler_body(handler.normalize(contract.original_input))
+                body = _normalize_handler_body(handler.normalize(contract.input))
+            if contract.input.get("capture_context") is not None:
+                body = {**body, "capture_context": contract.input["capture_context"]}
             restored = TaskNode.from_resolved(node.node_id, node.dependencies, task=node.task,
                 input=body, original_input=contract.original_input, budget_cost=node.budget_cost, expander=node.expander,
                 input_refs=node.input_refs, timeout_seconds=node.timeout_seconds, max_attempts=node.max_attempts,

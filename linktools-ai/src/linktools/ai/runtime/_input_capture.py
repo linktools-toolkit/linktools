@@ -24,8 +24,10 @@ from ..task import (
 )
 from ._input import (
     CanonicalUserInput, ExecutionInputMaterializer, UserPromptInput,
-    decode_task_prompt_draft, task_prompt_draft,
+    captured_input_files, decode_task_prompt_draft, task_prompt_draft,
 )
+from ._execution_context import ExecutionInputContext
+from ._input_contract import MaterializedUserContent
 from ._object import read_runtime_object
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from .service_api import ExecutionService
@@ -73,6 +75,7 @@ class AgentInputCapture:
     repository_instructions: JsonValue = None
     task_input: TaskInvocationInputContract | None = None
     source_principal: Mapping[str, JsonValue] | None = None
+    input_context: ExecutionInputContext | None = None
 
 
 class RuntimeInputCaptures:
@@ -173,9 +176,9 @@ class RuntimeInputCaptures:
         await self._authorize(principal, ResourceKind.EXECUTION, "input-capture", AuthorizationAction.EXECUTION_CAPTURE_INPUT)
         canonical = await self._materializer.canonicalize_input(prompt)
         canonical = await self._materializer.materialize(canonical, await self._materializer.canonicalize_files(files))
-        payload = {"prompt": task_prompt_draft(canonical), "binding": None,
+        payload = {"prompt": task_prompt_draft(canonical), "input_view": dict(canonical.view) if isinstance(canonical, MaterializedUserContent) else None, "binding": None,
                    "original_input": {}, "source_execution_id": None,
-                   "source_invocation_id": None, "repository_instructions": None, "task_input": None, "source_principal": None}
+                   "source_invocation_id": None, "repository_instructions": None, "task_input": None, "source_principal": None, "input_context": None}
         identity, digest = await self._publish("agent", principal, idempotency_key, payload)
         return AgentInputCaptureRef(self._namespace, principal.tenant_id, identity, digest, None)
 
@@ -272,8 +275,17 @@ class RuntimeInputCaptures:
         await self._authorize(principal, ResourceKind.EXECUTION, execution_id, AuthorizationAction.EXECUTION_READ, record.principal_id)
         await self._authorize(principal, ResourceKind.EXECUTION, execution_id, AuthorizationAction.EXECUTION_CAPTURE_INPUT, record.principal_id)
         is_agent = isinstance(record.binding, AgentBindingContract)
+        context = None
         if is_agent and request.context_policy == "captured":
-            raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "pre_input_context_not_retained"})
+            if record.input_context is not None:
+                context = ExecutionInputContext.from_payload(await self._payload(record.input_context.payload, RuntimeDomain.EXECUTION))
+                if context.unavailable_reason is not None:
+                    raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": context.unavailable_reason})
+            elif any(value is not None for value in (record.session_id, record.memory_scope, record.previous_execution_id, record.fork_base_execution_id)):
+                raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "pre_input_context_not_retained"})
+            else:
+                instructions = None if record.repository_instructions is None else await self._payload(record.repository_instructions.payload, record.repository_instructions.source_domain)
+                context = ExecutionInputContext.from_messages((), repository_instructions=instructions)
         invocation = await self._get(self._key(principal.tenant_id, "invocation", execution_id))
         task_input = None
         if isinstance(invocation, Mapping):
@@ -295,10 +307,11 @@ class RuntimeInputCaptures:
         if is_agent:
             prompt = await self._materializer.restore(record.stored_user_input)
             instructions = None if record.repository_instructions is None else await self._payload(record.repository_instructions.payload, record.repository_instructions.source_domain)
-            payload = {"prompt": task_prompt_draft(prompt), "binding": record.binding.to_payload(),
+            payload = {"prompt": task_prompt_draft(prompt), "input_view": record.stored_user_input.view, "binding": record.binding.to_payload(),
                        "original_input": dict(record.stored_user_input.view or {"prompt": task_prompt_draft(prompt)}) if task_input is None else dict(task_input.original_input),
                        "source_execution_id": execution_id, "source_invocation_id": record.parent_invocation_id,
                        "repository_instructions": instructions,
+                       "input_context": None if context is None else context.to_payload(),
                        "source_principal": {"principal_id": record.principal_id, "tenant_id": principal.tenant_id, "kind": record.principal_kind},
                        "task_input": None if task_input is None else encode_domain(task_input)}
             identity, digest = await self._publish("agent", principal, request.idempotency_key, payload)
@@ -318,12 +331,16 @@ class RuntimeInputCaptures:
         source = payload["source_execution_id"]
         if source != reference.source_execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return AgentInputCapture(decode_task_prompt_draft(payload["prompt"]),
+        prompt = decode_task_prompt_draft(payload["prompt"])
+        if not isinstance(prompt, str) and payload.get("input_view") is not None:
+            prompt = MaterializedUserContent(prompt, payload["input_view"])
+        return AgentInputCapture(prompt,
                                  None if payload["binding"] is None else AgentBindingContract.from_payload(payload["binding"]),
                                  ImmutableJsonMapping(payload["original_input"]), source,
                                  payload["source_invocation_id"], payload["repository_instructions"],
                                  None if payload["task_input"] is None else decode_domain(payload["task_input"], TaskInvocationInputContract),
-                                 None if payload["source_principal"] is None else ImmutableJsonMapping(payload["source_principal"]))
+                                 None if payload["source_principal"] is None else ImmutableJsonMapping(payload["source_principal"]),
+                                 None if payload.get("input_context") is None else ExecutionInputContext.from_payload(payload["input_context"]))
 
     async def read_task(self, reference: TaskInvocationInputRef, *, principal: Principal) -> TaskInvocationInputContract:
         payload = await self._read(reference, "task", principal)
@@ -373,10 +390,13 @@ class RuntimeInputCaptures:
             else:
                 normalized = dict(contract.original_input)
                 if normalized.get("files"):
-                    raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "raw_file_projection_not_retained"})
+                    normalized["capture_files"] = contract.input.get("capture_files") or task_prompt_draft(captured_input_files(agent.prompt, len(normalized["files"])))
+                    normalized["files"] = []
         else:
             contract = await self.read_task(reference, principal=principal)
             normalized = dict(contract.input if input_mode == "fixed_input" else contract.original_input)
+        if isinstance(reference, AgentInputCaptureRef) and agent.input_context is not None:
+            normalized["capture_context"] = agent.input_context.to_payload()
         # A new invocation never inherits a source session or its memory scope.
         if normalized.get("kind") == "agent-task-input":
             normalized["session_id"] = None
@@ -415,11 +435,6 @@ class RuntimeInputCaptures:
             else:
                 nodes = decode_domain(original, TaskGraphTemplate).nodes
         bindings = await TaskGraphBindingCaptureStore(self._namespace, self._objects).load(admission)
-        if request.context_policy == "captured" and any(
-            node.task is not None and bindings.tasks.get((node.task.id, node.task.revision), {}).get("type") == "agent"
-            for node in nodes
-        ):
-            raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "pre_input_context_not_retained"})
         selected = {node.node_id for node in nodes}
         captured_nodes = []
         for node in nodes:
@@ -435,9 +450,17 @@ class RuntimeInputCaptures:
                 else:
                     frozen_refs[name] = reference
             body = dict(node.input)
+            node_context = None
+            declaration = {} if node.task is None else bindings.tasks.get((node.task.id, node.task.revision), {})
+            if declaration.get("type") == "agent" and request.context_policy == "captured":
+                source = next((item.execution_id for item in state.node_states if item.node_id == node.node_id), None)
+                if source is None:
+                    raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "graph_node_never_started"})
+                reference = await self.capture_input(source, CaptureInputRequest(principal, request.idempotency_key + ":context:" + node.node_id))
+                node_context = (await self.read_agent(reference, principal=principal)).input_context
             if body.get("kind") == "agent-task-input":
-                if request.context_policy == "captured":
-                    raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "pre_input_context_not_retained"})
+                if node_context is not None:
+                    body["capture_context"] = node_context.to_payload()
                 body["session_id"] = None
                 body["memory_scope"] = None
                 prompt = body.get("prompt")
@@ -447,6 +470,12 @@ class RuntimeInputCaptures:
                     stored = replace(stored, payload=StoredPayload.inline_text(value) if stored.codec == "text" else StoredPayload.inline_json(value))
                     body["prompt"] = task_prompt_draft(await self._materializer.restore(stored))
             input_capture = node.input_capture
+            if input_capture is not None and node_context is not None:
+                previous = await self.read_task(input_capture, principal=principal)
+                captured_body = {**previous.input, "capture_context": node_context.to_payload(), "session_id": None, "memory_scope": None}
+                contract = replace(previous, input=captured_body)
+                identity, digest = await self._publish("task", principal, request.idempotency_key + ":context-input:" + node.node_id, {"contract": encode_domain(contract)})
+                input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, contract.source_execution_id)
             if frozen_refs:
                 frozen_node = TaskNode(node.node_id, task=node.task, input_refs=frozen_refs, input_capture=input_capture)
                 dependencies = await self._capture_dependencies(frozen_node, graph_id, {}, principal)

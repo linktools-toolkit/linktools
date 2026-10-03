@@ -33,6 +33,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent
+from ._execution_context import ExecutionInputContext
 from ._input_contract import (
     UserPromptInput,
     normalize_input_files,
@@ -79,8 +80,15 @@ class ExecutionRequest:
     thinking: ThinkingValue
     correlation: CorrelationData = field(default_factory=dict)
     files: tuple[str, ...] = ()
+    input_context: ExecutionInputContext | None = None
 
     def __post_init__(self) -> None:
+        if self.input_context is not None and not isinstance(self.input_context, ExecutionInputContext):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self.input_context is not None and self.input_context.unavailable_reason is not None:
+            raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE)
+        if self.input_context is not None and self.memory_scope is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_owns_memory_scope"})
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
         files = normalize_input_files(self.files)
         validate_idempotency_key(self.idempotency_key)

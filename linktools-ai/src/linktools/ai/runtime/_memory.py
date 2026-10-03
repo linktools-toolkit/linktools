@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -22,6 +23,7 @@ from pydantic_ai_harness.memory import (
 )
 
 from ..core import (
+    JsonValue,
     OperationKind,
     OperationLedgerInput,
     OperationStatus,
@@ -83,6 +85,35 @@ class RuntimeMemoryStore:
             if transient
             else scope_digest
         )
+
+    async def capture(self) -> Mapping[str, JsonValue]:
+        records = await self._state.records.capture_scope(tenant_id=self._tenant_id, memory_scope_digest=self._memory_scope_digest)
+        result: dict[str, JsonValue] = {}
+        for record in records:
+            path = record.metadata["path"]
+            _validate_record(record, path, self._memory_scope_digest)
+            result[path] = {"content": await self._content(record), "version": _record_version(record)}
+        return result
+
+    async def seed_capture(self, snapshot: Mapping[str, JsonValue]) -> None:
+        for path, value in snapshot.items():
+            _normalize_path(path)
+            if not isinstance(value, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            content, version = value["content"], value["version"]
+            _validate_content(content)
+            if not isinstance(version, str) or _MEMORY_VERSION.fullmatch(version) is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            operation = MemoryOperation(id="capture:" + path, fingerprint=canonical_sha256(value))
+            if await self.get_operation(operation) is not None:
+                continue
+            now = datetime.now(timezone.utc)
+            memory_id = _memory_id(self._memory_scope_digest, path)
+            record = MemoryRecord(memory_id, self._memory_scope_digest, StoredPayload.inline_text(content),
+                {"path": path, "version": version, "operation_id": _operation_id(self._memory_scope_digest, operation.id)}, 0, now, now)
+            await self._state.records.apply_write(record, expected_revision=None,
+                operation=_operation_input(operation, self._memory_scope_digest, self._tenant_id,
+                    _MutationReceipt(path, version, False, "write"), OperationKind.MEMORY_WRITE, memory_id))
 
     async def read(self, path: str, *, max_chars: int) -> MemoryFile | None:
         logical_path = _normalize_path(path)

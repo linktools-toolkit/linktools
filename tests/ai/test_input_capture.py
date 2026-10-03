@@ -2,21 +2,24 @@
 # -*- coding: utf-8 -*-
 """Immutable historical inputs are executable without their source graph."""
 
+from collections.abc import AsyncIterator, Mapping
+from pathlib import Path
+
 import pytest
 
-from linktools.ai.core import Principal, TaskStatus
+from linktools.ai.core import JsonValue, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import CaptureInputRequest, CaptureGraphRequest, Runtime, RuntimeStorage
-from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeResultRef
+from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, CaptureGraphRequest, Runtime, RuntimeStorage
+from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext, TaskNodeResultRef
 from .test_task_mixed_node_reliability import _TaskTestModels
 
 
 @pytest.mark.asyncio
-async def test_captured_task_dependencies_outlive_source_execution(tmp_path):
-    async def source(context):
+async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Path) -> None:
+    async def source(context: TaskNodeContext[None]) -> JsonValue:
         return {"number": 17}
 
-    async def target(context):
+    async def target(context: TaskNodeContext[None]) -> JsonValue:
         return {"value": (await context.read_dependency("alias"))["number"], "input": dict(context.input)}
 
     producer = Task("capture.source", source, effect_policy="none")
@@ -44,7 +47,7 @@ async def test_captured_task_dependencies_outlive_source_execution(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_capture_permission_denied_by_default():
+async def test_capture_permission_denied_by_default() -> None:
     async with Runtime.open("capture-default-deny", models=_TaskTestModels(), storage=RuntimeStorage.in_memory()) as runtime:
         with pytest.raises(AIError) as raised:
             await runtime.executions.capture_input("unknown", CaptureInputRequest(runtime.default_principal, "capture-denied-0001", "clean"))
@@ -52,7 +55,7 @@ async def test_capture_permission_denied_by_default():
 
 
 @pytest.mark.asyncio
-async def test_agent_capture_fixed_and_reproject_inputs(tmp_path):
+async def test_agent_capture_fixed_and_reproject_inputs(tmp_path: Path) -> None:
     from linktools.ai.capability import CapabilityGroup
     from linktools.ai.runtime import AgentTaskInput
 
@@ -60,7 +63,7 @@ async def test_agent_capture_fixed_and_reproject_inputs(tmp_path):
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     calls = []
 
-    async def build(context):
+    async def build(context: AgentTaskInputContext) -> str:
         calls.append(context.input["name"])
         return "Hello " + context.input["name"]
 
@@ -89,17 +92,16 @@ async def test_agent_capture_fixed_and_reproject_inputs(tmp_path):
         restored_execution = await restored_run.execution("a")
         restored_capture = await runtime.executions.capture_input(restored_execution.execution_id, CaptureInputRequest(principal, "agent-capture-restored-input-0001", "clean"))
         assert (await runtime._input_captures.read_agent(restored_capture, principal=principal)).prompt == "different case"
-        with pytest.raises(AIError) as raised:
-            await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "agent-captured-context-0001"))
-        assert raised.value.code is ErrorCode.INPUT_CONTEXT_UNAVAILABLE
+        contextual = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "agent-captured-context-0001"))
+        assert (await runtime._input_captures.read_agent(contextual, principal=principal)).input_context.model_messages() == ()
 
 
 @pytest.mark.asyncio
-async def test_graph_capture_keeps_frozen_results_across_restart(tmp_path):
-    async def source(context):
+async def test_graph_capture_keeps_frozen_results_across_restart(tmp_path: Path) -> None:
+    async def source(context: TaskNodeContext[None]) -> JsonValue:
         return "frozen value"
 
-    async def read(context):
+    async def read(context: TaskNodeContext[None]) -> JsonValue:
         return await context.read_dependency("frozen")
 
     producer = Task("frozen.source", source, effect_policy="none")
@@ -129,11 +131,11 @@ async def test_graph_capture_keeps_frozen_results_across_restart(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_capture_preserves_failed_dependency_states(tmp_path):
-    async def fail(context):
+async def test_capture_preserves_failed_dependency_states(tmp_path: Path) -> None:
+    async def fail(context: TaskNodeContext[None]) -> JsonValue:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-    async def collect(context):
+    async def collect(context: TaskNodeContext[None]) -> JsonValue:
         with pytest.raises(AIError) as raised:
             await context.read_dependency("failed")
         assert raised.value.code is ErrorCode.TASK_DEPENDENCY_FAILED
@@ -160,7 +162,7 @@ async def test_capture_preserves_failed_dependency_states(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_subagent_capture_runs_as_independent_execution(tmp_path):
+async def test_subagent_capture_runs_as_independent_execution(tmp_path: Path) -> None:
     from linktools.ai.capability import CapabilityGroup
     from linktools.ai.runtime import AgentTaskInput, ExecutionRequest
 
@@ -181,13 +183,13 @@ async def test_subagent_capture_runs_as_independent_execution(tmp_path):
             parent_invocation_id="source-invocation", binding_contract=binding.binding_contract)
         await runtime.executions.wait(child.execution_id, principal=principal)
         reference = await runtime.executions.capture_input(child.execution_id,
-            CaptureInputRequest(principal, "capture-child-input-0001", "clean"))
+            CaptureInputRequest(principal, "capture-child-input-0001"))
         value = await runtime._input_captures.read_agent(reference, principal=principal)
         assert value.prompt == "accepted child input"
         assert value.source_invocation_id == "source-invocation"
         restored = await runtime.tasks.from_agent_capture("restored.child", reference, principal=principal)
         run = await runtime.tasks.bind(restored).start(TaskGraph("child-standalone", (
-            TaskNode("child", task=restored, input=AgentTaskInput(value.prompt)),
+            TaskNode("child", task=restored, input=AgentTaskInput(value.prompt, input_context=value.input_context)),
         )), principal=principal, idempotency_key="child-standalone-0001")
         assert (await run.wait()).status is TaskStatus.SUCCEEDED
         execution = await run.execution("child")
@@ -200,16 +202,16 @@ async def test_subagent_capture_runs_as_independent_execution(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path):
+async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path: Path) -> None:
     import json
     from linktools.ai.core import canonical_json_bytes, canonical_sha256
     from linktools.ai.runtime.state import SnapshotLimits
     from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
-    async def producer(context):
+    async def producer(context: TaskNodeContext[None]) -> JsonValue:
         return "owned result"
 
-    async def consumer(context):
+    async def consumer(context: TaskNodeContext[None]) -> JsonValue:
         return await context.read_dependency("input")
 
     make = Task("snapshot.make", producer, effect_policy="none")
@@ -249,7 +251,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
     data = canonical_json_bytes(manifest)
     digest = canonical_sha256(manifest)
 
-    async def damaged_chunks():
+    async def damaged_chunks() -> AsyncIterator[bytes]:
         yield data
 
     await archive.put("damaged", damaged_chunks(), expected_size=len(data), expected_digest=digest)
@@ -260,18 +262,18 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_task_capture_preserves_raw_input_and_projects_only_when_requested(tmp_path):
+async def test_task_capture_preserves_raw_input_and_projects_only_when_requested(tmp_path: Path) -> None:
     counts = {"source": 0, "candidate": 0}
 
-    def original(value):
+    def original(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         counts["source"] += 1
         return {"value": value["value"] + 1}
 
-    def candidate(value):
+    def candidate(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         counts["candidate"] += 1
         return {"value": value["value"] + 10}
 
-    async def echo(context):
+    async def echo(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
 
     source = Task("raw.source", echo, normalize=original, effect_policy="none")
@@ -301,7 +303,7 @@ async def test_task_capture_preserves_raw_input_and_projects_only_when_requested
 
 
 @pytest.mark.asyncio
-async def test_capture_reads_keep_owner_and_storage_tenant_authorization():
+async def test_capture_reads_keep_owner_and_storage_tenant_authorization() -> None:
     async with Runtime.open("capture-owner", models=_TaskTestModels(), storage=RuntimeStorage.in_memory()) as runtime:
         owner = Principal("owner", runtime.tenant_id)
         other = Principal("other", runtime.tenant_id)
@@ -315,8 +317,8 @@ async def test_capture_reads_keep_owner_and_storage_tenant_authorization():
 
 
 @pytest.mark.asyncio
-async def test_graph_capture_authorizes_admitted_owner_before_copying_inputs():
-    async def echo(context):
+async def test_graph_capture_authorizes_admitted_owner_before_copying_inputs() -> None:
+    async def echo(context: TaskNodeContext[None]) -> JsonValue:
         return dict(context.input)
 
     task = Task("private.graph", echo, effect_policy="none")

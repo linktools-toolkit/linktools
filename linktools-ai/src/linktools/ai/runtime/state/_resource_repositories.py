@@ -8,7 +8,7 @@ from ...core import OperationKind, OperationLedgerInput, OperationLedgerRecord, 
 from ...errors import AIError, ErrorCode
 from ._contracts import ArtifactRecord, EvaluationRecord, MemoryRecord
 from ._plan import RuntimeDomain
-from ._store import StateStore, StateTransaction, StoredRecord
+from ._store import RecordQuery, StateStore, StateTransaction, StoredRecord
 from ._repository_common import (
     ResourceRepository as _ResourceRepository,
     insert_operation as _insert_operation,
@@ -90,6 +90,24 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             ),
             sort_key=path,
         )
+
+    async def capture_scope(self, *, tenant_id: str, memory_scope_digest: str) -> tuple[MemoryRecord, ...]:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
+            rows: list[StoredRecord] = []
+            while True:
+                last = rows[-1] if rows else None
+                page = await transaction.list_records(RecordQuery(kind="memory",
+                    scope_digest=self._scope("memory", "memory_scope", memory_scope_digest),
+                    after_sort_key=None if last is None else last.sort_key,
+                    after_key_digest=None if last is None else last.key_digest, limit=1000))
+                rows.extend(page)
+                if len(page) < 1000:
+                    return tuple(rows)
+        records = await self._store.read(read)
+        return tuple([await self._decode(record, MemoryRecord) for record in records])
+
 
     async def apply_write(
         self,

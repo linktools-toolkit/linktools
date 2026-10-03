@@ -316,7 +316,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "execution_event": ("execution_id", "sequence", "event_type", "payload"),
         "execution_history_head": ("execution_id", "state", "revision", "seal_digest"),
         "execution_history_seal": ("execution_id", "run_heads", "execution_event_high_water"),
-        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "previous_execution_id", "fork_base_execution_id", "lineage_kind", "status", "revision", "event_sequence", "agent_run_sequence", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_agent_run_id", "result", "repository_instructions", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "retention_closed", "started_at"),
+        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "previous_execution_id", "fork_base_execution_id", "lineage_kind", "status", "revision", "event_sequence", "agent_run_sequence", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_agent_run_id", "result", "repository_instructions", "input_context", "context_imported", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "retention_closed", "started_at"),
         "execution_run_seal_head": ("agent_run_id", "event_count", "checkpoint_count", "transcript_message_count", "projection_digest", "interaction_count"),
         "model_interaction": ("agent_run_id", "step_index", "request_sequence", "purpose", "output_retry_index", "model", "request_context", "request_envelope", "response_context", "status", "error_code", "duration_ns", "usage", "started_at", "finished_at", "attachments"),
         "execution_start_claim": ("execution_id", "expected_revision", "expected_event_sequence", "scope", "idempotency_key_digest", "request_digest", "started_at"),
@@ -1881,16 +1881,16 @@ def _iter_runtime_object_refs(
                 value,
                 RuntimePayloadRef,
                 codec,
-                persisted=True,
+                persisted="schema" in value,
             )
             yield from _iter_runtime_object_refs(decoded, domain, codec)
             return
         if dataclass_name == codec.wire_ids[StoredPayload]:
-            decoded = _decode_domain(value, StoredPayload, codec, persisted=True)
+            decoded = _decode_domain(value, StoredPayload, codec, persisted="schema" in value)
             yield from _iter_runtime_object_refs(decoded, domain, codec)
             return
         if dataclass_name == codec.wire_ids[ObjectRef]:
-            decoded = _decode_domain(value, ObjectRef, codec, persisted=True)
+            decoded = _decode_domain(value, ObjectRef, codec, persisted="schema" in value)
             yield domain, decoded
             return
         if dataclass_name == codec.wire_ids.get(RecoveryTerminalOutcome):

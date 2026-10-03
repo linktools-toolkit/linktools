@@ -83,6 +83,7 @@ from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeS
 from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInputBuilder
 from ._context import RuntimeContext
+from ._execution_context import ExecutionInputContext
 from ._input_contract import normalize_input_files
 from ._input import CanonicalUserInput
 from ._metrics import (
@@ -609,8 +610,11 @@ class Runtime(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
         compiled_agent: "CompiledAgent | None" = None,
         dependency_hold_id: "str | None" = None,
+        input_context: ExecutionInputContext | None = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
+        if input_context is not None and session_id is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_requires_new_execution"})
         resolved_principal = self._resolve_principal(principal)
         effective_correlation = _overlay_request_correlation(
             self.correlation,
@@ -637,6 +641,7 @@ class Runtime(Generic[AppT]):
             thinking=resolved_thinking,
             correlation=effective_correlation,
             files=resolved_files,
+            input_context=input_context,
         )
         if session_id is None:
             handle = await self._execution_service.start(
@@ -947,6 +952,7 @@ class Runtime(Generic[AppT]):
                 correlation=invocation.correlation,
                 compiled_agent=compiled,
                 dependency_hold_id=dependency_hold_id,
+                input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
             )
             if self._input_captures is not None:
                 await self._input_captures.record_invocation(execution.execution_id, invocation)

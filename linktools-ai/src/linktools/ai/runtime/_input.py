@@ -643,6 +643,24 @@ def _input_view(
     return normalized
 
 
+def captured_input_files(value: CanonicalUserInput, count: int) -> tuple[UserContent, ...]:
+    """Read the accepted file suffix produced by this input materializer."""
+    if not isinstance(value, MaterializedUserContent):
+        raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "accepted_file_view_not_retained"})
+    views = value.view.get("files")
+    if not isinstance(views, list) or len(views) < count or len(value) < 2 * count:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    files = tuple(value[-2 * count:])
+    for index, view in enumerate(views[-count:]):
+        label, content = files[2 * index:2 * index + 2]
+        if (not isinstance(view, Mapping) or not isinstance(content, BinaryContent)
+            or label != "Workspace file path: " + json.dumps(view.get("path"))
+            or content.media_type != view.get("media_type") or len(content.data) != view.get("size")
+            or hashlib.sha256(content.data).hexdigest() != view.get("digest")):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return files
+
+
 def stored_input_attachment_views(
     value: "StoredUserInput",
 ) -> tuple[Mapping[str, JsonValue], ...]:
@@ -739,6 +757,7 @@ def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ..
 
 
 __all__ = [
+    "captured_input_files",
     "CanonicalUserInput",
     "ExecutionInputMaterializer",
     "InputIntent",

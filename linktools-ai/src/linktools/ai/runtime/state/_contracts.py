@@ -711,6 +711,8 @@ class ExecutionRecord:
     conversation_agent_run_id: str | None = None
     result: ResultRecord | None = None
     repository_instructions: RuntimePayloadRef | None = None
+    input_context: RuntimePayloadRef | None = None
+    context_imported: bool = False
     error_diagnostics: ErrorDiagnostics | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
     task_attempt: int = 0
@@ -721,6 +723,10 @@ class ExecutionRecord:
     started_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.context_imported, bool) or (self.input_context is not None and not isinstance(self.input_context, RuntimePayloadRef)):
+            raise TypeError("execution input context is invalid")
+        if self.context_imported and (self.input_context is None or self.session_id is not None):
+            raise ValueError("imported context must belong to an independent execution")
         agent_binding = isinstance(self.binding, AgentBindingContract)
         task_binding = isinstance(self.binding, TaskBindingContract)
         if agent_binding == task_binding:
@@ -746,6 +752,8 @@ class ExecutionRecord:
             if (
                 self.session_id is not None
                 or self.memory_scope is not None
+                or self.input_context is not None
+                or self.context_imported
                 or self.conversation_agent_run_id is not None
                 or self.parent_execution_id is not None
                 or self.parent_invocation_id is not None
@@ -2345,6 +2353,7 @@ class EvaluationRepository(RuntimeRepository, Protocol):
 
 
 class MemoryRepository(RuntimeRepository, Protocol):
+    async def capture_scope(self, *, tenant_id: str, memory_scope_digest: str) -> tuple[MemoryRecord, ...]: ...
     async def get_header(
         self, memory_id: str, *, tenant_id: str
     ) -> ResourceRef | None: ...

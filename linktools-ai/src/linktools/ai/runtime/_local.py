@@ -83,7 +83,8 @@ from ._metrics import (
     _release_metric_execution_context,
 )
 from ._message import encode_model_messages
-from ._memory import MemoryStore
+from ._execution_context import ExecutionInputContext
+from ._memory import MemoryStore, RuntimeMemoryStore
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._tool import (
     RuntimeToolOperationBridge,
@@ -113,6 +114,7 @@ from .state._contracts import (
     ExternalCallRecord,
     IdempotencyRecord,
     LoadedModelContext,
+    LoadedContextMessage,
     PendingDeferredCall,
     PendingToolContinuation,
     RecoveryCheckpointState,
@@ -2698,6 +2700,33 @@ class LocalExecutionBackend:
             len(operations),
         )
 
+    async def load_input_context(self, reference: RuntimePayloadRef | None) -> ExecutionInputContext | None:
+        if reference is None:
+            return None
+        payload = reference.payload
+        value = payload.decode() if payload.kind == "inline" else json.loads(await read_runtime_object(self._execution_objects, payload.ref))
+        return ExecutionInputContext.from_payload(value)
+
+    async def _persist_input_context(self, execution: ExecutionRecord, context: ExecutionInputContext) -> ExecutionRecord:
+        stored = StoredPayload.inline_json(context.to_payload())
+        if not payload_fits_inline(stored, self._payload_policy):
+            stored = StoredPayload.object(await put_runtime_object(self._execution_objects, RuntimeObjectKeyFactory(self._namespace),
+                RuntimeDomain.EXECUTION, self._tenant_id, canonical_json_bytes(context.to_payload())))
+        reference = RuntimePayloadRef(stored, RuntimeDomain.EXECUTION)
+        current = execution
+        while current.input_context is None:
+            try:
+                return await self._execution.executions.compare_and_swap(current.execution_id, tenant_id=self._tenant_id,
+                    expected_revision=current.revision,
+                    next_record=replace(current, input_context=reference, revision=current.revision + 1, updated_at=datetime.now(timezone.utc)))
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                current = await self._execution.executions.get(current.execution_id, tenant_id=self._tenant_id)
+                if current is None or current.status is not ExecutionStatus.STARTED:
+                    raise AIError(ErrorCode.EXECUTION_CANCELLED) from error
+        return current
+
     async def _run(
         self,
         request: ExecutionRequest,
@@ -2896,6 +2925,7 @@ class LocalExecutionBackend:
                 if tool_repository is not None
                 else None
             )
+            accepted_context = await self.load_input_context(current.input_context)
             loaded_context = LoadedModelContext(())
             session_history_source = (
                 current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
@@ -2918,6 +2948,9 @@ class LocalExecutionBackend:
                     recovery_history_agent_run_id,
                 )
                 history = list(loaded_context.model_messages())
+            elif accepted_context is not None:
+                history = list(accepted_context.model_messages())
+                loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
             elif session_history_source:
                 if session_history_owner is not None:
                     if (
@@ -2943,8 +2976,8 @@ class LocalExecutionBackend:
             else:
                 history = cast("list[ModelMessage]", await self._history(current))
             session_history_start = (
-                current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
-                and bool(history)
+                accepted_context.replace_history_system_prompt if accepted_context is not None
+                else current.lineage_kind is ExecutionLineageKind.SESSION_RESUME and bool(history)
             )
             if isinstance(self._run_store, RuntimeAgentRunStore):
                 self._run_store.register_context_baseline(agent_run_id, loaded_context)
@@ -2999,6 +3032,33 @@ class LocalExecutionBackend:
                 if session is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 session_metadata = session.metadata
+            if accepted_context is None:
+                memory_capture = None
+                reason = None
+                if memory is not None:
+                    if isinstance(memory, RuntimeMemoryStore):
+                        memory_capture = await memory.capture()
+                    else:
+                        reason = "memory_store_has_no_consistent_capture"
+                accepted_context = ExecutionInputContext.from_messages(history, session_metadata=session_metadata,
+                    memory=memory_capture,
+                    repository_instructions=None if initial_repository_instructions is None else initial_repository_instructions.to_payload(),
+                    replace_history_system_prompt=session_history_start, unavailable_reason=reason)
+                proposed_context = accepted_context
+                current = await self._persist_input_context(current, accepted_context)
+                accepted_context = await self.load_input_context(current.input_context)
+                if accepted_context.digest != proposed_context.digest:
+                    history = list(accepted_context.model_messages())
+                    loaded_context = LoadedModelContext(tuple(LoadedContextMessage(message, None) for message in history))
+                    session_history_start = accepted_context.replace_history_system_prompt
+                    if isinstance(self._run_store, RuntimeAgentRunStore):
+                        self._run_store.register_context_baseline(agent_run_id, loaded_context)
+            if current.context_imported:
+                session_metadata = accepted_context.session_metadata
+                if memory is not None:
+                    if not isinstance(memory, RuntimeMemoryStore):
+                        raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "memory_store_has_no_isolated_capture"})
+                    await memory.seed_capture(accepted_context.memory or {})
             public_context = AgentContext(
                 app=self._app,
                 principal=request.principal,
@@ -3037,7 +3097,7 @@ class LocalExecutionBackend:
                         agent_run_id=agent_run_id,
                         agent_run_sequence=current.agent_run_sequence,
                         history_id=history_id,
-                        memory_store=memory,
+                        memory_store=memory if selected_memory else None,
                         plan_store_resolver=lambda _ctx: plan_store,
                         mode=current.mode,
                         planning=current.planning,
