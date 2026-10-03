@@ -12,7 +12,7 @@ from .hooks import HookPhase
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
-    from typing import Any
+    from typing import Any, Callable
     from ..container import BaseContainer
     from ..context import EventContext
     from ..manager import ContainerManager
@@ -70,15 +70,7 @@ class LifecycleDispatcher:
             yield from cls.iter_steps("up", containers, after=after)
         elif action == "up":
             if after is not True:
-                for container in containers:
-                    yield LifecycleStep(container, HookPhase.CHECK, "on_check")
-                # Every on_starting may register hooks on another container.
-                # Finish all callbacks before looking up BEFORE_START buckets.
-                for container in containers:
-                    yield LifecycleStep(container, callback="on_starting")
-                for container in containers:
-                    yield LifecycleStep(container, HookPhase.BEFORE_START)
-                yield LifecycleStep(phase=HookPhase.BEFORE_START)
+                yield from cls._iter_start_steps(lambda: containers)
             if after is not False:
                 for container in reversed(containers):
                     yield LifecycleStep(container, HookPhase.AFTER_START, "on_started", reverse=True)
@@ -94,6 +86,22 @@ class LifecycleDispatcher:
         else:
             raise ContainerError(f"Unsupported lifecycle action: {action!r}; expected up/restart/down")
 
+    @classmethod
+    def _iter_start_steps(
+            cls,
+            get_containers: "Callable[[], Sequence[BaseContainer]]",
+    ) -> "Iterator[LifecycleStep]":
+        # Callbacks may replace the targets; each phase reads the current list.
+        for container in get_containers():
+            yield LifecycleStep(container, HookPhase.CHECK, "on_check")
+        # Every on_starting may register hooks on another container.
+        # Finish all callbacks before looking up BEFORE_START buckets.
+        for container in get_containers():
+            yield LifecycleStep(container, callback="on_starting")
+        for container in get_containers():
+            yield LifecycleStep(container, HookPhase.BEFORE_START)
+        yield LifecycleStep(phase=HookPhase.BEFORE_START)
+
     def _dispatch_steps(self, steps: "Iterable[LifecycleStep]", context: "EventContext") -> None:
         for step in steps:
             if step.callback is not None:
@@ -104,7 +112,7 @@ class LifecycleDispatcher:
 
     @contextlib.contextmanager
     def notify_start(self, context: "EventContext") -> "Iterator[None]":
-        self._dispatch_steps(self.iter_steps("up", context.target_containers, after=False), context)
+        self._dispatch_steps(self._iter_start_steps(lambda: context.target_containers), context)
         yield
         self._dispatch_steps(self.iter_steps("up", context.target_containers, after=True), context)
 

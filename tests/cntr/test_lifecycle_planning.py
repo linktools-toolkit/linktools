@@ -180,3 +180,43 @@ def test_starting_callbacks_all_finish_before_start_registry_lookup(lifecycle_ca
         ("runtime", None, "up"),
         ("callback", "second", "started"), ("callback", "first", "started"),
     ]
+
+
+@pytest.mark.parametrize("reassign_at", ["on_check", "check_hook", "on_starting"])
+def test_start_phases_reread_reassigned_targets(lifecycle_case, reassign_at):
+    manager, containers, context, events = lifecycle_case
+    first, second = containers
+
+    def reassign(context):
+        events.append(("reassign", "first", reassign_at))
+        context.target_containers = [second]
+
+    if reassign_at == "check_hook":
+        first.hooks.register(HookPhase.CHECK, reassign)
+    else:
+        setattr(first, reassign_at, reassign)
+
+    def removed_target_hook():
+        raise AssertionError("Removed target must not run before-start hooks")
+
+    first.hooks.register(HookPhase.BEFORE_START, removed_target_hook)
+    _register(second.hooks, HookPhase.BEFORE_START, events, "second", "remaining")
+    _register(manager.hooks, HookPhase.BEFORE_START, events, None, "manager")
+
+    with manager.lifecycle.notify_start(context):
+        events.append(("runtime", None, "up"))
+
+    check_events = [("callback", "first", "check"), ("callback", "second", "check")]
+    starting_events = [("callback", "second", "starting")]
+    if reassign_at == "on_check":
+        check_events[0] = ("reassign", "first", reassign_at)
+    elif reassign_at == "check_hook":
+        check_events.insert(1, ("reassign", "first", reassign_at))
+    else:
+        starting_events.insert(0, ("reassign", "first", reassign_at))
+    assert events == check_events + starting_events + [
+        ("before-start", "second", "remaining"),
+        ("before-start", None, "manager"),
+        ("runtime", None, "up"),
+        ("callback", "second", "started"),
+    ]
