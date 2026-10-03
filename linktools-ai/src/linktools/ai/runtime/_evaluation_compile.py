@@ -214,6 +214,7 @@ class EvaluationCompiler:
         capture = None
         contract = None
         defaults: dict[str, JsonValue] = {}
+        original_input = node.original_input
         captured_from = None
         references = node.input_refs
         excluded = tuple(sorted(set(node.dependencies) | {
@@ -252,9 +253,12 @@ class EvaluationCompiler:
                             if contract is None else contract.input)
                 if any(name in data and data[name] != item for name, item in value.input.items()):
                     raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "node input has conflicting owners")
+                additions = {name: item for name, item in value.input.items() if name not in data}
                 data.update(value.input)
                 if contract is not None:
-                    contract = replace(contract, original_input={**contract.original_input, **value.input})
+                    contract = replace(contract, original_input={**contract.original_input, **additions})
+                elif original_input is not None:
+                    original_input = {**original_input, **additions}
                 if any(name in references and references[name] != ref for name, ref in value.input_refs.items()):
                     raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "input alias has two owners")
                 references = {**references, **value.input_refs}
@@ -295,7 +299,7 @@ class EvaluationCompiler:
         return TaskNode.from_resolved(
             node.node_id, node.dependencies, task=node.task, input=data,
             input_refs=references, input_capture=capture,
-            original_input=node.original_input if capture is None and input_mode == "fixed_input" else None,
+            original_input=original_input if capture is None and input_mode == "fixed_input" else None,
             budget_cost=node.budget_cost,
             expander=node.expander, timeout_seconds=node.timeout_seconds,
             max_attempts=node.max_attempts, retry_delay_seconds=node.retry_delay_seconds,

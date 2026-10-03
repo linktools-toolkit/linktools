@@ -347,9 +347,12 @@ async def test_function_task_capture_keeps_agent_shaped_business_json(tmp_path: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("input_mode", ("fixed_input", "reproject_input"))
-async def test_captured_case_preserves_template_fields_and_original_parameters(
-    tmp_path: Path, input_mode: str,
+@pytest.mark.parametrize(("capture_owner", "input_mode"), (
+    ("case", "fixed_input"), ("case", "reproject_input"),
+    ("template_graph", "fixed_input"), ("template_input", "fixed_input"),
+))
+async def test_captured_inputs_preserve_merged_fields_and_original_parameters(
+    tmp_path: Path, capture_owner: str, input_mode: str,
 ) -> None:
     def normalize(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         return {**value, "number": value["number"] + 1}
@@ -367,13 +370,23 @@ async def test_captured_case_preserves_template_fields_and_original_parameters(
         await source.wait()
         execution = await source.execution("target")
         captured = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(PRINCIPAL, "source-input"))
+        merged = {"number": 2 if input_mode == "fixed_input" else 1, "added": "template"}
+        if capture_owner == "case":
+            case_input = TaskCaseInput(capture=captured)
+            graph_target = GraphTargetSpec(template=TaskGraphTemplate((TaskNode("target", task=target, input=merged),)),
+                                           outputs={"answer": "target"})
+        else:
+            case_input = TaskCaseInput(input=merged)
+            if capture_owner == "template_graph":
+                graph_capture = await runtime.tasks.capture_graph(source.graph_id, CaptureGraphRequest(PRINCIPAL, "graph-input"))
+                graph_target = GraphTargetSpec(capture=graph_capture, outputs={"answer": "target"})
+            else:
+                graph_target = GraphTargetSpec(template=TaskGraphTemplate((TaskNode("target", task=target, input_capture=captured),)),
+                                               outputs={"answer": "target"})
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), (
-            CaseSpec.graph(CaseRef("data", "one", 1), inputs={"target": TaskCaseInput(capture=captured)}),
+            CaseSpec.graph(CaseRef("data", "one", 1), inputs={"target": case_input}),
         )), principal=PRINCIPAL, idempotency_key="dataset")
-        template = TaskGraphTemplate((TaskNode("target", task=target, input={
-            "number": 2 if input_mode == "fixed_input" else 1, "added": "template",
-        }),))
-        candidate = CandidateSpec("candidate", graph_template=GraphTargetSpec(template=template, outputs={"answer": "target"}))
+        candidate = CandidateSpec("candidate", graph_template=graph_target)
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (candidate,), (scorer,),
             input_mode=input_mode), PRINCIPAL, "evaluate"), engine=engine)
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
