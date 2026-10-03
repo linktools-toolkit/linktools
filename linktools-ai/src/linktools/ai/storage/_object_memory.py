@@ -14,6 +14,7 @@ from ._object import (
     _CHUNK_SIZE,
     _digest,
     _validate_key,
+    _validate_put,
     _validate_store_id,
 )
 
@@ -39,6 +40,7 @@ class InMemoryObjectStore:
         expected_size: int,
         expected_digest: str,
     ) -> ObjectStat:
+        _validate_put(key, expected_size, expected_digest)
         data, digest = await _spool_memory(chunks, expected_size)
         if len(data) != expected_size or digest != expected_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

@@ -772,61 +772,6 @@ class TaskRepositoryImpl(RepositoryBase):
         node_candidate = projected_record(self, node_record, value)
         await replace_checked(transaction, node_candidate, node_record.storage_version)
 
-    async def _current_graph_in_transaction(
-        self,
-        transaction: StateTransaction,
-        graph_id: str,
-    ) -> tuple[TaskGraphView, tuple[TaskNodeView, ...]]:
-        graph_record = await transaction.get_record(self._graph_key(graph_id))
-        if graph_record is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._validate_graph_record(graph_record, graph_id)
-        header = await self._decode(graph_record, TaskGraphView)
-        if header.graph_id != graph_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        definition_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._definition_parent(graph_id),
-                kind="task_node_definition",
-            )
-        )
-        state_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._state_parent(graph_id),
-                kind="task_node_state",
-            )
-        )
-        definitions: dict[str, TaskNode] = {}
-        for record in definition_records:
-            value = await self._decode(record, TaskNode)
-            self._validate_definition_record(record, graph_id, value.node_id)
-            if value.node_id in definitions:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            definitions[value.node_id] = value
-        states: dict[str, TaskNodeView] = {}
-        for record in state_records:
-            value = await self._decode(record, TaskNodeView)
-            self._validate_state_record(record, graph_id, value.node_id)
-            if value.node_id in states:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            states[value.node_id] = value
-        if set(definitions) != set(states):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        nodes = tuple(definitions[node_id] for node_id in sorted(definitions))
-        ordered_states = tuple(
-            replace(states[node.node_id], dependencies=node.dependencies)
-            for node in nodes
-        )
-        TaskGraph(graph_id, nodes)
-        return (
-            TaskGraphView(
-                graph_id,
-                _effective_graph_status(header, ordered_states, nodes),
-                nodes,
-            ),
-            ordered_states,
-        )
-
     async def _mutate_with_event_retry(
         self,
         operation: Callable[[StateTransaction], Awaitable[_ValueT]],

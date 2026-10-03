@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 
 from ..artifacts import collect_candidates, sha256_of
 from ..container import ContainerError
-from ..lifecycle.hooks import HookPhase
 from ..runtime.compose import ComposeOptions
 from ..runtime.structured import redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
@@ -25,16 +24,6 @@ if TYPE_CHECKING:
     from ..manager import ContainerManager
 
 PLAN_SCHEMA_VERSION = 1
-
-# Hook phases each action's dispatch touches, in the same order LifecycleDispatcher uses.
-_ACTION_PHASES = {
-    "up": (HookPhase.CHECK, HookPhase.BEFORE_START, HookPhase.AFTER_START),
-    "restart": (
-        HookPhase.BEFORE_STOP, HookPhase.AFTER_STOP,
-        HookPhase.CHECK, HookPhase.BEFORE_START, HookPhase.AFTER_START,
-    ),
-    "down": (HookPhase.BEFORE_STOP, HookPhase.AFTER_STOP),
-}
 
 
 class ExecutionPlanner:
@@ -87,18 +76,22 @@ class ExecutionPlanner:
             commands.append(self._planned_command("down", [*file_args, "down", *services]))
 
         hooks = []
-        for phase in _ACTION_PHASES[action]:
-            for container in selection.target_containers:
-                # A hook order that couldn't actually execute (missing
-                # required before/after reference, or a cycle) must fail
-                # the plan, not be silently shown as if it would run.
-                container.hooks.validate(phase)
-                for hook in container.hooks.iter_phase(phase):
-                    hooks.append(PlannedHook(phase=phase.value, container=container.name,
-                                             name=hook.name, opaque=hook.opaque))
-            manager.hooks.validate(phase)
-            for hook in manager.hooks.iter_phase(phase):
-                hooks.append(PlannedHook(phase=phase.value, container=None, name=hook.name, opaque=hook.opaque))
+        for step in manager.lifecycle.iter_steps(action, selection.target_containers):
+            if step.phase is None:
+                continue
+            owner = step.container if step.container is not None else manager
+            # Validate only buckets that dispatch actually visits, without
+            # executing the callbacks that may register additional hooks.
+            owner.hooks.validate(step.phase)
+            ordered = list(owner.hooks.iter_phase(step.phase))
+            if step.reverse:
+                ordered.reverse()
+            for hook in ordered:
+                hooks.append(PlannedHook(
+                    phase=step.phase.value,
+                    container=step.container.name if step.container is not None else None,
+                    name=hook.name, opaque=hook.opaque,
+                ))
 
         warnings = []
         preflight = "skipped"

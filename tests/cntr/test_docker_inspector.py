@@ -20,7 +20,10 @@ def _service_container(fresh_manager, name, services):
 
 
 @pytest.fixture
-def inspector(fresh_manager):
+def inspector(fresh_manager, monkeypatch):
+    # Keep Docker/Compose argv construction real, but never launch a process
+    # before the per-test structured output/error stubs can take effect.
+    monkeypatch.setattr(fresh_manager.runtime, "create_process", lambda *args, **kwargs: _FakeProcess(args))
     return DockerInspector(fresh_manager)
 
 
@@ -131,6 +134,41 @@ def test_duplicate_ids_are_deduped_stably(inspector, fresh_manager, monkeypatch)
 
     inspector.get_project_state([nginx])
     assert seen_ids == [["abc123abc123", "def456def456"]]
+
+
+def test_inspector_builds_real_commands_without_launching_processes(inspector, fresh_manager, monkeypatch):
+    nginx = _service_container(fresh_manager, "nginx", ["nginx"])
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\n")
+    _stub_inspect(monkeypatch, fresh_manager, [_item()])
+    commands = []
+    create_process = fresh_manager.runtime.create_process
+
+    def record_process(*args, **kwargs):
+        commands.append(args)
+        return create_process(*args, **kwargs)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("Inspector unit tests must not launch subprocesses")
+
+    monkeypatch.setattr(fresh_manager.runtime, "create_process", record_process)
+    monkeypatch.setattr("linktools.cntr.runtime.process.popen", fail)
+    inspector.get_project_state([nginx])
+
+    assert commands[0][:2] == ("docker", "compose")
+    assert "--file" in commands[0]
+    assert commands[0][-3:] == ("ps", "--all", "--quiet")
+    assert commands[1] == ("docker", "inspect", "--type", "container", "abc123abc123")
+
+
+def test_process_creation_failure_still_raises_unavailable(inspector, fresh_manager, monkeypatch):
+    nginx = _service_container(fresh_manager, "nginx", ["nginx"])
+
+    def fail(*args, **kwargs):
+        raise FileNotFoundError("docker binary missing")
+
+    monkeypatch.setattr(fresh_manager.runtime, "create_process", fail)
+    with pytest.raises(RuntimeInspectionUnavailable, match="docker binary missing"):
+        inspector.get_project_state([nginx])
 
 
 def test_invalid_id_line_raises_output_error(inspector, fresh_manager, monkeypatch):

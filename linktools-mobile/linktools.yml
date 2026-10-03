@@ -43,3 +43,6 @@ checks:
       - F82
     paths:
       - src
+  pytest:
+    paths:
+      - ../tests/mobile

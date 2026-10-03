@@ -7,10 +7,10 @@ import json
 import shutil
 import time
 import uuid
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from ._config_store import ConfigStore
     from ._environ import BaseEnviron
 
@@ -26,16 +26,12 @@ def _digest(path: "Path") -> str:
     return h.hexdigest()[:8]
 
 
-def _backup(config_dir: "Path", path: "Path") -> None:
-    """Move ``path`` into ``<config_dir>/migrations/<migration_id>/``
-    instead of deleting it outright -- a migration is a one-way, best-
-    effort read of an old format; keep the original around in case
-    something about the read turns out to be wrong.
+def backup_legacy_path(config_dir: "Path", path: "Path") -> None:
+    """Move legacy data to a unique migration backup and record its source.
 
-    ``migration_id`` is ``<UTC timestamp>-<sha256 prefix>-<uuid4 prefix>``:
-    unique per call, so repeated migrations never overwrite a previous
-    backup (matches the ``ConfigMigration`` class this project used to
-    have, before it was deleted outright in commit 043b058d).
+    Read failures leave the original in place. Backups use UTC time, a
+    content digest prefix, and a random suffix so repeated migrations do
+    not overwrite earlier data.
     """
     if not path.exists() and not path.is_symlink():
         return
@@ -89,7 +85,7 @@ def migrate_legacy_config_cfg(environ: "BaseEnviron", store: "ConfigStore") -> N
         # Not utils.remove_file(): it checks environ.debug, which (via
         # the process-wide singleton) can re-enter this same
         # not-yet-cached _config_store construction and recurse.
-        _backup(environ.paths.config, old_path)
+        backup_legacy_path(environ.paths.config, old_path)
         if migrated:
             logger.info(f"Migrated old config file: {', '.join(migrated)}")
     except Exception as e:

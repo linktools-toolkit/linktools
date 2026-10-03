@@ -161,6 +161,12 @@ _WORKSPACE_INSTRUCTIONS = InstructionPart(
     dynamic=False,
 )
 _logger = environ.get_logger("ai.capability.workspace")
+_WORKSPACE_REJECTED_CODES = frozenset({
+    ErrorCode.REQUEST_FIELD_INVALID,
+    ErrorCode.STORAGE_NOT_FOUND,
+    ErrorCode.AUTHORIZATION_DENIED,
+    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+})
 _INVALID_WORKSPACE_REQUEST = (
     "The workspace tool arguments or target are invalid. Correct them and retry."
 )
@@ -278,8 +284,8 @@ class _WorkspaceToolSurface:
         operation: Awaitable[_ResultT],
         *,
         name: str,
-        rejected_codes: frozenset[ErrorCode],
-        rejected_message: str,
+        rejected_codes: frozenset[ErrorCode] = _WORKSPACE_REJECTED_CODES,
+        rejected_message: str = _INVALID_WORKSPACE_REQUEST,
     ) -> _ResultT:
         try:
             return await operation
@@ -304,15 +310,6 @@ class _WorkspaceToolSurface:
         return await self._call(
             self._attach_files(paths),
             name="attach_files",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.STORAGE_NOT_FOUND,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-                }
-            ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def _attach_files(self, paths: list[str]) -> ToolReturn:
@@ -390,15 +387,6 @@ class _WorkspaceToolSurface:
         return await self._call(
             self._require_session().read_file(path, offset=offset, limit=limit),
             name="read_file",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.STORAGE_NOT_FOUND,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-                }
-            ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def write_file(
@@ -419,14 +407,9 @@ class _WorkspaceToolSurface:
         Returns:
             Confirmation message with new hash.
         """
-        rejected_codes = {
-            ErrorCode.REQUEST_FIELD_INVALID,
-            ErrorCode.STORAGE_NOT_FOUND,
-            ErrorCode.AUTHORIZATION_DENIED,
-            ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-        }
+        rejected_codes = _WORKSPACE_REJECTED_CODES
         if expected_hash is not None:
-            rejected_codes.add(ErrorCode.STORAGE_CONFLICT)
+            rejected_codes |= {ErrorCode.STORAGE_CONFLICT}
         return await self._call(
             self._require_session().write_file(
                 path,
@@ -434,8 +417,7 @@ class _WorkspaceToolSurface:
                 expected_hash=expected_hash,
             ),
             name="write_file",
-            rejected_codes=frozenset(rejected_codes),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
+            rejected_codes=rejected_codes,
         )
 
     async def edit_file(
@@ -461,14 +443,9 @@ class _WorkspaceToolSurface:
         Returns:
             Summary with new hash for subsequent operations.
         """
-        rejected_codes = {
-            ErrorCode.REQUEST_FIELD_INVALID,
-            ErrorCode.STORAGE_NOT_FOUND,
-            ErrorCode.AUTHORIZATION_DENIED,
-            ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-        }
+        rejected_codes = _WORKSPACE_REJECTED_CODES
         if expected_hash is not None:
-            rejected_codes.add(ErrorCode.STORAGE_CONFLICT)
+            rejected_codes |= {ErrorCode.STORAGE_CONFLICT}
         return await self._call(
             self._require_session().edit_file(
                 path,
@@ -477,8 +454,7 @@ class _WorkspaceToolSurface:
                 expected_hash=expected_hash,
             ),
             name="edit_file",
-            rejected_codes=frozenset(rejected_codes),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
+            rejected_codes=rejected_codes,
         )
 
     async def list_directory(self, path: str = ".") -> str:
@@ -493,15 +469,6 @@ class _WorkspaceToolSurface:
         return await self._call(
             self._require_session().list_directory(path),
             name="list_directory",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.STORAGE_NOT_FOUND,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-                }
-            ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def search_files(
@@ -528,15 +495,6 @@ class _WorkspaceToolSurface:
                 include_glob=include_glob,
             ),
             name="search_files",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.STORAGE_NOT_FOUND,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-                }
-            ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def find_files(self, pattern: str, *, path: str = ".") -> str:
@@ -553,15 +511,6 @@ class _WorkspaceToolSurface:
         return await self._call(
             self._require_session().find_files(pattern, path=path),
             name="find_files",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.STORAGE_NOT_FOUND,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-                }
-            ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def create_directory(self, path: str) -> str:
@@ -576,15 +525,6 @@ class _WorkspaceToolSurface:
         return await self._call(
             self._require_session().create_directory(path),
             name="create_directory",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.STORAGE_NOT_FOUND,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-                }
-            ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def file_info(self, path: str) -> str:
@@ -599,15 +539,6 @@ class _WorkspaceToolSurface:
         return await self._call(
             self._require_session().file_info(path),
             name="file_info",
-            rejected_codes=frozenset(
-                {
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.STORAGE_NOT_FOUND,
-                    ErrorCode.AUTHORIZATION_DENIED,
-                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
-                }
-            ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def run_command(
@@ -638,7 +569,6 @@ class _WorkspaceToolSurface:
                     ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
                 }
             ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def start_command(self, command: str) -> str:
@@ -664,7 +594,6 @@ class _WorkspaceToolSurface:
                     ErrorCode.TOO_MANY_PENDING_OPERATIONS,
                 }
             ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def check_command(self, command_id: str) -> str:
@@ -686,7 +615,6 @@ class _WorkspaceToolSurface:
                     ErrorCode.AUTHORIZATION_DENIED,
                 }
             ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def stop_command(self, command_id: str) -> str:
@@ -708,7 +636,6 @@ class _WorkspaceToolSurface:
                     ErrorCode.AUTHORIZATION_DENIED,
                 }
             ),
-            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
 

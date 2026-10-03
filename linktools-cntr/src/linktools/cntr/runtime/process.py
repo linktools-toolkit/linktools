@@ -28,7 +28,7 @@ def _is_chown_supported(system: str = None) -> bool:
     return (system or get_system()) == "linux"
 
 
-_DEFAULT_DOCKER_HOST = "/var/run/docker.sock"
+DEFAULT_DOCKER_HOST = "/var/run/docker.sock"
 
 
 def _docker_host_args(host: "str | None") -> "list[str]":
@@ -39,7 +39,7 @@ def _docker_host_args(host: "str | None") -> "list[str]":
     docker-rootless's active `docker context`) is left alone, since the
     built-in default string doesn't itself describe where that resolves to.
     """
-    if not host or host == _DEFAULT_DOCKER_HOST:
+    if not host or host == DEFAULT_DOCKER_HOST:
         return []
     if "://" not in host:
         host = f"unix://{host}"

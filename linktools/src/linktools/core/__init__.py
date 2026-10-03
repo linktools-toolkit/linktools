@@ -44,6 +44,7 @@ from ._profile import (
     ProjectProfile,
 )
 from ._entrypoint import select_entry_points
+from ._migrate import backup_legacy_path
 
 __all__ = [
     # environ
@@ -67,6 +68,8 @@ __all__ = [
     # capability
     "BaseCapability", "Capability", "Updater", "DevelopUpdater", "GitUpdater",
     "PypiUpdater",
+    # migration
+    "backup_legacy_path",
     # entrypoint
     "select_entry_points",
 ]

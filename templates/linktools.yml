@@ -9,7 +9,7 @@ dev-dependencies:
 
 release-dependencies: []
 
-optional-dependencies: {}
+optional-dependencies: {{}}
 
 scripts:
   capability: linktools.capabilities.{name}:__cap_{name}__

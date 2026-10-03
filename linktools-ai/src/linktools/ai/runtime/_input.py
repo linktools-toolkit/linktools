@@ -29,6 +29,7 @@ from ._input_contract import (
     CanonicalUserInput,
     MaterializedUserContent,
     UserPromptInput,
+    normalize_input_files,
     validate_user_content,
     validate_user_input,
 )
@@ -72,7 +73,7 @@ class InputIntent:
 
 def input_intent(value: _UserPromptInput, files: Sequence[str]) -> InputIntent:
     canonical = validate_user_input(value)
-    normalized_files = _require_files(files)
+    normalized_files = normalize_input_files(files)
     return InputIntent(_draft_prompt(canonical), normalized_files)
 
 
@@ -207,7 +208,7 @@ class ExecutionInputMaterializer:
         return self._access
 
     async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:
-        raw_files = _require_files(files)
+        raw_files = normalize_input_files(files)
         if raw_files and self._access is None:
             raise AIError(
                 ErrorCode.REQUEST_FIELD_INVALID,
@@ -554,20 +555,8 @@ def _file_request_error(
     return None
 
 
-def _require_files(value: Sequence[str]) -> tuple[str, ...]:
-    if not isinstance(value, Sequence) or isinstance(
-        value,
-        (str, bytes, bytearray),
-    ):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    result = tuple(value)
-    if any(not isinstance(item, str) or not item for item in result):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return result
-
-
 def _require_canonical_files(value: Sequence[str]) -> tuple[str, ...]:
-    files = _require_files(value)
+    files = normalize_input_files(value)
     for path in files:
         try:
             canonical = normalize_workspace_input_path(path)

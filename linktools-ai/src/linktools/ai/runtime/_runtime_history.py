@@ -991,7 +991,11 @@ class RuntimeHistory:
             tenant_id=principal.tenant_id,
         )
         record = records.get(node_id)
-        if record is None or record.result_digest != state.result_digest:
+        if (
+            record is None
+            or record.result_digest != state.result_digest
+            or record.execution_id != state.execution_id
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return record
 

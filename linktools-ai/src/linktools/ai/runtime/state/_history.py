@@ -11,7 +11,7 @@ from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
+from ...storage import ObjectRef, ObjectStore, StoredPayload, read_object, runtime_object_key
 from .._message import decode_model_messages, encode_model_messages
 from ._codec import (
     _decode_enveloped_domain,
@@ -670,9 +670,14 @@ class TranscriptRepository:
     async def _decode_chunk_messages(self, chunk: TranscriptChunk) -> tuple[ModelMessage, ...]:
         raw = await self._read_payload(chunk.content.payload)
         if chunk.codec == "zlib":
-            raw = zlib.decompress(raw)
+            try:
+                raw = zlib.decompress(raw)
+            except zlib.error as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        elif chunk.codec != "raw":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if hashlib.sha256(raw).hexdigest() != chunk.raw_digest or len(raw) != chunk.raw_size:
-            raise ValueError("transcript chunk integrity check failed")
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return decode_model_messages(raw)
 
     async def load_messages(self, owner_id: str) -> tuple[ModelMessage, ...]:
@@ -1382,18 +1387,21 @@ class TranscriptRepository:
     async def _read_payload(self, payload: StoredPayload) -> bytes:
         require_no_run_history_lock("TranscriptRepository._read_payload")
         if payload.kind == "inline":
-            value = payload.decode()
+            try:
+                value = payload.decode()
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             if not isinstance(value, bytes):
-                raise ValueError("inline transcript payload is not binary")
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return value
         if payload.ref is None or self._object_store is None:
-            raise ValueError("object transcript payload has no reader")
-        data = bytearray()
-        async for chunk in self._object_store.open(payload.ref.key):
-            data.extend(chunk)
-        if len(data) != payload.size or hashlib.sha256(data).hexdigest() != payload.digest:
-            raise ValueError("object transcript payload integrity check failed")
-        return bytes(data)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await read_object(
+            self._object_store,
+            payload.ref.key,
+            expected_digest=payload.digest,
+            expected_size=payload.size,
+        )
 
     async def read_payload(self, payload: StoredPayload) -> bytes:
         return await self._read_payload(payload)

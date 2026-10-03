@@ -26,6 +26,10 @@ from ._skill_source import (
 from ._subagent import SubagentCapability, SubagentDelegate
 from ._tool_signal import ToolCallFailed, ToolCallRetry
 from ._tool_metadata import (
+    ToolClass,
+    ToolEffectPolicy,
+    is_tool_class,
+    is_tool_effect_policy,
     TOOL_CLASS_METADATA_KEY,
     TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY,
     TOOL_CONTEXT_DEDUPE_METADATA_KEY,
@@ -49,6 +53,10 @@ from ._workspace import (
 from ..spec import mcp_server_selector, mcp_tool_selector
 
 __all__ = [
+    "ToolClass",
+    "ToolEffectPolicy",
+    "is_tool_class",
+    "is_tool_effect_policy",
     "AgentContext",
     "AgentDeclarationLoader",
     "CapabilityContribution",

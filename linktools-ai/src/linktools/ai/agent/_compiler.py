@@ -13,7 +13,6 @@ from ..capability import (
     SkillDefinition,
     workspace_tool_declarations,
 )
-from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelResolver
 from ..spec import (
@@ -21,6 +20,7 @@ from ..spec import (
     AgentSpecCodec,
     MCPServerSpec,
     SubagentRef,
+    mcp_server_name_token,
     mcp_server_selector,
     parse_mcp_tool_selector,
 )
@@ -72,13 +72,7 @@ class AgentCompiler:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             if candidate.kind != "mcp":
                 continue
-            token = canonical_sha256(
-                {
-                    "version": 1,
-                    "kind": "mcp-server-name",
-                    "server_id": candidate.id,
-                }
-            )[:24]
+            token = mcp_server_name_token(candidate.id)
             previous = server_tokens.get(token)
             if previous is not None and previous != candidate.id:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)

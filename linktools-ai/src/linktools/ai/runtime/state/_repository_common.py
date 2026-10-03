@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Generic, TypeVar
 from linktools.core import environ
-from ...core import OperationLedgerInput, OperationLedgerRecord, OperationStatus, ResourceKind, ResourceRef, canonical_json_bytes, operation_replay_matches
+from ...core import OperationLedgerInput, OperationLedgerRecord, OperationStatus, ResourceKind, ResourceRef, canonical_json_bytes, operation_cas_immutable_matches, operation_replay_matches
 from ...errors import AIError, ErrorCode
 from ...task import TaskGraphView, TaskNodeView
 from ._contracts import ToolOperationRecord
@@ -449,6 +449,10 @@ class OperationLedgerRepository(_RepositoryBase):
                     OperationStatus.CANCELLED.value,
                 }
                 and next_record.status is not expected_status
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if not operation_cas_immutable_matches(
+                _decode_operation(current), next_record
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             candidate = _stored_from_operation(next_record, current)

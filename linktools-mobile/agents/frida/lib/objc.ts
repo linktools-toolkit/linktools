@@ -154,8 +154,6 @@ export function getEventImpl(options: HookOpts): HookImpl {
                 objectArgs.push(convert2ObjcObject(args[i]));
             }
             event["args"] = pretty2Json(objectArgs);
-            event["result"] = null;
-            event["error"] = null;
         }
         if (hookOpts.result !== false) {
             event["result"] = null;

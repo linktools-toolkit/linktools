@@ -36,6 +36,19 @@ _USER_CONTENT_TYPES = (
 )
 
 
+def normalize_input_files(value: Sequence[str]) -> tuple[str, ...]:
+    """Freeze request file names without applying Workspace path semantics."""
+    if not isinstance(value, Sequence) or isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    files = tuple(value)
+    if any(not isinstance(item, str) or not item for item in files):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return files
+
+
 class MaterializedUserContent(tuple):
     """Validated prompt bytes with their accepted input provenance."""
 
@@ -134,4 +147,5 @@ __all__ = [
     "UserPromptInput",
     "validate_user_content",
     "validate_user_input",
+    "normalize_input_files",
 ]

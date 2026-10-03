@@ -28,7 +28,7 @@ class ObjectRef:
         _validate_store_id(self.store_id)
         _validate_key(self.key)
         _validate_digest(self.digest)
-        if not isinstance(self.size, int) or self.size < 0:
+        if not _is_valid_size(self.size):
             raise ValueError("object size must be non-negative")
 
 
@@ -214,8 +214,12 @@ def _validate_digest(value: str) -> None:
 def _validate_put(key: str, size: int, digest: str) -> None:
     _validate_key(key)
     _validate_digest(digest)
-    if not isinstance(size, int) or size < 0:
+    if not _is_valid_size(size):
         raise ValueError("object size is invalid")
+
+
+def _is_valid_size(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 __all__ = [

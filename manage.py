@@ -110,11 +110,15 @@ def get_modules() -> "typing.Dict[str, typing.Dict[str, str]]":
 
 
 def update_toml_recursive(source_data: typing.Any, target_data: typing.Any, **format_kwargs: typing.Any) -> None:
+    """Fill template defaults without replacing package-owned declarations."""
     if isinstance(source_data, dict):
         for key, value in source_data.items():
+            if key in target_data:
+                if isinstance(value, dict) and isinstance(target_data[key], dict):
+                    update_toml_recursive(value, target_data[key], **format_kwargs)
+                continue
             if isinstance(value, (dict, list)):
-                if key not in target_data:
-                    target_data[key] = tomlkit.table() if isinstance(value, dict) else tomlkit.array()
+                target_data[key] = tomlkit.table() if isinstance(value, dict) else tomlkit.array()
                 update_toml_recursive(value, target_data[key], **format_kwargs)
             elif isinstance(value, str):
                 target_data[key] = value.format(**format_kwargs)

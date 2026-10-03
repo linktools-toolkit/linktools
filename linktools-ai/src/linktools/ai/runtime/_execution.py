@@ -183,15 +183,6 @@ class _ExecutionTerminalVerifier(Protocol):
     ) -> None: ...
 
 
-class _ExecutionTerminalCommitter(Protocol):
-    async def commit_terminal_checkpoint(
-        self,
-        commit: ExecutionTerminalCommit,
-        *,
-        session_id: str | None,
-    ) -> ExecutionTerminalCommitResult: ...
-
-
 class _SubagentCancellation(Protocol):
     async def cancel_children(
         self, parent_execution_id: str, principal: Principal

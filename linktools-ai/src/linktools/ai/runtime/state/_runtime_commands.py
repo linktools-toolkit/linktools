@@ -2160,49 +2160,6 @@ class RuntimeStateCommands:
             await self._complete_recovery_checkpoint(recovery_checkpoint)
         return result
 
-    async def _materialize_checkpoint_with_reconciliation(
-        self,
-        archive: StateStepArchive,
-        run: AgentRunRecord,
-        checkpoint: AgentRunCheckpoint,
-        *,
-        execution_id: str | None = None,
-    ) -> None:
-        if await self._step_checkpoint_visible(
-            archive,
-            run,
-            checkpoint,
-        ):
-            return
-        async def operation() -> None:
-            await archive.materialize_checkpoint(
-                run,
-                checkpoint,
-                execution_id=execution_id,
-            )
-
-        async def readback() -> CommitObservation[None]:
-            try:
-                visible = await self._step_checkpoint_visible(
-                    archive,
-                    run,
-                    checkpoint,
-                )
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=error,
-                    )
-                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-            return CommitObservation(
-                DurableCommitState.COMMITTED
-                if visible
-                else DurableCommitState.NOT_COMMITTED
-            )
-
-        await self._commit_or_raise(operation, readback)
-
     async def _materialize_prepared_checkpoint_with_reconciliation(
         self,
         archive: StateStepArchive,

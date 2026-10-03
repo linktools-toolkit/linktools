@@ -3,6 +3,9 @@
 """Execution history projection for claimed and materialized attempts."""
 
 import asyncio
+import hashlib
+import zlib
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,15 +18,19 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
+    Principal,
+    TenantAuthorizationPolicy,
     agent_conversation_id as make_agent_conversation_id,
     agent_run_id as make_agent_run_id,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeStorage
+from linktools.ai.runtime import RuntimeHistory, RuntimeStorage
 from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
+from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._codec import _encode_persisted_domain, encode_envelope
 from linktools.ai.runtime.state._contracts import (
     ConversationHistoryRecord,
     ExecutionHistoryHeadRecord,
@@ -31,16 +38,19 @@ from linktools.ai.runtime.state._contracts import (
     ExecutionHistoryState,
     ExecutionRecord,
     ExecutionRunSealHead,
+    RuntimePayloadRef,
+    TranscriptChunk,
     TranscriptMessageRef,
 )
 from linktools.ai.runtime.state._steps import ExecutionTerminalSealPlan, StateStepArchive
 from linktools.ai.runtime.state._store import (
     StateLockOrderError,
+    StoredFact,
     StateTransactionNestingError,
 )
 from linktools.ai.runtime.state._steps import LockOrderError, _AgentRunHistoryLock
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import FilesystemObjectStore
+from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
 from ._runtime_test_helpers import execution_owner_fields
 from pydantic_ai.messages import (
     ModelRequest,
@@ -792,5 +802,91 @@ async def test_successful_history_preserves_user_prompt_and_projects_all_views()
         assert [item.content for item in history.items] == [prompt, "plan", "response"]
         assert [item.payload["agent_run_sequence"] for item in trace.items] == [1, 1]
         assert [item.text for item in transcript.items] == [prompt, "response"]
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "storage_kind, corruption",
+    tuple(
+        (storage_kind, corruption)
+        for storage_kind in ("inline", "object")
+        for corruption in ("none", "raw-digest", "raw-size", "zlib", "truncated-zlib")
+    ) + (("inline", "non-binary"), ("inline", "unknown-codec")),
+)
+async def test_public_transcript_rejects_corrupt_chunk_content(
+    storage_kind: str,
+    corruption: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    objects = FilesystemObjectStore(tmp_path / "objects")
+    state = RuntimeStorage.filesystem(tmp_path / "state", object_store=objects)
+    await state.initialize(namespace="history", tenant_id="tenant")
+    try:
+        await state.execution.executions.create(_record(ExecutionStatus.STARTED, 1))
+        await _materialize_attempt(state, 1, "hello")
+        archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
+        repository = archive.transcript_repository
+        owner_id = make_agent_run_id(
+            namespace="history", tenant_id="tenant", execution_id="execution", agent_run_sequence=1,
+        )
+        chunk = await repository.latest_chunk(owner_id)
+        assert chunk is not None
+        raw = await repository.read_payload(chunk.content.payload)
+        assert chunk.codec == "raw"
+        compressed = raw if corruption == "unknown-codec" else zlib.compress(raw)
+        if corruption == "zlib":
+            compressed = b"not a zlib stream"
+        elif corruption == "truncated-zlib":
+            compressed = compressed[:-1]
+        if storage_kind == "inline":
+            payload = StoredPayload.inline_bytes(compressed)
+        else:
+            async def chunks() -> AsyncIterator[bytes]:
+                yield compressed
+            stat = await objects.put(
+                "transcript", chunks(), expected_digest=hashlib.sha256(compressed).hexdigest(),
+                expected_size=len(compressed),
+            )
+            payload = StoredPayload.object(ObjectRef(objects.store_id, stat.key, stat.digest, stat.size))
+        if corruption == "non-binary":
+            payload = StoredPayload.inline_text("not binary")
+        changed = replace(
+            chunk,
+            codec="unknown-compression" if corruption == "unknown-codec" else "zlib",
+            content=RuntimePayloadRef(payload, RuntimeDomain.EXECUTION),
+            raw_digest="0" * 64 if corruption == "raw-digest" else chunk.raw_digest,
+            raw_size=chunk.raw_size + 1 if corruption == "raw-size" else chunk.raw_size,
+        )
+        decode_stored_chunk = repository.decode_chunk
+        corrupt_data = encode_envelope({
+            "type": "transcript_chunk", "payload": _encode_persisted_domain(changed),
+        })
+
+        def decode_chunk(fact: StoredFact) -> TranscriptChunk:
+            return decode_stored_chunk(replace(fact, data=corrupt_data))
+
+        monkeypatch.setattr(repository, "decode_chunk", decode_chunk)
+        history = RuntimeHistory(
+            DefaultExecutionHistoryService(
+                state.execution.executions, TenantAuthorizationPolicy("tenant"), _reader(state),
+            ),
+            tenant_id="tenant",
+        )
+        request = history.transcript(
+            "execution", principal=Principal("caller", "tenant", "service"), include_content=True,
+        )
+        if corruption == "none":
+            page = await request
+            assert any(item.text == "hello" for item in page.items)
+            assert any(item.text == "response" for item in page.items)
+        else:
+            with pytest.raises(AIError) as raised:
+                await request
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+            if corruption in {"zlib", "truncated-zlib"}:
+                assert isinstance(raised.value.__cause__, zlib.error)
     finally:
         await state.close()

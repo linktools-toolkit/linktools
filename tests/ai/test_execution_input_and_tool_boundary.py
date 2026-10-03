@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 """Execution input and final tool-boundary regressions."""
 
+from dataclasses import fields, replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -10,10 +13,18 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
-from linktools.ai.core import Principal, PromptLimits
+from linktools.ai.core import HmacCursorSigner, Principal, PromptLimits, TenantAuthorizationPolicy
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.runtime import ExecutionRequest, RuntimeStorage
+from linktools.ai.runtime._session import DefaultSessionService
+from linktools.ai.runtime.service_api import (
+    CreateSessionRequest,
+    ExecutionHandle,
+    ForkExecutionRequest,
+    RetryExecutionRequest,
+    ResumeSessionRequest,
+)
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._input import (
     ExecutionInputMaterializer,
@@ -337,3 +348,93 @@ async def test_final_tool_boundary_does_not_freeze_transient_sandbox_failure() -
         )
 
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+
+
+_REQUEST_TYPES = (ExecutionRequest, ResumeSessionRequest, RetryExecutionRequest, ForkExecutionRequest)
+
+
+def _file_request(request_type, files):
+    values = dict(
+        user_prompt="inspect", principal=Principal("user", "tenant", "local_trusted"),
+        idempotency_key="file-input", correlation={"trace": "original"}, files=files,
+    )
+    if request_type in (ExecutionRequest, ResumeSessionRequest):
+        values.update(memory_scope="memory", mode="plan", planning=True, thinking=False)
+    return request_type(**values)
+
+
+@pytest.mark.parametrize("request_type", _REQUEST_TYPES)
+@pytest.mark.parametrize(
+    "files",
+    (None, "file.txt", b"file.txt", bytearray(b"file.txt"), {"file.txt"},
+     {"file.txt": 1}, iter(("file.txt",)), [""], [None], [1]),
+)
+def test_request_files_reject_invalid_sequences(request_type: type, files: object) -> None:
+    with pytest.raises(AIError) as raised:
+        _file_request(request_type, files)
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+@pytest.mark.parametrize("request_type", _REQUEST_TYPES)
+@pytest.mark.parametrize("files", ([], ["b.txt", "a.txt", "b.txt"], [" ", "../file.txt"]))
+def test_request_file_normalization_preserves_input_meaning(request_type: type, files: list[str]) -> None:
+    files = list(files)
+    request = _file_request(request_type, files)
+    assert request.files == tuple(files)
+    assert request.correlation == {"trace": "original"}
+    assert replace(request) == request
+    assert repr(request).startswith(request_type.__name__ + "(")
+    if request_type in (ExecutionRequest, ResumeSessionRequest):
+        assert (request.memory_scope, request.mode, request.planning, request.thinking) == (
+            "memory", "plan", True, False,
+        )
+    files.append("added-later.txt")
+    assert "added-later.txt" not in request.files
+
+
+def test_request_types_keep_distinct_identity_and_positional_fields() -> None:
+    first_fields = {
+        ExecutionRequest: ("user_prompt", "principal"),
+        ResumeSessionRequest: ("principal", "user_prompt"),
+        RetryExecutionRequest: ("user_prompt", "principal"),
+        ForkExecutionRequest: ("user_prompt", "principal"),
+    }
+    requests = [_file_request(request_type, ()) for request_type in _REQUEST_TYPES]
+    for request_type, expected in first_fields.items():
+        assert tuple(field.name for field in fields(request_type))[:2] == expected
+    for index, request in enumerate(requests):
+        assert all(request != other for other in requests[index + 1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("files", ("file.txt", {"file.txt"}, [""], [None]))
+async def test_materializer_rejects_invalid_files_before_workspace_access(files: object) -> None:
+    materializer = ExecutionInputMaterializer(None, PromptLimits())
+    with pytest.raises(AIError) as raised:
+        await materializer.canonicalize_files(files)
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert raised.value.safe_details == {}
+
+
+@pytest.mark.asyncio
+async def test_session_resume_preserves_explicit_execution_input_fields() -> None:
+    storage = RuntimeStorage.in_memory()
+    await storage.initialize(namespace="resume-input", tenant_id="tenant")
+    execution = SimpleNamespace(
+        start_for_session=AsyncMock(return_value=ExecutionHandle("execution")),
+    )
+    service = DefaultSessionService(
+        storage.conversation, storage.execution.executions,
+        TenantAuthorizationPolicy(), execution,
+        HmacCursorSigner("session", b"session-key"), history_reader=object(),
+    )
+    request = _file_request(ResumeSessionRequest, ["b.txt", "a.txt", "b.txt"])
+    try:
+        await service.create("agent", CreateSessionRequest(request.principal, "session", "create"))
+        handle = await service.resume("agent", "a" * 64, "session", request)
+        captured = execution.start_for_session.await_args.args[3]
+        assert handle == ExecutionHandle("execution")
+        assert type(captured) is ExecutionRequest
+        assert captured == _file_request(ExecutionRequest, request.files)
+    finally:
+        await storage.close()
