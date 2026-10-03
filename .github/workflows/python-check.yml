@@ -87,5 +87,5 @@ jobs:
           python manage.py install --editable --quiet
       - name: Run checks
         env:
-          PYTEST_ADDOPTS: "-n 4 --dist=loadfile --capture=fd"
+          PYTEST_ADDOPTS: "-n 4 --dist=loadfile --capture=fd ${{ matrix.package == 'linktools-ai' && '--durations=50' || '' }}"
         run: python manage.py check ${{ matrix.package }} --skip-compatibility
