@@ -358,6 +358,45 @@ async def test_concurrent_deferred_inputs_do_not_accept_a_conflicting_value(
 
 
 @pytest.mark.asyncio
+async def test_new_human_decision_rejects_native_cancellation_before_reconciliation(tmp_path: Path) -> None:
+    target = Task("semantics.cancelled-human-target", echo, effect_policy="none")
+    scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
+    async with Runtime.open("cancelled-human", models=FixtureModels(), storage=RuntimeStorage.filesystem(tmp_path),
+                            context=CONTEXT) as runtime:
+        engine = runtime.tasks.bind(target)
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("cancelled", 1), (
+            CaseSpec.task(CaseRef("cancelled", "one", 1), input={"answer": "yes"}),
+        )), principal=PRINCIPAL, idempotency_key="dataset")
+        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+            (CandidateSpec("candidate", task=target.ref),), (scorer,)), PRINCIPAL, "start"), engine=engine)
+
+        async def waiting_score():
+            while True:
+                pending = (await run.scores()).items[0]
+                if pending.scorer_execution is not None:
+                    graph = await engine.get(pending.scorer_graph.graph_id, principal=PRINCIPAL)
+                    if any(node.node_id == "score" and node.status is TaskStatus.WAITING
+                           for node in (await graph.state()).node_states):
+                        return pending
+                await asyncio.sleep(0.01)
+
+        pending = await asyncio.wait_for(waiting_score(), 10)
+        experiment_id = run.experiment_id
+
+    storage = RuntimeStorage.filesystem(tmp_path)
+    async with Runtime.open("cancelled-human", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+        run = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
+        graph = await runtime.tasks.bind(target).get(pending.scorer_graph.graph_id, principal=PRINCIPAL)
+        assert (await graph.cancel(idempotency_key="native-cancel")).status is TaskStatus.CANCELLED
+        with pytest.raises(AIError) as raised:
+            await run.submit_human_score(HumanScoreRequest(pending.trial.trial_id, "human", pending.evidence_ref,
+                ScoreBundle(dimensions={"exact_match": 1.0}), "too-late"))
+        assert raised.value.code is ErrorCode.TASK_NOT_READY
+        record = await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        assert not record.human_decisions
+
+
+@pytest.mark.asyncio
 async def test_new_human_decision_is_rejected_after_its_slot_times_out(tmp_path: Path) -> None:
     target = Task("semantics.expired-human-target", echo, effect_policy="none")
     scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))

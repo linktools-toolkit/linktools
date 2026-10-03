@@ -1276,6 +1276,12 @@ class RuntimeEvaluations:
             "evidence": evidence.ref.to_mapping(), "score": request.score.to_mapping()})
         decision = EvaluationHumanDecision(intent.slot_id, uuid.uuid4().hex, principal, _now(), digest,
                                            idempotency_key_digest(request.idempotency_key), request.score)
+        header = await self._storage.task.tasks.get_header(
+            intent.submission.graph.graph_id, tenant_id=principal.tenant_id)
+        native = (None if header is None else
+                  await self._graph.state(intent.submission.graph.graph_id, principal=principal))
+        terminal = native is not None and (native.status in _TERMINAL or any(
+            node.node_id == "score" and node.status in _TERMINAL for node in native.node_states))
         def reserve(value: EvaluationRecord) -> EvaluationRecord:
             existing = next((item for item in value.human_decisions if item.slot_id == intent.slot_id or
                              item.idempotency_key_digest == decision.idempotency_key_digest), None)
@@ -1284,7 +1290,7 @@ class RuntimeEvaluations:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 return value
             current = next(item for item in value.intents if item.slot_id == intent.slot_id)
-            if (value.gate != "open" or current.released or
+            if (terminal or value.gate != "open" or current.released or
                     current.deadline_at is not None and current.deadline_at <= _now() or
                     any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in value.scores)):
                 raise AIError(ErrorCode.TASK_NOT_READY)
