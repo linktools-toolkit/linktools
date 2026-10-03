@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Prepared TaskGraph identity and cancellation outcome."""
+"""TaskGraph submission identity and cancellation outcome."""
 
 import re
 from dataclasses import dataclass

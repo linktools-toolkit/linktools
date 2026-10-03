@@ -183,11 +183,11 @@ async def test_submission_identity_is_registered_and_cannot_be_reassigned() -> N
         with pytest.raises(AIError) as caught:
             await service.start_prepared(unregistered)
         assert caught.value.code is ErrorCode.STORAGE_NOT_FOUND
-        with pytest.raises(AIError) as caught:
-            await service.cancel_submission(
-                unregistered.ref, principal=request.principal, idempotency_key="cancel",
-            )
-        assert caught.value.code is ErrorCode.STORAGE_NOT_FOUND
+        cancelled = await service.cancel_submission(
+            unregistered.ref, principal=request.principal, idempotency_key="cancel",
+        )
+        assert not cancelled.admitted
+        assert cancelled.status is TaskStatus.CANCELLED
 
         submission = await service.prepare_submission(request)
         with pytest.raises(AIError) as caught:

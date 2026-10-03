@@ -425,7 +425,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "evaluation_score_comparison_selection": ('baseline', 'candidate'),
         "evaluation_dimension_bound": ('selection', 'minimum', 'maximum', 'max_regression'),
         "evaluation_gate_policy": ('minimum_coverage', 'minimum_cases', 'bounds', 'maximum_failure_rate', 'require_complete_usage'),
-        "evaluation_read_cutoff": ('experiment_id', 'manifest_digest', 'state_revisions', 'score_selections', 'source_evidence_refs'),
+        "evaluation_read_cutoff": ('experiment_id', 'manifest_digest', 'state_revisions', 'score_selections', 'source_evidence_refs', 'usage_complete'),
         "evaluation_comparison_read_cutoff": ('baseline', 'candidate', 'scoring'),
         "evaluation_comparison_spec": ('baseline', 'candidate', 'scores', 'mode', 'allowed_changes', 'gate_policy', 'cutoff'),
         "evaluation_contract_difference": ('path', 'baseline', 'candidate', 'allowed'),

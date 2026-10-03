@@ -37,15 +37,16 @@ from ..evaluation import (
     ModelUsage, PriceTable, estimate_model_budget,
     ScorerContract, ScoringInput, SlotDispositionView, StartEvaluationRequest,
     TargetTrialRef, TrialFilter, TrialPlan, TrialView, build_comparison_report,
-    build_evaluation_report, capture_mapping, input_mapping,
+    build_evaluation_report, capture_mapping,
 )
 from ..task import (
     Task, TaskGraph, TaskGraphService, TaskGraphState, TaskInputSupplyRequest,
-    TaskNode, TaskNodeContext, TaskRef, TaskGraphLimits,
+    TaskNode, TaskNodeContext, TaskNodeResultRef, TaskRef, TaskGraphLimits,
 )
 from ._agent_task_input import AgentTaskInput
 from ._evaluation_compile import EvaluationCompiler, task_contract
 from ._evaluation_retention import EvaluationRetention, require_evaluation_content
+from ._input import input_intent
 from ._input_capture import CaptureInputRequest
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .service_api import ExecutionService, UsageSummary
@@ -555,16 +556,22 @@ class RuntimeEvaluations:
         scores = await self._scores(record, trials, revisions)
         revisions[f"evaluation:{experiment_id}"] = record.revision
         blocked = False
+        usage_complete = all([(await self.read_evidence(item.evidence_ref, principal=principal)).usage_complete
+                              for item in record.evidence])
         for intent in record.intents:
             if intent.scorer_slot_id is not None:
                 state = await self._graph_state(intent, principal)
                 if state is not None:
                     revisions[f"graph:{state.graph_id}"] = state.event_sequence
                     blocked |= state.status is TaskStatus.RECOVERY_REQUIRED
+                    summary = await self._history.graph_usage(state.graph_id, principal=principal)
+                    _, complete = await self._model_usage(summary, principal)
+                    usage_complete &= complete
         cutoff = EvaluationReadCutoff(experiment_id, record.manifest_digest, revisions,
             score_selections=tuple(ScoreSelection(scorer.slot_id, dimension.name, experiment_id)
                 for scorer in record.manifest.scorers for dimension in scorer.dimensions),
-            source_evidence_refs=tuple(item.evidence_ref for item in record.evidence))
+            source_evidence_refs=tuple(item.evidence_ref for item in record.evidence),
+            usage_complete=usage_complete)
         cases = tuple([await self._case(ref) for ref in
                        (await self.get_dataset(record.manifest.dataset, principal=principal)).ordered_case_refs])
         report = build_evaluation_report(record.manifest, cases, trials, scores, cutoff=cutoff,
@@ -627,8 +634,7 @@ class RuntimeEvaluations:
             report_id=uuid.uuid4().hex, created_at=_now(),
             scoring_manifests=tuple(record.manifest for record, _ in snapshots.values()),
             completions={identity: snapshot.completion for identity, (_, snapshot) in snapshots.items()},
-            usage_complete=all([(await self.read_evidence(ref, principal=principal)).usage_complete
-                for _, report in snapshots.values() for ref in report.cutoff.source_evidence_refs]))
+            usage_complete=all(snapshot.cutoff.usage_complete for _, snapshot in snapshots.values()))
         await self._state.publish_report(report)
         return report
 
@@ -710,6 +716,7 @@ class RuntimeEvaluations:
                 continue
             if not expired:
                 if intent.scorer_slot_id is not None:
+                    await self._resume_decision(record, intent, state)
                     await self._collect_score(record, intent, state)
                 elif state.status in _TERMINAL:
                     await self._capture_evidence(record, intent, state, principal)
@@ -771,7 +778,8 @@ class RuntimeEvaluations:
                         await self._value(cases[trial.case_ref].expected), cases[trial.case_ref].expected is not None,
                         await self._value(scorer.rubric), scorer.config, evidence.ref,
                         canonical_sha256({"candidate": trial.candidate_slot_id})[:16],
-                        rubric_present=scorer.rubric is not None)
+                        rubric_present=scorer.rubric is not None,
+                        target_input=None if evidence.input is None else evidence.input.value)
                     graph = self._scoring_graph(record, trial.trial, scorer, sample)
                     await self._launch(record, trial.trial, scorer, graph,
                                        record.manifest.policy.scorer_graph_limits, engine)
@@ -797,7 +805,7 @@ class RuntimeEvaluations:
             return
         if scorer is not None:
             engine = engine.with_definitions(self._recorder)
-        submission = await engine.prepare_submission(graph, principal=record.manifest.principal,
+        submission = await engine.describe_submission(graph, principal=record.manifest.principal,
             idempotency_key=f"evaluation:{record.evaluation_id}:{slot}", limits=limits,
             correlation={"evaluation_experiment": record.evaluation_id, "evaluation_trial": trial.trial_id,
                          "evaluation_slot": slot})
@@ -883,17 +891,19 @@ class RuntimeEvaluations:
         include_attachments = any(item.evidence_policy.include_attachments for item in record.manifest.scorers)
         attachments, attachment_issues, attachment_sources = await self._capture_attachments(
             intent.trial, execution_ids, principal, selected=include_attachments)
-        case = await self._case(plan.case_ref)
+        captured_input, input_issues = (await self._capture_target_input(state, principal,
+            graph_target=candidate.graph_template is not None) if include_input else (None, ()))
         if not include_output:
             target = (replace(target, output=None) if isinstance(target, ExecutionTargetEvidence)
                       else replace(target, outputs={}))
         bundle = EvidenceBundle(EvidenceRef(self._namespace, principal.tenant_id, uuid.uuid4().hex, "0" * 64),
-            intent.trial, target, InlineValue.from_value(input_mapping(case.input)) if include_input else None, tuple(trace.values()), attachments,
+            intent.trial, target, captured_input, tuple(trace.values()), attachments,
             UsageMetrics(usage.logical_requests, 0, usage.input_tokens, usage.output_tokens,
                          usage.cache_read_tokens, usage.cache_write_tokens),
             usage_complete,
             {"graph_sequence": state.event_sequence, "include_trace": include_trace,
-             "include_input": include_input, "include_output": include_output,
+             "include_input": include_input and not input_issues, "input_issues": list(input_issues),
+             "include_output": include_output,
              "include_attachments": include_attachments and not attachment_issues,
              "attachment_issues": list(attachment_issues), "attachment_sources": attachment_sources, "usage": [{"execution_id": item.execution_id,
                 "agent_run_sequence": item.agent_run_sequence, "request_sequence": item.request_sequence}
@@ -901,6 +911,55 @@ class RuntimeEvaluations:
         bundle = replace(bundle, ref=replace(bundle.ref, digest=bundle.digest))
         await self._state.publish_evidence(bundle)
         await self._state.publish_trial_evidence(record.evaluation_id, EvaluationTrialEvidence(intent.trial, bundle.ref))
+
+    async def _capture_target_input(
+        self, state: TaskGraphState, principal: Principal, *, graph_target: bool,
+    ) -> tuple[InlineValue | None, tuple[str, ...]]:
+        inputs: dict[str, JsonValue] = {}
+        declarations = {node.node_id: node for node in state.nodes}
+        states = {node.node_id: node for node in state.node_states}
+        for node in state.node_states:
+            if node.execution_id is None:
+                inputs[node.node_id] = {"status": node.status.value.lower(), "input": None}
+                continue
+            try:
+                execution = await self._execution.inspect(node.execution_id, principal=principal)
+                if execution.binding_kind == "agent":
+                    prompt = await self._captures.read_execution_prompt(node.execution_id, principal=principal)
+                    value = {"kind": "agent_input", "prompt": input_intent(prompt, ()).prompt}
+                else:
+                    parameters = await self._captures.read_execution_input(node.execution_id, principal=principal)
+                    dependencies = {}
+                    declaration = declarations[node.node_id]
+                    capture = declaration.input_capture
+                    if capture is not None:
+                        task = await self._captures.read_task(capture, principal=principal)
+                        for item in task.dependencies:
+                            dependencies[item.name] = {"status": item.state.status.value.lower(),
+                                "value": (await self._captures.read_dependency(capture, item.name, principal=principal)
+                                          if item.state.status is TaskStatus.SUCCEEDED else None),
+                                "reason": item.state.error_code}
+                    for name, reference in declaration.input_refs.items():
+                        if isinstance(reference, TaskNodeResultRef):
+                            dependency = states[reference.node_id]
+                            status, reason, digest = dependency.status, dependency.error_code, dependency.result_digest
+                            body = (await self._history.task_result(state.graph_id, reference.node_id, principal=principal)
+                                    if status is TaskStatus.SUCCEEDED else None)
+                        else:
+                            if reference.namespace != self._namespace or reference.tenant_id != principal.tenant_id:
+                                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                            status, reason, digest = TaskStatus.SUCCEEDED, None, reference.result_digest
+                            body = await self._history.task_result(reference.graph_id, reference.node_id, principal=principal)
+                        if status is TaskStatus.SUCCEEDED and canonical_sha256(body) != digest:
+                            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
+                        dependencies[name] = {"status": status.value.lower(), "value": body, "reason": reason}
+                    value = {"kind": "task_input", "input": dict(parameters), "dependencies": dependencies}
+                inputs[node.node_id] = value
+            except AIError as error:
+                if error.code not in {ErrorCode.INPUT_CAPTURE_UNAVAILABLE, ErrorCode.INPUT_CONTEXT_UNAVAILABLE}:
+                    raise
+                return None, (f"input_unavailable:{node.node_id}",)
+        return InlineValue.from_value({"kind": "graph_input", "inputs": inputs} if graph_target else inputs["target"]), ()
 
     async def _capture_attachments(
         self, trial: TargetTrialRef, execution_ids: tuple[str, ...], principal: Principal, *, selected: bool,
@@ -1162,14 +1221,18 @@ class RuntimeEvaluations:
                 if existing.request_digest != digest:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 return value
-            if value.gate != "open":
+            current = next(item for item in value.intents if item.slot_id == intent.slot_id)
+            if (value.gate != "open" or current.released or
+                    current.deadline_at is not None and current.deadline_at <= _now() or
+                    any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in value.scores)):
                 raise AIError(ErrorCode.TASK_NOT_READY)
             return replace(value, human_decisions=(*value.human_decisions, decision))
         record = await self._state.update(experiment_id, reserve)
-        state = await self._graph.state(intent.submission.graph.graph_id, principal=principal)
-        await self._resume_decision(record, intent, state)
-        state = await self._graph.state(intent.submission.graph.graph_id, principal=principal)
-        await self._collect_score(record, intent, state)
+        state = await self._graph_state(intent, principal)
+        if state is not None:
+            await self._resume_decision(record, intent, state)
+            state = await self._graph.state(intent.submission.graph.graph_id, principal=principal)
+            await self._collect_score(record, intent, state)
         record = await self._record(experiment_id, principal)
         trials, _ = await self._trials(record, principal)
         return next(item for item in await self._scores(record, trials) if item.trial == intent.trial and
@@ -1178,6 +1241,8 @@ class RuntimeEvaluations:
     async def _resume_decision(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
     ) -> None:
+        if record.gate != "open" or intent.released or intent.deadline_at is not None and intent.deadline_at <= _now():
+            return
         decision = next((item for item in record.human_decisions if item.slot_id == intent.slot_id), None)
         node = next(item for item in state.node_states if item.node_id == "score")
         if decision is not None and node.status is TaskStatus.WAITING:

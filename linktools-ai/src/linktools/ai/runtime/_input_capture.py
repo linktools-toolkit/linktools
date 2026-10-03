@@ -445,6 +445,14 @@ class RuntimeInputCaptures:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return body
 
+    async def read_execution_prompt(self, execution_id: str, *, principal: Principal) -> CanonicalUserInput:
+        """Read an Agent's accepted prompt without publishing a new capture."""
+        await self._execution.inspect(execution_id, principal=principal)
+        record = await self._storage.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
+        if record is None or not isinstance(record.binding, AgentBindingContract):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await self._materializer.restore(record.stored_user_input)
+
     async def read_dependency(self, reference: TaskInvocationInputRef, name: str, *, principal: Principal) -> JsonValue:
         contract = await self.read_task(reference, principal=principal)
         item = next((item for item in contract.dependencies if item.name == name), None)
@@ -545,7 +553,9 @@ class RuntimeInputCaptures:
                 reference = await self.capture_input(source, CaptureInputRequest(principal, request.idempotency_key + ":context:" + node.node_id))
                 node_context = (await self.read_agent(reference, principal=principal)).input_context
             if body.get("kind") == "agent-task-input":
-                if node_context is not None:
+                if request.context_policy == "clean":
+                    body.pop("capture_context", None)
+                elif node_context is not None:
                     body["capture_context"] = node_context.to_payload()
                 body["session_id"] = None
                 body["memory_scope"] = None
@@ -555,10 +565,15 @@ class RuntimeInputCaptures:
                     value = await self._payload(stored.payload, RuntimeDomain.TASK)
                     stored = replace(stored, payload=StoredPayload.inline_text(value) if stored.codec == "text" else StoredPayload.inline_json(value))
                     body["prompt"] = task_prompt_draft(await self._materializer.restore(stored))
+                    body["files"] = []
             input_capture = node.input_capture
-            if input_capture is not None and node_context is not None:
+            if input_capture is not None and declaration.get("type") == "agent":
                 previous = await self.read_task(input_capture, principal=principal)
-                captured_body = {**previous.input, "capture_context": node_context.to_payload(), "session_id": None, "memory_scope": None}
+                captured_body = {**previous.input, "session_id": None, "memory_scope": None}
+                if request.context_policy == "clean":
+                    captured_body.pop("capture_context", None)
+                elif node_context is not None:
+                    captured_body["capture_context"] = node_context.to_payload()
                 contract = replace(previous, input=captured_body)
                 identity, digest = await self._publish("task", principal, request.idempotency_key + ":context-input:" + node.node_id, {"contract": encode_domain(contract)})
                 input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, contract.source_execution_id)

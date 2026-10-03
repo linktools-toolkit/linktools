@@ -93,8 +93,11 @@ class EvaluationReadCutoff:
     state_revisions: Mapping[str, int] = field(default_factory=dict)
     score_selections: tuple[ScoreSelection, ...] = ()
     source_evidence_refs: tuple[EvidenceRef, ...] = ()
+    usage_complete: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.usage_complete, bool):
+            raise ValueError("usage completeness must be boolean")
         object.__setattr__(self, "state_revisions", MappingProxyType(dict(self.state_revisions)))
         object.__setattr__(self, "score_selections", tuple(self.score_selections))
         object.__setattr__(self, "source_evidence_refs", tuple(self.source_evidence_refs))

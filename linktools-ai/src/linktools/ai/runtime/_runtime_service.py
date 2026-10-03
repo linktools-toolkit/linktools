@@ -909,9 +909,11 @@ class Runtime(Generic[AppT]):
                 dependency_hold_id=dependency_hold_id,
                 input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
             )
-            if self._input_captures is not None:
-                await self._input_captures.record_invocation(execution.execution_id, invocation)
             return execution
+
+        async def record_invocation(execution_id: str, invocation: TaskNodeInvocation) -> None:
+            if self._input_captures is not None:
+                await self._input_captures.record_invocation(execution_id, invocation)
 
         async def get_execution(
             execution_id: str,
@@ -954,6 +956,7 @@ class Runtime(Generic[AppT]):
             binding_contract=binding_contract.to_payload(),
             build_input=build_input,
             start_execution=start_execution,
+            record_invocation=record_invocation,
             get_execution=get_execution,
             acquire_execution_hold=acquire_execution_hold,
             release_execution_hold=release_execution_hold,

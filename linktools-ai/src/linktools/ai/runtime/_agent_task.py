@@ -70,6 +70,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         restore_prepared_prompt: Callable[
             [StoredUserInput], Awaitable[CanonicalUserInput]
         ],
+        record_invocation: Callable[[str, TaskNodeInvocation], Awaitable[None]] | None = None,
     ) -> None:
         if input_mode not in {"literal", "projected"}:
             raise ValueError("Agent Task input mode is invalid")
@@ -89,6 +90,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         ).binding_digest
         self._build_input = build_input
         self._start_execution = start_execution
+        self._record_invocation = record_invocation
         self._get_execution = get_execution
         self._acquire_execution_hold = acquire_execution_hold
         self._release_execution_hold = release_execution_hold
@@ -393,12 +395,42 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         elif current != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await control.handoff_execution(execution_id)
+        await self._capture_invocation(execution, execution_id, invocation)
         await self._release_execution_hold(
             execution_id,
             invocation.principal,
             hold_id,
         )
         return execution, execution_id
+
+    async def _capture_invocation(
+        self, execution: object, execution_id: str, invocation: TaskNodeInvocation,
+    ) -> None:
+        if self._record_invocation is None:
+            return
+        try:
+            await self._record_invocation(execution_id, invocation)
+        except BaseException:
+            cleanup = asyncio.create_task(execution.cancel())
+            interrupted = False
+            try:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        if cleanup.cancelled():
+                            raise
+                        interrupted = True
+                cleanup.result()
+            except BaseException as error:
+                raise TaskNodeRunError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    execution_id,
+                    safe_details={"phase": "task_invocation_capture_cancel"},
+                ) from error
+            if interrupted:
+                raise asyncio.CancelledError
+            raise
 
     async def wait_bound(
         self,
@@ -407,6 +439,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
     ) -> TaskNodeRunResult:
         execution = await self._get_execution(execution_id, invocation.principal)
         result = await execution.wait()
+        await self._capture_invocation(execution, execution_id, invocation)
         return _agent_task_result(result, execution_id)
 
     async def supply_input(

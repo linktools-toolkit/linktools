@@ -273,7 +273,8 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         async def mutate(transaction: StateTransaction) -> bool:
             record = await self._submission_in_transaction(transaction, submission)
             if record is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                record = self._stored("task_submission", submission.graph_id, submission, state="cancelled")
+                await transaction.insert_records((record,))
             graph_record = await transaction.get_record(self._graph_key(submission.graph_id))
             admitted = graph_record is not None
             if (record.state == "admitted" and not admitted) or (

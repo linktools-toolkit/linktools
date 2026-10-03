@@ -380,39 +380,39 @@ class DefaultTaskGraphService(TaskGraphService):
     async def prepare_submission(
         self, request: TaskGraphRequest
     ) -> TaskGraphSubmission:
+        return await self.prepare_described(await self.describe_submission(request))
+
+    async def describe_submission(
+        self, request: TaskGraphRequest
+    ) -> TaskGraphSubmission:
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        graph_id = request.graph.graph_id
-        tenant_id = request.principal.tenant_id
         await self._authorization.authorize(
             request.principal,
             AuthorizationAction.TASK_RUN,
-            ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id),
+            ResourceRef(ResourceKind.TASK_GRAPH, request.graph.graph_id, request.principal.tenant_id),
         )
-        graph = request.graph
         if self._preflight is not None:
-            graph = self._preflight.admit_request(graph)
             request = TaskGraphRequest(
-                graph,
-                request.principal,
-                request.idempotency_key,
-                request.limits,
-                request.correlation,
+                self._preflight.admit_request(request.graph), request.principal,
+                request.idempotency_key, request.limits, request.correlation,
             )
-        admission = TaskGraphAdmission.from_request(request)
-        existing = await self._persistence.admissions.get(
-            graph_id, tenant_id=tenant_id,
-        )
-        status = await self._persistence.admissions.submission_status(TaskGraphSubmission(
-            self._persistence.admissions.namespace, admission, graph).ref)
-        if self._preflight is not None and existing is None and status != "cancelled":
-            graph = await self._preflight.capture_admission(
-                admission,
-                request.graph,
-            )
-        return await self._persistence.admissions.prepare(TaskGraphSubmission(
-            self._persistence.admissions.namespace, admission, graph,
-        ))
+        return TaskGraphSubmission(self._persistence.admissions.namespace,
+                                   TaskGraphAdmission.from_request(request), request.graph)
+
+    async def prepare_described(
+        self, submission: TaskGraphSubmission
+    ) -> TaskGraphSubmission:
+        if submission.namespace != self._persistence.admissions.namespace:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        admission = submission.admission
+        await self._authorization.authorize(admission.principal, AuthorizationAction.TASK_RUN,
+            ResourceRef(ResourceKind.TASK_GRAPH, admission.graph_id, admission.principal.tenant_id))
+        status = await self._persistence.admissions.submission_status(submission.ref)
+        if status is None and self._preflight is not None:
+            graph = await self._preflight.capture_admission(admission, submission.graph)
+            submission = TaskGraphSubmission(submission.namespace, admission, graph)
+        return await self._persistence.admissions.prepare(submission)
 
     async def start_prepared(
         self, submission: TaskGraphSubmission
@@ -1124,12 +1124,25 @@ class DefaultTaskGraphService(TaskGraphService):
         elif state.status is TaskStatus.WAITING:
             if self._launcher is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            view = await self._launcher.supply_input(
-                admission.launch(),
-                node_id,
-                request.wait_id,
-                request.value,
-            )
+            try:
+                view = await self._launcher.supply_input(
+                    admission.launch(),
+                    node_id,
+                    request.wait_id,
+                    request.value,
+                )
+            except AIError as error:
+                if error.code not in {ErrorCode.TASK_NOT_READY, ErrorCode.STORAGE_CONFLICT}:
+                    raise
+                latest = await self._persistence.tasks.graph_state(graph_id, tenant_id=tenant_id)
+                accepted = None if latest is None else next(
+                    (item for item in latest.node_states if item.node_id == node_id), None)
+                if (accepted is None or accepted.execution_id != request.wait_id or
+                        accepted.status is not TaskStatus.SUCCEEDED or accepted.result_digest != value_digest):
+                    raise
+                view = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
+                if view is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         else:
             raise AIError(ErrorCode.TASK_NOT_READY)
 

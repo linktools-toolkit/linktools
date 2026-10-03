@@ -1043,15 +1043,26 @@ class DefaultExecutionService:
             return _execution_view(current)
         if current.status is not ExecutionStatus.WAITING_DEFERRED:
             raise AIError(ErrorCode.TASK_NOT_READY)
-        await self._complete_task_output(
-            current,
-            principal=principal,
-            output=normalized,
-            terminal_event_payload={
-                "task_input": "supplied",
-                "task_input_value_digest": value_digest,
-            },
-        )
+        try:
+            await self._complete_task_output(
+                current,
+                principal=principal,
+                output=normalized,
+                terminal_event_payload={
+                    "task_input": "supplied",
+                    "task_input_value_digest": value_digest,
+                },
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.EXECUTION_RESULT_CONFLICT:
+                raise
+            latest = await self.inspect(execution_id, principal=principal)
+            if latest.status is not ExecutionStatus.SUCCEEDED:
+                raise
+            result = await self.result(execution_id, principal=principal)
+            if canonical_sha256(result.output) != value_digest:
+                raise
+            return latest
         return await self.inspect(execution_id, principal=principal)
 
     async def resume_task_not_applied(

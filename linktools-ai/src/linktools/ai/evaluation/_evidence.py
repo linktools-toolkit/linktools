@@ -269,7 +269,7 @@ class ScoringInput:
         self, trial: TargetTrialRef, target: ExecutionTargetEvidence | GraphTargetEvidence,
         expected: JsonValue, expected_present: bool, rubric: JsonValue,
         config: Mapping[str, JsonValue], evidence_ref: EvidenceRef, candidate_label: str,
-        *, rubric_present: bool = False,
+        *, rubric_present: bool = False, target_input: JsonValue = None,
     ) -> None:
         if not isinstance(expected_present, bool) or not isinstance(rubric_present, bool):
             raise ValueError("input presence must be boolean")
@@ -280,7 +280,12 @@ class ScoringInput:
         object.__setattr__(self, "content", ImmutableJsonMapping({
             "expected": expected, "expected_present": expected_present,
             "rubric": rubric, "rubric_present": rubric_present, "config": dict(config),
+            "target_input": target_input,
         }))
+
+    @property
+    def target_input(self) -> JsonValue:
+        return self.content["target_input"]
 
     @property
     def expected(self) -> JsonValue:
@@ -324,7 +329,7 @@ class ScoringInput:
     @classmethod
     def from_mapping(cls, value: Mapping[str, JsonValue]) -> "ScoringInput":
         required = {"kind", "trial", "target", "expected", "expected_present", "rubric", "rubric_present",
-                    "config", "evidence_ref", "candidate_label"}
+                    "config", "evidence_ref", "candidate_label", "target_input"}
         if set(value) != required or value["kind"] != "evaluation-scoring-input":
             raise ValueError("invalid scoring input contract")
         trial = _mapping(value["trial"])
@@ -338,7 +343,8 @@ class ScoringInput:
                    _mapping(value["config"]),
                    EvidenceRef(_text(evidence, "namespace"), _text(evidence, "tenant_id"),
                                _text(evidence, "evidence_id"), _text(evidence, "digest")),
-                   _text(value, "candidate_label"), rubric_present=cast(bool, value["rubric_present"]))
+                   _text(value, "candidate_label"), rubric_present=cast(bool, value["rubric_present"]),
+                   target_input=value["target_input"])
 
 
 def _mapping(value: JsonValue) -> Mapping[str, JsonValue]:

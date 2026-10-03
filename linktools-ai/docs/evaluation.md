@@ -302,6 +302,11 @@ whole external world or guarantee deterministic live model/tool responses.
 `EvidencePolicy` defaults to input/output included, trace/attachments excluded.
 Enable trace or attachments in the initial scorers if later scoring needs them.
 A rescore cannot retroactively capture omitted source evidence.
+`EvidenceBundle.input` retains the accepted target input, and each scorer receives
+its authorized projection as `ScoringInput.target_input`, including the default
+Agent judge. Graph input is keyed by node ID. Binary prompt parts contain
+metadata and content digests; raw bytes require the attachment policy and API
+below. With `include_input=False`, the scorer receives no target input.
 
 For a scorer with `EvidencePolicy(include_attachments=True)`, retained raw
 `BinaryContent` is exposed through typed `EvidenceAttachmentRef` entries. Read
@@ -396,6 +401,9 @@ Exploratory comparisons can diagnose differences but cannot pass a gate.
 The default gate requires full paired coverage and at least one distinct case;
 it has no quality bound until you supply one. Insufficient evidence, pending
 work, or incompatibility makes a configured gate `inconclusive`.
+`require_complete_usage=True` checks both target and selected scoring work,
+including score-only runs. Usage completeness is fixed in the report cutoff,
+so replaying a comparison does not substitute later usage observations.
 
 `report()` and `compare()` publish immutable snapshots. Their typed cutoffs pin
 manifest/evidence references and observed revisions, not a cross-store atomic
@@ -418,7 +426,9 @@ Start an evaluation with this scorer, then inspect `await run.scores()`. For the
 pending slot, use `scorer_graph`, `scorer_node_id`, and `scorer_execution` to
 inspect its native graph with `engine.get(...).state(...)`. Once the deferred
 node is `TaskStatus.WAITING`, submit the decision against that slot's exact
-evidence reference:
+evidence reference. You may also submit after the scorer graph is reserved but
+before the node starts waiting; the accepted decision is consumed automatically
+when the deferred node is ready:
 
 ```python
 await run.submit_human_score(HumanScoreRequest(
@@ -431,7 +441,8 @@ await run.submit_human_score(HumanScoreRequest(
 ```
 
 A slot accepts one decision. Equivalent idempotent retries return that decision;
-conflicting submissions fail. To revise a completed decision, create a rescore.
+conflicting submissions fail. A timed-out, cancelled, or completed slot rejects a
+new decision. To revise a completed decision, create a rescore.
 The default human wait deadline is 86,400 seconds; configure
 `human_timeout_seconds` explicitly when that does not suit the workflow.
 
@@ -447,6 +458,10 @@ The default human wait deadline is 86,400 seconds; configure
   contract drift is rejected before work can resume
 
 ## Storage, limits, and retention
+
+Evaluation registers a launch intent before materializing Task input. Cancellation
+fences that same submission even when preparation is interrupted; reconciliation
+reuses its identity rather than starting an unowned replacement.
 
 Durable retained storage is required by default. In-memory tests must explicitly
 use `EvaluationPolicy(allow_volatile=True)`; transient evidence storage is
@@ -518,8 +533,8 @@ result = await runtime.evaluations.purge_expired(
 `application_guard` must implement the public
 `linktools.ai.runtime.state.SnapshotExclusiveGuard` protocol. Its
 `offline_exclusivity()` context must actually quiesce every related writer and
-object-cleanup process during reachability checking and deletion; a no-op guard
-or read-only storage handle is insufficient. Purge first closes admission and
+object-cleanup process during object discovery, reachability checking, and
+deletion; a no-op guard or read-only storage handle is insufficient. Purge first closes admission and
 settles native graph cancellation fences. It reports blocked work instead of
 deleting beneath an active execution. Object deletion uses durable cleanup
 receipts and can be retried after failure/restart. Inspect `blocked` and

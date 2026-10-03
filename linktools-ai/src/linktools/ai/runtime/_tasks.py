@@ -173,6 +173,32 @@ class TaskEngine(Generic[AppT]):
         limits: TaskGraphLimits | None = None,
         correlation: Mapping[str, object] | None = None,
     ) -> TaskGraphSubmission:
+        return await self._prepare_submission(graph, idempotency_key=idempotency_key,
+            principal=principal, limits=limits, correlation=correlation, describe=False)
+
+    async def describe_submission(
+        self,
+        graph: TaskGraph,
+        *,
+        idempotency_key: str,
+        principal: Principal | None = None,
+        limits: TaskGraphLimits | None = None,
+        correlation: Mapping[str, object] | None = None,
+    ) -> TaskGraphSubmission:
+        """Resolve submission identity without storing input or launching work."""
+        return await self._prepare_submission(graph, idempotency_key=idempotency_key,
+            principal=principal, limits=limits, correlation=correlation, describe=True)
+
+    async def _prepare_submission(
+        self,
+        graph: TaskGraph,
+        *,
+        idempotency_key: str,
+        principal: Principal | None = None,
+        limits: TaskGraphLimits | None = None,
+        correlation: Mapping[str, object] | None = None,
+        describe: bool,
+    ) -> TaskGraphSubmission:
         runtime = self._runtime
         request = await runtime._admit_graph(
             graph, principal=principal, idempotency_key=idempotency_key,
@@ -185,6 +211,8 @@ class TaskEngine(Generic[AppT]):
         )
         assert activation is not None
         try:
+            if describe:
+                return await self._graph_service.describe_submission(request)
             return await self._graph_service.prepare_submission(request)
         finally:
             await task_runtime.finish_graph_activation(
@@ -205,6 +233,7 @@ class TaskEngine(Generic[AppT]):
         assert activation is not None
         admitted = False
         try:
+            submission = await self._graph_service.prepare_described(submission)
             result = await self._graph_service.start_prepared(submission)
             admitted = result.admitted
             return result
