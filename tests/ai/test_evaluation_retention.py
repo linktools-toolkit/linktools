@@ -379,8 +379,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
         assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
         # The capture owner also blocks direct retries even without the dataset receipt.
         with pytest.raises(AIError) as unavailable:
-            await runtime.evaluations._captures.create_agent_input("private literal copy", principal=principal,
-                idempotency_key="evaluation-case:expired:owned:1")
+            await runtime.evaluations._compiler.case(spec.cases[0], principal=principal)
         assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
     async with Runtime.open("evaluation-retention", storage=RuntimeStorage.filesystem(tmp_path),
                             models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
@@ -404,8 +403,7 @@ async def test_literal_capture_deadline_deletes_owned_copy_without_deleting_borr
     async with Runtime.open("evaluation-retention", storage=RuntimeStorage.from_root(restored_root),
                             models=RuntimeUsageModels(), context=RuntimeContext(None, tenant_id="tenant")) as runtime:
         with pytest.raises(AIError) as unavailable:
-            await runtime.evaluations._captures.create_agent_input("private literal copy", principal=principal,
-                idempotency_key="evaluation-case:expired:owned:1")
+            await runtime.evaluations._compiler.case(spec.cases[0], principal=principal)
         assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
         with pytest.raises(AIError) as unavailable:
             await runtime.evaluations.publish_dataset(spec, principal=principal, idempotency_key="restored-publication",
