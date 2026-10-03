@@ -271,7 +271,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
     ) -> EvaluationRecord:
         return await self.update(experiment_id, lambda value: replace(
             value, gate="closed_budget" if budget else "closed_cancel")
-            if value.gate == "open" else value)
+            if value.gate == "open" or not budget and value.gate == "closed_budget" else value)
 
     async def settle_intent(
         self, experiment_id: str, slot_id: str, *, confirmed: bool, released: bool,

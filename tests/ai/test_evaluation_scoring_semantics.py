@@ -468,3 +468,134 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
         permissive = await runtime.evaluations.compare(replace(spec,
             gate_policy=replace(spec.gate_policy, require_complete_usage=False)), principal=PRINCIPAL)
         assert permissive.gate == "pass"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish", ("result", "cancel", "expire"))
+async def test_budget_stops_new_scoring_without_cancelling_accepted_work(
+    monkeypatch: pytest.MonkeyPatch, finish: str,
+) -> None:
+    from datetime import timedelta
+    from linktools.ai.runtime import _evaluation as evaluation_module
+
+    entered, release, budget_reached = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def score(context: TaskNodeContext[None]) -> JsonValue:
+        entered.set()
+        await release.wait()
+        return ScoreBundle(dimensions={"exact_match": 1.0}).to_mapping()
+
+    async def observed_budget(*args: object) -> bool:
+        return budget_reached.is_set()
+
+    target, rule = Task("semantics.budget-target", echo, effect_policy="none"), Task(
+        "semantics.budget-score", score, effect_policy="none")
+    storage = RuntimeStorage.in_memory()
+    async with Runtime.open("soft-budget", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+        monkeypatch.setattr(runtime.evaluations, "_budget_exhausted", observed_budget)
+        engine = runtime.tasks.bind(target, rule)
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("budget", 1), tuple(
+            CaseSpec.task(CaseRef("budget", name, 1), input={"answer": name}) for name in ("first", "second")
+        )), principal=PRINCIPAL, idempotency_key="dataset")
+        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+            (CandidateSpec("candidate", task=target.ref),), (rule_scorer(rule),),
+            policy=EvaluationPolicy(allow_volatile=True, scorer_concurrency=1, content_retention_seconds=60)),
+            PRINCIPAL, "start"), engine=engine)
+        await asyncio.wait_for(entered.wait(), 10)
+        budget_reached.set()
+
+        async def admission_stopped():
+            while True:
+                record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                if record.gate == "closed_budget" and any(
+                    item.disposition.reason_code == "closed_budget" for item in record.dispositions
+                ):
+                    return record
+                await asyncio.sleep(0.01)
+
+        record = await asyncio.wait_for(admission_stopped(), 10)
+        try:
+            assert (await run.inspect()).completion == "running"
+            pending = next(item for item in (await run.scores()).items if item.status == "pending")
+            graph = await engine.get(pending.scorer_graph.graph_id, principal=PRINCIPAL)
+            assert (await graph.state()).status is TaskStatus.RUNNING
+            if finish == "cancel":
+                await run.cancel(idempotency_key="cancel-after-budget")
+            elif finish == "expire":
+                monkeypatch.setattr(evaluation_module, "_now", lambda: record.content_expires_at + timedelta(seconds=1))
+            else:
+                release.set()
+            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "cancelled"
+            record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+            if finish == "result":
+                scores = (await run.scores()).items
+                assert [item.status for item in scores] == ["valid", "not_attempted"]
+                assert scores[1].reason == "closed_budget"
+                assert (await graph.state()).status is TaskStatus.SUCCEEDED
+            else:
+                assert record.gate == "closed_cancel"
+                assert (await graph.state()).status is TaskStatus.CANCELLED
+        finally:
+            release.set()
+
+
+@pytest.mark.asyncio
+async def test_budget_allows_reserved_human_score_to_complete_and_pass_a_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reached = asyncio.Event()
+
+    async def observed_budget(*args: object) -> bool:
+        return reached.is_set()
+
+    target = Task("semantics.budget-human-target", echo, effect_policy="none")
+    scorer = ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,))
+    storage = RuntimeStorage.in_memory()
+    async with Runtime.open("budget-human", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+        monkeypatch.setattr(runtime.evaluations, "_budget_exhausted", observed_budget)
+        engine = runtime.tasks.bind(target)
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("human-budget", 1), (
+            CaseSpec.task(CaseRef("human-budget", "one", 1), input={"answer": "yes"}),
+        )), principal=PRINCIPAL, idempotency_key="dataset")
+        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+            (CandidateSpec("candidate", task=target.ref),), (scorer,),
+            policy=EvaluationPolicy(allow_volatile=True)), PRINCIPAL, "start"), engine=engine)
+
+        async def waiting_score():
+            while True:
+                pending = (await run.scores()).items[0]
+                if pending.scorer_execution is not None:
+                    graph = await engine.get(pending.scorer_graph.graph_id, principal=PRINCIPAL)
+                    if any(node.node_id == "score" and node.status is TaskStatus.WAITING
+                           for node in (await graph.state()).node_states):
+                        return pending
+                await asyncio.sleep(0.01)
+
+        pending = await asyncio.wait_for(waiting_score(), 10)
+        reached.set()
+
+        async def closed_budget():
+            while True:
+                record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
+                if record.gate == "closed_budget":
+                    return
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(closed_budget(), 10)
+        await runtime.evaluations.reconcile(run.experiment_id, engine=engine, principal=PRINCIPAL,
+                                             idempotency_key="resume-budget")
+        request = HumanScoreRequest(pending.trial.trial_id, "human", pending.evidence_ref,
+                                    ScoreBundle(dimensions={"exact_match": 1.0}), "accepted")
+        await run.submit_human_score(request)
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.submit_human_score(request)).status == "valid"
+        report = await run.report()
+        assert report.completion == "complete" and report.scores[0].coverage == 1
+        selection = ScoreSelection("human", "exact_match")
+        spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "candidate"),
+            CandidateSlotRef(run.experiment_id, "candidate"), (ScoreComparisonSelection(selection, selection),),
+            gate_policy=GatePolicy())
+        comparison = await runtime.evaluations.compare(spec, principal=PRINCIPAL)
+        assert comparison.gate == "pass"
+        repeated = await runtime.evaluations.compare(replace(spec, cutoff=comparison.cutoff), principal=PRINCIPAL)
+        assert repeated.gate == "pass" and repeated.cutoff == comparison.cutoff

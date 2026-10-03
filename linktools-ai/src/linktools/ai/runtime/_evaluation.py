@@ -94,11 +94,13 @@ def _completion(
                 all(item.status in _RECORDED for item in scores) and
                 all(item.released for item in record.intents))
     if complete:
-        return "cancelled" if record.gate != "open" else "complete"
+        budget_stopped = record.gate == "closed_budget" and any(
+            item.disposition.reason_code == "closed_budget" for item in record.dispositions)
+        return "cancelled" if record.gate == "closed_cancel" or budget_stopped else "complete"
     if blocked or any(not item.disposition.terminal for item in record.dispositions) or any(
             item.execution_status in {TaskStatus.RECOVERY_REQUIRED, ExecutionStatus.RECOVERY_REQUIRED} for item in trials):
         return "needs_attention"
-    return "running" if record.gate == "open" else "cancelling"
+    return "cancelling" if record.gate == "closed_cancel" else "running"
 
 
 class RuntimeEvaluations:
@@ -332,7 +334,7 @@ class RuntimeEvaluations:
         for intent in record.intents:
             if intent.released:
                 continue
-            if record.gate != "open":
+            if record.gate == "closed_cancel":
                 await self._cancel_intent(record, intent, principal)
                 continue
             selected = bound if intent.scorer_slot_id is None else bound.with_definitions(self._recorder)
@@ -749,7 +751,7 @@ class RuntimeEvaluations:
             expired = True
             record = await self._state.close_reservation_gate(experiment_id)
         for intent in record.intents:
-            if not intent.released and (record.gate != "open" or intent.deadline_at is not None and intent.deadline_at <= _now()):
+            if not intent.released and (record.gate == "closed_cancel" or intent.deadline_at is not None and intent.deadline_at <= _now()):
                 await self._cancel_intent(record, intent, principal)
             elif not intent.confirmed and not intent.released:
                 selected = engine if intent.scorer_slot_id is None else engine.with_definitions(self._recorder)
@@ -772,7 +774,7 @@ class RuntimeEvaluations:
             record = await self._state.close_reservation_gate(experiment_id, budget=True)
         if record.gate != "open":
             for intent in record.intents:
-                if not intent.released:
+                if record.gate == "closed_cancel" and not intent.released:
                     await self._cancel_intent(record, intent, principal)
             record = await self._record(experiment_id, principal, allow_expired=True)
             intents = {item.slot_id: item for item in record.intents}
@@ -870,7 +872,7 @@ class RuntimeEvaluations:
         selected = next((item for item in registered.intents if item.slot_id == slot), None)
         if selected is None:
             return
-        if registered.gate != "open":
+        if registered.gate == "closed_cancel":
             await self._cancel_intent(registered, selected, record.manifest.principal)
             return
         result = await engine.start_prepared(selected.submission)
@@ -1126,7 +1128,7 @@ class RuntimeEvaluations:
             principal=record.manifest.principal), scorer)
         score = None
         status, reason = "error", node.error_code or node.status.value.lower()
-        if node.status is TaskStatus.CANCELLED and record.gate == "open" and intent.deadline_at is not None and intent.deadline_at <= _now():
+        if node.status is TaskStatus.CANCELLED and record.gate != "closed_cancel" and intent.deadline_at is not None and intent.deadline_at <= _now():
             reason = "unanswered" if scorer.task == TaskRef.deferred_input() else "scorer_timeout"
         if node.status is TaskStatus.SUCCEEDED:
             value = await self._history.task_result(state.graph_id, "score", principal=record.manifest.principal)
@@ -1290,7 +1292,7 @@ class RuntimeEvaluations:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 return value
             current = next(item for item in value.intents if item.slot_id == intent.slot_id)
-            if (terminal or value.gate != "open" or current.released or
+            if (terminal or value.gate == "closed_cancel" or current.released or
                     current.deadline_at is not None and current.deadline_at <= _now() or
                     any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in value.scores)):
                 raise AIError(ErrorCode.TASK_NOT_READY)
@@ -1309,7 +1311,7 @@ class RuntimeEvaluations:
     async def _resume_decision(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
     ) -> None:
-        if record.gate != "open" or intent.released or intent.deadline_at is not None and intent.deadline_at <= _now():
+        if record.gate == "closed_cancel" or intent.released or intent.deadline_at is not None and intent.deadline_at <= _now():
             return
         decision = next((item for item in record.human_decisions if item.slot_id == intent.slot_id), None)
         node = next(item for item in state.node_states if item.node_id == "score")
