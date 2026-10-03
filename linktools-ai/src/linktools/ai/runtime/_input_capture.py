@@ -489,8 +489,10 @@ class RuntimeInputCaptures:
         else:
             contract = await self.read_task(reference, principal=principal)
             normalized = dict(contract.input if input_mode == "fixed_input" else contract.original_input)
-        if isinstance(reference, AgentInputCaptureRef) and agent.input_context is not None:
-            normalized["capture_context"] = agent.input_context.to_payload()
+        if isinstance(reference, AgentInputCaptureRef):
+            normalized.pop("capture_context", None)
+            if agent.input_context is not None:
+                normalized["capture_context"] = agent.input_context.to_payload()
         # A new invocation never inherits a source session or its memory scope.
         if normalized.get("kind") == "agent-task-input":
             normalized["session_id"] = None

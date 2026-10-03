@@ -5,7 +5,7 @@
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, TextPart, UserPromptPart
 
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import TaskStatus
@@ -105,4 +105,63 @@ async def test_graph_capture_applies_context_policy_to_all_agent_input_forms(
         value = await runtime._input_captures.read_agent(recaptured, principal=PRINCIPAL)
         assert dict(value.input_context.session_metadata) == (
             {"secret": "historical value"} if context_policy == "captured" else {}
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", ["agent", "graph"])
+@pytest.mark.parametrize("context_policy", ["clean", "captured"])
+@pytest.mark.parametrize("input_mode", ["fixed_input", "reproject_input"])
+async def test_capture_context_policy_remains_authoritative_when_reprojecting(
+    tmp_path: Path, source_kind: str, context_policy: str, input_mode: str,
+) -> None:
+    from linktools.ai.evaluation import (
+        CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
+        EvaluationSpec, StartEvaluationRequest,
+    )
+    from linktools.ai.task import Task
+    from .test_evaluation_consumers import exact, rule_scorer
+
+    context = ExecutionInputContext.from_messages((
+        ModelRequest(parts=[SystemPromptPart("PRIOR INSTRUCTIONS"), UserPromptPart("HISTORICAL INPUT TO REMOVE")]),
+        ModelResponse(parts=[TextPart("prior answer")]),
+    ), session_metadata={"secret": "prior metadata"})
+    async with Runtime.open("capture-reproject", models=FixtureModels(), context=CONTEXT,
+                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(_agents(),)) as runtime:
+        task = runtime.tasks.from_agent("capture.agent", runtime.agents.get())
+        scorer = Task("capture.scorer", exact, effect_policy="none")
+        engine = runtime.tasks.bind(task, scorer)
+        source = await engine.start(TaskGraph("source", (
+            TaskNode("agent", task=task, input=AgentTaskInput("current question", input_context=context)),
+        )), principal=PRINCIPAL, idempotency_key="source")
+        assert (await source.wait()).status is TaskStatus.SUCCEEDED
+        if source_kind == "graph":
+            graph_capture = await runtime.tasks.capture_graph(source.graph_id,
+                CaptureGraphRequest(PRINCIPAL, "graph-capture", context_policy=context_policy))
+            template = await runtime._input_captures.read_graph(graph_capture, principal=PRINCIPAL)
+            source = await engine.start(TaskGraph("graph-replay", template.nodes),
+                principal=PRINCIPAL, idempotency_key="graph-replay")
+            assert (await source.wait()).status is TaskStatus.SUCCEEDED
+        execution = await source.execution("agent")
+        capture = await runtime.executions.capture_input(execution.execution_id,
+            CaptureInputRequest(PRINCIPAL, "input-capture", context_policy=context_policy))
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), cases=(
+            CaseSpec.from_capture(CaseRef("data", "case", 1), capture=capture, expected="fixture answer"),
+        )), principal=PRINCIPAL, idempotency_key="publish")
+        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+            (CandidateSpec("agent", task=task.ref),), (rule_scorer(scorer),), input_mode=input_mode,
+            policy=EvaluationPolicy(model_fixtures=(FixtureModels.contract,))), PRINCIPAL, "evaluate"), engine=engine)
+        assert (await run.wait(timeout_seconds=20)).completion == "complete"
+        trial = (await run.trials()).items[0]
+        interactions = await runtime.executions.model_interactions(trial.subject.execution_id,
+            principal=PRINCIPAL, include_content=True)
+        content = str(interactions.items[0].request)
+        assert "current question" in content
+        assert ("HISTORICAL INPUT TO REMOVE" in content) == (context_policy == "captured")
+        assert ("PRIOR INSTRUCTIONS" in content) == (context_policy == "captured")
+        recaptured = await runtime.executions.capture_input(trial.subject.execution_id,
+            CaptureInputRequest(PRINCIPAL, "result-capture"))
+        value = await runtime._input_captures.read_agent(recaptured, principal=PRINCIPAL)
+        assert dict(value.input_context.session_metadata) == (
+            {"secret": "prior metadata"} if context_policy == "captured" else {}
         )
