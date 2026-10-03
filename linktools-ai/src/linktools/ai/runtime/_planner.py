@@ -1179,6 +1179,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             != _output_contract(None, node.output_type)
         ):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        output_contract = _output_contract(handler, node.output_type)
+        if node.output_contract is not None:
+            _restore_output_contract(node.output_contract)
+            if output_contract is not None and node.output_contract != output_contract:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            output_contract = dict(node.output_contract)
         return TaskNode.from_resolved(
             node.node_id,
             node.dependencies,
@@ -1192,7 +1198,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             timeout_seconds=node.timeout_seconds,
             max_attempts=node.max_attempts,
             retry_delay_seconds=node.retry_delay_seconds,
-            output_contract=_output_contract(handler, node.output_type),
+            output_contract=output_contract,
             effect_policy=_handler_effect_policy(handler, request=True),
             reconcile=_handler_has_reconcile(handler),
             dependency_policy=node.dependency_policy,
