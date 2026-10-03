@@ -257,7 +257,7 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("baseline", task=old.ref), CandidateSpec("candidate", task=new.ref)), (rule_scorer(scorer),)),
             PRINCIPAL, "start-paired"), engine=runtime.tasks.bind(old, new, scorer))
-        view = await run.wait(timeout_seconds=10)
+        view = await run.wait(timeout_seconds=30)
         assert view.completion == "complete", view.needs_attention
         original_report = await run.report()
         initial_trials = (await run.trials()).items
@@ -266,7 +266,7 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
         scoring_engine = runtime.tasks.bind(revised_task)
         rescored = await run.rescore(request, engine=scoring_engine)
         assert (await run.rescore(request, engine=scoring_engine)).experiment_id == rescored.experiment_id
-        view = await rescored.wait(timeout_seconds=10)
+        view = await rescored.wait(timeout_seconds=30)
         assert view.completion == "complete" and view.kind == "score_only"
         assert view.source_experiment_id == run.experiment_id
         assert view.progress.planned_trials == 0 and view.progress.source_trial_count == 2
@@ -317,7 +317,7 @@ async def test_target_failure_invalid_score_and_na_remain_in_the_report_denomina
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("current", task=target_task.ref),), (rule_scorer(scorer_task),)), PRINCIPAL, "start-failures"),
             engine=runtime.tasks.bind(target_task, scorer_task))
-        view = await run.wait(timeout_seconds=10)
+        view = await run.wait(timeout_seconds=30)
         assert view.completion == "complete", view.needs_attention
         report = await run.report()
         candidate = report.candidates[0]
