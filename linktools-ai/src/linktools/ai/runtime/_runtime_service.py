@@ -50,6 +50,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 
 if TYPE_CHECKING:
+    from ._evaluation import RuntimeEvaluations
     from ._input_capture import RuntimeInputCaptures
     from ..observe import Metrics
     from ..task import TaskResultRecord
@@ -98,8 +99,6 @@ from .service_api import (
     CancelExecutionResult,
     CloseSessionRequest,
     CreateSessionRequest,
-    EvaluationHandle,
-    EvaluationService,
     EventService,
     ExternalService,
     ExecutionRequest,
@@ -107,12 +106,10 @@ from .service_api import (
     ExecutionService,
     ForkExecutionRequest,
     ForkSessionRequest,
-    ReplayEvaluationRequest,
     ResumeSessionRequest,
     RetryExecutionRequest,
     SessionService,
     SessionView,
-    StartEvaluationRequest,
     UpdateSessionRequest,
     ExecutionTreeEvent,
     TaskGraphRunEvent,
@@ -273,7 +270,7 @@ class Runtime(Generic[AppT]):
         execution: ExecutionService,
         session: SessionService,
         graph: TaskGraphService,
-        evaluation: EvaluationService,
+        evaluation: "RuntimeEvaluations",
         approval: ApprovalService,
         external: ExternalService,
         event: EventService,
@@ -844,53 +841,11 @@ class Runtime(Generic[AppT]):
             ),
         )
 
-    async def _start_evaluation_for_agent(
-        self,
-        agent_id: str,
-        agent_revision: int,
-        request: StartEvaluationRequest,
-        *,
-        output: "type[BaseModel] | None",
-        compiled_agent: "CompiledAgent | None" = None,
-    ) -> EvaluationHandle:
-        binding = await self._resolve_agent_binding(
-            self._bind_agent(
-                agent_id,
-                agent_revision,
-                output=output,
-                compiled_agent=compiled_agent,
-            )
-        )
-        return await self.evaluations.start(
-            binding.binding_digest,
-            request,
-            binding_contract=binding.binding_contract,
-        )
-
-    async def _replay_evaluation_for_agent(
-        self,
-        agent_id: str,
-        evaluation_id: str,
-        request: ReplayEvaluationRequest,
-    ) -> "Execution[AppT]":
-        handle = await self.evaluations.replay(
-            agent_id,
-            evaluation_id,
-            request,
-        )
-        return Execution(
-            self,
-            handle.execution_id,
-            request.principal,
-            self._watch_execution_tree,
-        )
-
     def _task_from_agent_capture(self, task_id: str, binding: AgentBindingContract, *, revision: int) -> Task[AppT]:
         restored = self._compiler.restore(binding)
         compiled = restored.compiled_agent
         agent = Agent(self, compiled.spec.id, compiled.spec.revision, compiled)
         return self._task_from_agent(task_id, agent, revision=revision, build_input=None, binding_contract=binding)
-
 
     def _task_from_agent(
         self,

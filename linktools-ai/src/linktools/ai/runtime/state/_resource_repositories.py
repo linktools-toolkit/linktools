@@ -6,7 +6,7 @@ import json
 from dataclasses import replace
 from ...core import OperationKind, OperationLedgerInput, OperationLedgerRecord, OperationStatus, Page, ResourceKind
 from ...errors import AIError, ErrorCode
-from ._contracts import ArtifactRecord, EvaluationRecord, MemoryRecord
+from ._contracts import ArtifactRecord, MemoryRecord
 from ._plan import RuntimeDomain
 from ._store import RecordQuery, StateStore, StateTransaction, StoredRecord
 from ._repository_common import (
@@ -19,32 +19,6 @@ from ._repository_common import (
     reserve_operation as _reserve_operation,
     validate_page_limit as _validate_page_limit,
 )
-
-class EvaluationRepositoryImpl(_ResourceRepository[EvaluationRecord]):
-    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
-        super().__init__(
-            store,
-            namespace=namespace,
-            tenant_id=tenant_id,
-            domain=RuntimeDomain.EVALUATION,
-            kind="evaluation",
-            resource_kind=ResourceKind.EVALUATION,
-            value_type=EvaluationRecord,
-        )
-
-    async def list_by_execution(
-        self, execution_id: str, *, tenant_id: str
-    ) -> tuple[EvaluationRecord, ...]:
-        if tenant_id != self._tenant_id:
-            return ()
-        records = await self._records(
-            "evaluation",
-            scope=self._scope("evaluation", "execution", execution_id),
-        )
-        return tuple(
-            [await self._decode(record, EvaluationRecord) for record in records]
-        )
-
 
 class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
     def __init__(
@@ -107,7 +81,6 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                     return tuple(rows)
         records = await self._store.read(read)
         return tuple([await self._decode(record, MemoryRecord) for record in records])
-
 
     async def apply_write(
         self,
@@ -385,6 +358,5 @@ def _memory_delete_replay_result(operation: OperationLedgerRecord | None) -> boo
 
 __all__ = [
     "ArtifactRepositoryImpl",
-    "EvaluationRepositoryImpl",
     "MemoryRepositoryImpl",
 ]

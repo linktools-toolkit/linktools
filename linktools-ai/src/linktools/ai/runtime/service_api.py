@@ -13,7 +13,6 @@ from ..core import (
     ApprovalDecision,
     ApprovalStatus,
     CorrelationData,
-    EvaluationStatus,
     ExecutionLineageKind,
     ExecutionMode,
     ExecutionStatus,
@@ -753,73 +752,6 @@ class SessionView:
 
 
 @dataclass(frozen=True, slots=True)
-class StartEvaluationRequest:
-    principal: Principal
-    dataset_id: str
-    memory_scope: str
-    idempotency_key: str = ""
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.dataset_id, str) or not self.dataset_id.strip():
-            raise ValueError("evaluation dataset identity is required")
-        validate_memory_scope(self.memory_scope)
-        validate_idempotency_key(self.idempotency_key)
-
-
-@dataclass(frozen=True, slots=True)
-class CompareEvaluationRequest:
-    principal: Principal
-    baseline_id: str
-    candidate_id: str
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.baseline_id, str)
-            or not self.baseline_id.strip()
-            or not isinstance(self.candidate_id, str)
-            or not self.candidate_id.strip()
-        ):
-            raise ValueError("evaluation ids are required")
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayEvaluationRequest:
-    principal: Principal
-    memory_scope: str
-    idempotency_key: str = ""
-
-    def __post_init__(self) -> None:
-        validate_memory_scope(self.memory_scope)
-        validate_idempotency_key(self.idempotency_key)
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationHandle:
-    evaluation_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationView:
-    evaluation_id: str
-    status: EvaluationStatus
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationComparison:
-    baseline_id: str
-    candidate_id: str
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.baseline_id, str)
-            or not self.baseline_id.strip()
-            or not isinstance(self.candidate_id, str)
-            or not self.candidate_id.strip()
-        ):
-            raise ValueError("evaluation comparison is invalid")
-
-
-@dataclass(frozen=True, slots=True)
 class ApprovalView:
     approval_id: str
     status: ApprovalStatus
@@ -1386,28 +1318,6 @@ class SessionService(Protocol):
     ) -> SessionView: ...
 
 
-class EvaluationService(Protocol):
-    async def start(
-        self,
-        binding_digest: str,
-        request: StartEvaluationRequest,
-        *,
-        binding_contract: "AgentBindingContract | None" = None,
-    ) -> EvaluationHandle: ...
-    async def inspect(
-        self, evaluation_id: str, *, principal: Principal
-    ) -> EvaluationView: ...
-    async def compare(
-        self, request: CompareEvaluationRequest
-    ) -> EvaluationComparison: ...
-    async def replay(
-        self,
-        agent_id: str,
-        evaluation_id: str,
-        request: ReplayEvaluationRequest,
-    ) -> ExecutionHandle: ...
-
-
 class ApprovalService(Protocol):
     async def list(
         self, execution_id: str, *, principal: Principal
@@ -1468,12 +1378,7 @@ __all__ = [
     "CancelExecutionRequest",
     "CancelExecutionResult",
     "CloseSessionRequest",
-    "CompareEvaluationRequest",
     "CreateSessionRequest",
-    "EvaluationComparison",
-    "EvaluationHandle",
-    "EvaluationService",
-    "EvaluationView",
     "EventService",
     "ExternalCallFailed",
     "ExternalCallRetry",
@@ -1501,7 +1406,6 @@ __all__ = [
     "ListSessionRequest",
     "ModelInteractionItem",
     "Page",
-    "ReplayEvaluationRequest",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
     "SessionHistoryItem",
@@ -1510,7 +1414,6 @@ __all__ = [
     "SessionTurn",
     "SessionTurnItem",
     "SessionView",
-    "StartEvaluationRequest",
     "TaskGraphRunEvent",
     "TranscriptItem",
     "UpdateSessionRequest",

@@ -204,6 +204,12 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         return record
 
+    async def submission_status(self, submission: TaskSubmissionRef) -> str | None:
+        async def read(transaction: StateTransaction) -> str | None:
+            record = await self._submission_in_transaction(transaction, submission)
+            return None if record is None else record.state
+        return await self._store.read(read)
+
     async def prepare(
         self, submission: TaskGraphSubmission
     ) -> TaskGraphSubmission:

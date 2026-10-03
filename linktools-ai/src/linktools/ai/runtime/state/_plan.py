@@ -32,6 +32,7 @@ _OBJECT_STORE_DOMAINS = frozenset(
         RuntimeDomain.MEMORY,
         RuntimeDomain.ARTIFACT,
         RuntimeDomain.TASK,
+        RuntimeDomain.EVALUATION,
         RuntimeDomain.RECOVERY,
     }
 )

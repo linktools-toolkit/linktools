@@ -172,16 +172,6 @@ class TaskStatus(str, Enum):
     BLOCKED = "BLOCKED"
 
 
-class EvaluationStatus(str, Enum):
-    __str__ = str.__str__
-    __format__ = str.__format__
-    PENDING = "PENDING"
-    RUNNING = "RUNNING"
-    SUCCEEDED = "SUCCEEDED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
-
-
 class ApprovalStatus(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
@@ -300,7 +290,7 @@ class Principal:
 
 
 __all__ = [
-    "ApprovalDecision", "ApprovalStatus", "EvaluationStatus",
+    "ApprovalDecision", "ApprovalStatus",
     "ExecutionDeltaType", "ExecutionEventType", "ExecutionLineageKind", "ExecutionMode",
     "ExecutionStatus", "ExternalCallStatus",
     "IdempotencyStatus", "OperationKind", "OperationStatus", "Page", "Principal",

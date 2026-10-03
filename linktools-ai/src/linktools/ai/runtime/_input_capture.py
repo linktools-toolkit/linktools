@@ -6,16 +6,17 @@ import json
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import TypeAlias
 
 from ..agent import AgentBindingContract, AgentInputCaptureRef
 from ..core import (
     AuthorizationAction, AuthorizationPolicy, ImmutableJsonMapping, JsonValue,
     Principal, ResourceKind, ResourceRef, TaskStatus, canonical_json_bytes,
-    canonical_sha256, validate_idempotency_key, principal_identity_payload,
+    canonical_sha256, validate_idempotency_key, principal_identity_payload, validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload, read_object
+from ..storage import ObjectRef, ObjectStoreInspection, StoredPayload, read_object
 from ..task import (
     TaskDependencyCapture, TaskDependencyState, TaskGraph,
     TaskGraphAdmission, TaskGraphCaptureRef, TaskGraphTemplate, TaskGraphTemplateRef,
@@ -31,7 +32,7 @@ from ._input_contract import MaterializedUserContent
 from ._object import read_runtime_object
 from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from .service_api import ExecutionService
-from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage, input_capture_key
+from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage, input_capture_key, input_capture_expiry_key
 from .state._codec import decode_domain, encode_domain
 from .state._contracts import StoredUserInput
 
@@ -132,16 +133,24 @@ class RuntimeInputCaptures:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, ResourceRef(kind, id, principal.tenant_id, owner_principal_id))
 
-    async def _publish(self, kind: str, principal: Principal, key: str, payload: Mapping[str, JsonValue]) -> tuple[str, str]:
+    async def _publish(self, kind: str, principal: Principal, key: str, payload: Mapping[str, JsonValue],
+                       *, expires_at: datetime | None = None) -> tuple[str, str]:
         if principal.tenant_id != self._storage.tenant_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if self._storage.plan.route(RuntimeDomain.TASK).retention is RuntimeRetentionMode.TRANSIENT:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         validate_idempotency_key(key)
         identity = canonical_sha256({"kind": kind, "key": key})
+        object_key = self._key(principal.tenant_id, kind, identity)
+        if expires_at is not None and (expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc)):
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
+        if await self._objects.stat(input_capture_expiry_key(object_key)) is not None:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         value = {"kind": kind, "version": 1, "namespace": self._namespace,
                  "tenant_id": principal.tenant_id, "principal": principal_identity_payload(principal), "payload": dict(payload)}
-        digest = await self._put(self._key(principal.tenant_id, kind, identity), value)
+        if expires_at is not None:
+            value["expires_at"] = expires_at.isoformat()
+        digest = await self._put(object_key, value)
         return identity, digest
 
     async def _read(self, reference: AgentInputCaptureRef | TaskInvocationInputRef | TaskGraphCaptureRef | TaskGraphTemplateRef,
@@ -151,7 +160,10 @@ class RuntimeInputCaptures:
         graph = kind in {"graph", "template"}
         await self._authorize(principal, ResourceKind.TASK_GRAPH if graph else ResourceKind.EXECUTION,
                               reference.capture_id, AuthorizationAction.TASK_CAPTURE_GRAPH if graph else AuthorizationAction.EXECUTION_CAPTURE_INPUT)
-        value = await self._get(self._key(principal.tenant_id, kind, reference.capture_id), reference.digest)
+        key = self._key(principal.tenant_id, kind, reference.capture_id)
+        if await self._objects.stat(input_capture_expiry_key(key)) is not None:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
+        value = await self._get(key, reference.digest)
         if value is None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         if not isinstance(value, Mapping) or value.get("kind") != kind or value.get("namespace") != self._namespace or value.get("tenant_id") != principal.tenant_id or not isinstance(value.get("payload"), Mapping):
@@ -164,6 +176,15 @@ class RuntimeInputCaptures:
         await self._authorize(principal, ResourceKind.TASK_GRAPH if graph else ResourceKind.EXECUTION,
                               reference.capture_id, AuthorizationAction.TASK_CAPTURE_GRAPH if graph else AuthorizationAction.EXECUTION_CAPTURE_INPUT,
                               owner["principal_id"])
+        if value.get("expires_at") is not None:
+            try:
+                expires_at = datetime.fromisoformat(value["expires_at"])
+                if expires_at.tzinfo is None:
+                    raise ValueError("capture expiry must be aware")
+            except (ValueError, TypeError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if expires_at <= datetime.now(timezone.utc):
+                raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         required = {
             "agent": {"prompt", "binding", "original_input", "source_execution_id", "source_invocation_id", "repository_instructions", "task_input", "source_principal"},
             "task": {"contract"}, "graph": {"source_graph_id", "mode", "template"}, "template": {"template"},
@@ -172,15 +193,80 @@ class RuntimeInputCaptures:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value["payload"]
 
-    async def create_agent_input(self, prompt: UserPromptInput, *, files: Sequence[str] = (), principal: Principal, idempotency_key: str) -> AgentInputCaptureRef:
+    async def create_agent_input(self, prompt: UserPromptInput, *, files: Sequence[str] = (), principal: Principal, idempotency_key: str,
+                                 expires_at: datetime | None = None) -> AgentInputCaptureRef:
         await self._authorize(principal, ResourceKind.EXECUTION, "input-capture", AuthorizationAction.EXECUTION_CAPTURE_INPUT)
         canonical = await self._materializer.canonicalize_input(prompt)
         canonical = await self._materializer.materialize(canonical, await self._materializer.canonicalize_files(files))
         payload = {"prompt": task_prompt_draft(canonical), "input_view": dict(canonical.view) if isinstance(canonical, MaterializedUserContent) else None, "binding": None,
                    "original_input": {}, "source_execution_id": None,
                    "source_invocation_id": None, "repository_instructions": None, "task_input": None, "source_principal": None, "input_context": None}
-        identity, digest = await self._publish("agent", principal, idempotency_key, payload)
+        identity, digest = await self._publish("agent", principal, idempotency_key, payload, expires_at=expires_at)
         return AgentInputCaptureRef(self._namespace, principal.tenant_id, identity, digest, None)
+
+    async def expire_inputs(self, *, principal: Principal, now: datetime, limit: int = 100) -> tuple[ObjectRef, ...]:
+        """Tombstone owned captures at their explicit deletion deadline."""
+        validate_page_limit(limit)
+        if now.tzinfo is None:
+            raise ValueError("capture expiry time must be timezone-aware")
+        await self._authorize(principal, ResourceKind.EVALUATION, "retention", AuthorizationAction.EVALUATION_PURGE)
+        if not isinstance(self._objects, ObjectStoreInspection):
+            raise AIError(ErrorCode.EVALUATION_POLICY_UNSUPPORTED)
+        candidates = []
+        expirations = []
+        async for stat in self._objects.list_objects():
+            if not stat.key.startswith(("v1/input-capture/agent/", "v1/input-capture/template/")):
+                continue
+            value = await self._get(stat.key, stat.digest)
+            if not isinstance(value, Mapping) or value.get("namespace") != self._namespace or value.get("tenant_id") != principal.tenant_id:
+                continue
+            owner = value.get("principal")
+            if not isinstance(owner, Mapping) or owner.get("principal_id") != principal.principal_id or value.get("expires_at") is None:
+                continue
+            try:
+                expires_at = datetime.fromisoformat(value["expires_at"])
+                if expires_at.tzinfo is None:
+                    raise ValueError("capture expiry must be aware")
+            except (ValueError, TypeError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if expires_at > now:
+                continue
+            await self._authorize(principal, ResourceKind.EVALUATION, stat.key,
+                                  AuthorizationAction.EVALUATION_PURGE, principal.principal_id)
+            expirations.append((stat.key, expires_at))
+            candidates.append(ObjectRef(self._objects.store_id, stat.key, stat.digest, stat.size))
+            if len(candidates) >= limit:
+                break
+        for key, expires_at in expirations:
+            await self._put(input_capture_expiry_key(key), {"namespace": self._namespace,
+                "tenant_id": principal.tenant_id, "capture_key": key, "expired_at": expires_at.isoformat()})
+        return tuple(candidates)
+
+    async def expire_templates(
+        self, references: tuple[TaskGraphTemplateRef, ...], *, principal: Principal, now: datetime,
+    ) -> tuple[ObjectRef, ...]:
+        """Expire template copies owned by an evaluation whose gate is closed."""
+        candidates = []
+        for reference in references:
+            if reference.namespace != self._namespace or reference.tenant_id != principal.tenant_id:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            key = self._key(principal.tenant_id, "template", reference.capture_id)
+            stat = await self._objects.stat(key)
+            if stat is None:
+                continue
+            value = await self._get(key, reference.digest)
+            if (not isinstance(value, Mapping) or value.get("namespace") != self._namespace
+                    or value.get("tenant_id") != principal.tenant_id or not isinstance(value.get("principal"), Mapping)
+                    or not isinstance(value["principal"].get("principal_id"), str)
+                    or value["principal"].get("tenant_id") != principal.tenant_id):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._authorize(principal, ResourceKind.EVALUATION, reference.capture_id,
+                                  AuthorizationAction.EVALUATION_PURGE, value["principal"]["principal_id"])
+            if await self._objects.stat(input_capture_expiry_key(key)) is None:
+                await self._put(input_capture_expiry_key(key), {"namespace": self._namespace,
+                    "tenant_id": principal.tenant_id, "capture_key": key, "expired_at": now.isoformat()})
+            candidates.append(ObjectRef(self._objects.store_id, key, stat.digest, stat.size))
+        return tuple(candidates)
 
     async def record_invocation(self, execution_id: str, invocation: TaskNodeInvocation) -> None:
         state = await self._storage.task.tasks.graph_state(invocation.graph_id, tenant_id=invocation.principal.tenant_id)

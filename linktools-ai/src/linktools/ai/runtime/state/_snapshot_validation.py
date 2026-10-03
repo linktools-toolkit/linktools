@@ -8,6 +8,8 @@ from typing import cast
 
 from ...core import OperationLedgerInput
 from ...errors import AIError, ErrorCode
+from ...evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
+from ._evaluation_records import EvaluationCaseRecord, EvaluationDatasetRecord, EvaluationTombstone, EvaluationContentTombstone, EvaluationCleanupRecord
 from ...task import (
     TaskGraphAdmission,
     TaskGraphSubmission,
@@ -106,7 +108,7 @@ _ALLOWED_RECORD_KINDS = {
             "task_prepared_input",
         }
     ),
-    RuntimeDomain.EVALUATION: frozenset({"evaluation", "idempotency"}),
+    RuntimeDomain.EVALUATION: frozenset({"evaluation", "idempotency", "evaluation_case", "evaluation_dataset", "evaluation_evidence", "evaluation_report", "evaluation_comparison", "evaluation_tombstone", "evaluation_content_tombstone", "evaluation_cleanup"}),
     RuntimeDomain.RECOVERY: frozenset(
         {
             "recovery_checkpoint",
@@ -135,6 +137,14 @@ _RECORD_TYPES = {
     "memory": MemoryRecord,
     "artifact": ArtifactRecord,
     "evaluation": EvaluationRecord,
+    "evaluation_tombstone": EvaluationTombstone,
+    "evaluation_content_tombstone": EvaluationContentTombstone,
+    "evaluation_cleanup": EvaluationCleanupRecord,
+    "evaluation_case": EvaluationCaseRecord,
+    "evaluation_dataset": EvaluationDatasetRecord,
+    "evaluation_evidence": EvidenceBundle,
+    "evaluation_report": EvaluationReport,
+    "evaluation_comparison": ComparisonReport,
     "recovery_checkpoint": RecoveryCheckpoint,
     "approval": ApprovalRecord,
     "external_call": ExternalCallRecord,

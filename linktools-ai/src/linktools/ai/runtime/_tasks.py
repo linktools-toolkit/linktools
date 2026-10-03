@@ -12,6 +12,7 @@ from ..errors import AIError, ErrorCode
 from ..task import (
     Task,
     TaskExpander,
+    TaskExpanderRef,
     TaskGraph,
     TaskGraphCaptureRef,
     TaskGraphLimits,
@@ -20,6 +21,10 @@ from ..task import (
     TaskNodeInfo,
     TaskRef,
     TaskGraphService,
+    TaskGraphSubmission,
+    TaskSubmissionRef,
+    TaskSubmissionResult,
+    TaskSubmissionCancellation,
 )
 from ._task import TaskGraphRun
 from ._input_capture import CaptureGraphRequest
@@ -61,7 +66,6 @@ class RuntimeTasks(Generic[AppT]):
         self._runtime._ensure_open()
         return await self._runtime._input_captures.capture_graph(graph_id, request)
 
-
     async def from_agent_capture(self, id: str, capture: AgentInputCaptureRef, *,
                                  revision: int = 1, principal: Principal) -> Task[AppT]:
         self._runtime._ensure_open()
@@ -69,7 +73,6 @@ class RuntimeTasks(Generic[AppT]):
         if value.binding is None:
             raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         return self._runtime._task_from_agent_capture(id, value.binding, revision=revision)
-
 
     def bind(self, *definitions: Task[AppT] | TaskExpander) -> "TaskEngine[AppT]":
         tasks: dict[tuple[str, int], Task[AppT]] = {}
@@ -111,6 +114,35 @@ class TaskEngine(Generic[AppT]):
         self._tasks = MappingProxyType(dict(sorted(tasks.items())))
         self._expanders = MappingProxyType(dict(sorted(expanders.items())))
 
+    @property
+    def runtime(self) -> "Runtime[AppT]":
+        return self._runtime
+
+    @property
+    def definitions(self) -> tuple[Task[AppT], ...]:
+        return tuple(self._tasks.values())
+
+    @property
+    def expanders(self) -> tuple[TaskExpander, ...]:
+        return tuple(self._expanders.values())
+
+    def definition(self, ref: TaskRef) -> Task[AppT]:
+        try:
+            return self._tasks[(ref.id, ref.revision)]
+        except KeyError as error:
+            raise AIError(ErrorCode.BINDING_NOT_REGISTERED) from error
+
+    def expander_definition(self, ref: TaskExpanderRef) -> TaskExpander:
+        try:
+            return self._expanders[(ref.id, ref.revision)]
+        except KeyError as error:
+            raise AIError(ErrorCode.BINDING_NOT_REGISTERED) from error
+
+    def with_definitions(self, *definitions: Task[AppT]) -> "TaskEngine[AppT]":
+        return self._runtime.tasks.bind(
+            *self._tasks.values(), *self._expanders.values(), *definitions,
+        )
+
     async def start(
         self,
         graph: TaskGraph,
@@ -120,48 +152,79 @@ class TaskEngine(Generic[AppT]):
         limits: TaskGraphLimits | None = None,
         correlation: Mapping[str, object] | None = None,
     ) -> TaskGraphRun[AppT]:
+        submission = await self.prepare_submission(
+            graph, principal=principal, idempotency_key=idempotency_key,
+            limits=limits, correlation=correlation,
+        )
+        result = await self.start_prepared(submission)
+        if not result.admitted:
+            raise AIError(ErrorCode.TASK_NOT_READY, "submission_cancelled")
+        return TaskGraphRun(
+            self._runtime, self._graph_service, graph.graph_id,
+            submission.admission.principal, self._runtime._watch_execution_tree, self,
+        )
+
+    async def prepare_submission(
+        self,
+        graph: TaskGraph,
+        *,
+        idempotency_key: str,
+        principal: Principal | None = None,
+        limits: TaskGraphLimits | None = None,
+        correlation: Mapping[str, object] | None = None,
+    ) -> TaskGraphSubmission:
         runtime = self._runtime
-        runtime._ensure_open()
-        if not isinstance(graph, TaskGraph):
-            raise TypeError("graph must be TaskGraph")
         request = await runtime._admit_graph(
-            graph,
-            principal=principal,
-            idempotency_key=idempotency_key,
-            limits=limits,
-            correlation=correlation,
+            graph, principal=principal, idempotency_key=idempotency_key,
+            limits=limits, correlation=correlation,
         )
         task_runtime = runtime._require_task_node_runtime()
         activation = await task_runtime.activate_graph(
-            graph,
-            tuple(self._tasks.values()),
-            tuple(self._expanders.values()),
+            graph, tuple(self._tasks.values()), tuple(self._expanders.values()),
             track_pre_admission=True,
         )
         assert activation is not None
         try:
-            await self._graph_service.start(request)
-        except BaseException:
+            return await self._graph_service.prepare_submission(request)
+        finally:
             await task_runtime.finish_graph_activation(
-                graph.graph_id,
-                request.principal.tenant_id,
-                activation,
+                graph.graph_id, request.principal.tenant_id, activation,
                 admitted=False,
             )
-            raise
-        await task_runtime.finish_graph_activation(
-            graph.graph_id,
-            request.principal.tenant_id,
-            activation,
-            admitted=True,
+
+    async def start_prepared(
+        self, submission: TaskGraphSubmission,
+    ) -> TaskSubmissionResult:
+        runtime = self._runtime
+        runtime._ensure_open()
+        task_runtime = runtime._require_task_node_runtime()
+        activation = await task_runtime.activate_graph(
+            submission.graph, tuple(self._tasks.values()),
+            tuple(self._expanders.values()), track_pre_admission=True,
         )
-        return TaskGraphRun(
-            runtime,
-            self._graph_service,
-            graph.graph_id,
-            request.principal,
-            runtime._watch_execution_tree,
-            self,
+        assert activation is not None
+        admitted = False
+        try:
+            result = await self._graph_service.start_prepared(submission)
+            admitted = result.admitted
+            return result
+        finally:
+            await task_runtime.finish_graph_activation(
+                submission.graph.graph_id, submission.ref.tenant_id,
+                activation, admitted=admitted,
+            )
+
+    async def cancel_submission(
+        self,
+        submission: TaskSubmissionRef,
+        *,
+        principal: Principal | None = None,
+        idempotency_key: str,
+    ) -> TaskSubmissionCancellation:
+        self._runtime._ensure_open()
+        return await self._graph_service.cancel_submission(
+            submission, principal=self._runtime._resolve_principal(principal),
+            idempotency_key=idempotency_key,
         )
 
     async def get(

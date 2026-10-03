@@ -17,10 +17,10 @@ from ...core import (
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
-from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, read_object
+from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, ObjectStoreInspection, read_object
 from ...task import TaskGraphAdmission, TaskGraphSubmission
 from .._runtime_identity import task_graph_binding_capture_key
-from ._input_capture import input_capture_key, iter_input_capture_dependencies, validate_input_capture_payload
+from ._input_capture import input_capture_expiry_key, input_capture_key, iter_input_capture_dependencies, validate_input_capture_payload
 from ._contracts import (
     ArtifactRepositories,
     ConversationRepositories,
@@ -50,9 +50,11 @@ from ._store import (
 )
 from ._snapshot import (
     SnapshotLimits,
+    SnapshotExclusiveGuard,
     snapshot_object_ref_payload as _object_ref_payload,
     snapshot_object_ref_from_payload as _object_ref_from_payload,
 )
+from ._object_cleanup import ObjectCleanupResult, purge_unreferenced_objects
 from ._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from ._codec import (
     _decode_enveloped_domain,
@@ -375,6 +377,21 @@ class RuntimeStorage:
             )
         return value
 
+    async def purge_unreferenced_objects(
+        self, candidates: tuple[tuple[RuntimeDomain, ObjectRef], ...], *,
+        exclusive: SnapshotExclusiveGuard, limit: int = 100,
+    ) -> ObjectCleanupResult:
+        self._require_ready()
+        if self.read_only:
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
+        return await purge_unreferenced_objects(
+            candidates, namespace=self.namespace, tenant_id=self.tenant_id,
+            stores=self._stores,
+            object_stores={domain: self.object_store(domain) for domain in RuntimeDomain
+                           if runtime_domain_uses_object_store(domain)},
+            exclusive=exclusive, limit=limit,
+        )
+
     def object_store(self, domain: RuntimeDomain) -> ObjectStore:
         self._require_ready()
         if self._objects is None:
@@ -514,15 +531,35 @@ class RuntimeStorage:
 
         async def copy_references(encoded: object, domain: RuntimeDomain) -> None:
             for key, digest in iter_input_capture_dependencies(encoded, namespace=self.namespace, tenant_id=self.tenant_id):
-                stat = await self.object_store(RuntimeDomain.TASK).stat(key)
+                source = self.object_store(RuntimeDomain.TASK)
+                marker = await source.stat(input_capture_expiry_key(key))
+                if marker is not None:
+                    await copy_reference(RuntimeDomain.TASK, ObjectRef(source.store_id, marker.key, marker.digest, marker.size))
+                    continue
+                stat = await source.stat(key)
                 if stat is None or stat.digest != digest:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await copy_reference(RuntimeDomain.TASK, ObjectRef(self.object_store(RuntimeDomain.TASK).store_id, key, digest, stat.size))
+                await copy_reference(RuntimeDomain.TASK, ObjectRef(source.store_id, key, digest, stat.size))
             for source_domain, reference in iter_runtime_object_refs(
                 encoded,
                 default_domain=domain,
             ):
                 await copy_reference(source_domain, reference)
+
+        if RuntimeDomain.TASK in self._plan.durable_domains:
+            capture_store = self.object_store(RuntimeDomain.TASK)
+            if not isinstance(capture_store, ObjectStoreInspection):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            async for stat in capture_store.list_objects():
+                if not stat.key.startswith(tuple("v1/input-capture/" + kind + "/" for kind in ("agent", "task", "graph", "template", "expired"))):
+                    continue
+                payload = await read_object(capture_store, stat.key, expected_digest=stat.digest, expected_size=stat.size)
+                value = json.loads(payload)
+                if not isinstance(value, Mapping) or value.get("namespace") != self.namespace or value.get("tenant_id") != self.tenant_id:
+                    continue
+                if not stat.key.startswith("v1/input-capture/expired/") and await capture_store.stat(input_capture_expiry_key(stat.key)) is not None:
+                    continue
+                await copy_reference(RuntimeDomain.TASK, ObjectRef(capture_store.store_id, stat.key, stat.digest, stat.size))
 
         for domain in sorted(self._plan.durable_domains, key=lambda item: item.value):
             store = self._stores[domain]
@@ -551,7 +588,8 @@ class RuntimeStorage:
                     domain_records.append(value)
                     encoded = encode_record(value)
                     raw_domain["records"].append(accept(encoded))
-                    await copy_references(encoded, domain)
+                    if value.kind != "evaluation_cleanup":
+                        await copy_references(encoded, domain)
                     if value.kind in {"execution", "task_admission"}:
                         if value.kind == "execution":
                             from ._contracts import ExecutionRecord
@@ -838,7 +876,8 @@ class RuntimeStorage:
                 elif record.kind == "task_admission":
                     identity = _decode_enveloped_domain(record.data, TaskGraphAdmission).graph_id
                     optional_capture_keys.add(input_capture_key(namespace, tenant_id, "declaration", identity))
-            for encoded in (*raw_records, *raw_facts, *raw_operations):
+            live_records = tuple(encoded for encoded, record in zip(raw_records, records) if record.kind != "evaluation_cleanup")
+            for encoded in (*live_records, *raw_facts, *raw_operations):
                 capture_dependencies.update(iter_input_capture_dependencies(encoded, namespace=namespace, tenant_id=tenant_id))
                 for source_domain, reference in iter_runtime_object_refs(
                     encoded,
@@ -894,6 +933,9 @@ class RuntimeStorage:
 
         def capture_identity(key: str, digest: str) -> tuple[str, str, str, int]:
             matches = [identity for identity in actual_objects if identity[0] == RuntimeDomain.TASK.value and identity[1] == key and identity[2] == digest]
+            if not matches:
+                marker_key = input_capture_expiry_key(key)
+                matches = [identity for identity in actual_objects if identity[0] == RuntimeDomain.TASK.value and identity[1] == marker_key]
             if len(matches) != 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return matches[0]
@@ -901,6 +943,14 @@ class RuntimeStorage:
         for key, digest in capture_dependencies:
             expected_objects.add(capture_identity(key, digest))
         expected_objects.update(identity for identity in actual_objects if identity[0] == RuntimeDomain.TASK.value and identity[1] in optional_capture_keys)
+        for identity in actual_objects:
+            if identity[0] != RuntimeDomain.TASK.value or not identity[1].startswith(tuple("v1/input-capture/" + kind + "/" for kind in ("agent", "task", "graph", "template", "expired"))):
+                continue
+            _, source, content_ref = decoded_by_identity[identity]
+            raw_capture = await read_object(object_store, content_ref.key, expected_digest=content_ref.digest, expected_size=content_ref.size)
+            capture = json.loads(raw_capture)
+            validate_input_capture_payload(source.key, capture, namespace=namespace, tenant_id=tenant_id)
+            expected_objects.add(identity)
         pending_objects = list(expected_objects)
         while pending_objects:
             identity = pending_objects.pop()

@@ -51,7 +51,7 @@ from ._approval import DefaultApprovalService
 from ._agent_binding_resolver import _AgentBindingResolver
 from ._artifact import DefaultArtifactService
 from ._coordinator import _LocalRuntimeCoordinator
-from ._evaluation import DefaultEvaluationService
+from ._evaluation import RuntimeEvaluations
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._external import DefaultExternalService
 from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
@@ -85,7 +85,7 @@ class _RuntimeComponents:
     execution: DefaultExecutionService
     session: DefaultSessionService
     graph: DefaultTaskGraphService
-    evaluation: DefaultEvaluationService
+    evaluation: RuntimeEvaluations
     approval: DefaultApprovalService
     external: DefaultExternalService
     event: DefaultEventService
@@ -640,7 +640,9 @@ async def _build_local_components(
             release_terminal=storage.retention.release_session,
             workspace_access=input_materializer.access,
         )
-        input_captures = RuntimeInputCaptures(namespace, storage, authorization, execution, input_materializer)
+        input_captures = RuntimeInputCaptures(
+            namespace, storage, authorization, execution, input_materializer,
+        )
         task_graph_binding_captures = TaskGraphBindingCaptureStore(
             namespace,
             storage.object_store(RuntimeDomain.TASK),
@@ -695,12 +697,6 @@ async def _build_local_components(
             metric_recorder=metric_buffer,
             metric_source_namespace=metric_source_namespace,
         )
-        evaluation = DefaultEvaluationService(
-            storage.evaluation,
-            storage.execution.executions,
-            authorization,
-            execution,
-        )
         approval = DefaultApprovalService(
             storage.recovery.approvals,
             storage.execution.executions,
@@ -732,6 +728,17 @@ async def _build_local_components(
             token_seed=runtime_token_seed,
             cursor_signer=HmacCursorSigner("artifact", runtime_token_seed),
         )
+        history = _borrowed_runtime_history(
+            history_service, tenant_id=tenant_id, storage=storage,
+            authorization=authorization, artifact=artifact,
+        )
+        evaluation = RuntimeEvaluations(
+            namespace, storage, authorization, execution, graph_service,
+            input_captures, history,
+            cursor_signer=HmacCursorSigner("evaluation", runtime_token_seed),
+            asset_readers=tuple(asset_sources.values()),
+            shared_environment=app is not None or workspace is not None,
+        )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
         tree_streamer = ExecutionTreeStreamer(
             execution,
@@ -747,6 +754,7 @@ async def _build_local_components(
             metric_buffer=metric_buffer,
             storage=storage,
         )
+        close_actions = (("runtime.evaluation", evaluation.close), *close_actions)
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
         )
@@ -785,13 +793,7 @@ async def _build_local_components(
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
         binding_resolver=binding_resolver,
-        history=_borrowed_runtime_history(
-            history_service,
-            tenant_id=tenant_id,
-            storage=storage,
-            authorization=authorization,
-            artifact=artifact,
-        ),
+        history=history,
         task_admissions=storage.task.admissions,
         input_captures=input_captures,
     )

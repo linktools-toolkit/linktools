@@ -21,11 +21,7 @@ from .service_api import (
     CancelExecutionRequest,
     CancelExecutionResult,
     CloseSessionRequest,
-    CompareEvaluationRequest,
     CreateSessionRequest,
-    EvaluationComparison,
-    EvaluationHandle,
-    EvaluationView,
     ExecutionEvent,
     ExecutionHandle,
     ExecutionHistoryItem,
@@ -43,12 +39,10 @@ from .service_api import (
     ListSessionRequest,
     ModelInteractionItem,
     Page,
-    ReplayEvaluationRequest,
     RetryExecutionRequest,
     SessionHistoryItem,
     SessionTurn,
     SessionView,
-    StartEvaluationRequest,
     TranscriptItem,
     UpdateSessionRequest,
     UsageReadCutoff,
@@ -97,7 +91,6 @@ class RuntimeExecutions(Generic[AppT]):
             from ..errors import AIError, ErrorCode
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._input_captures.capture_input(execution_id, request)
-
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         return await self._service.inspect(execution_id, principal=principal)

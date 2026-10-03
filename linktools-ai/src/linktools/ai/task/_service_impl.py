@@ -403,7 +403,9 @@ class DefaultTaskGraphService(TaskGraphService):
         existing = await self._persistence.admissions.get(
             graph_id, tenant_id=tenant_id,
         )
-        if self._preflight is not None and existing is None:
+        status = await self._persistence.admissions.submission_status(TaskGraphSubmission(
+            self._persistence.admissions.namespace, admission, graph).ref)
+        if self._preflight is not None and existing is None and status != "cancelled":
             graph = await self._preflight.capture_admission(
                 admission,
                 request.graph,
@@ -1138,12 +1140,21 @@ class DefaultTaskGraphService(TaskGraphService):
             result_digest=value_digest,
             updated_at=datetime.now(timezone.utc),
         )
-        settled = await self._persistence.operations.compare_and_swap(
-            operation_id,
-            tenant_id=tenant_id,
-            expected_status=operation.status,
-            next_record=completed,
-        )
+        try:
+            settled = await self._persistence.operations.compare_and_swap(
+                operation_id,
+                tenant_id=tenant_id,
+                expected_status=operation.status,
+                next_record=completed,
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            settled = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)
+            if (settled is None or settled.request_digest != operation.request_digest
+                    or settled.result_digest != value_digest
+                    or settled.status is not OperationStatus.SUCCEEDED):
+                raise
         if settled.status is not OperationStatus.SUCCEEDED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 

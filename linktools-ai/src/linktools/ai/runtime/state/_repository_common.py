@@ -12,10 +12,12 @@ from typing import Generic, TypeVar
 from linktools.core import environ
 from ...core import OperationLedgerInput, OperationLedgerRecord, OperationStatus, ResourceKind, ResourceRef, canonical_json_bytes, operation_cas_immutable_matches, operation_replay_matches
 from ...errors import AIError, ErrorCode
+from ...evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
 from ...task import TaskGraphView, TaskNodeView
 from ._contracts import ToolOperationRecord
 from ._codec import _decode_enveloped_domain, _encode_persisted_domain, encode_envelope, wire_type_id
 from ._contracts import ApprovalRecord, ArtifactRecord, ConversationHistoryRecord, EvaluationRecord, ExecutionRecord, ExternalCallRecord, IdempotencyRecord, MemoryRecord, RecoveryCheckpoint, SessionRecord
+from ._evaluation_records import EvaluationCaseRecord, EvaluationDatasetRecord, EvaluationTombstone, EvaluationContentTombstone, EvaluationCleanupRecord
 from ._plan import RuntimeDomain
 from ._store import OperationQuery, RecordQuery, StateStore, StateTransaction, StoredOperation, StoredRecord, operation_key, parent_digest, record_key_digest, scope_digest, sequence_key, sortable_identity, stream_digest
 
@@ -609,6 +611,8 @@ def _default_record_scope(
     kind: str,
     value: object,
 ) -> bytes | None:
+    if isinstance(value, EvaluationReport):
+        return scope_digest(namespace, tenant_id, domain.value, kind, "experiment", value.experiment_id)
     if isinstance(value, SessionRecord):
         return scope_digest(
             namespace,
@@ -638,7 +642,7 @@ def _default_record_scope(
         )
     if isinstance(
         value,
-        (EvaluationRecord, ArtifactRecord, ApprovalRecord, ExternalCallRecord),
+        (ArtifactRecord, ApprovalRecord, ExternalCallRecord),
     ):
         return scope_digest(
             namespace,
@@ -723,8 +727,18 @@ def _canonical_record_identity(kind: str, value: object) -> object:
         return value.memory_id
     if isinstance(value, ArtifactRecord):
         return value.artifact_id
-    if isinstance(value, EvaluationRecord):
+    if isinstance(value, (EvaluationRecord, EvaluationTombstone, EvaluationCleanupRecord)):
         return value.evaluation_id
+    if isinstance(value, EvaluationContentTombstone):
+        return [value.kind, value.identity]
+    if isinstance(value, EvaluationDatasetRecord):
+        return [value.contract.ref.id, value.contract.ref.revision]
+    if isinstance(value, EvaluationCaseRecord):
+        return [value.contract.ref.dataset_id, value.contract.ref.case_id, value.contract.ref.revision]
+    if isinstance(value, EvidenceBundle):
+        return value.ref.evidence_id
+    if isinstance(value, (EvaluationReport, ComparisonReport)):
+        return value.report_id
     if isinstance(value, RecoveryCheckpoint):
         return value.execution_id
     if isinstance(value, ApprovalRecord):
@@ -815,7 +829,6 @@ def _status_value(value: object) -> str | None:
             SessionRecord,
             ExecutionRecord,
             IdempotencyRecord,
-            EvaluationRecord,
             ApprovalRecord,
             ExternalCallRecord,
             TaskGraphView,

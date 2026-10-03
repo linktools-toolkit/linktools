@@ -11,6 +11,7 @@ from ..task import (
     TaskGraphInfo,
     TaskGraphService,
 )
+from ._evaluation import RuntimeEvaluations, EvaluationRun
 from ._input_capture import AgentInputCapture, CaptureInputRequest, CaptureGraphRequest, ExecutionInputCaptureRef
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
@@ -50,12 +51,7 @@ from .service_api import (
     CancelExecutionRequest,
     CancelExecutionResult,
     CloseSessionRequest,
-    CompareEvaluationRequest,
     CreateSessionRequest,
-    EvaluationComparison,
-    EvaluationHandle,
-    EvaluationService,
-    EvaluationView,
     EventService,
     ExecutionEvent,
     ExecutionHandle,
@@ -83,7 +79,6 @@ from .service_api import (
     ListSessionRequest,
     ModelInteractionItem,
     Page,
-    ReplayEvaluationRequest,
     ResumeSessionRequest,
     RetryExecutionRequest,
     SessionHistoryItem,
@@ -92,7 +87,6 @@ from .service_api import (
     SessionTurn,
     SessionTurnItem,
     SessionView,
-    StartEvaluationRequest,
     TaskGraphRunEvent,
     TranscriptItem,
     UpdateSessionRequest,
@@ -109,6 +103,8 @@ from .state import (
 
 __all__ = [
     "ExecutionInputContext",
+    "RuntimeEvaluations",
+    "EvaluationRun",
     "AgentInputCapture",
     "CaptureInputRequest",
     "CaptureGraphRequest",
@@ -138,12 +134,7 @@ __all__ = [
     "CancelExecutionResult",
     "CancelGraphRequest",
     "CloseSessionRequest",
-    "CompareEvaluationRequest",
     "CreateSessionRequest",
-    "EvaluationComparison",
-    "EvaluationHandle",
-    "EvaluationService",
-    "EvaluationView",
     "EventService",
     "ExecutionEvent",
     "ExecutionHandle",
@@ -174,7 +165,6 @@ __all__ = [
     "ListSessionRequest",
     "Page",
     "PromptLimits",
-    "ReplayEvaluationRequest",
     "ResolveToolEffectRequest",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
@@ -198,7 +188,6 @@ __all__ = [
     "SessionTurn",
     "SessionTurnItem",
     "SessionView",
-    "StartEvaluationRequest",
     "TaskEvent",
     "TaskEventType",
     "TaskGraphInfo",
