@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
+from functools import lru_cache
 from operator import attrgetter
 from types import MappingProxyType
 from typing import (
@@ -2329,6 +2330,18 @@ def _decode_enum(
     return result
 
 
+@lru_cache(maxsize=None)
+def _dataclass_decode_fields(
+    target: type[object],
+) -> Mapping[str, tuple[object, bool]]:
+    # Registered wire classes have stable declarations; payloads remain uncached.
+    hints = get_type_hints(target)
+    return MappingProxyType({
+        field.name: (hints.get(field.name, Any), field.init)
+        for field in fields(target)
+    })
+
+
 def _decode_dataclass(
     value: object,
     target: type,
@@ -2380,23 +2393,23 @@ def _decode_dataclass(
     if not frozen_name_set.issubset(raw_fields):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        hints = get_type_hints(target)
+        declared = _dataclass_decode_fields(target)
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-    declared = {field.name: field for field in fields(target)}
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
     for field_name in frozen_names:
         field = declared.get(field_name)
         if field is None:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        field_type, field_init = field
         if field_name not in raw_fields:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
             try:
                 decoded = _decode_domain(
                     raw_fields[field_name],
-                    hints.get(field_name, Any),
+                    field_type,
                     codec,
                     persisted=persisted,
                 )
@@ -2404,7 +2417,7 @@ def _decode_dataclass(
                 raise
             except (KeyError, TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if field.init:
+        if field_init:
             kwargs[field_name] = decoded
         else:
             post_init_fields[field_name] = decoded
