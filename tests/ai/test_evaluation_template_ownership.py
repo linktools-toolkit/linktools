@@ -3,7 +3,7 @@
 """Evaluation admission owns its private inputs before any capture materialization."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 from contextlib import asynccontextmanager
@@ -15,7 +15,7 @@ import pytest
 from linktools.ai.core import JsonValue, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
-    CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, DimensionContract,
+    AgentCaseInput, CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, DimensionContract,
     EvaluationPolicy, EvaluationSpec, GraphTargetSpec, ScorerSpec, ScoreBundle,
     StartEvaluationRequest, TaskCaseInput,
 )
@@ -344,3 +344,129 @@ async def test_function_task_capture_keeps_agent_shaped_business_json(tmp_path: 
             evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
             actual = evidence.target.output.value if route == "input" else evidence.target.outputs["answer"].value.value
             assert actual == payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_mode", ("fixed_input", "reproject_input"))
+async def test_captured_case_preserves_template_fields_and_original_parameters(
+    tmp_path: Path, input_mode: str,
+) -> None:
+    def normalize(value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+        return {**value, "number": value["number"] + 1}
+
+    async def echo(context: TaskNodeContext[None]) -> JsonValue:
+        return dict(context.input)
+
+    target = Task("merge.capture", echo, normalize=normalize, effect_policy="none")
+    judge = Task("merge.score", score, effect_policy="none")
+    scorer = ScorerSpec("score", judge.ref, (DIMENSION,))
+    async with Runtime.open("captured-case", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+        engine = runtime.tasks.bind(target, judge)
+        source = await engine.start(TaskGraph("source", (TaskNode("target", task=target, input={"number": 1}),)),
+            principal=PRINCIPAL, idempotency_key="source")
+        await source.wait()
+        execution = await source.execution("target")
+        captured = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(PRINCIPAL, "source-input"))
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), (
+            CaseSpec.graph(CaseRef("data", "one", 1), inputs={"target": TaskCaseInput(capture=captured)}),
+        )), principal=PRINCIPAL, idempotency_key="dataset")
+        template = TaskGraphTemplate((TaskNode("target", task=target, input={
+            "number": 2 if input_mode == "fixed_input" else 1, "added": "template",
+        }),))
+        candidate = CandidateSpec("candidate", graph_template=GraphTargetSpec(template=template, outputs={"answer": "target"}))
+        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (candidate,), (scorer,),
+            input_mode=input_mode), PRINCIPAL, "evaluate"), engine=engine)
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        trial = (await run.trials()).items[0]
+        graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
+        assert await graph.result("target") == {"number": 2, "added": "template"}
+        replay_execution = await graph.execution("target")
+        replay_capture = await runtime.executions.capture_input(replay_execution.execution_id, CaptureInputRequest(PRINCIPAL, "replay-input"))
+        replay_dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("replay", 1), (
+            CaseSpec.from_capture(CaseRef("replay", "one", 1), capture=replay_capture),
+        )), principal=PRINCIPAL, idempotency_key="replay-dataset")
+        replay = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(replay_dataset,
+            (CandidateSpec("candidate", task=target.ref),), (scorer,), input_mode="reproject_input"),
+            PRINCIPAL, "reproject"), engine=engine)
+        assert (await replay.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        evidence = await runtime.evaluations.read_evidence((await replay.trials()).items[0].evidence_ref, principal=PRINCIPAL)
+        assert evidence.target.output.value == {"number": 2, "added": "template"}
+        conflicting = CandidateSpec("conflicting", graph_template=GraphTargetSpec(
+            template=TaskGraphTemplate((TaskNode("target", task=target, input={"number": 3}),)), outputs={"answer": "target"}))
+        with pytest.raises(AIError) as rejected:
+            await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (conflicting,), (scorer,),
+                input_mode=input_mode), PRINCIPAL, "conflict"), engine=engine)
+        assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
+
+
+@pytest.mark.asyncio
+async def test_graph_input_capture_has_one_owner(tmp_path: Path) -> None:
+    async def echo(context: TaskNodeContext[None]) -> JsonValue:
+        return dict(context.input)
+
+    target, judge = Task("capture.echo", echo, effect_policy="none"), Task("capture.score", score, effect_policy="none")
+    async with Runtime.open("capture-owner", models=ModelRegistry(), storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT) as runtime:
+        engine = runtime.tasks.bind(target, judge)
+        captures = []
+        for identity in ("first", "second"):
+            graph = await engine.start(TaskGraph(identity, (TaskNode("target", task=target, input={identity: True}),)),
+                principal=PRINCIPAL, idempotency_key=identity)
+            await graph.wait()
+            execution = await graph.execution("target")
+            captures.append(await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(PRINCIPAL, identity)))
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), (
+            CaseSpec.graph(CaseRef("data", "one", 1), inputs={"target": TaskCaseInput(capture=captures[0])}),
+        )), principal=PRINCIPAL, idempotency_key="dataset")
+        scorer = ScorerSpec("score", judge.ref, (DIMENSION,))
+        for index, capture in enumerate(captures):
+            candidate = CandidateSpec("candidate", graph_template=GraphTargetSpec(
+                template=TaskGraphTemplate((TaskNode("target", task=target, input_capture=capture),)), outputs={"answer": "target"}))
+            request = StartEvaluationRequest(EvaluationSpec(dataset, (candidate,), (scorer,)), PRINCIPAL, f"evaluate-{index}")
+            if index:
+                with pytest.raises(AIError) as rejected:
+                    await runtime.evaluations.start(request, engine=engine)
+                assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
+            else:
+                run = await runtime.evaluations.start(request, engine=engine)
+                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+                evidence = await runtime.evaluations.read_evidence((await run.trials()).items[0].evidence_ref, principal=PRINCIPAL)
+                assert evidence.target.outputs["answer"].value.value == {"first": True}
+
+
+@pytest.mark.asyncio
+async def test_agent_graph_case_preserves_template_options_and_checks_prompt_owner(tmp_path: Path) -> None:
+    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.runtime import AgentTaskInputContext
+    from .test_evaluation_consumers import FixtureModels
+
+    async def project(context: AgentTaskInputContext) -> str:
+        return f"{context.prompt}:{context.input['suffix']}"
+
+    models = FixtureModels()
+    group = CapabilityGroup("case-agent")
+    group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    async with Runtime.open("agent-case", models=models, storage=RuntimeStorage.filesystem(tmp_path), context=CONTEXT,
+                            capabilities=(group,)) as runtime:
+        target = runtime.tasks.from_agent("case.agent", runtime.agents.get(), build_input=project)
+        judge = Task("case.score", score, effect_policy="none")
+        engine = runtime.tasks.bind(target, judge)
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), (
+            CaseSpec.graph(CaseRef("data", "one", 1), inputs={"target": AgentCaseInput(prompt="question")}),
+        )), principal=PRINCIPAL, idempotency_key="dataset")
+        for question in ("question", "conflict"):
+            candidate = CandidateSpec("candidate", graph_template=GraphTargetSpec(template=TaskGraphTemplate((
+                TaskNode("target", task=target, input={"prompt": question, "parameters": {"suffix": "template"}}),)), outputs={"answer": "target"}))
+            request = StartEvaluationRequest(EvaluationSpec(dataset, (candidate,),
+                (ScorerSpec("score", judge.ref, (DIMENSION,)),), policy=EvaluationPolicy(model_fixtures=(models.contract,))),
+                PRINCIPAL, question)
+            if question == "conflict":
+                with pytest.raises(AIError) as rejected:
+                    await runtime.evaluations.start(request, engine=engine)
+                assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
+            else:
+                run = await runtime.evaluations.start(request, engine=engine)
+                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+                trial = (await run.trials()).items[0]
+                graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
+                assert (await graph.state(include_content=True)).nodes[0].input["parameters"] == {"suffix": "template"}
+        assert models.prompts == ["question:template"]

@@ -208,8 +208,12 @@ class EvaluationCompiler:
     ) -> TaskNode:
         if isinstance(value, AgentCaseInput):
             value = value.capture
+        case_capture = value if isinstance(value, AgentInputCaptureRef) else (value.capture if isinstance(value, TaskCaseInput) else None)
+        if case_capture is not None and node.input_capture is not None and case_capture != node.input_capture:
+            raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "node input has two capture owners")
         capture = None
         contract = None
+        defaults: dict[str, JsonValue] = {}
         captured_from = None
         references = node.input_refs
         excluded = tuple(sorted(set(node.dependencies) | {
@@ -225,7 +229,8 @@ class EvaluationCompiler:
             elif input_mode == "reproject_input" and value.source_execution_id is not None:
                 raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
             else:
-                data = dict(AgentTaskInput(agent.prompt))
+                defaults = dict(AgentTaskInput(agent.prompt))
+                data = {name: defaults[name] for name in ("prompt", "accepted_input_view") if name in defaults}
                 if agent.input_context is not None:
                     data["capture_context"] = agent.input_context.to_payload()
                 if value.source_execution_id is not None:
@@ -255,6 +260,18 @@ class EvaluationCompiler:
                 references = {**references, **value.input_refs}
         else:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
+        if case_capture is not None:
+            template_input = dict(node.original_input if input_mode == "reproject_input" and node.original_input is not None else node.input)
+            if isinstance(value, AgentInputCaptureRef) and "prompt" in template_input:
+                template_input["prompt"] = AgentTaskInput.from_authoring({"prompt": template_input["prompt"]})["prompt"]
+            data = dict(contract.input) if contract is not None else data
+            if any(name in data and data[name] != item for name, item in template_input.items()):
+                raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "node input has conflicting owners")
+            if contract is not None:
+                template_original = node.original_input if node.original_input is not None else node.input
+                original = {name: item for name, item in template_original.items() if name not in data}
+                contract = replace(contract, original_input={**original, **contract.original_input})
+            data = {**defaults, **template_input, **data}
         if agent_input and input_mode == "reproject_input" and node.original_input is not None and contract is None:
             self._captures.require_reprojectable_input(data)
         if contract is not None:

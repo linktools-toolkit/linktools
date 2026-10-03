@@ -172,7 +172,9 @@ case = CaseSpec.graph(CaseRef("graph-cases", "hello", 1),
 ```
 
 Each trial gets a new native graph. Template input and case input may combine
-when fields do not conflict; conflicting values are rejected. Scheduling
+when fields do not conflict; conflicting values are rejected. A node and case
+may reuse the same input capture, but different captures cannot be combined:
+each capture owns its original parameters and dependency results. Scheduling
 `dependencies` alone do not provide model-visible data: `input_refs` explicitly
 select results. A successful null is `{"status": "succeeded", "value": None,
 "reason": None}`; failure is a different status with a reason. Use explicit
