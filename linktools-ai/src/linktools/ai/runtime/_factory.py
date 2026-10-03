@@ -59,6 +59,7 @@ from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ._history_projection import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._input import ExecutionInputMaterializer
+from ._input_capture import RuntimeInputCaptures
 from ._local import LocalExecutionBackend
 from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _MetricBuffer
@@ -97,6 +98,7 @@ class _RuntimeComponents:
     binding_resolver: _AgentBindingResolver
     history: object
     task_admissions: TaskAdmissionRepository
+    input_captures: RuntimeInputCaptures
 
 
 async def compose_runtime_components(
@@ -638,6 +640,7 @@ async def _build_local_components(
             release_terminal=storage.retention.release_session,
             workspace_access=input_materializer.access,
         )
+        input_captures = RuntimeInputCaptures(namespace, storage, authorization, execution, input_materializer)
         task_graph_binding_captures = TaskGraphBindingCaptureStore(
             namespace,
             storage.object_store(RuntimeDomain.TASK),
@@ -648,6 +651,7 @@ async def _build_local_components(
             app=app,
             authorization=authorization,
             task_state=storage.task.tasks,
+            input_captures=input_captures,
             task_admissions=storage.task.admissions,
             task_objects=storage.object_store(RuntimeDomain.TASK),
             artifact_state=storage.artifact,
@@ -789,6 +793,7 @@ async def _build_local_components(
             artifact=artifact,
         ),
         task_admissions=storage.task.admissions,
+        input_captures=input_captures,
     )
 
 

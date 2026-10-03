@@ -11,6 +11,7 @@ from ..task import (
     TaskGraphInfo,
     TaskGraphService,
 )
+from ._input_capture import AgentInputCapture, CaptureInputRequest, CaptureGraphRequest, ExecutionInputCaptureRef
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
 from ._metrics import MetricFlushResult, MetricBufferStatus
@@ -106,6 +107,10 @@ from .state import (
 )
 
 __all__ = [
+    "AgentInputCapture",
+    "CaptureInputRequest",
+    "CaptureGraphRequest",
+    "ExecutionInputCaptureRef",
     "Agent",
     "Execution",
     "Session",

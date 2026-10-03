@@ -14,6 +14,7 @@ from ...task import (
     TaskSubmissionRef,
     TaskGraphView,
     TaskNode,
+    TaskResultRef,
     TaskNodeView,
     TaskResultRecord,
 )
@@ -466,6 +467,7 @@ def _expected_record(
         if any(
             reference.namespace != namespace or reference.tenant_id != tenant_id
             for reference in value.input_refs.values()
+            if isinstance(reference, TaskResultRef)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     elif isinstance(value, TaskNodeView):

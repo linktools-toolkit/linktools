@@ -46,7 +46,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
         thinking: ThinkingValue | None = None,
     ) -> None:
         try:
-            canonical_prompt = validate_user_input(prompt)
+            canonical_prompt = "" if isinstance(prompt, str) and prompt == "" else validate_user_input(prompt)
             parameter_values = normalize_json_value(dict(parameters or {}))
             normalized_files = tuple(files)
             normalized_scope = (
@@ -70,7 +70,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
         values: dict[str, JsonValue] = {
             "kind": "agent-task-input",
             "version": 1,
-            "prompt": task_prompt_draft(canonical_prompt),
+            "prompt": {"kind": "text", "text": ""} if canonical_prompt == "" else task_prompt_draft(canonical_prompt),
             "parameters": parameter_values,
             "files": list(normalized_files),
             "session_id": session_id,
@@ -406,7 +406,7 @@ class AgentTaskInputContext:
     def _validate_name(self, name: str) -> str:
         if not isinstance(name, str) or not name:
             raise _AgentTaskContextError(ErrorCode.REQUEST_FIELD_INVALID)
-        if name not in self._invocation.node.dependencies and name not in self._invocation.node.input_refs:
+        if name not in self._invocation.node.dependencies and name not in self._invocation.node.input_refs and name not in self._invocation.dependency_states:
             raise _AgentTaskContextError(ErrorCode.REQUEST_FIELD_INVALID)
         return name
 

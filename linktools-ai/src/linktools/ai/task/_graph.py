@@ -28,6 +28,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..errors import ErrorDiagnostics
+from ._capture import TaskInvocationInputRef
 from ._definitions import Task, TaskExpander, TaskExpanderRef, TaskRef
 
 
@@ -130,6 +131,17 @@ class TaskResultRef:
             raise ValueError("task result reference is invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class TaskNodeResultRef:
+    """An explicit result input from a scheduling dependency in this graph."""
+
+    node_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.node_id, str) or not self.node_id.strip():
+            raise ValueError("task node result reference is invalid")
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class TaskNode:
     node_id: str
@@ -137,7 +149,9 @@ class TaskNode:
     task: "TaskRef | None"
     budget_cost: int
     expander: "TaskExpanderRef | None"
-    input_refs: "Mapping[str, TaskResultRef]"
+    input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef]"
+    input_capture: "TaskInvocationInputRef | None"
+    original_input: "Mapping[str, JsonValue] | None" = field(repr=False)
     timeout_seconds: "float | None"
     max_attempts: int
     retry_delay_seconds: float
@@ -158,7 +172,8 @@ class TaskNode:
         input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
         expander: "TaskExpander | TaskExpanderRef | None" = None,
-        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef] | None" = None,
+        input_capture: "TaskInvocationInputRef | None" = None,
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
         retry_delay_seconds: float = 0,
@@ -171,9 +186,11 @@ class TaskNode:
             dependencies,
             task=task,
             input=input,
+            original_input=None,
             budget_cost=budget_cost,
             expander=expander,
             input_refs=input_refs,
+            input_capture=input_capture,
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
@@ -193,9 +210,11 @@ class TaskNode:
         *,
         task: "TaskRef | None",
         input: "Mapping[str, JsonValue] | None" = None,
+        original_input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
         expander: "TaskExpanderRef | None" = None,
-        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef] | None" = None,
+        input_capture: "TaskInvocationInputRef | None" = None,
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
         retry_delay_seconds: float = 0,
@@ -212,9 +231,11 @@ class TaskNode:
             dependencies,
             task=task,
             input=input,
+            original_input=original_input,
             budget_cost=budget_cost,
             expander=expander,
             input_refs=input_refs,
+            input_capture=input_capture,
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
@@ -234,9 +255,11 @@ class TaskNode:
         *,
         task: "Task | TaskRef | None",
         input: "Mapping[str, JsonValue] | None",
+        original_input: "Mapping[str, JsonValue] | None",
         budget_cost: int,
         expander: "TaskExpander | TaskExpanderRef | None",
-        input_refs: "Mapping[str, TaskResultRef] | None",
+        input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef] | None",
+        input_capture: "TaskInvocationInputRef | None",
         timeout_seconds: "float | None",
         max_attempts: int,
         retry_delay_seconds: float,
@@ -301,14 +324,23 @@ class TaskNode:
         if any(
             not isinstance(name, str)
             or not name
-            or not isinstance(reference, TaskResultRef)
+            or not isinstance(reference, (TaskResultRef, TaskNodeResultRef))
             for name, reference in references.items()
         ):
             raise ValueError("task node input references are invalid")
-        if set(references).intersection(normalized_dependencies):
-            raise ValueError(
-                "task node input reference names conflict with dependencies"
-            )
+        for name, reference in references.items():
+            if isinstance(reference, TaskNodeResultRef):
+                if reference.node_id not in normalized_dependencies:
+                    raise ValueError("symbolic result must name a scheduling dependency")
+                if name in normalized_dependencies and name != reference.node_id:
+                    raise ValueError("task input alias conflicts with a dependency")
+            elif name in normalized_dependencies:
+                raise ValueError("task node input reference names conflict with dependencies")
+        if input_capture is not None:
+            if not isinstance(input_capture, TaskInvocationInputRef):
+                raise TypeError("task input capture is invalid")
+            if normalized:
+                raise ValueError("task input and input capture are mutually exclusive")
         contract = None
         if output_contract is not None:
             normalized_contract = _normalize_json_value(dict(output_contract))
@@ -323,6 +355,8 @@ class TaskNode:
         object.__setattr__(self, "budget_cost", budget_cost)
         object.__setattr__(self, "expander", expander_ref)
         object.__setattr__(self, "input_refs", MappingProxyType(references))
+        object.__setattr__(self, "input_capture", input_capture)
+        object.__setattr__(self, "original_input", None if original_input is None else ImmutableJsonMapping(original_input))
         object.__setattr__(self, "timeout_seconds", normalized_timeout)
         object.__setattr__(self, "max_attempts", max_attempts)
         object.__setattr__(self, "retry_delay_seconds", normalized_retry_delay)
@@ -666,7 +700,7 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
     }
     if node.input_refs:
         value["input_refs"] = {
-            name: {
+            name: {"node_id": reference.node_id} if isinstance(reference, TaskNodeResultRef) else {
                 "namespace": reference.namespace,
                 "tenant_id": reference.tenant_id,
                 "graph_id": reference.graph_id,
@@ -674,6 +708,17 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
                 "result_digest": reference.result_digest,
             }
             for name, reference in sorted(node.input_refs.items())
+        }
+    if node.original_input is not None:
+        value["original_input"] = dict(node.original_input)
+    if node.input_capture is not None:
+        reference = node.input_capture
+        value["input_capture"] = {
+            "namespace": reference.namespace,
+            "tenant_id": reference.tenant_id,
+            "capture_id": reference.capture_id,
+            "digest": reference.digest,
+            "source_execution_id": reference.source_execution_id,
         }
     if node.timeout_seconds is not None:
         value["timeout_seconds"] = node.timeout_seconds
@@ -861,7 +906,8 @@ class TaskNodeInfo:
     dependencies: tuple[str, ...]
     budget_cost: int
     expander: "TaskExpanderRef | None"
-    input_refs: "Mapping[str, TaskResultRef]"
+    input_refs: "Mapping[str, TaskResultRef | TaskNodeResultRef]"
+    input_capture: "TaskInvocationInputRef | None"
     timeout_seconds: "float | None"
     max_attempts: int
     retry_delay_seconds: float
@@ -880,6 +926,7 @@ class TaskNodeInfo:
             node.budget_cost,
             node.expander,
             node.input_refs,
+            node.input_capture,
             node.timeout_seconds,
             node.max_attempts,
             node.retry_delay_seconds,
@@ -1003,6 +1050,7 @@ __all__ = [
     "TaskNodeView",
     "TaskResultRecord",
     "TaskResultRef",
+    "TaskNodeResultRef",
     "TaskInputSupplyRequest",
     "TaskStatus",
     "TaskTerminalRecord",

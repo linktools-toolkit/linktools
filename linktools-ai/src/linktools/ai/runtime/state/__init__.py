@@ -15,10 +15,14 @@ from ._snapshot import (
     snapshot_object_ref_payload,
     snapshot_object_ref_from_payload,
 )
+from ._input_capture import input_capture_key, input_capture_object_dependency, iter_input_capture_dependencies
 from ._root import RuntimeStorage
 from ._contracts import ArtifactRecord, ArtifactRepositories
 
 __all__ = [
+    "input_capture_key",
+    "input_capture_object_dependency",
+    "iter_input_capture_dependencies",
     "snapshot_object_ref_payload",
     "snapshot_object_ref_from_payload",
     "SnapshotExclusiveGuard",

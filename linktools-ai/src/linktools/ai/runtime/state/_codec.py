@@ -29,7 +29,7 @@ from typing import (
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
-from ...agent import AgentBindingContract
+from ...agent import AgentInputCaptureRef, AgentBindingContract
 from ...core import (
     RUNTIME_OBJECT_STORE_ID,
     ApprovalDecision,
@@ -72,6 +72,15 @@ from ...task import (
     TaskNodeView,
     TaskResultRecord,
     TaskResultRef,
+    TaskNodeResultRef,
+    TaskInvocationInputRef,
+    TaskGraphCaptureRef,
+    TaskInvocationInputContract,
+    TaskDependencyCapture,
+    TaskDependencyState,
+    TaskDependencyResult,
+    TaskGraphTemplate,
+    TaskGraphTemplateRef,
     TaskTerminalRecord,
 )
 from .._message import decode_model_messages, encode_model_messages
@@ -234,6 +243,17 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     (_TASK_NODE_VIEW_WIRE_ID, TaskNodeView),
     ("task_result", TaskResultRecord),
     ("task_result_ref", TaskResultRef),
+    ("task_node_result_ref", TaskNodeResultRef),
+    ("task_invocation_input_ref", TaskInvocationInputRef),
+    ("task_invocation_input_contract", TaskInvocationInputContract),
+    ("task_dependency_capture", TaskDependencyCapture),
+    ("task_dependency_state", TaskDependencyState),
+    ("task_dependency_result", TaskDependencyResult),
+    ("task_graph_template", TaskGraphTemplate),
+    ("task_graph_template_ref", TaskGraphTemplateRef),
+    ("task_graph_capture_ref", TaskGraphCaptureRef),
+    ("agent_input_capture_ref", AgentInputCaptureRef),
+
     ("task_prepared_input", TaskPreparedInputRecord),
     ("task_terminal", TaskTerminalRecord),
     ("tool_operation", ToolOperationRecord),
@@ -344,6 +364,16 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "task_lease": ("graph_id", "node_id", "tenant_id", "owner", "fence", "lease_expires_at", "execution_id"),
         "task_expander_ref": ("id", "revision"),
         "task_ref": ("id", "revision"),
+        "task_node_result_ref": ('node_id',),
+        "task_invocation_input_ref": ('namespace', 'tenant_id', 'capture_id', 'digest', 'source_execution_id'),
+        "task_invocation_input_contract": ('source_execution_id', 'task_ref', 'input', 'original_input', 'binding', 'dependencies', 'input_mode', 'excluded_dependencies'),
+        "task_dependency_capture": ('name', 'state', 'source_ref', 'execution_id', 'body_digest'),
+        "task_dependency_state": ('status', 'result_digest', 'error_code', 'error_digest'),
+        "task_dependency_result": ('result_digest', 'execution_id'),
+        "task_graph_template": ('nodes', 'limits', 'task_contracts', 'expander_contracts', 'context_policy'),
+        "task_graph_template_ref": ('namespace', 'tenant_id', 'capture_id', 'digest'),
+        "task_graph_capture_ref": ('namespace', 'tenant_id', 'capture_id', 'digest', 'source_graph_id'),
+        "agent_input_capture_ref": ('namespace', 'tenant_id', 'capture_id', 'digest', 'source_execution_id'),
         "task_result_ref": (
             "namespace",
             "tenant_id",
@@ -451,7 +481,7 @@ def _encode_v1_task_node_fields(
         fields["input_refs"] = [
             [
                 name,
-                {
+                {"node_id": reference.node_id} if isinstance(reference, TaskNodeResultRef) else {
                     "namespace": reference.namespace,
                     "tenant_id": reference.tenant_id,
                     "graph_id": reference.graph_id,
@@ -461,6 +491,10 @@ def _encode_v1_task_node_fields(
             ]
             for name, reference in sorted(value.input_refs.items())
         ]
+    if value.original_input is not None:
+        fields["original_input"] = _encode_domain(value.original_input, codec, persisted=persisted)
+    if value.input_capture is not None:
+        fields["input_capture"] = _encode_domain(value.input_capture, codec, persisted=persisted)
     if value.timeout_seconds is not None:
         fields["timeout_seconds"] = value.timeout_seconds
     if value.max_attempts != 1:
@@ -509,13 +543,21 @@ def _decode_v1_task_node(
     raw_refs = raw_fields.get("input_refs", [])
     if not isinstance(raw_refs, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    input_refs: dict[str, TaskResultRef] = {}
+    input_refs: dict[str, TaskResultRef | TaskNodeResultRef] = {}
     for item in raw_refs:
         if not isinstance(item, list) or len(item) != 2:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         name, raw_reference = item
         if not isinstance(name, str) or not isinstance(raw_reference, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if set(raw_reference) == {"node_id"}:
+            if name in input_refs:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                input_refs[name] = TaskNodeResultRef(raw_reference["node_id"])
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            continue
         _require_required_keys(
             raw_reference,
             frozenset(
@@ -549,6 +591,8 @@ def _decode_v1_task_node(
     optional = frozenset(
         {
             "input_refs",
+            "input_capture",
+            "original_input",
             "timeout_seconds",
             "max_attempts",
             "retry_delay_seconds",
@@ -610,6 +654,8 @@ def _decode_v1_task_node(
             ),
         ),
         input_refs=input_refs,
+        input_capture=_decode_domain(raw_fields.get("input_capture"), TaskInvocationInputRef | None, codec, persisted=persisted),
+        original_input=_decode_domain(raw_fields.get("original_input"), Mapping[str, JsonValue] | None, codec, persisted=persisted),
         timeout_seconds=cast("float | None", timeout_seconds),
         max_attempts=max_attempts,
         retry_delay_seconds=retry_delay_seconds,
@@ -1794,7 +1840,7 @@ def _iter_runtime_object_refs(
         if dataclass_name in {
             codec.wire_ids.get(TaskNode),
         }:
-            node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted=True))
+            node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted="schema" in value))
             task_input = node.input
             prompt = task_input.get("prompt")
             if (
@@ -2509,6 +2555,8 @@ def _validate_v1_codec_definition() -> None:
         "budget_cost",
         "expander",
         "input_refs",
+        "input_capture",
+        "original_input",
         "timeout_seconds",
         "max_attempts",
         "retry_delay_seconds",

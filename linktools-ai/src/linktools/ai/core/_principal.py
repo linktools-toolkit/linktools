@@ -16,6 +16,7 @@ class AuthorizationAction(str, Enum):
     __format__ = str.__format__
     EXECUTION_RUN = "execution.run"
     EXECUTION_READ = "execution.read"
+    EXECUTION_CAPTURE_INPUT = "execution.capture_input"
     EXECUTION_CANCEL = "execution.cancel"
     EXECUTION_RECOVER = "execution.recover"
     SESSION_CREATE = "session.create"
@@ -24,6 +25,7 @@ class AuthorizationAction(str, Enum):
     SESSION_CLOSE = "session.close"
     TASK_RUN = "task.run"
     TASK_READ = "task.read"
+    TASK_CAPTURE_GRAPH = "task.capture_graph"
     TASK_CANCEL = "task.cancel"
     EVALUATION_RUN = "evaluation.run"
     EVALUATION_READ = "evaluation.read"

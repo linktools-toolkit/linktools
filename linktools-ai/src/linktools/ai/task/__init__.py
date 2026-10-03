@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Generic TaskGraph contracts and local scheduling."""
 
+from ._capture import TaskInvocationInputRef, TaskGraphCaptureRef, TaskGraphTemplateRef
+from ._invocation_input import TaskInvocationInputContract, TaskDependencyCapture, TaskGraphTemplate
 from ._api import open_local_task_graph_service
 from ._definitions import (
     Task,
@@ -33,6 +35,7 @@ from ._graph import (
     TaskNodeView,
     TaskResultRecord,
     TaskResultRef,
+    TaskNodeResultRef,
     TaskStatus,
     TaskTerminalRecord,
     normalize_retry_delay_seconds,
@@ -119,6 +122,13 @@ __all__ = [
     "TaskPersistence",
     "TaskResultRecord",
     "TaskResultRef",
+    "TaskNodeResultRef",
+    "TaskInvocationInputRef",
+    "TaskInvocationInputContract",
+    "TaskDependencyCapture",
+    "TaskGraphTemplate",
+    "TaskGraphTemplateRef",
+    "TaskGraphCaptureRef",
     "TaskStatus",
     "TaskTerminalRecord",
     "normalize_retry_delay_seconds",

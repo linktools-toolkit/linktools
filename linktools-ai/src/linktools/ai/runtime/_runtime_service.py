@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from ..agent import (
     AgentBinding,
+    AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
     CompiledAgent,
@@ -49,6 +50,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 
 if TYPE_CHECKING:
+    from ._input_capture import RuntimeInputCaptures
     from ..observe import Metrics
     from ..task import TaskResultRecord
     from ._runtime_history import RuntimeHistory
@@ -285,6 +287,7 @@ class Runtime(Generic[AppT]):
         tree_streamer: "_ExecutionTreeStreamer | None" = None,
         metric_control: "_MetricControl | None" = None,
         _binding_resolver: "_AgentBindingResolver | None" = None,
+        input_captures: "RuntimeInputCaptures | None" = None,
     ) -> None:
         if any(
             value is None
@@ -308,7 +311,8 @@ class Runtime(Generic[AppT]):
         self._compiler = compiler
         self._task_owner_token = object()
         self._execution_service = execution
-        self.executions = RuntimeExecutions(execution, self._get_execution)
+        self._input_captures = input_captures
+        self.executions = RuntimeExecutions(execution, self._get_execution, input_captures)
         self._session_service = session
         self.sessions = RuntimeSessions(session, self._get_session)
         self._graph_service = graph
@@ -876,6 +880,13 @@ class Runtime(Generic[AppT]):
             self._watch_execution_tree,
         )
 
+    def _task_from_agent_capture(self, task_id: str, binding: AgentBindingContract, *, revision: int) -> Task[AppT]:
+        restored = self._compiler.restore(binding)
+        compiled = restored.compiled_agent
+        agent = Agent(self, compiled.spec.id, compiled.spec.revision, compiled)
+        return self._task_from_agent(task_id, agent, revision=revision, build_input=None, binding_contract=binding)
+
+
     def _task_from_agent(
         self,
         task_id: str,
@@ -883,6 +894,7 @@ class Runtime(Generic[AppT]):
         *,
         revision: int,
         build_input: AgentTaskInputBuilder | None,
+        binding_contract: AgentBindingContract | None = None,
     ) -> Task[AppT]:
         self._ensure_open()
         if not isinstance(agent, Agent) or agent.runtime is not self:
@@ -890,7 +902,7 @@ class Runtime(Generic[AppT]):
         if build_input is not None and not inspect.iscoroutinefunction(build_input):
             raise TypeError("build_input must be async")
         compiled = self._compiled_agent(agent.id, agent.revision, agent.compiled)
-        binding_contract = self._compiler.bind(compiled).binding_contract
+        binding_contract = binding_contract or self._compiler.bind(compiled).binding_contract
         input_mode = "projected" if build_input is not None else "literal"
 
         async def start_execution(
@@ -918,8 +930,8 @@ class Runtime(Generic[AppT]):
                 not isinstance(output_type, type)
                 or not issubclass(output_type, BaseModel)
             ):
-                output_type = None
-            return await self._start_for_agent(
+                output_type = restore_output(binding_contract.output_mode, binding_contract.output_schema)
+            execution = await self._start_for_agent(
                 agent.id,
                 agent.revision,
                 prompt,
@@ -936,6 +948,9 @@ class Runtime(Generic[AppT]):
                 compiled_agent=compiled,
                 dependency_hold_id=dependency_hold_id,
             )
+            if self._input_captures is not None:
+                await self._input_captures.record_invocation(execution.execution_id, invocation)
+            return execution
 
         async def get_execution(
             execution_id: str,
@@ -1381,6 +1396,7 @@ async def _open_runtime(
             tree_streamer=components.tree_streamer,
             metric_control=components.metric_control,
             _binding_resolver=components.binding_resolver,
+            input_captures=components.input_captures,
         )
     except BaseException:
         try:

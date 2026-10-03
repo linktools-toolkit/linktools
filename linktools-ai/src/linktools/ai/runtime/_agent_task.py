@@ -125,6 +125,8 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
 
     def normalize(self, value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         task_input = AgentTaskInput.from_authoring(value)
+        if self.input_mode == "literal" and task_input.stored_prompt is None:
+            validate_user_input(task_input.prompt)
         normalized = dict(task_input)
         normalized["planning"] = (
             self._planning_default
@@ -142,7 +144,10 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         self,
         value: Mapping[str, JsonValue],
     ) -> Mapping[str, JsonValue]:
-        return dict(AgentTaskInput.from_mapping(value))
+        task_input = AgentTaskInput.from_mapping(value)
+        if self.input_mode == "literal" and task_input.stored_prompt is None:
+            validate_user_input(task_input.prompt)
+        return dict(task_input)
 
     async def run(
         self,
@@ -153,7 +158,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         task_input = AgentTaskInput.from_mapping(invocation.node.input)
         files = task_input.files
         request_identity: str | None = None
-        if self.input_mode == "literal":
+        if self.input_mode == "literal" or invocation.node.input.get("capture_fixed_input") is True:
             if task_input.parameters:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             if task_input.stored_prompt is None:

@@ -19,6 +19,7 @@ from ..core import (
     normalize_correlation,
 )
 from ..errors import AIError, ErrorCode
+from ._capture import TaskInvocationInputRef
 from ._graph import TaskResultRef, normalize_retry_delay_seconds, normalize_timeout_seconds
 
 AppT = TypeVar("AppT")
@@ -93,6 +94,8 @@ class TaskDependency:
     node_id: str
     result_digest: str
     execution_id: str
+    input_capture: TaskInvocationInputRef | None = None
+    capture_name: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.node_id, str) or not self.node_id.strip():

@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from ..core import Principal
+from ._input_capture import CaptureInputRequest, ExecutionInputCaptureRef, RuntimeInputCaptures
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -77,9 +78,11 @@ class RuntimeExecutions(Generic[AppT]):
         self,
         service: ExecutionService,
         get_execution: Callable[[str, Principal | None], Awaitable["Execution[AppT]"]],
+        input_captures: RuntimeInputCaptures | None = None,
     ) -> None:
         self._service = service
         self._get_execution = get_execution
+        self._input_captures = input_captures
 
     async def get(
         self,
@@ -88,6 +91,13 @@ class RuntimeExecutions(Generic[AppT]):
         principal: Principal | None = None,
     ) -> "Execution[AppT]":
         return await self._get_execution(execution_id, principal)
+
+    async def capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
+        if self._input_captures is None:
+            from ..errors import AIError, ErrorCode
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._input_captures.capture_input(execution_id, request)
+
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         return await self._service.inspect(execution_id, principal=principal)

@@ -56,8 +56,11 @@ from ..task import (
     TaskNodeRunResult,
     TaskResultRecord,
     TaskResultRef,
+    TaskNodeResultRef,
+    TaskInvocationInputRef,
     TaskRef,
 )
+from ._input_capture import RuntimeInputCaptures
 from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInput
 from ._input import (
@@ -346,6 +349,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         execution_durable: bool = True,
         recovery_durable: bool = True,
         input_materializer: ExecutionInputMaterializer | None = None,
+        input_captures: RuntimeInputCaptures | None = None,
     ) -> None:
         self._app = app
         self._namespace = namespace
@@ -355,6 +359,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._task_admissions = task_admissions
         self._task_objects = task_objects
         self._input_materializer = input_materializer
+        self._input_captures = input_captures
         self._artifact_state = artifact_state
         self._artifact_objects = artifact_objects
         self._object_key_factory = object_key_factory
@@ -591,7 +596,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             expanders=tuple(expanders.values()),
         )
         self._admitted_binding_captures[admission.graph_id] = binding_capture
-        return TaskGraph(
+        resolved = TaskGraph(
             graph.graph_id,
             tuple(
                 [
@@ -604,6 +609,14 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 ]
             ),
         )
+        if self._input_captures is not None:
+            for node in resolved.nodes:
+                if node.input_capture is not None:
+                    contract = await self._input_captures.read_task(node.input_capture, principal=admission.principal)
+                    if {item.name for item in contract.dependencies}.intersection((*node.dependencies, *node.input_refs)):
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            await self._input_captures.record_graph(resolved, admission)
+        return resolved
 
     async def _materialize_node_input(
         self,
@@ -612,7 +625,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         tasks: Mapping[tuple[str, int], Task[AppT]],
     ) -> TaskNode:
         reference = node.task
-        if reference is None:
+        if reference is None or node.input_capture is not None:
             return node
         task = tasks.get((reference.id, reference.revision))
         if task is None or task.contract.get("type") != "agent":
@@ -640,6 +653,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 budget_cost=node.budget_cost,
                 expander=node.expander,
                 input_refs=node.input_refs,
+                input_capture=node.input_capture,
+                original_input=node.original_input,
                 timeout_seconds=node.timeout_seconds,
                 max_attempts=node.max_attempts,
                 retry_delay_seconds=node.retry_delay_seconds,
@@ -673,6 +688,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             budget_cost=node.budget_cost,
             expander=node.expander,
             input_refs=node.input_refs,
+            input_capture=node.input_capture,
+            original_input=node.original_input,
             timeout_seconds=node.timeout_seconds,
             max_attempts=node.max_attempts,
             retry_delay_seconds=node.retry_delay_seconds,
@@ -1046,6 +1063,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             raise TypeError("tenant identity is required")
         grouped: dict[str, list[TaskResultRef]] = {}
         for reference in node.input_refs.values():
+            if isinstance(reference, TaskNodeResultRef):
+                continue
             if (
                 reference.namespace != self._namespace
                 or reference.tenant_id != resolved_tenant
@@ -1140,11 +1159,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node_id=node.node_id,
             )
         try:
-            normalized = handler.normalize(body)
+            normalized = {} if node.input_capture is not None else (body if node.original_input is not None else handler.normalize(body))
             canonical_body = _normalize_handler_body(normalized)
             if (
                 isinstance(handler, _TaskRunnerAdapter)
                 and isinstance(handler.runner, RuntimeAgentTaskRunner)
+                and node.input_capture is None
                 and AgentTaskInput.from_mapping(canonical_body).stored_prompt
                 is not None
             ):
@@ -1167,6 +1187,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             budget_cost=node.budget_cost,
             expander=node.expander,
             input_refs=node.input_refs,
+            input_capture=node.input_capture,
+            original_input=node.original_input if node.original_input is not None else node.input,
             timeout_seconds=node.timeout_seconds,
             max_attempts=node.max_attempts,
             retry_delay_seconds=node.retry_delay_seconds,
@@ -1304,10 +1326,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     },
             )
             try:
-                normalized_body = (
+                normalized_body = {} if node.input_capture is not None else (
                     handler.normalize_durable(body)
                     if isinstance(handler, _TaskRunnerAdapter)
-                    else handler.normalize(body)
+                    else body
                 )
                 canonical_body = _normalize_handler_body(normalized_body)
             except (AIError, TypeError, ValueError) as error:
@@ -1333,6 +1355,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 budget_cost=node.budget_cost,
                 expander=node.expander,
                 input_refs=node.input_refs,
+                input_capture=node.input_capture,
+                original_input=node.original_input,
                 timeout_seconds=node.timeout_seconds,
                 max_attempts=node.max_attempts,
                 retry_delay_seconds=node.retry_delay_seconds,
@@ -1353,12 +1377,46 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     },
                 )
 
+    async def _restore_invocation(self, invocation: TaskNodeInvocation) -> TaskNodeInvocation:
+        if invocation.node.input_capture is not None:
+            if self._input_captures is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            contract = await self._input_captures.read_task(invocation.node.input_capture, principal=invocation.principal)
+            if invocation.node.task == contract.task_ref and contract.binding.get("type") is not None:
+                task = self._definitions_for(invocation.graph_id)[0].get((contract.task_ref.id, contract.task_ref.revision))
+                if task is None or task_declaration_semantics(contract.binding) != task_declaration_semantics({"id": task.id, "revision": task.revision, **dict(task.contract)}):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            names = {item.name for item in contract.dependencies}
+            if names.intersection((*invocation.node.dependencies, *invocation.node.input_refs)):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            node = invocation.node
+            body = contract.input
+            handler = self._handler(node.task.id, node.task.revision, graph_id=invocation.graph_id, node_id=node.node_id, request=False)
+            if contract.input_mode == "reproject_input" and isinstance(handler, _TaskCallableAdapter):
+                body = (
+                    await self._input_captures.read_execution_input(invocation.execution_id, principal=invocation.principal)
+                    if invocation.execution_id is not None
+                    else _normalize_handler_body(handler.normalize(contract.original_input))
+                )
+            elif contract.input_mode == "reproject_input" and isinstance(handler, _TaskRunnerAdapter):
+                body = _normalize_handler_body(handler.normalize(contract.original_input))
+            restored = TaskNode.from_resolved(node.node_id, node.dependencies, task=node.task,
+                input=body, original_input=contract.original_input, budget_cost=node.budget_cost, expander=node.expander,
+                input_refs=node.input_refs, timeout_seconds=node.timeout_seconds, max_attempts=node.max_attempts,
+                retry_delay_seconds=node.retry_delay_seconds, output_contract=node.output_contract,
+                effect_policy=node.effect_policy, reconcile=node.reconcile,
+                dependency_policy=node.dependency_policy, failure_policy=node.failure_policy)
+            invocation = replace(invocation, node=restored, input_capture=node.input_capture)
+        return invocation
+
     async def run(
         self,
         invocation: TaskNodeInvocation,
         *,
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
+        original_invocation = invocation
+        invocation = await self._restore_invocation(invocation)
         node = invocation.node
         graph_id = invocation.graph_id
         principal = invocation.principal
@@ -1374,6 +1432,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             request=False,
         )
         if isinstance(handler, _TaskRunnerAdapter):
+            if invocation.input_capture is not None:
+                contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
+                invocation = replace(invocation, dependency_states={**invocation.dependency_states, **{item.name: item.state for item in contract.dependencies}})
             runner_result = await handler.runner.run(invocation, control=control)
             return await self._complete_runner_result(invocation, runner_result)
         dependencies = await self._dependencies(
@@ -1383,6 +1444,17 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal=principal,
             graph_id=graph_id,
         )
+        dependency_states = {**dependency_states, **{
+            name: dependency_states[reference.node_id]
+            for name, reference in node.input_refs.items()
+            if isinstance(reference, TaskNodeResultRef)
+        }}
+        if invocation.input_capture is not None:
+            contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
+            dependency_states = {**dependency_states, **{item.name: item.state for item in contract.dependencies}}
+            for item in contract.dependencies:
+                if item.state.status is TaskStatus.SUCCEEDED:
+                    dependencies[item.name] = TaskDependency(item.source_ref.node_id, item.body_digest, item.execution_id, invocation.input_capture, item.name)
         binding = _task_binding(node, handler, task_id, task_revision)
         idempotency_key = _custom_idempotency_key(
             graph_id,
@@ -1399,6 +1471,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             correlation=correlation,
         )
         execution_id = handle.execution_id
+        if self._input_captures is not None:
+            await self._input_captures.record_invocation(execution_id, original_invocation)
         if control.execution_id is None:
             await control.bind_execution(execution_id)
         elif control.execution_id != execution_id:
@@ -2180,6 +2254,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
+        invocation = await self._restore_invocation(invocation)
         graph_id = invocation.graph_id
         node = invocation.node
         principal = invocation.principal
@@ -2249,6 +2324,17 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal=principal,
             graph_id=graph_id,
         )
+        dependency_states = {**dependency_states, **{
+            name: dependency_states[reference.node_id]
+            for name, reference in node.input_refs.items()
+            if isinstance(reference, TaskNodeResultRef)
+        }}
+        if invocation.input_capture is not None:
+            contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
+            dependency_states = {**dependency_states, **{item.name: item.state for item in contract.dependencies}}
+            for item in contract.dependencies:
+                if item.state.status is TaskStatus.SUCCEEDED:
+                    dependencies[item.name] = TaskDependency(item.source_ref.node_id, item.body_digest, item.execution_id, invocation.input_capture, item.name)
         context = TaskNodeContext(
             self._app,
             principal,
@@ -2344,6 +2430,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         invocation: TaskNodeInvocation,
         name: str,
     ) -> JsonValue:
+        if invocation.input_capture is not None:
+            contract = await self._input_captures.read_task(invocation.input_capture, principal=invocation.principal)
+            if any(item.name == name for item in contract.dependencies):
+                return await self._input_captures.read_dependency(invocation.input_capture, name, principal=invocation.principal)
         reference, record = await self._input_result_source(invocation, name)
         del reference
         if record.execution_id is None:
@@ -2355,6 +2445,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         invocation: TaskNodeInvocation,
         name: str,
     ) -> TaskResultRef:
+        if invocation.input_capture is not None:
+            contract = await self._input_captures.read_task(invocation.input_capture, principal=invocation.principal)
+            item = next((item for item in contract.dependencies if item.name == name), None)
+            if item is not None:
+                if item.state.status is not TaskStatus.SUCCEEDED:
+                    raise AIError(ErrorCode.TASK_DEPENDENCY_FAILED)
+                return item.source_ref
         reference, _record = await self._input_result_source(invocation, name)
         return reference
 
@@ -2364,6 +2461,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         name: str,
     ) -> tuple[TaskResultRef, TaskResultRecord]:
         node = invocation.node
+        symbolic = node.input_refs.get(name)
+        if isinstance(symbolic, TaskNodeResultRef):
+            name = symbolic.node_id
         if name in node.dependencies:
             state = invocation.dependency_states.get(name)
             if state is not None and state.status is not TaskStatus.SUCCEEDED:
@@ -2683,7 +2783,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         graph_id: str,
         request: bool,
     ) -> None:
-        if node.input_refs and not (
+        if any(isinstance(value, TaskResultRef) for value in node.input_refs.values()) and not (
             self._task_durable and self._execution_durable
         ):
             raise AIError(
@@ -2728,7 +2828,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         principal: Principal,
         graph_id: str,
     ) -> dict[str, TaskDependency]:
-        del graph_id
         if set(dependency_states) != set(node.dependencies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         dependency_status = node.dependency_status(
@@ -2757,6 +2856,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
         grouped: dict[str, list[tuple[str, TaskResultRef]]] = {}
         for name, reference in node.input_refs.items():
+            if isinstance(reference, TaskNodeResultRef):
+                state = dependency_states[reference.node_id]
+                if state.status is TaskStatus.SUCCEEDED:
+                    dependency = dependency_results[reference.node_id]
+                    values[name] = TaskDependency(reference.node_id, dependency.result_digest, dependency.execution_id)
+                continue
             if (
                 reference.namespace != self._namespace
                 or reference.tenant_id != principal.tenant_id
@@ -2823,6 +2928,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         principal: Principal,
     ) -> JsonValue:
+        if dependency.input_capture is not None:
+            if self._input_captures is None or dependency.capture_name is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            return await self._input_captures.read_dependency(dependency.input_capture, dependency.capture_name, principal=principal)
         result = await self._execution.result(
             dependency.execution_id,
             principal=principal,
@@ -2939,7 +3048,7 @@ def _dependency_identity_payload(
     dependencies: Mapping[str, TaskDependency],
     dependency_states: Mapping[str, TaskDependencyState],
 ) -> list[dict[str, JsonValue]]:
-    if node.dependency_policy == "all_succeeded":
+    if node.dependency_policy == "all_succeeded" and all(state.status is TaskStatus.SUCCEEDED for state in dependency_states.values()):
         return [
             {
                 "node_id": dependency_id,
@@ -2947,12 +3056,12 @@ def _dependency_identity_payload(
             }
             for dependency_id in sorted(dependencies)
         ]
-    if node.dependency_policy not in {"all_terminal", "any_succeeded"}:
+    if node.dependency_policy not in {"all_succeeded", "all_terminal", "any_succeeded"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if set(dependency_states) != set(node.dependencies):
+    if not set(node.dependencies).issubset(dependency_states):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    node_dependencies = set(node.dependencies)
+    node_dependencies = set(dependency_states)
     result: list[dict[str, JsonValue]] = []
     for dependency_id in sorted(node_dependencies | set(dependencies)):
         if dependency_id not in node_dependencies:

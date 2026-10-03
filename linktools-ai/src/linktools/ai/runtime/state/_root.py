@@ -20,6 +20,7 @@ from ...errors import AIError, ErrorCode
 from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, read_object
 from ...task import TaskGraphAdmission, TaskGraphSubmission
 from .._runtime_identity import task_graph_binding_capture_key
+from ._input_capture import input_capture_key, iter_input_capture_dependencies, validate_input_capture_payload
 from ._contracts import (
     ArtifactRepositories,
     ConversationRepositories,
@@ -486,6 +487,12 @@ class RuntimeStorage:
                 }
             )
             copied_objects.add(identity)
+            if reference.key.startswith("v1/input-capture/"):
+                payload = await read_object(source_store, reference.key, expected_digest=reference.digest, expected_size=reference.size)
+                manifest = json.loads(payload)
+                validate_input_capture_payload(reference.key, manifest, namespace=self.namespace, tenant_id=self.tenant_id)
+                if not reference.key.startswith("v1/input-capture/result/"):
+                    await copy_references(manifest, RuntimeDomain.TASK)
             if reference.key.startswith(
                 (
                     "v1/asset-snapshot/",
@@ -506,6 +513,11 @@ class RuntimeStorage:
                     await copy_reference(nested_domain, nested)
 
         async def copy_references(encoded: object, domain: RuntimeDomain) -> None:
+            for key, digest in iter_input_capture_dependencies(encoded, namespace=self.namespace, tenant_id=self.tenant_id):
+                stat = await self.object_store(RuntimeDomain.TASK).stat(key)
+                if stat is None or stat.digest != digest:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await copy_reference(RuntimeDomain.TASK, ObjectRef(self.object_store(RuntimeDomain.TASK).store_id, key, digest, stat.size))
             for source_domain, reference in iter_runtime_object_refs(
                 encoded,
                 default_domain=domain,
@@ -540,6 +552,18 @@ class RuntimeStorage:
                     encoded = encode_record(value)
                     raw_domain["records"].append(accept(encoded))
                     await copy_references(encoded, domain)
+                    if value.kind in {"execution", "task_admission"}:
+                        if value.kind == "execution":
+                            from ._contracts import ExecutionRecord
+                            identity = _decode_enveloped_domain(value.data, ExecutionRecord).execution_id
+                            capture_kind = "invocation"
+                        else:
+                            identity = _decode_enveloped_domain(value.data, TaskGraphAdmission).graph_id
+                            capture_kind = "declaration"
+                        key = input_capture_key(self.namespace, self.tenant_id, capture_kind, identity)
+                        stat = await self.object_store(RuntimeDomain.TASK).stat(key)
+                        if stat is not None:
+                            await copy_reference(RuntimeDomain.TASK, ObjectRef(self.object_store(RuntimeDomain.TASK).store_id, key, stat.digest, stat.size))
                     if (
                         domain is RuntimeDomain.TASK
                         and value.kind in {"task_admission", "task_submission_payload"}
@@ -708,6 +732,8 @@ class RuntimeStorage:
         object_bytes = 0
         expected_objects: set[tuple[str, str, str, int]] = set()
         expected_task_object_keys: set[str] = set()
+        capture_dependencies: set[tuple[str, str]] = set()
+        optional_capture_keys: set[str] = set()
         decoded_domains: dict[
             RuntimeDomain,
             tuple[
@@ -804,7 +830,16 @@ class RuntimeStorage:
                             admission.initial_request_digest,
                         )
                     )
+            for record in records:
+                if record.kind == "execution":
+                    from ._contracts import ExecutionRecord
+                    identity = _decode_enveloped_domain(record.data, ExecutionRecord).execution_id
+                    optional_capture_keys.add(input_capture_key(namespace, tenant_id, "invocation", identity))
+                elif record.kind == "task_admission":
+                    identity = _decode_enveloped_domain(record.data, TaskGraphAdmission).graph_id
+                    optional_capture_keys.add(input_capture_key(namespace, tenant_id, "declaration", identity))
             for encoded in (*raw_records, *raw_facts, *raw_operations):
+                capture_dependencies.update(iter_input_capture_dependencies(encoded, namespace=namespace, tenant_id=tenant_id))
                 for source_domain, reference in iter_runtime_object_refs(
                     encoded,
                     default_domain=domain,
@@ -857,6 +892,15 @@ class RuntimeStorage:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             expected_objects.add(matches[0])
 
+        def capture_identity(key: str, digest: str) -> tuple[str, str, str, int]:
+            matches = [identity for identity in actual_objects if identity[0] == RuntimeDomain.TASK.value and identity[1] == key and identity[2] == digest]
+            if len(matches) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return matches[0]
+
+        for key, digest in capture_dependencies:
+            expected_objects.add(capture_identity(key, digest))
+        expected_objects.update(identity for identity in actual_objects if identity[0] == RuntimeDomain.TASK.value and identity[1] in optional_capture_keys)
         pending_objects = list(expected_objects)
         while pending_objects:
             identity = pending_objects.pop()
@@ -864,6 +908,21 @@ class RuntimeStorage:
             if decoded is None:
                 continue
             domain, source, content_ref = decoded
+            if source.key.startswith("v1/input-capture/"):
+                raw_capture = await read_object(object_store, content_ref.key, expected_digest=content_ref.digest, expected_size=content_ref.size)
+                manifest_capture = json.loads(raw_capture)
+                validate_input_capture_payload(source.key, manifest_capture, namespace=namespace, tenant_id=tenant_id)
+                if not source.key.startswith("v1/input-capture/result/"):
+                    for key, digest in iter_input_capture_dependencies(manifest_capture, namespace=namespace, tenant_id=tenant_id):
+                        nested_identity = capture_identity(key, digest)
+                        if nested_identity not in expected_objects:
+                            expected_objects.add(nested_identity)
+                            pending_objects.append(nested_identity)
+                    for nested_domain, nested in iter_runtime_object_refs(manifest_capture, default_domain=RuntimeDomain.TASK):
+                        nested_identity = (nested_domain.value, nested.key, nested.digest, nested.size)
+                        if nested_identity not in expected_objects:
+                            expected_objects.add(nested_identity)
+                            pending_objects.append(nested_identity)
             if not source.key.startswith(
                 (
                     "v1/asset-snapshot/",

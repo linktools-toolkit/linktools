@@ -10,6 +10,7 @@ from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from ..core import CorrelationData, JsonValue, Principal
 from ..errors import AIError, ErrorCode
+from ._capture import TaskInvocationInputRef
 from ._graph import TaskDependencyResult, TaskLease, TaskNode
 from ._handler import TaskDependencyState, TaskEffectResolution
 
@@ -82,6 +83,7 @@ class TaskNodeInvocation:
     execution_id: "str | None" = None
     dependency_states: "Mapping[str, TaskDependencyState]" = field(default_factory=dict)
     task_lease: "TaskLease | None" = None
+    input_capture: "TaskInvocationInputRef | None" = None
 
 
 class TaskNodeRunner(Protocol, Generic[AppT]):

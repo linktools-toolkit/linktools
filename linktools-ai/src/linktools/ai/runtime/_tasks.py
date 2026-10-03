@@ -6,12 +6,14 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+from ..agent import AgentInputCaptureRef
 from ..core import Page, Principal
 from ..errors import AIError, ErrorCode
 from ..task import (
     Task,
     TaskExpander,
     TaskGraph,
+    TaskGraphCaptureRef,
     TaskGraphLimits,
     TaskGraphResult,
     TaskNode,
@@ -20,6 +22,7 @@ from ..task import (
     TaskGraphService,
 )
 from ._task import TaskGraphRun
+from ._input_capture import CaptureGraphRequest
 from ._agent_task_input import AgentTaskInputBuilder
 
 if TYPE_CHECKING:
@@ -53,6 +56,20 @@ class RuntimeTasks(Generic[AppT]):
             revision=revision,
             build_input=build_input,
         )
+
+    async def capture_graph(self, graph_id: str, request: CaptureGraphRequest) -> TaskGraphCaptureRef:
+        self._runtime._ensure_open()
+        return await self._runtime._input_captures.capture_graph(graph_id, request)
+
+
+    async def from_agent_capture(self, id: str, capture: AgentInputCaptureRef, *,
+                                 revision: int = 1, principal: Principal) -> Task[AppT]:
+        self._runtime._ensure_open()
+        value = await self._runtime._input_captures.read_agent(capture, principal=principal)
+        if value.binding is None:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
+        return self._runtime._task_from_agent_capture(id, value.binding, revision=revision)
+
 
     def bind(self, *definitions: Task[AppT] | TaskExpander) -> "TaskEngine[AppT]":
         tasks: dict[tuple[str, int], Task[AppT]] = {}
@@ -231,6 +248,7 @@ class TaskEngine(Generic[AppT]):
                     budget_cost=node.budget_cost,
                     expander=node.expander,
                     input_refs=node.input_refs,
+                    input_capture=node.input_capture,
                     timeout_seconds=node.timeout_seconds,
                     max_attempts=node.max_attempts,
                     retry_delay_seconds=node.retry_delay_seconds,
