@@ -18,7 +18,7 @@ from ...core import (
 )
 from ...errors import AIError, ErrorCode
 from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, read_object
-from ...task import TaskGraphAdmission
+from ...task import TaskGraphAdmission, TaskGraphSubmission
 from .._runtime_identity import task_graph_binding_capture_key
 from ._contracts import (
     ArtifactRepositories,
@@ -542,11 +542,12 @@ class RuntimeStorage:
                     await copy_references(encoded, domain)
                     if (
                         domain is RuntimeDomain.TASK
-                        and value.kind == "task_admission"
+                        and value.kind in {"task_admission", "task_submission_payload"}
                     ):
-                        admission = _decode_enveloped_domain(
-                            value.data,
-                            TaskGraphAdmission,
+                        admission = (
+                            _decode_enveloped_domain(value.data, TaskGraphAdmission)
+                            if value.kind == "task_admission"
+                            else _decode_enveloped_domain(value.data, TaskGraphSubmission).admission
                         )
                         key = task_graph_binding_capture_key(
                             self.namespace,
@@ -788,11 +789,12 @@ class RuntimeStorage:
             )
             if domain is RuntimeDomain.TASK:
                 for record in records:
-                    if record.kind != "task_admission":
+                    if record.kind not in {"task_admission", "task_submission_payload"}:
                         continue
-                    admission = _decode_enveloped_domain(
-                        record.data,
-                        TaskGraphAdmission,
+                    admission = (
+                        _decode_enveloped_domain(record.data, TaskGraphAdmission)
+                        if record.kind == "task_admission"
+                        else _decode_enveloped_domain(record.data, TaskGraphSubmission).admission
                     )
                     expected_task_object_keys.add(
                         task_graph_binding_capture_key(

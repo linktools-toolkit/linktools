@@ -60,6 +60,12 @@ from ._service import (
     TaskGraphQueryService,
     TaskGraphService,
 )
+from ._submission import (
+    TaskGraphSubmission,
+    TaskSubmissionCancellation,
+    TaskSubmissionRef,
+    TaskSubmissionResult,
+)
 from ._service_impl import DefaultTaskGraphService, TaskPersistence
 
 __all__ = [
@@ -92,6 +98,10 @@ __all__ = [
     "TaskGraphRequest",
     "TaskGraphResult",
     "TaskGraphService",
+    "TaskGraphSubmission",
+    "TaskSubmissionCancellation",
+    "TaskSubmissionRef",
+    "TaskSubmissionResult",
     "TaskGraphState",
     "TaskGraphView",
     "TaskInputSupplyRequest",

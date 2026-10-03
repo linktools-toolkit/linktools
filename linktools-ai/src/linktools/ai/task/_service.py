@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..core import JsonValue, Page, Principal, validate_idempotency_key
+from ._submission import (
+    TaskGraphSubmission,
+    TaskSubmissionCancellation,
+    TaskSubmissionRef,
+    TaskSubmissionResult,
+)
 from ._handler import TaskEffectResolution
 from ._event import TaskEvent
 from ._graph import (
@@ -101,6 +107,22 @@ class TaskGraphQueryService(Protocol):
 
 
 class TaskGraphService(TaskGraphQueryService, Protocol):
+    async def prepare_submission(
+        self, request: TaskGraphRequest
+    ) -> TaskGraphSubmission: ...
+
+    async def start_prepared(
+        self, submission: TaskGraphSubmission
+    ) -> TaskSubmissionResult: ...
+
+    async def cancel_submission(
+        self,
+        submission: TaskSubmissionRef,
+        *,
+        principal: Principal,
+        idempotency_key: str,
+    ) -> TaskSubmissionCancellation: ...
+
     async def start(self, request: TaskGraphRequest) -> TaskGraphResult: ...
 
     async def run(

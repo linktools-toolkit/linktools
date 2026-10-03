@@ -10,6 +10,8 @@ from ...core import OperationLedgerInput
 from ...errors import AIError, ErrorCode
 from ...task import (
     TaskGraphAdmission,
+    TaskGraphSubmission,
+    TaskSubmissionRef,
     TaskGraphView,
     TaskNode,
     TaskNodeView,
@@ -95,6 +97,8 @@ _ALLOWED_RECORD_KINDS = {
         {
             "task_graph",
             "task_admission",
+            "task_submission",
+            "task_submission_payload",
             "task_node_definition",
             "task_node_state",
             "task_result",
@@ -136,6 +140,8 @@ _RECORD_TYPES = {
     "tool_operation": ToolOperationRecord,
     "task_graph": TaskGraphView,
     "task_admission": TaskGraphAdmission,
+    "task_submission": TaskSubmissionRef,
+    "task_submission_payload": TaskGraphSubmission,
     "task_node_definition": TaskNode,
     "task_node_state": TaskNodeView,
     "task_result": TaskResultRecord,
@@ -414,6 +420,31 @@ def _expected_record(
         _require_anchor(
             namespace, tenant_id, domain, records, "session", value.session_id
         )
+    elif isinstance(value, TaskSubmissionRef):
+        if (
+            value.namespace != namespace or value.tenant_id != tenant_id
+            or record.state not in {"prepared", "admitted", "cancelled"}
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        state = record.state
+        if state == "prepared":
+            _require_anchor(
+                namespace, tenant_id, domain, records,
+                "task_submission_payload", value.graph_id,
+            )
+        elif state == "admitted":
+            _require_anchor(
+                namespace, tenant_id, domain, records, "task_graph", value.graph_id,
+            )
+    elif isinstance(value, TaskGraphSubmission):
+        if value.namespace != namespace or value.admission.principal.tenant_id != tenant_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = record_key_digest(
+            namespace, tenant_id, domain.value, "task_submission", value.graph.graph_id,
+        )
+        head = records.get(key)
+        if head is None or head.state != "prepared" or _decode_record(head) != value.ref:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     elif isinstance(value, TaskGraphAdmission):
         if value.principal.tenant_id != tenant_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -587,8 +618,10 @@ def _record_identity(
         return value.node_id
     if isinstance(value, (ExecutionHistoryHeadRecord, ExecutionHistorySealRecord)):
         return value.execution_id
-    if isinstance(value, TaskGraphAdmission):
+    if isinstance(value, (TaskGraphAdmission, TaskSubmissionRef)):
         return value.graph_id
+    if isinstance(value, TaskGraphSubmission):
+        return value.graph.graph_id
     if isinstance(value, TaskNode):
         graph_id = (
             None

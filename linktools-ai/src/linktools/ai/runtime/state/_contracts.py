@@ -57,6 +57,8 @@ from ...task import (
     TaskEvent,
     TaskGraph,
     TaskGraphAdmission,
+    TaskGraphSubmission,
+    TaskSubmissionRef,
     TaskGraphLaunch,
     TaskGraphState,
     TaskGraphView,
@@ -2299,6 +2301,17 @@ class TaskRepository(RuntimeRepository, Protocol):
 
 
 class TaskAdmissionRepository(RuntimeRepository, Protocol):
+    async def admit_prepared(
+        self, submission: TaskGraphSubmission
+    ) -> TaskGraphView: ...
+
+    async def prepare(
+        self, submission: TaskGraphSubmission
+    ) -> TaskGraphSubmission: ...
+    async def cancel_submission(
+        self, submission: TaskSubmissionRef, operation: OperationLedgerInput
+    ) -> bool: ...
+
     async def admit(
         self, admission: TaskGraphAdmission, graph: TaskGraph
     ) -> TaskGraphView: ...
