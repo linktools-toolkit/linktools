@@ -59,7 +59,7 @@ def test_scale(): pass
 @pytest.mark.manual
 def test_manual_takes_precedence(): pass
 ''')
-    args = ["-q", "-p", "no:asyncio"]
+    args = ["-q"]
     if tier is not None:
         args.extend(("--test-tier", tier))
     result = pytester.runpytest(*args)
