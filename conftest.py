@@ -8,6 +8,10 @@ import pytest
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addini(
+        "asyncio_default_fixture_loop_scope", "Default loop scope for async fixtures",
+        type="string", default="function",
+    )
     parser.addoption(
         "--test-tier", choices=("daily", "merge", "all"), default="merge",
         help="daily: representative regressions; merge: automatic acceptance; all: include manual probes",
