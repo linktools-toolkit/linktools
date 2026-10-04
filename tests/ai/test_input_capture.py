@@ -2,20 +2,23 @@
 # -*- coding: utf-8 -*-
 """Immutable historical inputs are executable without their source graph."""
 
+import json
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import JsonValue, Principal, TaskStatus
+from linktools.ai.core import JsonValue, Principal, TaskStatus, canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import AgentTaskInputContext, CaptureInputRequest, CaptureGraphRequest, Runtime, RuntimeStorage
+from linktools.ai.runtime.state import RuntimeDomain, input_capture_key
 from linktools.ai.task import Task, TaskGraph, TaskNode, TaskNodeContext, TaskNodeResultRef
 from .test_task_mixed_node_reliability import _TaskTestModels
 
 
 @pytest.mark.asyncio
-async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Path) -> None:
+@pytest.mark.parametrize("extra_invocation_fields", (False, True))
+async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Path, extra_invocation_fields: bool) -> None:
     async def source(context: TaskNodeContext[None]) -> JsonValue:
         return {"number": 17}
 
@@ -36,6 +39,22 @@ async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Pat
         result = await source_run.wait()
         assert result.status is TaskStatus.SUCCEEDED
         execution = await source_run.execution("target")
+        if extra_invocation_fields:
+            objects = storage.object_store(RuntimeDomain.TASK)
+            key = input_capture_key("input-capture", principal.tenant_id, "invocation", execution.execution_id)
+            stat = await objects.stat(key)
+            payload = json.loads(b"".join([chunk async for chunk in objects.open(key)]))
+            payload["dependency_results"] = {"$mapping": [["source", {
+                "$dataclass": "task_dependency_result",
+                "fields": {"result_digest": "0" * 64, "execution_id": "unused"},
+            }]]}
+            data = canonical_json_bytes(payload)
+
+            async def chunks() -> AsyncIterator[bytes]:
+                yield data
+
+            assert await objects.delete_object(key, expected_digest=stat.digest)
+            await objects.put(key, chunks(), expected_size=len(data), expected_digest=canonical_sha256(payload))
         capture = await runtime.executions.capture_input(execution.execution_id,
             CaptureInputRequest(principal, "capture-task-input-0001", "clean"))
         rerun = await engine.start(TaskGraph("rerun-graph", (

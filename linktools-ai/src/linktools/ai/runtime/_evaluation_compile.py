@@ -202,12 +202,10 @@ class EvaluationCompiler:
 
     async def _node_input(
         self, node: TaskNode,
-        value: AgentInputCaptureRef | AgentCaseInput | TaskCaseInput | GraphCaseInput,
+        value: AgentInputCaptureRef | TaskCaseInput | GraphInputContract,
         *, principal: Principal, input_mode: str, owner_id: str, materialize: bool,
         owned_captures: list[TaskInvocationInputRef] | None, agent_input: bool = False,
     ) -> TaskNode:
-        if isinstance(value, AgentCaseInput):
-            value = value.capture
         case_capture = value if isinstance(value, AgentInputCaptureRef) else (value.capture if isinstance(value, TaskCaseInput) else None)
         if case_capture is not None and node.input_capture is not None and case_capture != node.input_capture:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "node input has two capture owners")

@@ -296,8 +296,7 @@ class RuntimeInputCaptures:
         if node is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value = {"graph_id": invocation.graph_id, "node": encode_domain(node),
-                 "dependency_states": encode_domain({name: invocation.dependency_states[name] for name in node.dependencies}),
-                 "dependency_results": encode_domain({name: result for name, result in invocation.dependency_results.items() if name in node.dependencies})}
+                 "dependency_states": encode_domain({name: invocation.dependency_states[name] for name in node.dependencies})}
         await self._put(self._key(invocation.principal.tenant_id, "invocation", execution_id), value)
 
     async def record_graph(self, graph: TaskGraph, admission: TaskGraphAdmission) -> None:
