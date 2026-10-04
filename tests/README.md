@@ -13,9 +13,11 @@ python manage.py check linktools-ai --test-tier all # explicitly include manual 
 backend and recovery combinations. `all` adds manual scale and repeated-stress
 probes; it is not the release default. Direct pytest uses the same `--test-tier`
 option and defaults to `merge`, but does not replace the other `manage.py` gates.
-Tier exclusions are reported as deselections, separately from unavailable-backend
-or optional-dependency skips. Selecting `all` does not make missing prerequisites
-available.
+Tier exclusions happen during collection and are not test skips. Use
+`PYTEST_ADDOPTS=--collect-only python manage.py check linktools-ai --test-tier all`
+(or `daily`/`merge`) to inspect coverage; xdist execution summaries may omit
+deselection counts. Selecting `all` does not make missing backend or optional
+dependency prerequisites available.
 
 Only two markers change scheduling:
 
