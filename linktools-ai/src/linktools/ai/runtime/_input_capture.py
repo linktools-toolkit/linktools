@@ -652,6 +652,18 @@ class RuntimeInputCaptures:
                     original_input.pop("capture_context", None)
                     original_input["session_id"] = None
                     original_input["memory_scope"] = None
+                    if input_capture is not None:
+                        previous = await self.read_task(input_capture, principal=principal)
+                        clean_input = dict(previous.input)
+                        original_input = dict(previous.original_input)
+                        for value in (clean_input, original_input):
+                            value.pop("capture_context", None)
+                            value["session_id"] = None
+                            value["memory_scope"] = None
+                        contract = replace(previous, input=clean_input, original_input=original_input)
+                        input_capture = await self.create_task_input(contract, principal=principal,
+                            source_capture=input_capture,
+                            idempotency_key=request.idempotency_key + ":context-input:" + node.node_id)
                 else:
                     from ._agent_task_input import AgentTaskInput
                     reference = await self.capture_input(source, CaptureInputRequest(
