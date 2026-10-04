@@ -29,10 +29,25 @@ async def _score_graph(context: TaskNodeContext[None]) -> JsonValue:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["declaration_graph", "materialized_graph"])
-@pytest.mark.parametrize("context_policy", ["clean", "captured"])
-@pytest.mark.parametrize("file_change", ["changed", "deleted"])
-@pytest.mark.parametrize("input_mode", ["fixed_input", "reproject_input"])
+# The daily half covers every pair of capture axes; merge covers all interactions.
+@pytest.mark.parametrize(("mode", "context_policy", "file_change", "input_mode"), [
+    pytest.param('declaration_graph', 'clean', 'changed', 'fixed_input'),
+    pytest.param('declaration_graph', 'clean', 'changed', 'reproject_input', marks=pytest.mark.merge),
+    pytest.param('declaration_graph', 'clean', 'deleted', 'fixed_input', marks=pytest.mark.merge),
+    pytest.param('declaration_graph', 'clean', 'deleted', 'reproject_input'),
+    pytest.param('declaration_graph', 'captured', 'changed', 'fixed_input', marks=pytest.mark.merge),
+    pytest.param('declaration_graph', 'captured', 'changed', 'reproject_input'),
+    pytest.param('declaration_graph', 'captured', 'deleted', 'fixed_input'),
+    pytest.param('declaration_graph', 'captured', 'deleted', 'reproject_input', marks=pytest.mark.merge),
+    pytest.param('materialized_graph', 'clean', 'changed', 'fixed_input', marks=pytest.mark.merge),
+    pytest.param('materialized_graph', 'clean', 'changed', 'reproject_input'),
+    pytest.param('materialized_graph', 'clean', 'deleted', 'fixed_input'),
+    pytest.param('materialized_graph', 'clean', 'deleted', 'reproject_input', marks=pytest.mark.merge),
+    pytest.param('materialized_graph', 'captured', 'changed', 'fixed_input'),
+    pytest.param('materialized_graph', 'captured', 'changed', 'reproject_input', marks=pytest.mark.merge),
+    pytest.param('materialized_graph', 'captured', 'deleted', 'fixed_input', marks=pytest.mark.merge),
+    pytest.param('materialized_graph', 'captured', 'deleted', 'reproject_input'),
+])
 async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
     tmp_path: Path, mode: str, context_policy: str, file_change: str, input_mode: str,
 ) -> None:

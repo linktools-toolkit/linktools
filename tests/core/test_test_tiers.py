@@ -35,8 +35,10 @@ def test_invalid_manual_selection_fails_closed(event: str, tier: str) -> None:
 
 @pytest.mark.parametrize("tier,passed,deselected", ((None, 3, 2), ("daily", 2, 3), ("merge", 3, 2), ("all", 5, 0)))
 def test_collection_keeps_unknown_tests_and_never_leaks_manual_cases(
-    pytester: pytest.Pytester, tier: "str | None", passed: int, deselected: int,
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch,
+    tier: "str | None", passed: int, deselected: int,
 ) -> None:
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
     root = Path(__file__).resolve().parents[2]
     pytester.makeconftest((root / "conftest.py").read_text(encoding="utf-8"))
     pytester.makeini((root / "pytest.ini").read_text(encoding="utf-8"))

@@ -14,7 +14,11 @@ from ._session_tool_test_helpers import (
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "phase",
-    ("tool_completed", "tool_checkpoint", "projected_tool_checkpoint"),
+    (
+        "tool_completed",
+        pytest.param("tool_checkpoint", marks=pytest.mark.merge),
+        pytest.param("projected_tool_checkpoint", marks=pytest.mark.merge),
+    ),
 )
 async def test_session_tool_turn_recovers_after_process_exit_without_replaying_effect(
     tmp_path: Path,

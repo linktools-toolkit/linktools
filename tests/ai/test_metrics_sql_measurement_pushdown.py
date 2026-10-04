@@ -323,8 +323,13 @@ async def test_measurement_pushdown_preserves_metric_type_integrity_checks(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sample_count", (
+    pytest.param(100, id="representative"),
+    pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
+))
 async def test_every_measurement_aggregation_uses_bounded_sql_round_trips(
     tmp_path: Path,
+    sample_count: int,
 ) -> None:
     path = tmp_path / "measurement-statements.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
@@ -340,7 +345,7 @@ async def test_every_measurement_aggregation_uses_bounded_sql_round_trips(
             distribution=index + 0.25,
             ratio=(index % 4) / 4,
         )
-        for index in range(1500)
+        for index in range(sample_count)
     )
     statements: list[str] = []
 

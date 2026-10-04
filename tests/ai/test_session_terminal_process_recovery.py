@@ -12,7 +12,11 @@ from ._session_tool_test_helpers import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("backend", ("sqlite", "sql", "split_sqlite"))
+@pytest.mark.parametrize("backend", (
+    "sqlite",
+    pytest.param("sql", marks=pytest.mark.merge),
+    pytest.param("split_sqlite", marks=pytest.mark.merge),
+))
 @pytest.mark.parametrize("phase", ("before_terminal", "after_terminal"))
 async def test_session_tool_turn_recovers_at_terminal_commit_without_replaying_effect(
     tmp_path: Path,
