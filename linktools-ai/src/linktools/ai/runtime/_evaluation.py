@@ -1228,6 +1228,7 @@ class RuntimeEvaluations:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "rescore requires a target experiment")
         await self._require_content(source, principal)
         bound = self._engine(engine)
+        self._validate_storage(source.manifest.policy)
         trials, _ = await self._trials(source, principal)
         selected = tuple(item for item in trials if request.trial_ids is None or item.trial.trial_id in request.trial_ids)
         if request.trial_ids is not None and {item.trial.trial_id for item in selected} != set(request.trial_ids):

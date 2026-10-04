@@ -13,7 +13,7 @@ from pydantic_ai.messages import BinaryContent, ModelMessage, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 
 from linktools.ai.capability import CapabilityGroup
-from linktools.ai.core import JsonValue, TaskStatus
+from linktools.ai.core import JsonValue, TaskStatus, idempotency_key_digest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     CandidateSlotRef, CandidateSpec, CaseRef, CaseSpec, ComparisonSpec, DatasetRef,
@@ -25,6 +25,7 @@ from linktools.ai.runtime import AgentTaskInput, AgentTaskInputContext, Runtime,
 from linktools.ai.task import (
     Task, TaskGraph, TaskGraphTemplate, TaskInputSupplyRequest, TaskNode, TaskNodeContext, TaskNodeResultRef, TaskRef,
 )
+from linktools.ai.workspace import Workspace
 
 from .test_evaluation_consumers import EVALUATION_COMPLETION_TIMEOUT_SECONDS, CONTEXT, DIMENSION, PRINCIPAL, FixtureModels, echo, rule_scorer
 
@@ -33,6 +34,65 @@ def capabilities() -> CapabilityGroup[None]:
     group = CapabilityGroup[None]("scoring-semantics")
     group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
     return group
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("environment,live", (
+    ("isolated", True), ("app", True), ("workspace", True),
+    ("app", False), ("workspace", False),
+))
+async def test_rescore_validates_reopened_environment_before_reserving_or_scoring(
+    tmp_path: Path, environment: str, live: bool,
+) -> None:
+    received: list[ScoringInput] = []
+
+    async def score(context: TaskNodeContext[None]) -> JsonValue:
+        received.append(ScoringInput.from_mapping(context.input))
+        return ScoreBundle(dimensions={"exact_match": 1.0}).to_mapping()
+
+    target = Task("semantics.environment-target", echo, effect_policy="none")
+    scorer = Task("semantics.environment-score", score, effect_policy="none")
+    state = tmp_path / "state"
+    async with Runtime.open("rescore-environment", models=FixtureModels(),
+                            storage=RuntimeStorage.filesystem(state), context=CONTEXT) as runtime:
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("environment", 1), (
+            CaseSpec.task(CaseRef("environment", "one", 1), input={"answer": "yes"}),
+        )), principal=PRINCIPAL, idempotency_key="dataset")
+        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+            (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
+            policy=EvaluationPolicy(external_effects="live" if live else "deny")), PRINCIPAL, "start"),
+            engine=runtime.tasks.bind(target, scorer))
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        experiment_id = run.experiment_id
+        assert len(received) == 1
+    received.clear()
+
+    groups = ()
+    if environment == "workspace":
+        work = tmp_path / "workspace"
+        work.mkdir()
+        groups = (CapabilityGroup("workspace", workspace=Workspace.load(work)),)
+    storage = RuntimeStorage.filesystem(state)
+    context = replace(CONTEXT, app=object()) if environment == "app" else CONTEXT
+    async with Runtime.open("rescore-environment", models=FixtureModels(), storage=storage,
+                            context=context, capabilities=groups) as runtime:
+        run = await runtime.evaluations.get(experiment_id, principal=PRINCIPAL)
+        before = await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
+        request = RescoreRequest((rule_scorer(scorer),), "rescore")
+        engine = runtime.tasks.bind(scorer)
+        if live and environment != "isolated":
+            with pytest.raises(AIError) as raised:
+                await run.rescore(request, engine=engine)
+            assert raised.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
+            assert received == []
+            assert await storage.evaluation.idempotency.get("evaluation.run",
+                idempotency_key_digest(request.idempotency_key), tenant_id=PRINCIPAL.tenant_id) is None
+        else:
+            rescored = await run.rescore(request, engine=engine)
+            assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+            assert len(received) == 1
+            assert (await rescored.scores()).items[0].status == "valid"
+        assert await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id) == before
 
 
 @pytest.mark.asyncio
