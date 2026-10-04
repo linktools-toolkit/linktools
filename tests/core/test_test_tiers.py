@@ -41,7 +41,10 @@ def test_collection_keeps_unknown_tests_and_never_leaks_manual_cases(
     monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
     root = Path(__file__).resolve().parents[2]
     pytester.makeconftest((root / "conftest.py").read_text(encoding="utf-8"))
-    pytester.makeini((root / "pytest.ini").read_text(encoding="utf-8"))
+    pytester.makeini(
+        (root / "pytest.ini").read_text(encoding="utf-8")
+        + "    new_category: unrelated test category\n"
+    )
     pytester.makepyfile('''
 import pytest
 
@@ -56,8 +59,8 @@ def test_scale(): pass
 @pytest.mark.manual
 def test_manual_takes_precedence(): pass
 ''')
-    args = ["-q"]
+    args = ["-q", "-p", "no:asyncio"]
     if tier is not None:
         args.extend(("--test-tier", tier))
     result = pytester.runpytest(*args)
-    result.assert_outcomes(passed=passed, deselected=deselected)
+    result.assert_outcomes(passed=passed, deselected=deselected, warnings=0)
