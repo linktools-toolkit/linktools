@@ -23,13 +23,15 @@ def _corrupt_index(manager):
 def test_doctor_reports_warn_and_does_not_overwrite_corrupt_index(fresh_manager):
     _corrupt_index(fresh_manager)
     import os
-    before = open(fresh_manager.artifact_index.path, "r", encoding="utf-8").read()
+    with open(fresh_manager.artifact_index.path, "r", encoding="utf-8") as f:
+        before = f.read()
 
     doctor = Doctor(fresh_manager)
     findings = doctor.check_artifacts(list(fresh_manager.containers.values()))
 
     assert any(f.code == ARTIFACT_INDEX_INVALID and f.severity == WARN for f in findings)
-    after = open(fresh_manager.artifact_index.path, "r", encoding="utf-8").read()
+    with open(fresh_manager.artifact_index.path, "r", encoding="utf-8") as f:
+        after = f.read()
     assert after == before  # never overwritten
 
 
