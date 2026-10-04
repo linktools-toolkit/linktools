@@ -287,6 +287,7 @@ class _ExecutionRuntimePort(ExecutionBackend, Protocol):
         commit: ExecutionTerminalCommit,
         *,
         session_id: str | None,
+        expected_execution: ExecutionRecord | None = None,
     ) -> ExecutionTerminalCommitResult: ...
 
     async def verify_terminal_projection(
@@ -1043,15 +1044,26 @@ class DefaultExecutionService:
             return _execution_view(current)
         if current.status is not ExecutionStatus.WAITING_DEFERRED:
             raise AIError(ErrorCode.TASK_NOT_READY)
-        await self._complete_task_output(
-            current,
-            principal=principal,
-            output=normalized,
-            terminal_event_payload={
-                "task_input": "supplied",
-                "task_input_value_digest": value_digest,
-            },
-        )
+        try:
+            await self._complete_task_output(
+                current,
+                principal=principal,
+                output=normalized,
+                terminal_event_payload={
+                    "task_input": "supplied",
+                    "task_input_value_digest": value_digest,
+                },
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.EXECUTION_RESULT_CONFLICT:
+                raise
+            latest = await self.inspect(execution_id, principal=principal)
+            if latest.status is not ExecutionStatus.SUCCEEDED:
+                raise
+            result = await self.result(execution_id, principal=principal)
+            if canonical_sha256(result.output) != value_digest:
+                raise
+            return latest
         return await self.inspect(execution_id, principal=principal)
 
     async def resume_task_not_applied(
@@ -2016,8 +2028,17 @@ class DefaultExecutionService:
         context = await self._freeze_input(context)
         request = context.request
 
+        input_context = None
         repository_instructions = None
-        if self._instruction_resolver is not None:
+        if request.input_context is not None:
+            if session_id is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            input_context = await self._materialize_repository_instructions(request.input_context, tenant_id=request.principal.tenant_id)
+            if request.input_context.repository_instructions is not None:
+                from ..spec import RepositoryInstructions
+                repository_instructions = await self._materialize_repository_instructions(
+                    RepositoryInstructions.from_payload(request.input_context.repository_instructions), tenant_id=request.principal.tenant_id)
+        elif self._instruction_resolver is not None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
                 if parent is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2071,13 +2092,15 @@ class DefaultExecutionService:
             fork_base_execution_id=fork_base_execution_id,
             lineage_kind=lineage_kind,
             agent_run_sequence=0,
-            memory_scope=request.memory_scope,
+            memory_scope=("capture:" + execution_id) if request.input_context is not None else request.memory_scope,
             conversation_agent_run_id=conversation_agent_run_id,
             mode=request.mode,
             planning=request.planning,
             thinking=request.thinking,
             binding=binding.binding_contract,
             repository_instructions=repository_instructions,
+            input_context=input_context,
+            context_imported=request.input_context is not None,
             correlation=request.correlation,
             principal_id=request.principal.principal_id,
             principal_kind=request.principal.kind,
@@ -2342,6 +2365,7 @@ class DefaultExecutionService:
                         ),
                     ),
                     session_id=None,
+                    expected_execution=current,
                 )
             except AIError as commit_error:
                 if commit_error.code not in {
@@ -3213,6 +3237,7 @@ class DefaultExecutionService:
                 await self._terminal_committer.commit_terminal_checkpoint(
                     terminal_commit,
                     session_id=cancelling_current.session_id,
+                    expected_execution=cancelling_current,
                 )
             except AIError as error:
                 if error.code not in {
@@ -3730,6 +3755,7 @@ def _request_digest(
     return canonical_sha256(
         {
             "input_intent": user_prompt_identity,
+            **({"input_context_digest": request.input_context.digest} if request.input_context is not None else {}),
             "binding_digest": binding_digest,
             "scope": session_id or "execution",
             "principal": principal_identity_payload(request.principal),

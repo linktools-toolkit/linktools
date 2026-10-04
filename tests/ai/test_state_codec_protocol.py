@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.evaluation import CaseRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state._codec import (
     _V1_ENUM_WIRE_TYPES,
@@ -105,6 +106,24 @@ def test_task_binding_contract_uses_wire_version_and_behavior_reference() -> Non
     assert "task_id" not in fields
     assert "task_revision" not in fields
     assert decode_domain(encoded, TaskBindingContract) == contract
+
+
+@pytest.mark.parametrize("values,field_name", (
+    ((ConversationCursor("first", None, 1), ConversationCursor("second", "history", 2)), "message_count"),
+    ((CaseRef("dataset", "first", 1), CaseRef("dataset", "second", 2)), "revision"),
+))
+def test_repeated_domain_decodes_validate_each_payload(
+    values: tuple[ConversationCursor, ConversationCursor] | tuple[CaseRef, CaseRef],
+    field_name: str,
+) -> None:
+    for value in values:
+        payload = encode_domain(value)
+        assert decode_domain(payload, type(value)) == value
+        malformed = {**payload, "fields": {**payload["fields"], field_name: True}}
+        with pytest.raises(AIError) as raised:
+            decode_domain(malformed, type(value))
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert decode_domain(payload, type(value)) == value
 
 
 def test_record_reader_ignores_additive_fields() -> None:

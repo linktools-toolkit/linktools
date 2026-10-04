@@ -8,10 +8,15 @@ from typing import cast
 
 from ...core import OperationLedgerInput
 from ...errors import AIError, ErrorCode
+from ...evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
+from ._evaluation_records import EvaluationCaseRecord, EvaluationDatasetRecord, EvaluationTombstone, EvaluationContentTombstone, EvaluationCleanupRecord
 from ...task import (
     TaskGraphAdmission,
+    TaskGraphSubmission,
+    TaskSubmissionRef,
     TaskGraphView,
     TaskNode,
+    TaskResultRef,
     TaskNodeView,
     TaskResultRecord,
 )
@@ -95,13 +100,15 @@ _ALLOWED_RECORD_KINDS = {
         {
             "task_graph",
             "task_admission",
+            "task_submission",
+            "task_submission_payload",
             "task_node_definition",
             "task_node_state",
             "task_result",
             "task_prepared_input",
         }
     ),
-    RuntimeDomain.EVALUATION: frozenset({"evaluation", "idempotency"}),
+    RuntimeDomain.EVALUATION: frozenset({"evaluation", "idempotency", "evaluation_case", "evaluation_dataset", "evaluation_evidence", "evaluation_report", "evaluation_comparison", "evaluation_tombstone", "evaluation_content_tombstone", "evaluation_cleanup"}),
     RuntimeDomain.RECOVERY: frozenset(
         {
             "recovery_checkpoint",
@@ -130,12 +137,22 @@ _RECORD_TYPES = {
     "memory": MemoryRecord,
     "artifact": ArtifactRecord,
     "evaluation": EvaluationRecord,
+    "evaluation_tombstone": EvaluationTombstone,
+    "evaluation_content_tombstone": EvaluationContentTombstone,
+    "evaluation_cleanup": EvaluationCleanupRecord,
+    "evaluation_case": EvaluationCaseRecord,
+    "evaluation_dataset": EvaluationDatasetRecord,
+    "evaluation_evidence": EvidenceBundle,
+    "evaluation_report": EvaluationReport,
+    "evaluation_comparison": ComparisonReport,
     "recovery_checkpoint": RecoveryCheckpoint,
     "approval": ApprovalRecord,
     "external_call": ExternalCallRecord,
     "tool_operation": ToolOperationRecord,
     "task_graph": TaskGraphView,
     "task_admission": TaskGraphAdmission,
+    "task_submission": TaskSubmissionRef,
+    "task_submission_payload": TaskGraphSubmission,
     "task_node_definition": TaskNode,
     "task_node_state": TaskNodeView,
     "task_result": TaskResultRecord,
@@ -414,6 +431,31 @@ def _expected_record(
         _require_anchor(
             namespace, tenant_id, domain, records, "session", value.session_id
         )
+    elif isinstance(value, TaskSubmissionRef):
+        if (
+            value.namespace != namespace or value.tenant_id != tenant_id
+            or record.state not in {"prepared", "admitted", "cancelled"}
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        state = record.state
+        if state == "prepared":
+            _require_anchor(
+                namespace, tenant_id, domain, records,
+                "task_submission_payload", value.graph_id,
+            )
+        elif state == "admitted":
+            _require_anchor(
+                namespace, tenant_id, domain, records, "task_graph", value.graph_id,
+            )
+    elif isinstance(value, TaskGraphSubmission):
+        if value.namespace != namespace or value.admission.principal.tenant_id != tenant_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = record_key_digest(
+            namespace, tenant_id, domain.value, "task_submission", value.graph.graph_id,
+        )
+        head = records.get(key)
+        if head is None or head.state != "prepared" or _decode_record(head) != value.ref:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     elif isinstance(value, TaskGraphAdmission):
         if value.principal.tenant_id != tenant_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -435,6 +477,7 @@ def _expected_record(
         if any(
             reference.namespace != namespace or reference.tenant_id != tenant_id
             for reference in value.input_refs.values()
+            if isinstance(reference, TaskResultRef)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     elif isinstance(value, TaskNodeView):
@@ -587,8 +630,10 @@ def _record_identity(
         return value.node_id
     if isinstance(value, (ExecutionHistoryHeadRecord, ExecutionHistorySealRecord)):
         return value.execution_id
-    if isinstance(value, TaskGraphAdmission):
+    if isinstance(value, (TaskGraphAdmission, TaskSubmissionRef)):
         return value.graph_id
+    if isinstance(value, TaskGraphSubmission):
+        return value.graph.graph_id
     if isinstance(value, TaskNode):
         graph_id = (
             None

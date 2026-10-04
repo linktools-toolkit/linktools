@@ -5,9 +5,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Any, Protocol
 
 from linktools.core import environ
 from openai import (
@@ -32,7 +33,8 @@ from pydantic_ai.exceptions import (
     UserError,
 )
 from pydantic_ai.messages import ModelMessage, ModelResponse
-from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
+from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters, StreamedResponse
+from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -66,6 +68,18 @@ class ModelInteractionRecorder(Protocol):
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None: ...
 
+    def prepare_model_interaction(
+        self,
+        fact: ModelRequestFact,
+        model: Model,
+        messages: Sequence[ModelMessage],
+        model_settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+        streaming: bool,
+        model_id: str | None = None,
+        source_messages: Sequence[ModelMessage] | None = None,
+    ) -> None: ...
+
     def finish_model_interaction(
         self,
         fact: ModelRequestFact,
@@ -87,6 +101,44 @@ class ModelInteractionRecorder(Protocol):
         error_code: str | None = None,
         include_observation: bool,
     ) -> None: ...
+
+
+class _PreparedRequestModel(WrapperModel):
+    """Freeze provider input after SDK preparation and before provider execution."""
+
+    def __init__(
+        self,
+        wrapped: Model,
+        prepare: Callable[
+            [Sequence[ModelMessage], ModelSettings | None, ModelRequestParameters, bool],
+            None,
+        ],
+    ) -> None:
+        super().__init__(wrapped)
+        self._prepare = prepare
+
+    async def request(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        self._prepare(messages, model_settings, model_request_parameters, False)
+        return await self.wrapped.request(messages, model_settings, model_request_parameters)
+
+    @asynccontextmanager
+    async def request_stream(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+        run_context: PydanticRunContext[Any] | None = None,
+    ) -> AsyncIterator[StreamedResponse]:
+        self._prepare(messages, model_settings, model_request_parameters, True)
+        async with self.wrapped.request_stream(
+            messages, model_settings, model_request_parameters, run_context,
+        ) as response:
+            yield response
 
 
 class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
@@ -124,6 +176,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         )
         self._interaction_recorder = interaction_recorder
         self._event_sink = event_sink
+        self._prepared_models: dict[int, Model] = {}
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="innermost")
@@ -139,6 +192,39 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             self._execution_id,
             ctx.deps.correlation,
         )
+
+    async def before_model_request(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        model = request_context.model
+
+        def prepare(
+            messages: Sequence[ModelMessage],
+            settings: ModelSettings | None,
+            parameters: ModelRequestParameters,
+            streaming: bool,
+        ) -> None:
+            fact = self._journal.latest_for_step(ctx.run_step)
+            if fact is None or fact.status is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if fact.request_sequence in self._prepared_models:
+                return
+            self._stage_request(
+                fact,
+                messages=messages,
+                model_settings=settings,
+                parameters=parameters,
+                streaming=streaming,
+                model=model,
+                model_id=request_context.model_id,
+                prepared=True,
+            )
+            self._prepared_models[fact.request_sequence] = model
+
+        request_context.model = _PreparedRequestModel(model, prepare)
+        return request_context
 
     async def wrap_model_request(
         self,
@@ -263,6 +349,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 raise asyncio.CancelledError
             return response
         finally:
+            self._prepared_models.pop(request_sequence, None)
             self._journal.consume(request_sequence)
 
     async def after_model_request(
@@ -479,6 +566,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         usage: object | None,
         phase: str,
     ) -> bool:
+        model = self._prepared_models.get(fact.request_sequence, model)
         finished = self._journal.finish(fact.request_sequence, status=status)
         self._finish_request(
             finished,
@@ -531,6 +619,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         model: Model | None = None,
         model_id: str | None = None,
         source_messages: Sequence[ModelMessage] | None = None,
+        prepared: bool = False,
     ) -> None:
         recorder = self._interaction_recorder
         if recorder is None:
@@ -544,7 +633,11 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             model_id = request_context.model_id
         if messages is None or parameters is None or model is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        recorder.begin_model_interaction(
+        stage = (
+            recorder.prepare_model_interaction
+            if prepared else recorder.begin_model_interaction
+        )
+        stage(
             fact,
             model,
             messages,

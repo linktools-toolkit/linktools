@@ -643,6 +643,79 @@ def _input_view(
     return normalized
 
 
+def captured_input_prompt(original: CanonicalUserInput, accepted: CanonicalUserInput) -> CanonicalUserInput:
+    """Freeze original inline files from their accepted materialization provenance.
+
+    A projection can discard or transform an original file reference. Leave an
+    unmatched reference unresolved so callers can reject only its reprojection.
+    """
+    if isinstance(original, str) or not any(isinstance(item, WorkspaceFileInput) for item in original):
+        return original
+    if not isinstance(accepted, MaterializedUserContent):
+        return original
+    prompt = accepted.view.get("prompt")
+    if not isinstance(prompt, Mapping) or prompt.get("kind") != "items":
+        return original
+    items = prompt.get("items")
+    views = accepted.view.get("files")
+    if not isinstance(items, list) or not isinstance(views, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    occurrences: dict[tuple[str, str | None, str | None], list[tuple[UserContent, ...]]] = {}
+    position = 0
+    file_index = 0
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if item.get("kind") != "workspace-file":
+            position += 1
+            continue
+        if file_index >= len(views):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        view = views[file_index]
+        parts = tuple(accepted[position:position + 2])
+        _validate_captured_file(parts, view)
+        if item.get("path") != view.get("path") or item.get("identifier") != view.get("identifier"):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = (item["path"], item.get("media_type"), item.get("identifier"))
+        occurrences.setdefault(key, []).append(parts)
+        position += 2
+        file_index += 1
+    result: list[UserContent | WorkspaceFileInput] = []
+    for item in original:
+        if isinstance(item, WorkspaceFileInput):
+            key = (normalize_workspace_input_path(item.path), item.media_type, item.identifier)
+            matches = occurrences.get(key)
+            if matches:
+                result.extend(matches.pop(0))
+                continue
+        result.append(item)
+    return tuple(result)
+
+
+def _validate_captured_file(parts: tuple[UserContent, ...], view: JsonValue) -> None:
+    if not isinstance(view, Mapping) or len(parts) != 2:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    label, content = parts
+    if (not isinstance(content, BinaryContent)
+        or label != "Workspace file path: " + json.dumps(view.get("path"))
+        or content.media_type != view.get("media_type") or len(content.data) != view.get("size")
+        or hashlib.sha256(content.data).hexdigest() != view.get("digest")):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def captured_input_files(value: CanonicalUserInput, count: int) -> tuple[UserContent, ...]:
+    """Read the accepted file suffix produced by this input materializer."""
+    if not isinstance(value, MaterializedUserContent):
+        raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "accepted_file_view_not_retained"})
+    views = value.view.get("files")
+    if not isinstance(views, list) or len(views) < count or len(value) < 2 * count:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    files = tuple(value[-2 * count:])
+    for index, view in enumerate(views[-count:]):
+        _validate_captured_file(files[2 * index:2 * index + 2], view)
+    return files
+
+
 def stored_input_attachment_views(
     value: "StoredUserInput",
 ) -> tuple[Mapping[str, JsonValue], ...]:
@@ -739,6 +812,8 @@ def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ..
 
 
 __all__ = [
+    "captured_input_files",
+    "captured_input_prompt",
     "CanonicalUserInput",
     "ExecutionInputMaterializer",
     "InputIntent",

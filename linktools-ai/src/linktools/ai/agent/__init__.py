@@ -3,6 +3,7 @@
 """Compiled Agent semantics, bindings, and output contracts."""
 
 from ..spec import SubagentRef
+from ._capture import AgentInputCaptureRef
 from ._binding import AgentBinding, AgentBindingContract, CapabilityPin
 from ._catalog import AgentCatalog
 from ._compiler import AgentCompiler
@@ -18,6 +19,7 @@ from ._output import (
 
 __all__ = [
     "AgentBinding",
+    "AgentInputCaptureRef",
     "AgentBindingContract",
     "AgentCatalog",
     "AgentCompiler",

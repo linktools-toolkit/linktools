@@ -18,20 +18,19 @@ from .test_metrics_server_read_integrity import (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("percentile", "sample_count"), [
-    (percentile, 100) for percentile in (
+@pytest.mark.parametrize(("sample_count", "percentiles"), [
+    pytest.param(100, (
         1e-12, .07, .14, .28, .5, .56, .58, .95, .99, 1.0,
         math.nextafter(.07, 0.0), math.nextafter(.07, 1.0),
         math.nextafter(.58, 0.0), math.nextafter(.58, 1.0),
         math.nextafter(1.0, 0.0),
-    )
-] + [
-    (percentile, sample_count)
-    for sample_count in (0, 1) for percentile in (1e-12, .5, 1.0)
-])
+    ), marks=pytest.mark.merge),
+    (0, (1e-12, .5, 1.0)),
+    (1, (1e-12, .5, 1.0)),
+], ids=("hundred-samples", "empty", "single-sample"))
 async def test_driver_percentile_preserves_binary_nearest_rank(
     server_metrics: _ServerMetrics, monkeypatch: pytest.MonkeyPatch,
-    percentile: float, sample_count: int,
+    sample_count: int, percentiles: tuple[float, ...],
 ) -> None:
     metrics, _, _ = server_metrics
     definition = MetricDefinition(
@@ -47,21 +46,22 @@ async def test_driver_percentile_preserves_binary_nearest_rank(
         if observations:
             await store.record_observations(observations)
     monkeypatch.setattr(SqlMetricStore, "scan_observations", AsyncMock(side_effect=AssertionError("unexpected scan fallback")))
-    for group_by, bucket in (((), None), (("group",), timedelta(seconds=1))):
-        query = MetricQuery(
-            definition.name, _WINDOW, aggregation=MetricAggregation.PERCENTILE,
-            percentile=percentile, group_by=group_by, bucket=bucket,
-            correlation_filters={"attempt": 2**53 + 1},
-        )
-        expected = await memory.query(query)
-        actual = await metrics.query(query)
-        assert actual == expected
-        if sample_count:
-            assert actual.points[0].value == math.ceil(percentile * sample_count)
-            if bucket is not None:
-                assert actual.points[1].value is None
-        else:
-            assert all(point.value is None for point in actual.points)
+    for percentile in percentiles:
+        for group_by, bucket in (((), None), (("group",), timedelta(seconds=1))):
+            query = MetricQuery(
+                definition.name, _WINDOW, aggregation=MetricAggregation.PERCENTILE,
+                percentile=percentile, group_by=group_by, bucket=bucket,
+                correlation_filters={"attempt": 2**53 + 1},
+            )
+            expected = await memory.query(query)
+            actual = await metrics.query(query)
+            assert actual == expected, (percentile, group_by, bucket)
+            if sample_count:
+                assert actual.points[0].value == math.ceil(percentile * sample_count), (percentile, group_by, bucket)
+                if bucket is not None:
+                    assert actual.points[1].value is None, percentile
+            else:
+                assert all(point.value is None for point in actual.points), (percentile, group_by, bucket)
 
 
 @pytest.mark.asyncio

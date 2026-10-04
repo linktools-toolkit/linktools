@@ -12,6 +12,10 @@ Linktools 是一套面向移动安全研究、逆向分析、合规检测工具�
 | [linktools-cntr](linktools-cntr/) | 容器管理：Docker/Compose 部署工具（`ct-cntr`） | [README](linktools-cntr/README.md) |
 | [linktools-ai](linktools-ai/) | AI agent 运行时：session/execution/swarm，基于 pydantic-ai（纯库，无 CLI） | [README](linktools-ai/README.md) |
 
+## 开发检查
+
+使用 `python manage.py check` 运行默认合并验收；日常代表集和仅手动规模/压力测试见 [测试分层说明](tests/README.md)。
+
 ## 快速开始
 
 ### 依赖项

@@ -58,6 +58,10 @@ def _iter_py_files(paths):
 
 
 def _literal_value(node):
+    if sys.version_info >= (3, 8):
+        if isinstance(node, ast.Constant):
+            return True, node.value
+        return False, None
     for type_name, attribute in (
         ("Constant", "value"),
         ("Str", "s"),

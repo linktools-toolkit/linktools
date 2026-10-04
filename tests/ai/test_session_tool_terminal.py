@@ -2482,7 +2482,12 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_checkpoint() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "phase", ("activated", "request_checkpoint", "recovered_before_terminal", "effect_unconfirmed")
+    "phase", (
+        "activated",
+        pytest.param("request_checkpoint", marks=pytest.mark.merge),
+        pytest.param("recovered_before_terminal", marks=pytest.mark.merge),
+        "effect_unconfirmed",
+    )
 )
 async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
     tmp_path: Path, phase: str

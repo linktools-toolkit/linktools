@@ -353,6 +353,7 @@ class StagingAgentRunStore(AgentRunStore):
         self._events: dict[str, list[StepEvent]] = {}
         self._checkpoints: dict[str, list[AgentRunCheckpoint]] = {}
         self._interactions: dict[str, list[StagedModelInteraction]] = {}
+        self._prepared_interactions: set[tuple[str, int]] = set()
         self._payloads: dict[str, dict[str, bytes]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -495,6 +496,31 @@ class StagingAgentRunStore(AgentRunStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values[index] = interaction
 
+    def prepare_model_interaction(self, interaction: object) -> None:
+        """Freeze a pending request's final provider input exactly once."""
+        self._ensure_open()
+        if not isinstance(interaction, StagedModelInteraction):
+            raise TypeError("staged model interaction is invalid")
+        values = self._interactions.get(interaction.agent_run_id, ())
+        key = (interaction.agent_run_id, interaction.request_sequence)
+        if not values or key in self._prepared_interactions:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        index = interaction.request_sequence - values[0].request_sequence
+        if index < 0 or index >= len(values):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        previous = values[index]
+        expected = replace(
+            previous,
+            model=interaction.model,
+            request_context=interaction.request_context,
+            request_envelope_digest=interaction.request_envelope_digest,
+            attachments=interaction.attachments,
+        )
+        if previous.status != "RUNNING" or expected != interaction:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        values[index] = interaction
+        self._prepared_interactions.add(key)
+
     async def list_model_interactions(
         self,
         *,
@@ -631,6 +657,9 @@ class StagingAgentRunStore(AgentRunStore):
         self._events.pop(agent_run_id, None)
         self._checkpoints.pop(agent_run_id, None)
         self._interactions.pop(agent_run_id, None)
+        self._prepared_interactions = {
+            key for key in self._prepared_interactions if key[0] != agent_run_id
+        }
         self._payloads.pop(agent_run_id, None)
 
     def capture_projection_local(

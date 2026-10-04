@@ -12,7 +12,8 @@ from ._repository_common import (
     OperationLedgerRepository, RepositoryBase, append_operation, decode_operation, decode_record_cursor,
     projected_record, record_cursor, replace_checked, require_repository_tenant,
 )
-from ._resource_repositories import ArtifactRepositoryImpl, EvaluationRepositoryImpl, MemoryRepositoryImpl
+from ._evaluation_repository import EvaluationRepositoryImpl
+from ._resource_repositories import ArtifactRepositoryImpl, MemoryRepositoryImpl
 from ._store import StateStore
 
 

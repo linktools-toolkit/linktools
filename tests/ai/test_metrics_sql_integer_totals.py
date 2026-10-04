@@ -147,7 +147,13 @@ async def test_integer_partitions_remain_exact_next_to_float_partitions(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_large_integer_sum_transfers_only_one_aggregate_statement(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sample_count", (
+    pytest.param(100, id="representative"),
+    pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
+))
+async def test_large_integer_sum_transfers_only_one_aggregate_statement(
+    tmp_path: Path, sample_count: int,
+) -> None:
     path = tmp_path / "large-integer-totals.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     metrics = Metrics.sql(engine, namespace="large-integer-totals")
@@ -168,9 +174,9 @@ async def test_large_integer_sum_transfers_only_one_aggregate_statement(tmp_path
     try:
         await provision_metrics_database(engine)
         await metrics.define(definition)
-        for offset in range(0, 1500, 250):
+        for offset in range(0, sample_count, 250):
             await metrics.record_observations(
-                tuple(_observation(index, _MAX) for index in range(offset, offset + 250))
+                tuple(_observation(index, _MAX) for index in range(offset, min(offset + 250, sample_count)))
             )
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         result = await metrics.query(
@@ -179,8 +185,8 @@ async def test_large_integer_sum_transfers_only_one_aggregate_statement(tmp_path
                 MetricWindow.between(_START, _START + timedelta(seconds=1)),
             )
         )
-        assert result.points[0].sample_count == 1500
-        assert result.points[0].value == _MAX * 1500
+        assert result.points[0].sample_count == sample_count
+        assert result.points[0].value == _MAX * sample_count
         assert type(result.points[0].value) is int
         assert len(statements) == 1
         assert "integer_sum_high" in statements[0]

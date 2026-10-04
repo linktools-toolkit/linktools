@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
+from functools import lru_cache
 from operator import attrgetter
 from types import MappingProxyType
 from typing import (
@@ -29,12 +30,71 @@ from typing import (
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
-from ...agent import AgentBindingContract
+from ...asset import AssetVersionRef
+from ...evaluation import (
+    CandidateContract,
+    CandidateSlotRef,
+    CandidateSummary,
+    CaseContract,
+    CaseRef,
+    ComparisonReadCutoff,
+    ComparisonReport,
+    ComparisonSpec,
+    ContractDifference,
+    DatasetContract,
+    DatasetRef,
+    DimensionBound,
+    DimensionContract,
+    EvaluationIssue,
+    EvaluationManifest,
+    EvaluationPolicy,
+    EvaluationProgress,
+    EvaluationReadCutoff,
+    EvaluationReport,
+    EvaluationView,
+    EvidenceBundle,
+    EvidencePolicy,
+    EvidenceRef,
+    ExecutionSubjectRef,
+    ExecutionTargetEvidence,
+    FailureCount,
+    GatePolicy,
+    GraphInputContract,
+    GraphOutputItem,
+    GraphSubjectRef,
+    GraphTargetContract,
+    GraphTargetEvidence,
+    HumanScoreRequest,
+    InlineValue,
+    LabelProvenance,
+    PairedDimensionSummary,
+    PairedScoreRow,
+    ScoreAttemptView,
+    ScoreComparisonSelection,
+    ScoreFilter,
+    ScoreSelection,
+    ScorerContract,
+    ScorerSummary,
+    SlotDispositionView,
+    TargetTrialRef,
+    TaskCaseInput,
+    TrialFilter,
+    TrialPlan,
+    TrialView,
+    ScoreBundle,
+    EvidenceAttachmentRef,
+    ModelUsage,
+)
+from ._evaluation_records import (
+    EvaluationLaunchIntent, EvaluationTrialEvidence, EvaluationSlotDisposition, EvaluationHumanDecision,
+    EvaluationDatasetRecord, EvaluationCaseRecord, EvaluationTombstone, EvaluationContentTombstone, EvaluationCleanupRecord,
+)
+
+from ...agent import AgentInputCaptureRef, AgentBindingContract
 from ...core import (
     RUNTIME_OBJECT_STORE_ID,
     ApprovalDecision,
     ApprovalStatus,
-    EvaluationStatus,
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionStatus,
@@ -63,6 +123,8 @@ from ...task import (
     TaskRef,
     TaskGraph,
     TaskGraphAdmission,
+    TaskGraphSubmission,
+    TaskSubmissionRef,
     TaskGraphLimits,
     TaskGraphView,
     TaskLease,
@@ -70,6 +132,15 @@ from ...task import (
     TaskNodeView,
     TaskResultRecord,
     TaskResultRef,
+    TaskNodeResultRef,
+    TaskInvocationInputRef,
+    TaskInvocationInputContract,
+    TaskDependencyCapture,
+    TaskDependencyState,
+    TaskDependencyResult,
+    TaskGraphTemplate,
+    TaskGraphTemplateRef,
+    TaskGraphCaptureRef,
     TaskTerminalRecord,
 )
 from .._message import decode_model_messages, encode_model_messages
@@ -158,6 +229,58 @@ DomainT = TypeVar("DomainT")
 _logger = environ.get_logger("ai.runtime.state.codec")
 
 _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
+    ("evaluation_candidate_slot_ref", CandidateSlotRef),
+    ("evaluation_score_selection", ScoreSelection),
+    ("evaluation_score_comparison_selection", ScoreComparisonSelection),
+    ("evaluation_dimension_bound", DimensionBound),
+    ("evaluation_gate_policy", GatePolicy),
+    ("evaluation_read_cutoff", EvaluationReadCutoff),
+    ("evaluation_comparison_read_cutoff", ComparisonReadCutoff),
+    ("evaluation_comparison_spec", ComparisonSpec),
+    ("evaluation_contract_difference", ContractDifference),
+    ("evaluation_failure_count", FailureCount),
+    ("evaluation_candidate_summary", CandidateSummary),
+    ("evaluation_scorer_summary", ScorerSummary),
+    ("evaluation_report", EvaluationReport),
+    ("evaluation_paired_score_row", PairedScoreRow),
+    ("evaluation_paired_dimension_summary", PairedDimensionSummary),
+    ("evaluation_comparison_report", ComparisonReport),
+    ("evaluation_slot_disposition_view", SlotDispositionView),
+    ("evaluation_issue", EvaluationIssue),
+    ("evaluation_progress", EvaluationProgress),
+    ("evaluation_view", EvaluationView),
+    ("evaluation_trial_view", TrialView),
+    ("evaluation_score_attempt_view", ScoreAttemptView),
+    ("evaluation_trial_filter", TrialFilter),
+    ("evaluation_score_filter", ScoreFilter),
+    ("evaluation_execution_subject_ref", ExecutionSubjectRef),
+    ("evaluation_graph_subject_ref", GraphSubjectRef),
+    ("evaluation_evidence_ref", EvidenceRef),
+    ("evaluation_execution_target_evidence", ExecutionTargetEvidence),
+    ("evaluation_graph_output_item", GraphOutputItem),
+    ("evaluation_graph_target_evidence", GraphTargetEvidence),
+    ("evaluation_evidence_bundle", EvidenceBundle),
+    ("evaluation_human_score_request", HumanScoreRequest),
+    ("evaluation_case_ref", CaseRef),
+    ("evaluation_dataset_ref", DatasetRef),
+    ("evaluation_inline_value", InlineValue),
+    ("evaluation_label_provenance", LabelProvenance),
+    ("evaluation_task_case_input", TaskCaseInput),
+    ("evaluation_graph_input_contract", GraphInputContract),
+    ("evaluation_dimension_contract", DimensionContract),
+    ("evaluation_evidence_policy", EvidencePolicy),
+    ("evaluation_policy", EvaluationPolicy),
+    ("evaluation_case_contract", CaseContract),
+    ("evaluation_dataset_contract", DatasetContract),
+    ("evaluation_graph_target_contract", GraphTargetContract),
+    ("evaluation_candidate_contract", CandidateContract),
+    ("evaluation_scorer_contract", ScorerContract),
+    ("evaluation_target_trial_ref", TargetTrialRef),
+    ("evaluation_trial_plan", TrialPlan),
+    ("evaluation_manifest", EvaluationManifest),
+    ("evaluation_launch_intent", EvaluationLaunchIntent),
+    ("evaluation_trial_evidence", EvaluationTrialEvidence),
+    ("evaluation_slot_disposition", EvaluationSlotDisposition),
     ("approval_record", ApprovalRecord),
     ("agent_attempt_claim", AgentAttemptClaim),
     ("artifact_record", ArtifactRecord),
@@ -168,6 +291,14 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("context_projection", ContextProjection),
     ("error_diagnostics", ErrorDiagnostics),
     ("evaluation_record", EvaluationRecord),
+    ("evaluation_tombstone", EvaluationTombstone),
+    ("evaluation_content_tombstone", EvaluationContentTombstone),
+    ("evaluation_cleanup_record", EvaluationCleanupRecord),
+    ("evaluation_attachment_ref", EvidenceAttachmentRef),
+    ("evaluation_dataset_record", EvaluationDatasetRecord),
+    ("evaluation_case_record", EvaluationCaseRecord),
+    ("evaluation_model_usage", ModelUsage),
+    ("evaluation_human_decision", EvaluationHumanDecision),
     ("execution_event", ExecutionEventRecord),
     ("execution_history_head", ExecutionHistoryHeadRecord),
     ("execution_history_seal", ExecutionHistorySealRecord),
@@ -221,6 +352,8 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("runtime_domain", RuntimeDomain),
     ("task_graph", TaskGraph),
     ("task_graph_admission", TaskGraphAdmission),
+    ("task_graph_submission", TaskGraphSubmission),
+    ("task_submission_ref", TaskSubmissionRef),
     ("task_graph_limits", TaskGraphLimits),
     ("task_graph_view", TaskGraphView),
     ("task_lease", TaskLease),
@@ -230,6 +363,16 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     (_TASK_NODE_VIEW_WIRE_ID, TaskNodeView),
     ("task_result", TaskResultRecord),
     ("task_result_ref", TaskResultRef),
+    ("task_node_result_ref", TaskNodeResultRef),
+    ("task_invocation_input_ref", TaskInvocationInputRef),
+    ("task_invocation_input_contract", TaskInvocationInputContract),
+    ("task_dependency_capture", TaskDependencyCapture),
+    ("task_dependency_state", TaskDependencyState),
+    ("task_dependency_result", TaskDependencyResult),
+    ("task_graph_template", TaskGraphTemplate),
+    ("task_graph_template_ref", TaskGraphTemplateRef),
+    ("task_graph_capture_ref", TaskGraphCaptureRef),
+    ("agent_input_capture_ref", AgentInputCaptureRef),
     ("task_prepared_input", TaskPreparedInputRecord),
     ("task_terminal", TaskTerminalRecord),
     ("tool_operation", ToolOperationRecord),
@@ -247,7 +390,6 @@ _V1_DOMAIN_TYPES = MappingProxyType(
 _V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("approval_decision", ApprovalDecision),
     ("approval_status", ApprovalStatus),
-    ("evaluation_status", EvaluationStatus),
     ("execution_event_type", ExecutionEventType),
     ("execution_history_state", ExecutionHistoryState),
     ("execution_lineage_kind", ExecutionLineageKind),
@@ -279,6 +421,58 @@ _V1_ENUM_TYPES = MappingProxyType(
 
 _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
+        "evaluation_candidate_slot_ref": ('experiment_id', 'slot_id'),
+        "evaluation_score_selection": ('scorer_slot_id', 'dimension', 'scoring_experiment_id', 'decision_id'),
+        "evaluation_score_comparison_selection": ('baseline', 'candidate'),
+        "evaluation_dimension_bound": ('selection', 'minimum', 'maximum', 'max_regression'),
+        "evaluation_gate_policy": ('minimum_coverage', 'minimum_cases', 'bounds', 'maximum_failure_rate', 'require_complete_usage'),
+        "evaluation_read_cutoff": ('experiment_id', 'manifest_digest', 'state_revisions', 'score_selections', 'source_evidence_refs', 'target_usage_complete', 'scorer_usage_complete'),
+        "evaluation_comparison_read_cutoff": ('baseline', 'candidate', 'scoring'),
+        "evaluation_comparison_spec": ('baseline', 'candidate', 'scores', 'mode', 'allowed_changes', 'gate_policy', 'cutoff'),
+        "evaluation_contract_difference": ('path', 'baseline', 'candidate', 'allowed'),
+        "evaluation_failure_count": ('code', 'count'),
+        "evaluation_candidate_summary": ('candidate_slot_id', 'planned', 'started', 'succeeded', 'failed', 'cancelled', 'unavailable', 'scoring_complete_trials'),
+        "evaluation_scorer_summary": ('scorer_slot_id', 'dimension', 'planned', 'pending', 'valid', 'not_applicable', 'error', 'not_attempted', 'mean', 'weight_sum', 'coverage', 'failure_counts', 'candidate_slot_id'),
+        "evaluation_report": ('report_id', 'experiment_id', 'kind', 'source_experiment_id', 'dataset', 'candidates', 'scores', 'failures', 'cutoff', 'created_at', 'trials', 'score_attempts', 'completion'),
+        "evaluation_paired_score_row": ('selection', 'case_ref', 'repetition', 'baseline_trial', 'candidate_trial', 'status', 'baseline_value', 'candidate_value', 'baseline_reason', 'candidate_reason', 'weight'),
+        "evaluation_paired_dimension_summary": ('selection', 'planned_pairs', 'complete_pairs', 'baseline_missing', 'candidate_missing', 'both_missing', 'not_comparable', 'mean_difference', 'complete_cases', 'weight_sum', 'baseline_mean', 'candidate_mean', 'direction'),
+        "evaluation_comparison_report": ('report_id', 'baseline', 'candidate', 'selections', 'compatibility', 'differences', 'dimensions', 'gate', 'gate_reasons', 'cutoff', 'created_at', 'pairs', 'gate_policy'),
+        "evaluation_slot_disposition_view": ('kind', 'reason_code', 'terminal', 'retryable', 'created_at'),
+        "evaluation_issue": ('code', 'message', 'trial', 'scorer_slot_id', 'retryable'),
+        "evaluation_progress": ('planned_trials', 'terminal_trials', 'planned_scores', 'terminal_scores', 'valid_scores', 'blocked_slots', 'source_trial_count'),
+        "evaluation_view": ('experiment_id', 'kind', 'source_experiment_id', 'dataset', 'progress', 'completion', 'needs_attention', 'created_at', 'updated_at'),
+        "evaluation_trial_view": ('trial', 'case_ref', 'candidate_slot_id', 'repetition', 'graph_ref', 'subject', 'execution_status', 'disposition', 'evidence_ref', 'error_code'),
+        "evaluation_score_attempt_view": ('scoring_experiment_id', 'score_attempt_id', 'trial', 'scorer_slot_id', 'scorer_task', 'status', 'score', 'scorer_execution', 'scorer_graph', 'scorer_node_id', 'evidence_ref', 'decision_id', 'reason'),
+        "evaluation_trial_filter": ('candidate_slot_ids', 'case_refs', 'terminal'),
+        "evaluation_score_filter": ('scorer_slot_ids', 'trial_ids', 'statuses'),
+        "evaluation_execution_subject_ref": ('namespace', 'tenant_id', 'execution_id'),
+        "evaluation_graph_subject_ref": ('namespace', 'tenant_id', 'graph_id'),
+        "evaluation_evidence_ref": ('namespace', 'tenant_id', 'evidence_id', 'digest'),
+        "evaluation_execution_target_evidence": ('subject', 'status', 'output', 'error_code'),
+        "evaluation_graph_output_item": ('status', 'value', 'reason'),
+        "evaluation_graph_target_evidence": ('subject', 'status', 'outputs', 'node_statuses', 'error_code'),
+        "evaluation_evidence_bundle": ('ref', 'trial', 'target', 'input', 'trace', 'attachments', 'usage', 'usage_complete', 'cutoff', 'source_ref', 'model_usage'),
+        "evaluation_human_score_request": ('trial_id', 'scorer_slot_id', 'evidence_ref', 'score', 'idempotency_key'),
+        "evaluation_case_ref": ('dataset_id', 'case_id', 'revision'),
+        "evaluation_dataset_ref": ('id', 'revision'),
+        "evaluation_inline_value": ('content',),
+        "evaluation_label_provenance": ('source', 'actor', 'procedure', 'revision'),
+        "evaluation_task_case_input": ('input', 'capture', 'input_refs'),
+        "evaluation_graph_input_contract": ('inputs', 'source_capture', 'node_mapping'),
+        "evaluation_dimension_contract": ('name', 'unit', 'direction', 'minimum', 'maximum'),
+        "evaluation_evidence_policy": ('include_input', 'include_output', 'include_trace', 'include_attachments'),
+        "evaluation_policy": ('model_mode', 'external_effects', 'max_trials', 'target_concurrency', 'scorer_concurrency', 'target_graph_limits', 'scorer_graph_limits', 'trial_timeout_seconds', 'scorer_timeout_seconds', 'human_timeout_seconds', 'environment', 'allow_volatile', 'token_limit', 'cost_limit', 'currency', 'price_table', 'unknown_usage', 'model_fixtures', 'content_retention_seconds', 'metadata_retention_seconds'),
+        "evaluation_case_contract": ('ref', 'input', 'expected', 'label_provenance', 'tags', 'weight'),
+        "evaluation_dataset_contract": ('ref', 'ordered_case_refs', 'input_kind', 'selection', 'asset_refs'),
+        "evaluation_graph_target_contract": ('template', 'namespace', 'tenant_id', 'outputs', 'selector', 'limits'),
+        "evaluation_candidate_contract": ('slot_id', 'task', 'graph_template', 'definition_contracts'),
+        "evaluation_scorer_contract": ('slot_id', 'task', 'task_contract', 'dimensions', 'output_contract', 'rubric', 'config', 'evidence_policy', 'required', 'accepts_target_failure', 'accepts_target_kinds', 'input_projection'),
+        "evaluation_target_trial_ref": ('target_experiment_id', 'trial_id'),
+        "evaluation_trial_plan": ('trial_id', 'case_ref', 'candidate_slot_id', 'repetition'),
+        "evaluation_manifest": ('experiment_id', 'kind', 'source_experiment_id', 'dataset', 'candidates', 'scorers', 'trials', 'source_trials', 'policy', 'input_mode', 'principal'),
+        "evaluation_launch_intent": ('slot_id', 'trial', 'scorer_slot_id', 'submission', 'deadline_at', 'confirmed', 'released'),
+        "evaluation_trial_evidence": ('trial', 'evidence_ref'),
+        "evaluation_slot_disposition": ('slot_id', 'disposition'),
         "approval_record": ("approval_id", "execution_id", "status", "idempotency_key_digest", "decision", "decided_by", "decision_digest", "created_at", "decided_at", "decision_message", "resolution_metadata"),
         "agent_attempt_claim": ("execution_id", "expected_execution_revision", "expected_agent_run_sequence", "expected_recovery_revision", "expected_recovery_state"),
         "artifact_record": ("artifact_id", "execution_id", "producer", "media_type", "object_ref", "created_at"),
@@ -288,11 +482,19 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "conversation_history_segment": ("owner_history_id", "through_local_message_count"),
         "context_projection": ("items",),
         "error_diagnostics": ("exception_type", "exception_message", "cause_digest"),
-        "evaluation_record": ("evaluation_id", "execution_id", "dataset_id", "status", "revision", "created_at", "updated_at"),
+        "evaluation_human_decision": ("slot_id", "decision_id", "actor", "created_at", "request_digest", "idempotency_key_digest", "score"),
+        "evaluation_model_usage": ("provider", "model", "usage", "complete"),
+        "evaluation_dataset_record": ("contract", "owner_principal_id", "created_at", "content_expires_at"),
+        "evaluation_case_record": ("contract", "owner_principal_id", "created_at", "content_expires_at"),
+        "evaluation_attachment_ref": ("attachment_id", "media_type", "object_ref"),
+        "evaluation_tombstone": ("evaluation_id", "owner_principal_id", "request_digest", "idempotency_key_digest", "manifest_digest", "deleted_at"),
+        "evaluation_content_tombstone": ("kind", "identity", "owner_principal_id", "digest", "deleted_at"),
+        "evaluation_cleanup_record": ("evaluation_id", "owner_principal_id", "objects", "created_at"),
+        "evaluation_record": ('manifest', 'manifest_digest', 'request_digest', 'idempotency_key_digest', 'gate', 'revision', 'created_at', 'updated_at', 'intents', 'evidence', 'scores', 'dispositions', 'human_decisions', 'content_expires_at', 'metadata_expires_at', 'content_deleted_at', 'owned_input_captures'),
         "execution_event": ("execution_id", "sequence", "event_type", "payload"),
         "execution_history_head": ("execution_id", "state", "revision", "seal_digest"),
         "execution_history_seal": ("execution_id", "run_heads", "execution_event_high_water"),
-        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "previous_execution_id", "fork_base_execution_id", "lineage_kind", "status", "revision", "event_sequence", "agent_run_sequence", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_agent_run_id", "result", "repository_instructions", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "retention_closed", "started_at"),
+        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "previous_execution_id", "fork_base_execution_id", "lineage_kind", "status", "revision", "event_sequence", "agent_run_sequence", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_agent_run_id", "result", "repository_instructions", "input_context", "context_imported", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "retention_closed", "started_at"),
         "execution_run_seal_head": ("agent_run_id", "event_count", "checkpoint_count", "transcript_message_count", "projection_digest", "interaction_count"),
         "model_interaction": ("agent_run_id", "step_index", "request_sequence", "purpose", "output_retry_index", "model", "request_context", "request_envelope", "response_context", "status", "error_code", "duration_ns", "usage", "started_at", "finished_at", "attachments"),
         "execution_start_claim": ("execution_id", "expected_revision", "expected_event_sequence", "scope", "idempotency_key_digest", "request_digest", "started_at"),
@@ -334,10 +536,22 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "tool_operation_admission": ("execution_id", "tool_operation_id", "agent_run_id", "recovery_agent_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "owner", "lease_seconds", "arguments_payload"),
         "task_graph": ("graph_id", "nodes"),
         "task_graph_admission": ("version", "graph_id", "principal", "limits", "operation_id", "initial_request_digest", "correlation"),
+        "task_graph_submission": ("namespace", "admission", "graph"),
+        "task_submission_ref": ("namespace", "tenant_id", "graph_id", "request_digest", "operation_id", "principal"),
         "task_graph_limits": ("max_concurrency", "max_depth", "max_nodes", "max_budget"),
         "task_lease": ("graph_id", "node_id", "tenant_id", "owner", "fence", "lease_expires_at", "execution_id"),
         "task_expander_ref": ("id", "revision"),
         "task_ref": ("id", "revision"),
+        "task_node_result_ref": ("node_id",),
+        "agent_input_capture_ref": ("namespace", "tenant_id", "capture_id", "digest", "source_execution_id"),
+        "task_invocation_input_ref": ("namespace", "tenant_id", "capture_id", "digest", "source_execution_id"),
+        "task_graph_capture_ref": ("namespace", "tenant_id", "capture_id", "digest", "source_graph_id"),
+        "task_graph_template_ref": ("namespace", "tenant_id", "capture_id", "digest"),
+        "task_dependency_capture": ("name", "state", "source_ref", "execution_id", "body_digest"),
+        "task_dependency_state": ("status", "result_digest", "error_code", "error_digest"),
+        "task_dependency_result": ("result_digest", "execution_id"),
+        "task_invocation_input_contract": ("source_execution_id", "task_ref", "input", "original_input", "binding", "dependencies", "input_mode", "excluded_dependencies"),
+        "task_graph_template": ("nodes", "limits", "task_contracts", "expander_contracts", "context_policy"),
         "task_result_ref": (
             "namespace",
             "tenant_id",
@@ -371,7 +585,6 @@ _V1_ENUM_VALUES: Mapping[str, frozenset[object]] = MappingProxyType(
     {
         "approval_decision": frozenset({"APPROVE", "DENY"}),
         "approval_status": frozenset({"PENDING", "APPROVED", "DENIED", "CANCELLED"}),
-        "evaluation_status": frozenset({"PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}),
         "execution_event_type": frozenset({"EXECUTION_CREATED", "EXECUTION_STARTED", "EXECUTION_START_UNKNOWN", "EXECUTION_RECOVERY_REQUIRED", "EXECUTION_RESUMED", "EXECUTION_RETRY_SCHEDULED", "APPROVAL_REQUESTED", "APPROVAL_DECIDED", "EXTERNAL_REQUESTED", "EXTERNAL_SUPPLIED", "CANCEL_REQUESTED", "EXECUTION_SUCCEEDED", "EXECUTION_FAILED", "EXECUTION_CANCELLED", "ASSISTANT_PART_COMPLETED", "TOOL_CALL_STARTED", "TOOL_CALL_FINISHED", "MODEL_REQUEST_STARTED", "MODEL_REQUEST_FINISHED"}),
         "execution_history_state": frozenset({"open", "sealed"}),
         "execution_lineage_kind": frozenset({"RUN", "SESSION_RESUME", "RETRY", "FORK", "SUBAGENT"}),
@@ -445,7 +658,7 @@ def _encode_v1_task_node_fields(
         fields["input_refs"] = [
             [
                 name,
-                {
+                {"node_id": reference.node_id} if isinstance(reference, TaskNodeResultRef) else {
                     "namespace": reference.namespace,
                     "tenant_id": reference.tenant_id,
                     "graph_id": reference.graph_id,
@@ -455,6 +668,10 @@ def _encode_v1_task_node_fields(
             ]
             for name, reference in sorted(value.input_refs.items())
         ]
+    if value.original_input is not None:
+        fields["original_input"] = _encode_domain(value.original_input, codec, persisted=persisted)
+    if value.input_capture is not None:
+        fields["input_capture"] = _encode_domain(value.input_capture, codec, persisted=persisted)
     if value.timeout_seconds is not None:
         fields["timeout_seconds"] = value.timeout_seconds
     if value.max_attempts != 1:
@@ -503,13 +720,21 @@ def _decode_v1_task_node(
     raw_refs = raw_fields.get("input_refs", [])
     if not isinstance(raw_refs, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    input_refs: dict[str, TaskResultRef] = {}
+    input_refs: dict[str, TaskResultRef | TaskNodeResultRef] = {}
     for item in raw_refs:
         if not isinstance(item, list) or len(item) != 2:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         name, raw_reference = item
         if not isinstance(name, str) or not isinstance(raw_reference, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if set(raw_reference) == {"node_id"}:
+            if name in input_refs:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                input_refs[name] = TaskNodeResultRef(raw_reference["node_id"])
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            continue
         _require_required_keys(
             raw_reference,
             frozenset(
@@ -543,6 +768,8 @@ def _decode_v1_task_node(
     optional = frozenset(
         {
             "input_refs",
+            "input_capture",
+            "original_input",
             "timeout_seconds",
             "max_attempts",
             "retry_delay_seconds",
@@ -604,6 +831,8 @@ def _decode_v1_task_node(
             ),
         ),
         input_refs=input_refs,
+        input_capture=_decode_domain(raw_fields.get("input_capture"), TaskInvocationInputRef | None, codec, persisted=persisted),
+        original_input=_decode_domain(raw_fields.get("original_input"), Mapping[str, JsonValue] | None, codec, persisted=persisted),
         timeout_seconds=cast("float | None", timeout_seconds),
         max_attempts=max_attempts,
         retry_delay_seconds=retry_delay_seconds,
@@ -1034,6 +1263,8 @@ _V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
             "linktools.ai.runtime.state.OperationTerminalUpdate"
         ),
         AgentBindingContract: "linktools.ai.agent.AgentBindingContract@1",
+        AssetVersionRef: "linktools.ai.asset.asset_version_ref@1",
+        ScoreBundle: "linktools.ai.evaluation.score_bundle@1",
         ModelRequest: "pydantic_ai.messages.ModelRequest",
         ModelResponse: "pydantic_ai.messages.ModelResponse",
     }
@@ -1320,8 +1551,10 @@ def _codec_wire_type_id(
 def _encode_external(value: object, codec: _VersionCodec) -> JsonValue:
     if type(value) not in codec.external_schema_types:
         raise TypeError(f"unsupported external type: {type(value).__name__}")
-    if isinstance(value, AgentBindingContract):
+    if isinstance(value, (AgentBindingContract, AssetVersionRef)):
         return value.to_payload()
+    if isinstance(value, ScoreBundle):
+        return value.to_mapping()
     if isinstance(value, IdempotencyTerminalUpdate):
         return {
             "scope": _encode_domain(value.scope, codec),
@@ -1363,9 +1596,9 @@ def _decode_external(
 ) -> object:
     if target not in codec.external_schema_types:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if target is AgentBindingContract:
+    if target in (AgentBindingContract, AssetVersionRef, ScoreBundle):
         try:
-            return AgentBindingContract.from_payload(value)
+            return ScoreBundle.from_mapping(value) if target is ScoreBundle else target.from_payload(value)
         except AIError:
             raise
         except (TypeError, ValueError, KeyError) as error:
@@ -1788,7 +2021,7 @@ def _iter_runtime_object_refs(
         if dataclass_name in {
             codec.wire_ids.get(TaskNode),
         }:
-            node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted=True))
+            node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted="schema" in value))
             task_input = node.input
             prompt = task_input.get("prompt")
             if (
@@ -1829,16 +2062,16 @@ def _iter_runtime_object_refs(
                 value,
                 RuntimePayloadRef,
                 codec,
-                persisted=True,
+                persisted="schema" in value,
             )
             yield from _iter_runtime_object_refs(decoded, domain, codec)
             return
         if dataclass_name == codec.wire_ids[StoredPayload]:
-            decoded = _decode_domain(value, StoredPayload, codec, persisted=True)
+            decoded = _decode_domain(value, StoredPayload, codec, persisted="schema" in value)
             yield from _iter_runtime_object_refs(decoded, domain, codec)
             return
         if dataclass_name == codec.wire_ids[ObjectRef]:
-            decoded = _decode_domain(value, ObjectRef, codec, persisted=True)
+            decoded = _decode_domain(value, ObjectRef, codec, persisted="schema" in value)
             yield domain, decoded
             return
         if dataclass_name == codec.wire_ids.get(RecoveryTerminalOutcome):
@@ -2097,6 +2330,18 @@ def _decode_enum(
     return result
 
 
+@lru_cache(maxsize=None)
+def _dataclass_decode_fields(
+    target: type[object],
+) -> Mapping[str, tuple[object, bool]]:
+    # Registered wire classes have stable declarations; payloads remain uncached.
+    hints = get_type_hints(target)
+    return MappingProxyType({
+        field.name: (hints.get(field.name, Any), field.init)
+        for field in fields(target)
+    })
+
+
 def _decode_dataclass(
     value: object,
     target: type,
@@ -2148,23 +2393,23 @@ def _decode_dataclass(
     if not frozen_name_set.issubset(raw_fields):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        hints = get_type_hints(target)
+        declared = _dataclass_decode_fields(target)
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-    declared = {field.name: field for field in fields(target)}
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
     for field_name in frozen_names:
         field = declared.get(field_name)
         if field is None:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        field_type, field_init = field
         if field_name not in raw_fields:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
             try:
                 decoded = _decode_domain(
                     raw_fields[field_name],
-                    hints.get(field_name, Any),
+                    field_type,
                     codec,
                     persisted=persisted,
                 )
@@ -2172,7 +2417,7 @@ def _decode_dataclass(
                 raise
             except (KeyError, TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if field.init:
+        if field_init:
             kwargs[field_name] = decoded
         else:
             post_init_fields[field_name] = decoded
@@ -2503,6 +2748,8 @@ def _validate_v1_codec_definition() -> None:
         "budget_cost",
         "expander",
         "input_refs",
+        "input_capture",
+        "original_input",
         "timeout_seconds",
         "max_attempts",
         "retry_delay_seconds",

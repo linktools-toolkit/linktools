@@ -72,7 +72,6 @@ from ._validation import (
 from ._value import (
     ApprovalDecision,
     ApprovalStatus,
-    EvaluationStatus,
     ExecutionDeltaType,
     ExecutionEventType,
     ExecutionLineageKind,
@@ -105,7 +104,6 @@ __all__ = [
     "CursorPayload",
     "CursorSigner",
     "DEFAULT_DISCOVERY_POLICY",
-    "EvaluationStatus",
     "ExecutionDeltaType",
     "ExecutionEventType",
     "ExecutionLineageKind",

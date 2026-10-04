@@ -2,10 +2,18 @@ name: Python checks
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches:
       - master
   workflow_dispatch:
+    inputs:
+      test-tier:
+        description: 'Coverage: daily, merge acceptance, or all including manual scale/stress probes'
+        type: choice
+        options: [daily, merge, all]
+        default: merge
+        required: true
   workflow_call:
 
 permissions:
@@ -36,6 +44,8 @@ jobs:
             python:3.6.15 \
             bash -lc '
               set -eu
+              python -m venv /tmp/linktools-compat-venv
+              . /tmp/linktools-compat-venv/bin/activate
               python -m pip install --quiet "tomlkit==0.11.6" "PyYAML==6.0.1"
               python -m py_compile manage.py scripts/check/python36.py
               python manage.py check --compatibility
@@ -46,6 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.modules.outputs.packages }}
+      test-tier: ${{ steps.tier.outputs.test-tier }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -55,6 +66,15 @@ jobs:
           cache-dependency-path: requirements.txt
       - name: Install tooling
         run: python -m pip install --quiet -U -r requirements.txt
+      - name: Select test coverage
+        id: tier
+        env:
+          CI_TEST_EVENT: ${{ github.event_name }}
+          CI_TEST_DRAFT: ${{ github.event.pull_request.draft || false }}
+          CI_TEST_TIER: ${{ inputs['test-tier'] || '' }}
+        run: |
+          tier="$(python -m scripts.check.tiers)"
+          echo "test-tier=$tier" >> "$GITHUB_OUTPUT"
       - name: Discover packages
         id: modules
         shell: bash
@@ -87,5 +107,24 @@ jobs:
           python manage.py install --editable --quiet
       - name: Run checks
         env:
-          PYTEST_ADDOPTS: "-n 4 --dist=loadfile --capture=fd"
-        run: python manage.py check ${{ matrix.package }} --skip-compatibility
+          PYTEST_ADDOPTS: "-n 4 --dist=loadfile --capture=fd ${{ matrix.package == 'linktools-ai' && '--durations=50' || '' }}"
+        run: python manage.py check ${{ matrix.package }} --skip-compatibility --test-tier ${{ needs.discover.outputs.test-tier }}
+
+  coverage:
+    name: Python test coverage
+    needs: [discover, python36, python]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require completed checks
+        env:
+          DISCOVER_RESULT: ${{ needs.discover.result }}
+          COMPATIBILITY_RESULT: ${{ needs.python36.result }}
+          PYTHON_RESULT: ${{ needs.python.result }}
+          TEST_TIER: ${{ needs.discover.outputs.test-tier }}
+        run: |
+          test "$DISCOVER_RESULT" = success
+          test "$COMPATIBILITY_RESULT" = success
+          test "$PYTHON_RESULT" = success
+          case "$TEST_TIER" in daily|merge|all) ;; *) exit 1 ;; esac
+          echo "Passed test coverage: $TEST_TIER" >> "$GITHUB_STEP_SUMMARY"
