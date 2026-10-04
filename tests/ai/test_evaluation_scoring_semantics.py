@@ -420,8 +420,12 @@ async def test_new_human_decision_is_rejected_after_its_slot_times_out(tmp_path:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("score_only", (False, True))
-@pytest.mark.parametrize("unknown_usage", (False, True))
+@pytest.mark.parametrize(("score_only", "unknown_usage"), (
+    pytest.param(False, False, id="initial-known"),
+    pytest.param(False, True, marks=pytest.mark.merge, id="initial-unknown"),
+    pytest.param(True, False, marks=pytest.mark.merge, id="rescore-known"),
+    pytest.param(True, True, id="rescore-unknown"),
+))
 async def test_comparison_usage_requirement_accounts_for_scorer_requests(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, score_only: bool, unknown_usage: bool,
 ) -> None:

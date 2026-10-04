@@ -24,14 +24,18 @@ from .test_evaluation_consumers import CONTEXT, PRINCIPAL, FixtureModels, rule_s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("projected", "file_change", "capture_kinds"), [
-    (False, "changed", ("declaration_graph", "agent")),
-    (True, "deleted", ("declaration_graph", "agent")),
-    (True, "changed", ("materialized_graph", "task")),
-    (False, "deleted", ("materialized_graph", "task")),
-], ids=("direct-changed", "projected-deleted", "projected-changed", "direct-deleted"))
+@pytest.mark.parametrize(("capture_kind", "projected", "file_change"), [
+    pytest.param("declaration_graph", False, "changed", id="declaration-graph-direct-changed"),
+    pytest.param("declaration_graph", True, "deleted", id="declaration-graph-projected-deleted", marks=pytest.mark.merge),
+    pytest.param("materialized_graph", True, "changed", id="materialized-graph-projected-changed"),
+    pytest.param("materialized_graph", False, "deleted", id="materialized-graph-direct-deleted", marks=pytest.mark.merge),
+    pytest.param("agent", False, "changed", id="agent-direct-changed", marks=pytest.mark.merge),
+    pytest.param("agent", True, "deleted", id="agent-projected-deleted"),
+    pytest.param("task", True, "changed", id="task-projected-changed", marks=pytest.mark.merge),
+    pytest.param("task", False, "deleted", id="task-direct-deleted"),
+])
 async def test_capture_reprojects_inline_and_file_attachments_without_live_reads(
-    tmp_path: Path, projected: bool, file_change: str, capture_kinds: tuple[str, ...],
+    tmp_path: Path, capture_kind: str, projected: bool, file_change: str,
 ) -> None:
     work = tmp_path / "work"
     work.mkdir()
@@ -66,42 +70,39 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
         if files:
             expected.append(b"SUFFIX ORIGINAL")
         assert models.attachments == expected
-        captures: list[tuple[str, CaseSpec, CandidateSpec]] = []
-        for capture_kind in capture_kinds:
-            case_ref = CaseRef(f"data-{capture_kind}", "case", 1)
-            if capture_kind.endswith("graph"):
-                capture = await runtime.tasks.capture_graph(source.graph_id,
-                    CaptureGraphRequest(PRINCIPAL, f"capture-{capture_kind}", mode=capture_kind, context_policy="clean"))
-                case = CaseSpec.graph(case_ref, inputs={})
-                candidate = CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "agent"}))
-            else:
-                execution = await source.execution("agent")
-                capture = await runtime.executions.capture_input(execution.execution_id,
-                    CaptureInputRequest(PRINCIPAL, f"capture-{capture_kind}", context_policy="clean"))
-                if capture_kind == "task":
-                    capture = await runtime._input_captures.task_input(capture, principal=PRINCIPAL)
-                case = CaseSpec.from_capture(case_ref, capture=capture)
-                candidate = CandidateSpec("captured", task=target.ref)
-            captures.append((capture_kind, case, candidate))
+        assert len(models.prompts) == 1
+        case_ref = CaseRef(f"data-{capture_kind}", "case", 1)
+        if capture_kind.endswith("graph"):
+            capture = await runtime.tasks.capture_graph(source.graph_id,
+                CaptureGraphRequest(PRINCIPAL, f"capture-{capture_kind}", mode=capture_kind, context_policy="clean"))
+            case = CaseSpec.graph(case_ref, inputs={})
+            candidate = CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "agent"}))
+        else:
+            execution = await source.execution("agent")
+            capture = await runtime.executions.capture_input(execution.execution_id,
+                CaptureInputRequest(PRINCIPAL, f"capture-{capture_kind}", context_policy="clean"))
+            if capture_kind == "task":
+                capture = await runtime._input_captures.task_input(capture, principal=PRINCIPAL)
+            case = CaseSpec.from_capture(case_ref, capture=capture)
+            candidate = CandidateSpec("captured", task=target.ref)
         for file in (inline, suffix):
             file.unlink() if file_change == "deleted" else file.write_text("MUTATED", encoding="utf-8")
-        for capture_kind, case, candidate in captures:
-            dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef(f"data-{capture_kind}", 1), (case,)),
-                principal=PRINCIPAL, idempotency_key=f"dataset-{capture_kind}")
-            prompt_offset, attachment_offset = len(models.prompts), len(models.attachments)
-            for input_mode in ("fixed_input", "reproject_input"):
-                run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                    (candidate,), (rule_scorer(scorer),), input_mode=input_mode,
-                    policy=EvaluationPolicy(model_fixtures=(models.contract,))),
-                    PRINCIPAL, f"{capture_kind}-{input_mode}"), engine=engine)
-                assert (await run.wait(timeout_seconds=20)).completion == "complete", (capture_kind, input_mode)
-                assert (await run.report()).scores[0].valid == 1, (capture_kind, input_mode)
-                assert models.attachments[-len(expected):] == expected, (capture_kind, input_mode)
-            assert models.attachments[attachment_offset:] == expected * 2, capture_kind
-            assert models.prompts[prompt_offset] == models.prompts[0], capture_kind
-            assert (models.prompts[prompt_offset + 1] != models.prompts[0]) == projected, capture_kind
-            assert len(models.prompts) == prompt_offset + 2, capture_kind
-        assert models.attachments == expected * (1 + 2 * len(captures))
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef(f"data-{capture_kind}", 1), (case,)),
+            principal=PRINCIPAL, idempotency_key=f"dataset-{capture_kind}")
+        prompt_offset, attachment_offset = len(models.prompts), len(models.attachments)
+        for input_mode in ("fixed_input", "reproject_input"):
+            run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                (candidate,), (rule_scorer(scorer),), input_mode=input_mode,
+                policy=EvaluationPolicy(model_fixtures=(models.contract,))),
+                PRINCIPAL, f"{capture_kind}-{input_mode}"), engine=engine)
+            assert (await run.wait(timeout_seconds=20)).completion == "complete", (capture_kind, input_mode)
+            assert (await run.report()).scores[0].valid == 1, (capture_kind, input_mode)
+            assert models.attachments[-len(expected):] == expected, (capture_kind, input_mode)
+        assert models.attachments[attachment_offset:] == expected * 2, capture_kind
+        assert models.prompts[prompt_offset] == models.prompts[0], capture_kind
+        assert (models.prompts[prompt_offset + 1] != models.prompts[0]) == projected, capture_kind
+        assert len(models.prompts) == prompt_offset + 2, capture_kind
+        assert models.attachments == expected * 3
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,9 @@ Repository protection settings are managed separately.
 | Family | Daily | Merge additions | Explicit manual additions |
 | --- | --- | --- | --- |
 | SQLite task concurrency | One serial DAG and one concurrent fan-in DAG; existing CAS/readback/cancel/failure/reopen regressions | None | Original 20 serial + 20 concurrent iterations |
+| Inline workspace captures | Four adapter scenarios, each running fixed input then reprojection against one accepted source (8 evaluation runs) | Four complementary adapter/projected/file-change scenarios, completing the original 16 evaluation runs | None |
+| Scorer request usage | Initial scoring with known usage; rescoring with unknown usage; complete inexpensive report-gate truth table | Initial scoring with unknown usage and rescoring with known usage; all four retain actual usage, saved cutoff and report assertions | None |
+| Recovery bootstrap | Activated-before-first-response and unconfirmed-effect process exits; existing cancellation, live-claim and split-handoff regressions | Request-checkpoint exit and a second crash during recovered terminal completion | None |
 | Captured graph inputs | Eight pairwise-balanced combinations across declaration/materialized, clean/captured, changed/deleted and fixed/reproject | Remaining eight combinations, completing all 16 | None |
 | Process-crash recovery | All five local SQLite boundaries; tool-completed boundary on SQLAlchemy SQLite and split storage; dedicated failure regressions | Checkpoint, projection and terminal boundaries on SQLAlchemy SQLite and split storage, completing 3 backends × 5 boundaries | None |
 | Server percentile compatibility | Empty/singleton inputs and existing small native-dialect aggregate/selection contracts | All original 100-sample nearest-rank floating-point boundaries, grouped and ungrouped | None |
@@ -81,7 +84,19 @@ Consolidations reduce preparation, not assertions:
   exercise every original percentile in both query layouts.
 - Each corrupted server record exercises all three metric query paths. Distinct
   corruptions have separate fixtures; snapshots/writers/pruning remain isolated.
-- Inline capture adapters share an accepted source only when projected/file-change
-  inputs match. Both captures are made before mutation and use separate durable
-  dataset/idempotency identities. All original adapters, fixed/reproject modes,
-  binary/file ordering and attachment assertions remain.
+- Each inline capture scenario keeps fixed-input replay followed by reprojection
+  on the same accepted source. The four daily scenarios cover all four adapters,
+  direct/projected inputs and changed/deleted files, with eight evaluation runs.
+  Merge adds the complementary four scenarios, preserving all sixteen original
+  evaluation runs and attachment/prompt assertions. Explicit scenario selection
+  requires eight source preparations in merge instead of the earlier four shared
+  preparations; daily still prepares four sources. This trades some merge setup
+  reuse for a smaller, visible daily integration set without hidden mode skips.
+
+The initial/rescore × known/unknown scorer-usage integration matrix stays complete
+in merge. Daily keeps the normal initial-scoring path and the rescore unknown-usage
+failure path; the report-only completeness/requirement truth table always runs.
+Recovery request-checkpoint and repeated-crash interactions likewise stay in merge,
+while unknown effects, cancellation, live claims, split ownership and real process
+exit safety retain daily coverage. Test counts alone do not measure these changes:
+one collected inline scenario performs two complete evaluation runs.

@@ -134,6 +134,20 @@ def test_gate_incomplete_precedence_is_not_relaxed_by_coverage(changes: dict, re
     assert reason in report.gate_reasons
 
 
+@pytest.mark.parametrize("usage_complete", (True, False, None))
+@pytest.mark.parametrize("required", (False, True))
+def test_usage_completeness_gate_requires_positive_confirmation_only_when_requested(
+    usage_complete: bool | None, required: bool,
+) -> None:
+    report = _compare(
+        policy=GatePolicy(minimum_coverage=0.1, require_complete_usage=required),
+        usage_complete=usage_complete,
+    )
+    blocked = required and usage_complete is not True
+    assert report.gate == ("inconclusive" if blocked else "pass")
+    assert ("unknown_required_usage" in report.gate_reasons) is blocked
+
+
 def test_pending_scores_and_recovery_required_prevent_a_gate_pass() -> None:
     left, right = _manifest("base"), _manifest("candidate")
     scores = _scores(left, (10,) * 6) + _scores(right, (11, None, None, None, None, None), status="pending")
