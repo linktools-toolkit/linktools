@@ -229,6 +229,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip Python compatibility gates",
     )
+    check_parser.add_argument(
+        "--test-tier", choices=("daily", "merge", "all"), default="merge",
+        help="Test coverage: daily representatives, merge acceptance, or all including manual probes",
+    )
     check_parser.set_defaults(func=handle_check)
 
     build_command = subparsers.add_parser("build", help="Build project modules")
@@ -461,9 +465,12 @@ def _run_ruff(project: str, check: "typing.Dict[str, typing.Any]", environment: 
     _run_check(command, environment)
 
 
-def _run_pytest(project: str, check: "typing.Dict[str, typing.Any]", environment: "typing.Dict[str, str]") -> None:
+def _run_pytest(
+    project: str, check: "typing.Dict[str, typing.Any]", environment: "typing.Dict[str, str]",
+    tier: str,
+) -> None:
     print("[+] %s: pytest" % project)
-    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--test-tier", tier]
     command.extend(check["paths"])
     _run_check(command, environment)
 
@@ -603,7 +610,7 @@ def handle_check(args: argparse.Namespace) -> None:
             if "ruff" in project_checks:
                 _run_ruff(project, project_checks["ruff"], environment)
             if "pytest" in project_checks:
-                _run_pytest(project, project_checks["pytest"], environment)
+                _run_pytest(project, project_checks["pytest"], environment, args.test_tier)
 
     mode = "compatibility" if args.compatibility else "check"
     print("[+] %s passed: %s" % (mode.capitalize(), ", ".join(compatible)))
