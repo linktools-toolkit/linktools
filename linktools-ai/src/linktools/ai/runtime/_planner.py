@@ -1479,12 +1479,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             correlation=correlation,
         )
         execution_id = handle.execution_id
-        if self._input_captures is not None:
-            await self._input_captures.record_invocation(execution_id, original_invocation)
         if control.execution_id is None:
             await control.bind_execution(execution_id)
         elif control.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._capture_invocation(execution_id, original_invocation)
 
         if handler is self._deferred_input:
             view = await self._execution.inspect(execution_id, principal=principal)
@@ -1529,6 +1528,37 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             graph_id=graph_id,
             execution_id=execution_id,
         )
+
+    async def _capture_invocation(
+        self, execution_id: str, invocation: TaskNodeInvocation,
+    ) -> None:
+        if self._input_captures is None:
+            return
+        try:
+            await self._input_captures.record_invocation(execution_id, invocation)
+        except BaseException:
+            cleanup = asyncio.create_task(self._execution.cancel_task(
+                execution_id, principal=invocation.principal,
+            ))
+            interrupted = False
+            try:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        if cleanup.cancelled():
+                            raise
+                        interrupted = True
+                cleanup.result()
+            except BaseException as error:
+                raise TaskNodeRunError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    execution_id,
+                    safe_details={"phase": "task_invocation_capture_cancel"},
+                ) from error
+            if interrupted:
+                raise asyncio.CancelledError
+            raise
 
     async def _run_custom_execution(
         self,
@@ -2324,6 +2354,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             await handler.runner.cancel(
                 replace(invocation, execution_id=execution_id),
             )
+            return
+        if execution_view.task_attempt == 0:
+            if not execution_cancelled:
+                await self._execution.cancel_task(execution_id, principal=principal)
             return
         dependencies = await self._dependencies(
             node,
