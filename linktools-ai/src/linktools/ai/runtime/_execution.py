@@ -61,6 +61,7 @@ from ..storage import (
     StoredPayload,
     payload_fits_inline,
 )
+from ._execution_context import ExecutionInputContext
 from ._handoff import HandoffGate, HandoffState
 from ._input import (
     ExecutionInputMaterializer,
@@ -2771,11 +2772,22 @@ class DefaultExecutionService:
         binding = self._binding(binding_digest, previous.binding)
         if binding.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        input_context = None
+        if previous.context_imported:
+            if previous.input_context is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            payload = previous.input_context.payload
+            value = (
+                payload.decode()
+                if payload.kind == "inline"
+                else json.loads(await read_runtime_object(self._object_store, payload.ref))
+            )
+            input_context = ExecutionInputContext.from_payload(value)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
-            memory_scope=previous.memory_scope,
+            memory_scope=None if input_context is not None else previous.memory_scope,
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
@@ -2783,6 +2795,7 @@ class DefaultExecutionService:
                 previous.correlation, request.correlation
             ),
             files=request.files,
+            input_context=input_context,
         )
         return await self._start(
             binding_digest,
