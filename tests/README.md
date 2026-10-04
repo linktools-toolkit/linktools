@@ -44,11 +44,34 @@ The reusable workflow intentionally declares no tier input. It cannot accept an
 input does not select manual tests. No path, ready transition, release or timer
 automatically enables manual probes. There is no scheduled run.
 
-Both Python versions and automatic package discovery are retained. Existing
-matrix check names are stable. The `Python test coverage` aggregate fails unless
-discovery, compatibility, and the whole package matrix actually succeed; skipped
-jobs do not count as completed coverage. Its summary states the selected tier.
-Repository protection settings are managed separately.
+Both Python versions and automatic package discovery are retained. Non-AI
+packages keep one check per version. AI runs two disjoint file-family groups per
+version: `evaluation` selects `test_evaluation*` and filenames containing
+`capture`; `runtime` selects every other file under `tests/ai`. New files join a
+group automatically; no file manifest or recorded timing database is required.
+Grouping never changes tier eligibility. The default group is `all`, so local
+checks continue to cover the complete chosen tier. To run one group locally:
+
+```bash
+PYTEST_ADDOPTS='--ai-group=evaluation' python manage.py check linktools-ai --test-tier daily
+PYTEST_ADDOPTS='--ai-group=runtime' python manage.py check linktools-ai --test-tier daily
+```
+
+The original `Python <version> linktools-ai checks` names remain as aggregate
+checks. They conservatively require the entire package matrix to succeed, so a
+failure in another package/version also fails both AI aggregates. The `Python
+test coverage` aggregate requires discovery, compatibility, all package groups
+and these aggregates to succeed; skipped/failed jobs or empty test groups do not
+count as completed coverage. Its summary states the selected tier. Repository
+protection settings are managed separately.
+
+With the current five packages this uses 17 jobs instead of 13: two additional
+AI execution jobs and two lightweight aggregates. Each AI group installs the
+same dependencies and runs the package architecture/lint gates before its own
+tests; files stay intact for fixture reuse and four-worker `loadfile` scheduling.
+The measured evaluation/capture family accounts for about 56% of cumulative
+daily test-call time, motivating two groups. That is not a wall-time prediction;
+extra runner startup, installation and gate work increase total runner usage.
 
 ## Coverage responsibilities
 
@@ -96,6 +119,10 @@ Consolidations reduce preparation, not assertions:
 The initial/rescore × known/unknown scorer-usage integration matrix stays complete
 in merge. Daily keeps the normal initial-scoring path and the rescore unknown-usage
 failure path; the report-only completeness/requirement truth table always runs.
+Known-usage rows use one equivalent successful case per candidate. Unknown-usage
+rows retain both successful and failing cases, so 50% valid score coverage still
+passes the permissive gate while unknown usage independently blocks the strict
+gate. Saved reports and persisted usage cutoff assertions remain in every row.
 Recovery request-checkpoint and repeated-crash interactions likewise stay in merge,
 while unknown effects, cancellation, live claims, split ownership and real process
 exit safety retain daily coverage. Test counts alone do not measure these changes:
