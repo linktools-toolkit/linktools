@@ -442,7 +442,7 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
         engine = runtime.tasks.bind(target, rule, judge)
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("usage", 1), tuple(
             CaseSpec.task(CaseRef("usage", answer, 1), input={"answer": answer}, expected=answer)
-            for answer in ("good", "bad")
+            for answer in (("good", "bad") if unknown_usage else ("good",))
         )), principal=PRINCIPAL, idempotency_key="dataset")
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             tuple(CandidateSpec(slot, task=target.ref) for slot in ("baseline", "candidate")),
