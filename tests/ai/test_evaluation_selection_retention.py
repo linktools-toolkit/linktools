@@ -60,8 +60,7 @@ def test_usage_cutoff_observations_are_immutable_and_round_trip() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selected", ("rescore", "rule", "failing"))
-async def test_usage_gate_uses_only_selected_scoring_work(monkeypatch: pytest.MonkeyPatch, selected: str) -> None:
+async def test_usage_gate_uses_only_selected_scoring_work(monkeypatch: pytest.MonkeyPatch) -> None:
     models = UsageModels(True)
     target = Task("selection.target", echo, effect_policy="none")
     rule = Task("selection.rule", score, effect_policy="none")
@@ -79,21 +78,24 @@ async def test_usage_gate_uses_only_selected_scoring_work(monkeypatch: pytest.Mo
         assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
         scoring = await run.rescore(RescoreRequest((rule_scorer(rule, slot="rule"),), "rescore"), engine=engine)
         assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
-        selection = ScoreSelection("failing" if selected == "failing" else "rule", "exact_match",
-                                   scoring.experiment_id if selected == "rescore" else None)
-        spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"), CandidateSlotRef(run.experiment_id, "candidate"),
-            (ScoreComparisonSelection(selection, selection),), gate_policy=GatePolicy(require_complete_usage=True))
-        report = await runtime.evaluations.compare(spec, principal=PRINCIPAL)
-        assert ("unknown_required_usage" in report.gate_reasons) is (selected == "failing")
-        assert report.gate == ("inconclusive" if selected == "failing" else "pass")
 
         async def no_new_usage(*args, **kwargs):
             raise AssertionError("a saved usage cutoff cannot observe later requests")
 
-        monkeypatch.setattr(runtime.history, "graph_usage", no_new_usage)
-        repeated = await runtime.evaluations.compare(replace(spec, cutoff=report.cutoff), principal=PRINCIPAL)
-        assert repeated.gate == report.gate and repeated.cutoff == report.cutoff
-        assert await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL) == report
+        for selected in ("rescore", "rule", "failing"):
+            selection = ScoreSelection("failing" if selected == "failing" else "rule", "exact_match",
+                                       scoring.experiment_id if selected == "rescore" else None)
+            spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"), CandidateSlotRef(run.experiment_id, "candidate"),
+                (ScoreComparisonSelection(selection, selection),), gate_policy=GatePolicy(require_complete_usage=True))
+            report = await runtime.evaluations.compare(spec, principal=PRINCIPAL)
+            assert ("unknown_required_usage" in report.gate_reasons) is (selected == "failing"), selected
+            assert report.gate == ("inconclusive" if selected == "failing" else "pass"), selected
+
+            with monkeypatch.context() as saved_cutoff:
+                saved_cutoff.setattr(runtime.history, "graph_usage", no_new_usage)
+                repeated = await runtime.evaluations.compare(replace(spec, cutoff=report.cutoff), principal=PRINCIPAL)
+                assert repeated.gate == report.gate and repeated.cutoff == report.cutoff, selected
+                assert await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL) == report, selected
 
 
 @pytest.mark.asyncio
