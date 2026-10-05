@@ -189,6 +189,7 @@ class _CaptureSessionExecution:
         self.agent_id: str | None = None
         self.binding_digest: str | None = None
         self.session_id: str | None = None
+        self.requires_task_invocation_capture: bool | None = None
 
     async def start_for_session(
         self,
@@ -199,6 +200,7 @@ class _CaptureSessionExecution:
         *,
         binding_contract: object | None = None,
         dependency_hold_id: str | None = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
         self.agent_id = agent_id
         self.binding_digest = binding_digest
@@ -206,6 +208,7 @@ class _CaptureSessionExecution:
         self.request = request
         self.binding_contract = binding_contract
         self.dependency_hold_id = dependency_hold_id
+        self.requires_task_invocation_capture = requires_task_invocation_capture
         return ExecutionHandle("execution")
 
 
@@ -250,6 +253,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     assert capture.agent_id == "agent"
     assert capture.binding_digest == "b" * 64
     assert capture.session_id == "session"
+    assert capture.requires_task_invocation_capture is False
     assert capture.request is not None
     assert capture.request.mode == "plan"
     assert capture.request.planning is True

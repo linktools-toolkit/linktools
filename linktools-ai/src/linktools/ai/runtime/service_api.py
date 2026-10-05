@@ -1072,6 +1072,7 @@ class ExecutionService(Protocol):
         *,
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle: ...
     async def start_task(
         self,
@@ -1081,6 +1082,7 @@ class ExecutionService(Protocol):
         input: Mapping[str, JsonValue],
         idempotency_key: str,
         correlation: Mapping[str, str | int],
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle: ...
 
     async def claim_task_attempt(
@@ -1170,6 +1172,7 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> "ExecutionHandle | None": ...
     async def inspect(
         self, execution_id: str, *, principal: Principal
@@ -1306,6 +1309,7 @@ class SessionService(Protocol):
         *,
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle: ...
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest

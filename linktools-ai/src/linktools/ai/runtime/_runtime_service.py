@@ -607,6 +607,7 @@ class Runtime(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
         compiled_agent: "CompiledAgent | None" = None,
         dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
         input_context: ExecutionInputContext | None = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
@@ -645,6 +646,7 @@ class Runtime(Generic[AppT]):
                 binding.binding_digest,
                 request,
                 dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=requires_task_invocation_capture,
                 binding_contract=binding.binding_contract,
             )
         else:
@@ -669,6 +671,7 @@ class Runtime(Generic[AppT]):
                 resume_request,
                 binding_contract=binding.binding_contract,
                 dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=requires_task_invocation_capture,
             )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s "
@@ -907,6 +910,7 @@ class Runtime(Generic[AppT]):
                 correlation=invocation.correlation,
                 compiled_agent=compiled,
                 dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=True,
                 input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
             )
             return execution

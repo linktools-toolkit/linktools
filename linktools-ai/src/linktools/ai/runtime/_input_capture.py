@@ -394,6 +394,9 @@ class RuntimeInputCaptures:
                 instructions = None if record.repository_instructions is None else await self._payload(record.repository_instructions.payload, record.repository_instructions.source_domain)
                 context = ExecutionInputContext.from_messages((), repository_instructions=instructions)
         invocation = await self._get(self._key(principal.tenant_id, "invocation", execution_id))
+        if invocation is None and record.requires_task_invocation_capture:
+            raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE,
+                          safe_details={"reason": "task_invocation_not_retained"})
         task_input = None
         if isinstance(invocation, Mapping):
             node = decode_domain(invocation["node"], TaskNode)

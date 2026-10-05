@@ -1477,6 +1477,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             input=body,
             idempotency_key=idempotency_key,
             correlation=correlation,
+            requires_task_invocation_capture=True,
         )
         execution_id = handle.execution_id
         if control.execution_id is None:

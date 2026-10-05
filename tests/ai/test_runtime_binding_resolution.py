@@ -89,6 +89,7 @@ class _RecordingExecution:
     def __init__(self) -> None:
         self.binding_digest: str | None = None
         self.binding_contract: AgentBindingContract | None = None
+        self.requires_task_invocation_capture: bool | None = None
 
     async def start(
         self,
@@ -97,10 +98,12 @@ class _RecordingExecution:
         *,
         dependency_hold_id: str | None = None,
         binding_contract: AgentBindingContract | None = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
         del request, dependency_hold_id
         self.binding_digest = binding_digest
         self.binding_contract = binding_contract
+        self.requires_task_invocation_capture = requires_task_invocation_capture
         return ExecutionHandle("execution")
 
 
@@ -405,6 +408,7 @@ async def test_runtime_start_admits_resolved_binding() -> None:
         assert started.execution_id == "execution"
         assert execution.binding_contract is not None
         assert execution.binding_digest == execution.binding_contract.binding_digest
+        assert execution.requires_task_invocation_capture is False
         assert _skill_ref(_resolved_child(execution.binding_contract)).resources
     finally:
         await fixture.assets.close()

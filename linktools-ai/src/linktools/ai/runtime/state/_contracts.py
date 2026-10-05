@@ -725,6 +725,8 @@ class ExecutionRecord:
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
     dependency_hold_ids: tuple[str, ...] = ()
+    # Admission provenance persists even if invocation storage fails or holds are released.
+    requires_task_invocation_capture: bool = False
     retention_closed: bool = False
     started_at: datetime | None = None
 
@@ -777,6 +779,8 @@ class ExecutionRecord:
             for value in (self.task_deadline_at, self.task_next_attempt_at):
                 if value is not None and value.tzinfo is None:
                     raise ValueError("task execution timestamps must be timezone-aware")
+        if not isinstance(self.requires_task_invocation_capture, bool):
+            raise TypeError("execution task invocation capture requirement must be bool")
         holds = tuple(self.dependency_hold_ids)
         if (
             any(not isinstance(value, str) or not value.strip() for value in holds)
