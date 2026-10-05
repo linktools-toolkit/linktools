@@ -578,6 +578,13 @@ class RuntimeEvaluations:
     async def _snapshot(
         self, experiment_id: str, principal: Principal,
     ) -> tuple[EvaluationRecord, EvaluationReport]:
+        record, report = await self._build_snapshot(experiment_id, principal)
+        await self._state.publish_report(report)
+        return record, report
+
+    async def _build_snapshot(
+        self, experiment_id: str, principal: Principal,
+    ) -> tuple[EvaluationRecord, EvaluationReport]:
         record = await self._record(experiment_id, principal)
         await self._require_content(record, principal)
         trials, revisions = await self._trials(record, principal)
@@ -607,7 +614,6 @@ class RuntimeEvaluations:
         report = build_evaluation_report(record.manifest, cases, trials, scores, cutoff=cutoff,
                                          report_id=uuid.uuid4().hex, created_at=_now())
         report = replace(report, completion=_completion(record, trials, scores, blocked=blocked))
-        await self._state.publish_report(report)
         return record, report
 
     async def get_report(self, report_id: str, *, principal: Principal) -> EvaluationReport | ComparisonReport:
@@ -715,7 +721,7 @@ class RuntimeEvaluations:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             index = int(raw_index)
         else:
-            _, report = await self._snapshot(experiment_id, principal)
+            _, report = await self._build_snapshot(experiment_id, principal)
             index = 0
         if is_trial:
             values = tuple(item for item in report.trials if
@@ -729,6 +735,8 @@ class RuntimeEvaluations:
                 (not filters.statuses or item.status in filters.statuses))
         next_cursor = (self._cursor(kind, digest, f"{report.report_id}:{index + limit}", principal)
                        if index + limit < len(values) else None)
+        if not cursor and next_cursor is not None:
+            await self._state.publish_report(report)
         return Page(values[index:index + limit], next_cursor)
 
     async def _disposition(
