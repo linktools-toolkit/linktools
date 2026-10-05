@@ -20,6 +20,7 @@ from ..evaluation import (
 from ..spec import canonicalize_pydantic_model_schema
 from ..task import TaskGraph, TaskNode, TaskNodeResultRef, TaskRef, TaskInvocationInputRef
 from ._agent_task_input import AgentTaskInput
+from ._execution_context import ExecutionInputContext
 
 if TYPE_CHECKING:
     from ._input_capture import RuntimeInputCaptures
@@ -170,10 +171,15 @@ class EvaluationCompiler:
         principal: Principal, input_mode: str, owner_id: str,
         materialize: bool = True, owned_captures: list[TaskInvocationInputRef] | None = None,
     ) -> TaskGraph:
+        agent_bindings = {
+            TaskRef(item["id"], item["revision"]): AgentBindingContract.from_payload(item["config"]["binding_contract"])
+            for item in candidate.definition_contracts if item["type"] == "agent"
+        }
         if candidate.task is not None:
             node = await self._node_input(TaskNode("target", task=candidate.task), case.input,
                                           principal=principal, input_mode=input_mode, owner_id=owner_id,
-                                          materialize=materialize, owned_captures=owned_captures)
+                                          materialize=materialize, owned_captures=owned_captures,
+                                          agent_binding=agent_bindings.get(candidate.task))
             return TaskGraph(graph_id, (node,))
         target = candidate.graph_template
         assert target is not None
@@ -187,24 +193,23 @@ class EvaluationCompiler:
         if len(inputs) != len(case.input.inputs) or set(inputs) - {node.node_id for node in template.nodes}:
             raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
         nodes = []
-        agent_tasks = {TaskRef(item["id"], item["revision"]) for item in candidate.definition_contracts if item["type"] == "agent"}
         for node in template.nodes:
             value = inputs.get(node.node_id)
-            if value is None and input_mode == "reproject_input":
-                if node.input_capture is not None:
+            if value is None:
+                if node.input_capture is not None and (input_mode == "reproject_input" or node.task in agent_bindings):
                     value = TaskCaseInput(capture=node.input_capture)
-                elif node.original_input is not None:
+                elif input_mode == "reproject_input" and node.original_input is not None:
                     value = TaskCaseInput(input={})
             nodes.append(node if value is None else await self._node_input(
                 node, value, principal=principal, input_mode=input_mode, owner_id=owner_id,
-                materialize=materialize, owned_captures=owned_captures, agent_input=node.task in agent_tasks))
+                materialize=materialize, owned_captures=owned_captures, agent_binding=agent_bindings.get(node.task)))
         return TaskGraph(graph_id, tuple(nodes))
 
     async def _node_input(
         self, node: TaskNode,
         value: AgentInputCaptureRef | TaskCaseInput | GraphInputContract,
         *, principal: Principal, input_mode: str, owner_id: str, materialize: bool,
-        owned_captures: list[TaskInvocationInputRef] | None, agent_input: bool = False,
+        owned_captures: list[TaskInvocationInputRef] | None, agent_binding: AgentBindingContract | None = None,
     ) -> TaskNode:
         case_capture = value if isinstance(value, AgentInputCaptureRef) else (value.capture if isinstance(value, TaskCaseInput) else None)
         if case_capture is not None and node.input_capture is not None and case_capture != node.input_capture:
@@ -214,12 +219,16 @@ class EvaluationCompiler:
         defaults: dict[str, JsonValue] = {}
         original_input = node.original_input
         captured_from = None
+        source_binding = None
         references = node.input_refs
         excluded = tuple(sorted(set(node.dependencies) | {
             name for name, ref in references.items() if isinstance(ref, TaskNodeResultRef)
         }))
         if isinstance(value, AgentInputCaptureRef):
             agent = await self._captures.read_agent(value, principal=principal)
+            source_binding = agent.binding
+            if agent_binding is not None and agent.input_context is not None and source_binding is None:
+                raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
             if agent.task_input is not None:
                 captured_from = value
                 contract = await self._captures.resolve_task_input(value, principal=principal, input_mode=input_mode,
@@ -242,7 +251,7 @@ class EvaluationCompiler:
                 data = {}
             else:
                 if node.input_capture is not None:
-                    if not value.input and not value.input_refs and input_mode == "fixed_input":
+                    if not value.input and not value.input_refs and input_mode == "fixed_input" and agent_binding is None:
                         return node
                     captured_from = node.input_capture
                     contract = await self._captures.resolve_task_input(node.input_capture, principal=principal,
@@ -274,8 +283,16 @@ class EvaluationCompiler:
                 original = {name: item for name, item in template_original.items() if name not in data}
                 contract = replace(contract, original_input={**original, **contract.original_input})
             data = {**defaults, **template_input, **data}
-        if agent_input and input_mode == "reproject_input" and node.original_input is not None and contract is None:
+        if agent_binding is not None and input_mode == "reproject_input" and node.original_input is not None and contract is None:
             self._captures.require_reprojectable_input(data)
+        if source_binding is None and contract is not None and contract.binding.get("type") == "agent":
+            source_binding = AgentBindingContract.from_payload(contract.binding["config"]["binding_contract"])
+        if (agent_binding is not None and source_binding is not None
+                and agent_binding.binding_digest != source_binding.binding_digest):
+            data = dict(contract.input) if contract is not None and not data else data
+            if data.get("capture_context") is not None:
+                context = ExecutionInputContext.from_payload(data["capture_context"])
+                data["capture_context"] = replace(context, replace_history_system_prompt=True).to_payload()
         if contract is not None:
             if data:
                 contract = replace(contract, input=data)
