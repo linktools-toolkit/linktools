@@ -626,6 +626,7 @@ class RuntimeInputCaptures:
                 nodes = decode_domain(original, TaskGraphTemplate).nodes
         bindings = await TaskGraphBindingCaptureStore(self._namespace, self._objects).load(admission)
         selected = {node.node_id for node in nodes}
+        sources = {item.node_id: item.execution_id for item in state.node_states}
         captured_nodes = []
         for node in nodes:
             input_refs = {}
@@ -643,8 +644,8 @@ class RuntimeInputCaptures:
             original_input = node.original_input
             input_capture = node.input_capture
             declaration = {} if node.task is None else bindings.tasks.get((node.task.id, node.task.revision), {})
+            source = sources.get(node.node_id)
             if declaration.get("type") == "agent":
-                source = next((item.execution_id for item in state.node_states if item.node_id == node.node_id), None)
                 if source is None:
                     if request.context_policy == "captured":
                         raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "graph_node_never_started"})
@@ -688,6 +689,21 @@ class RuntimeInputCaptures:
                             request.idempotency_key + ":context-input:" + node.node_id, {"contract": encode_domain(contract)})
                         input_capture = TaskInvocationInputRef(self._namespace, principal.tenant_id, identity, digest, contract.source_execution_id)
                         body = {}
+            elif declaration.get("type") == "function" and input_capture is not None:
+                if source is None:
+                    previous = await self.read_task(input_capture, principal=principal)
+                    if previous.input_mode == "reproject_input":
+                        raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "graph_node_never_started"})
+                else:
+                    reference = await self.capture_input(source, CaptureInputRequest(
+                        principal, request.idempotency_key + ":input:" + node.node_id, request.context_policy))
+                    input_capture = await self.task_input(reference, principal=principal,
+                        exclude_dependencies=(*node.dependencies, *input_refs),
+                        idempotency_key=request.idempotency_key + ":accepted-input:" + node.node_id)
+                    # Internal dependencies run again; external results belong to the captured invocation.
+                    body = {}
+                    original_input = None
+                    frozen_refs = {}
             if declaration.get("type") == "agent" and body.get("kind") == "agent-task-input":
                 if request.context_policy == "clean":
                     body.pop("capture_context", None)
@@ -709,7 +725,7 @@ class RuntimeInputCaptures:
                 if input_capture is not None:
                     previous = await self.read_task(input_capture, principal=principal)
                     body = dict(previous.input)
-                source_id = next((item.execution_id for item in state.node_states if item.node_id == node.node_id), None) or "graph:" + graph_id + ":" + node.node_id
+                source_id = source or "graph:" + graph_id + ":" + node.node_id
                 contract = TaskInvocationInputContract(source_id, node.task, body,
                     original_input if original_input is not None else body, declaration, dependencies)
                 identity, digest = await self._publish("task", principal, request.idempotency_key + ":" + node.node_id,

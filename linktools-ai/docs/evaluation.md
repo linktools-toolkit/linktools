@@ -297,6 +297,10 @@ Graph capture defaults to `mode="declaration_graph"`; materialized graphs use
 cases. Case node mappings and named outputs are checked. A template's explicit
 `TaskNodeResultRef` chooses the new run's dependency result instead of an old
 captured result for that alias.
+Recapturing an executed callable node uses that execution's accepted input and
+retains its original parameters for reprojection. A callable node with a
+`reproject_input` capture that has never started has no accepted input to freeze;
+graph capture rejects it with `INPUT_CAPTURE_UNAVAILABLE`.
 
 Historical records that lack the needed pre-input context fail with
 `INPUT_CONTEXT_UNAVAILABLE`, rather than reading today's session/memory state.
