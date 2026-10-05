@@ -340,6 +340,18 @@ def _resolve_gate_modules(project: str, values: "typing.Tuple[str, ...]") -> "ty
     return values
 
 
+def _default_pytest_paths(project: str, project_path: str) -> "typing.Tuple[str, ...]":
+    candidates = ["tests"]
+    if project != MODULE_NAME:
+        candidates.append(os.path.join("..", "tests", project[len(MODULE_NAME) + 1:]))
+    paths = tuple(path for path in candidates if os.path.isdir(os.path.join(project_path, path)))
+    paths = _resolve_paths(project, project_path, paths, "pytest")
+    return tuple(path for path in paths if any(
+        name.endswith("_test.py") or (name.startswith("test_") and name.endswith(".py"))
+        for _, _, names in os.walk(path) for name in names
+    ))
+
+
 def _load_project_checks(project: str, project_path: str) -> "typing.Dict[str, typing.Any]":
     path = os.path.join(project_path, "linktools.yml")
     if not os.path.isfile(path):
@@ -394,6 +406,13 @@ def _load_project_checks(project: str, project_path: str) -> "typing.Dict[str, t
         result["pytest"] = {
             "paths": _resolve_paths(project, project_path, paths, "pytest"),
         }
+    paths = list(result.get("pytest", {}).get("paths", ()))
+    for path in _default_pytest_paths(project, project_path):
+        if not any(os.path.commonpath((path, declared)) == declared for declared in paths):
+            paths = [declared for declared in paths if os.path.commonpath((path, declared)) != path]
+            paths.append(path)
+    if paths:
+        result["pytest"] = {"paths": tuple(paths)}
     return result
 
 
@@ -516,22 +535,74 @@ def _install_requirements(
     if not args.module:
         return [(name, info["path"]) for name, info in modules.items()]
 
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
     order = []
     extras_by_module = {}
+    pending = []
+
+    def include(name: str, extras: "typing.Iterable[str]") -> None:
+        if name not in extras_by_module:
+            order.append(name)
+            extras_by_module[name] = []
+            pending.append(name)
+        for extra in extras:
+            extra = canonicalize_name(extra)
+            if extra not in extras_by_module[name]:
+                extras_by_module[name].append(extra)
+                if name not in pending:
+                    pending.append(name)
+
     for value in args.module:
         match = _INSTALL_MODULE_PATTERN.match(value)
         name = match.group(1) if match else None
         if name not in modules:
             print("[-] Unknown project module: %s" % value, file=sys.stderr)
             raise SystemExit(2)
-        if name not in extras_by_module:
-            order.append(name)
-            extras_by_module[name] = []
         extras = match.group(2)
-        if extras:
-            for extra in extras.split(","):
-                if extra not in extras_by_module[name]:
-                    extras_by_module[name].append(extra)
+        include(name, extras.split(",") if extras else ())
+
+    local_names = {canonicalize_name(name): name for name in modules}
+    dependency_keys = ["dependencies"]
+    if args.editable or os.environ.get("SETUP_EDITABLE_MODE", "false").lower() in ("true", "1", "yes"):
+        dependency_keys.append("dev-dependencies")
+    if os.environ.get("RELEASE", "false").lower() in ("true", "1", "yes"):
+        dependency_keys.append("release-dependencies")
+
+    configs = {}
+    while pending:
+        name = pending.pop(0)
+        if name not in configs:
+            path = os.path.join(modules[name]["path"], "linktools.yml")
+            with open(path, "r", encoding="utf-8") as file:
+                configs[name] = yaml.load(file, Loader=_UniqueKeyLoader)
+        config = configs[name]
+        extras = tuple(extras_by_module[name])
+        declarations = [
+            (value, ("",) + extras)
+            for key in dependency_keys for value in config.get(key, [])
+        ]
+        optional = {}
+        for extra, values in config.get("optional-dependencies", {}).items():
+            optional.setdefault(canonicalize_name(extra), []).extend(values)
+        for extra in extras:
+            values = (
+                [value for requirements in optional.values() for value in requirements]
+                if extra == "all" else optional.get(extra, [])
+            )
+            declarations.extend((value, (extra,)) for value in values)
+        for value, contexts in declarations:
+            requirement = Requirement(value)
+            dependency = local_names.get(canonicalize_name(requirement.name))
+            if dependency is None or requirement.url is not None:
+                continue
+            if requirement.marker is not None and not any(
+                requirement.marker.evaluate({"extra": extra}) for extra in contexts
+            ):
+                continue
+            # Keep the original metadata constraints for pip to resolve against local candidates.
+            include(dependency, sorted(requirement.extras))
 
     result = []
     for name in order:
@@ -611,6 +682,8 @@ def handle_check(args: argparse.Namespace) -> None:
                 _run_ruff(project, project_checks["ruff"], environment)
             if "pytest" in project_checks:
                 _run_pytest(project, project_checks["pytest"], environment, args.test_tier)
+            else:
+                print("[+] %s: pytest skipped (no declared paths or conventional test files)" % project)
 
     mode = "compatibility" if args.compatibility else "check"
     print("[+] %s passed: %s" % (mode.capitalize(), ", ".join(compatible)))

@@ -6,6 +6,8 @@ import typing
 
 import pytest
 
+from scripts.check.matrix import AI_GROUPS, ai_test_group
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addini(
@@ -17,7 +19,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="daily: representative regressions; merge: automatic acceptance; all: include manual probes",
     )
     parser.addoption(
-        "--ai-group", choices=("all", "evaluation", "runtime"), default="all",
+        "--ai-group", choices=("all",) + AI_GROUPS, default="all",
         help="Partition AI tests by file family without changing tier coverage",
     )
 
@@ -34,11 +36,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: "typing.List[pyt
             tier == "daily" and item.get_closest_marker("merge") is not None
         )
         path = item.path.relative_to(config.rootpath)
-        if group != "all" and path.parts[:2] == ("tests", "ai"):
-            family = "evaluation" if (
-                path.name.startswith("test_evaluation") or "capture" in path.name
-            ) else "runtime"
-            excluded = excluded or family != group
+        if group != "all":
+            excluded = excluded or ai_test_group(path) not in ("all", group)
         (deselected if excluded else selected).append(item)
     items[:] = selected
     if deselected:

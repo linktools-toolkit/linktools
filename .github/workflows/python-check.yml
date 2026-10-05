@@ -31,6 +31,7 @@ jobs:
   python36:
     name: Python 3.6 static compatibility
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - name: Run static compatibility scan
@@ -54,8 +55,9 @@ jobs:
   discover:
     name: Discover Python packages
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
-      checks: ${{ steps.modules.outputs.checks }}
+      plan: ${{ steps.modules.outputs.plan }}
       test-tier: ${{ steps.tier.outputs.test-tier }}
     steps:
       - uses: actions/checkout@v7
@@ -80,20 +82,19 @@ jobs:
         shell: bash
         run: |
           packages="$(python manage.py modules)"
-          checks="$(python -m scripts.check.matrix "$packages")"
-          echo "checks=$checks" >> "$GITHUB_OUTPUT"
+          plan="$(python -m scripts.check.matrix "$packages")"
+          echo "plan=$plan" >> "$GITHUB_OUTPUT"
 
   python:
     name: Python ${{ matrix.python-version }} ${{ matrix.check.name }}
     needs: discover
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ needs.discover.outputs.test-tier == 'all' && 60 || 20 }}
     strategy:
       fail-fast: false
       matrix:
-        python-version:
-          - '3.10'
-          - '3.x'
-        check: ${{ fromJSON(needs.discover.outputs.checks) }}
+        python-version: ${{ fromJSON(needs.discover.outputs.plan).python-versions }}
+        check: ${{ fromJSON(needs.discover.outputs.plan).checks }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -105,24 +106,42 @@ jobs:
             requirements.txt
             linktools*/linktools.yml
       - name: Install tooling
+        env:
+          INSTALL_PACKAGES: ${{ matrix.check.install }}
         run: |
           python -m pip install --quiet -U -r requirements.txt
-          python manage.py install --editable --quiet
+          read -r -a packages <<< "$INSTALL_PACKAGES"
+          python manage.py install "${packages[@]}" --editable --quiet
       - name: Run checks
+        id: checks
         env:
-          PYTEST_ADDOPTS: "-n 4 --dist=loadfile --capture=fd --ai-group=${{ matrix.check.group }} ${{ matrix.check.package == 'linktools-ai' && '--durations=50' || '' }}"
+          PYTEST_ADDOPTS: ${{ matrix.check.pytest-args }}
           PACKAGE: ${{ matrix.check.package }}
           TEST_TIER: ${{ needs.discover.outputs.test-tier }}
         run: python manage.py check "$PACKAGE" --skip-compatibility --test-tier "$TEST_TIER"
+      - name: Summarize check
+        if: ${{ always() }}
+        env:
+          PACKAGE: ${{ matrix.check.package }}
+          PYTHON: ${{ matrix.python-version }}
+          GROUP: ${{ matrix.check.group }}
+          TEST_TIER: ${{ needs.discover.outputs.test-tier }}
+          RESULT: ${{ steps.checks.outcome }}
+        run: |
+          printf '%s / Python %s / %s / %s: %s\n' "$PACKAGE" "$PYTHON" "$GROUP" "$TEST_TIER" "$RESULT" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$RESULT" = skipped ]; then
+            echo 'Checks did not run; inspect checkout/setup/install results above.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   ai_coverage:
     name: Python ${{ matrix.python-version }} linktools-ai checks
     needs: [discover, python]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
-        python-version: ['3.10', '3.x']
+        python-version: ${{ fromJSON(needs.discover.outputs.plan).python-versions }}
     steps:
       - name: Require completed package groups
         env:
@@ -137,6 +156,7 @@ jobs:
     needs: [discover, python36, python, ai_coverage]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Require completed checks
         env:

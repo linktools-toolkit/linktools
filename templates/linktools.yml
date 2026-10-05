@@ -20,6 +20,7 @@ convert:
     dest: src/linktools/capabilities/{name}.py
 
 checks:
+  # Pytest files in tests/ here and ../tests/{name}/ are checked automatically.
   ruff:
     select:
       - E9

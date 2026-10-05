@@ -2,12 +2,19 @@
 # -*- coding: utf-8 -*-
 """Coverage selection keeps unclassified tests and isolates manual probes."""
 
+import itertools
+import json
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
-from scripts.check.tiers import select_ci_tier
 from scripts.check.matrix import package_checks
+from scripts.check.tiers import select_ci_tier
 
 pytest_plugins = ("pytester",)
 
@@ -76,6 +83,8 @@ def test_ci_matrix_retains_new_packages_and_partitions_ai() -> None:
     assert len({check["name"] for check in checks}) == len(checks)
     assert checks[0]["name"] == "linktools checks"
     assert checks[-1]["name"] == "linktools-new checks"
+    assert checks[0]["install"] == ""
+    assert all(check["install"] == check["package"] for check in checks[1:])
 
 
 @pytest.mark.parametrize("tier", ("daily", "merge", "all"))
@@ -91,6 +100,9 @@ def test_ai_groups_partition_file_families_without_changing_tiers(
         "tests/ai/test_evaluation_new.py": "evaluation",
         "tests/ai/test_new_capture.py": "evaluation",
         "tests/ai/test_new_feature.py": "runtime",
+        "linktools-ai/tests/test_evaluation_local.py": "evaluation",
+        "linktools-ai/tests/test_local_capture.py": "evaluation",
+        "linktools-ai/tests/test_local_feature.py": "runtime",
         "tests/core/test_evaluation_other.py": "all",
     }
     for name in families:
@@ -108,7 +120,7 @@ def test_manual(): pass
         "-q", "-p", "no:asyncio", "--collect-only", "--test-tier", tier, "--ai-group", group,
     )
     assert result.ret == 0
-    selected = {line for line in result.outlines if line.startswith("tests/") and "::test_" in line}
+    selected = {line for line in result.outlines if line.startswith(("tests/", "linktools-ai/tests/")) and "::test_" in line}
     cases = ("daily",) if tier == "daily" else (("daily", "merge") if tier == "merge" else ("daily", "merge", "manual"))
     assert selected == {
         "%s::test_%s" % (name, case)
@@ -130,3 +142,40 @@ def test_empty_ai_group_fails_instead_of_reporting_coverage(
     path.write_text("def test_runtime(): pass\n", encoding="utf-8")
     result = pytester.runpytest("-q", "-p", "no:asyncio", "--ai-group", "evaluation")
     assert result.ret == pytest.ExitCode.NO_TESTS_COLLECTED
+
+
+def test_generated_ci_plan_keeps_execution_and_compatibility_versions_in_sync() -> None:
+    root = Path(__file__).resolve().parents[2]
+    plan = json.loads(subprocess.check_output(
+        [sys.executable, "-m", "scripts.check.matrix", json.dumps(["linktools", "linktools-ai", "linktools-new"])],
+        cwd=root, text=True,
+    ))
+    assert plan["python-versions"] == ["3.10", "3.x"]
+    for check in plan["checks"]:
+        options = shlex.split(check["pytest-args"])
+        assert options[:2] == ["-n", "4"]
+        assert "--dist=loadfile" in options
+        assert "--ai-group=" + check["group"] in options
+        assert "-rs" in options
+    workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
+    jobs = workflow["jobs"]
+    assert jobs["python"]["strategy"]["matrix"]["python-version"] == jobs["ai_coverage"]["strategy"]["matrix"]["python-version"]
+    assert jobs["python"]["strategy"]["fail-fast"] is False
+    assert jobs["ai_coverage"]["name"] == "Python ${{ matrix.python-version }} linktools-ai checks"
+    assert jobs["coverage"]["name"] == "Python test coverage"
+
+
+@pytest.mark.parametrize("job", ("ai_coverage", "coverage"))
+def test_ci_aggregates_reject_every_incomplete_dependency(tmp_path: Path, job: str) -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
+    definition = workflow["jobs"][job]
+    assert definition["if"] == "${{ always() }}"
+    step = definition["steps"][0]
+    results = [key for key in step["env"] if key.endswith("_RESULT")]
+    assert len(results) == len(definition["needs"])
+    for states in itertools.product(("success", "failure", "cancelled", "skipped"), repeat=len(results)):
+        environment = dict(os.environ, TEST_TIER="merge", GITHUB_STEP_SUMMARY=str(tmp_path / "summary"))
+        environment.update(zip(results, states))
+        outcome = subprocess.run(["bash", "-e", "-c", step["run"]], env=environment, capture_output=True, check=False)
+        assert (outcome.returncode == 0) == all(state == "success" for state in states)
