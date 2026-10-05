@@ -5646,6 +5646,7 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
     from linktools.ai.task import _local
 
     monkeypatch.setattr(_local, "_LEASE_SECONDS", 1)
+    monkeypatch.setattr(_local, "_HEARTBEAT_SECONDS", 0.1)
     storage_root = tmp_path / "state"
     held_started = asyncio.Event()
     held_cancelled = asyncio.Event()
