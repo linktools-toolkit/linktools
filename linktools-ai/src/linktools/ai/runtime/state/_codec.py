@@ -1530,7 +1530,7 @@ def _encode_external(value: object, codec: _VersionCodec) -> JsonValue:
     if isinstance(value, (AgentBindingContract, AssetVersionRef)):
         return value.to_payload()
     if isinstance(value, ScoreBundle):
-        return value.to_mapping()
+        return _encode_domain(value.to_mapping(), codec)
     if isinstance(value, IdempotencyTerminalUpdate):
         return {
             "scope": _encode_domain(value.scope, codec),
@@ -1574,7 +1574,13 @@ def _decode_external(
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     if target in (AgentBindingContract, AssetVersionRef, ScoreBundle):
         try:
-            return ScoreBundle.from_mapping(value) if target is ScoreBundle else target.from_payload(value)
+            if target is ScoreBundle:
+                payload = cast(
+                    dict[str, JsonValue],
+                    _decode_domain(value, dict[str, JsonValue], codec, persisted=persisted),
+                )
+                return ScoreBundle.from_mapping(payload)
+            return target.from_payload(value)
         except AIError:
             raise
         except (TypeError, ValueError, KeyError) as error:
