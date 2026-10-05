@@ -12,6 +12,7 @@ from linktools.ai.core import JsonValue, TaskStatus, WorkspaceFileInput
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationPolicy,
     EvaluationSpec, GraphTargetSpec, ScoreBundle, ScoringInput, StartEvaluationRequest,
+    TaskCaseInput,
 )
 from linktools.ai.runtime import (
     AgentTaskInput, AgentTaskInputContext, CaptureGraphRequest, ExecutionInputContext,
@@ -162,8 +163,9 @@ async def test_graph_capture_retains_only_bindings_required_by_its_execution_top
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("context_policy", ["clean", "captured"])
+@pytest.mark.parametrize("mode", ["declaration_graph", "materialized_graph"])
 async def test_graph_capture_rejects_unavailable_projected_input(
-    tmp_path: Path, context_policy: str,
+    tmp_path: Path, context_policy: str, mode: str,
 ) -> None:
     from linktools.ai.errors import AIError, ErrorCode
 
@@ -188,11 +190,104 @@ async def test_graph_capture_rejects_unavailable_projected_input(
         assert (await source.wait(timeout_seconds=15)).status is TaskStatus.FAILED
         with pytest.raises(AIError) as raised:
             await runtime.tasks.capture_graph(source.graph_id,
-                CaptureGraphRequest(PRINCIPAL, "capture", context_policy=context_policy))
+                CaptureGraphRequest(PRINCIPAL, "capture", mode=mode, context_policy=context_policy))
         assert raised.value.code is (ErrorCode.INPUT_CONTEXT_UNAVAILABLE if context_policy == "captured"
                                      else ErrorCode.INPUT_CAPTURE_UNAVAILABLE)
         assert raised.value.safe_details["reason"] == "graph_node_never_started"
         assert not models.prompts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["declaration_graph", "materialized_graph"])
+async def test_clean_recapture_replays_unstarted_fixed_projected_graph(
+    tmp_path: Path, mode: str,
+) -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    group = CapabilityGroup("recaptured-fixed")
+    group.agent("default", model="default", allow_tools=(), allow_skills=(), allow_subagents=())
+    models = FixtureModels()
+    projected_graphs = []
+    ready = False
+    context = ExecutionInputContext.from_messages((
+        ModelRequest(parts=[UserPromptPart("Historical question")]),
+        ModelResponse(parts=[TextPart("Historical answer")]),
+    ), session_metadata={"secret": "historical metadata"})
+
+    async def project(context: AgentTaskInputContext) -> str:
+        projected_graphs.append(context.graph_id)
+        return f"Prepared in {context.graph_id}: {context.input['question']}"
+
+    async def gate(context: TaskNodeContext[None]) -> JsonValue:
+        if context.input.get("block") and not ready:
+            raise AIError(ErrorCode.TASK_NODE_FAILED)
+        return "ready"
+
+    async with Runtime.open("recaptured-fixed", models=models, context=CONTEXT,
+            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+        target = runtime.tasks.from_agent("captured.agent", runtime.agents.get(), build_input=project)
+        prepare = Task("captured.prepare", gate, effect_policy="none")
+        scorer = Task("captured.score", _score_graph, effect_policy="none")
+        engine = runtime.tasks.bind(target, prepare, scorer)
+        source = await engine.start(TaskGraph("source", (
+            TaskNode("prepare", task=prepare),
+            TaskNode("agent", ("prepare",), task=target, input=AgentTaskInput(
+                parameters={"question": "Question"}, input_context=context)),
+        )), principal=PRINCIPAL, idempotency_key="source")
+        assert (await source.wait()).status is TaskStatus.SUCCEEDED
+        capture = await runtime.tasks.capture_graph(source.graph_id,
+            CaptureGraphRequest(PRINCIPAL, "source-capture"))
+        original = await runtime._input_captures.read_graph(capture, principal=PRINCIPAL)
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), (
+            CaseSpec.graph(CaseRef("data", "control", 1), inputs={}),
+            CaseSpec.graph(CaseRef("data", "blocked", 1), inputs={
+                "prepare": TaskCaseInput(input={"block": True})}),
+        )), principal=PRINCIPAL, idempotency_key="dataset")
+        run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+            (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "agent"})),),
+            (rule_scorer(scorer),), input_mode="fixed_input",
+            policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "evaluate"), engine=engine)
+        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        trials = {trial.case_ref.case_id: trial for trial in (await run.trials()).items}
+        control = await engine.get(trials["control"].graph_ref.graph_id, principal=PRINCIPAL)
+        assert (await control.wait()).status is TaskStatus.SUCCEEDED
+        execution = await control.execution("agent")
+        request = str((await execution.model_interactions(include_content=True)).items[0].request)
+        assert "Prepared in source: Question" in request
+        assert "Historical question" in request
+        assert projected_graphs == ["source"]
+        blocked = await engine.get(trials["blocked"].graph_ref.graph_id, principal=PRINCIPAL)
+        assert (await blocked.wait()).status is TaskStatus.FAILED
+        assert next(node for node in (await blocked.state()).node_states
+                    if node.node_id == "agent").execution_id is None
+        clean = await runtime.tasks.capture_graph(blocked.graph_id,
+            CaptureGraphRequest(PRINCIPAL, "clean-recapture", mode=mode, context_policy="clean"))
+        assert (await runtime._input_captures.read_graph(capture, principal=PRINCIPAL)) == original
+        clean_template = await runtime._input_captures.read_graph(clean, principal=PRINCIPAL)
+        agent = next(node for node in clean_template.nodes if node.node_id == "agent")
+        for value in (agent.input, agent.original_input):
+            assert "capture_context" not in value
+            assert value["session_id"] is None
+            assert value["memory_scope"] is None
+
+        ready = True
+        replay_dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("replay", 1), (
+            CaseSpec.graph(CaseRef("replay", "case", 1), inputs={}),
+        )), principal=PRINCIPAL, idempotency_key="replay-dataset")
+        replay = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(replay_dataset,
+            (CandidateSpec("clean", graph_template=GraphTargetSpec(capture=clean, outputs={"answer": "agent"})),),
+            (rule_scorer(scorer),), input_mode="fixed_input",
+            policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "replay"), engine=engine)
+        assert (await replay.wait(timeout_seconds=30)).completion == "complete"
+        assert (await replay.report()).scores[0].valid == 1
+        trial = (await replay.trials()).items[0]
+        graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
+        execution = await graph.execution("agent")
+        request = str((await execution.model_interactions(include_content=True)).items[0].request)
+        assert "Prepared in source: Question" in request
+        assert "Historical question" not in request
+        assert "Historical answer" not in request
+        assert projected_graphs == ["source"]
 
 
 @pytest.mark.asyncio

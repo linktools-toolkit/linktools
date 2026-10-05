@@ -11,7 +11,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
-    AgentTaskInput, CaptureGraphRequest, CaptureInputRequest, ExecutionInputContext,
+    AgentTaskInput, AgentTaskInputContext, CaptureGraphRequest, CaptureInputRequest, ExecutionInputContext,
     Runtime, RuntimeStorage,
 )
 from linktools.ai.task import Task, TaskNodeContext, TaskGraph, TaskNode
@@ -21,9 +21,15 @@ from .test_captured_execution_context import _NoToolsModels
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("input_mode", ("fixed_input", "reproject_input"))
-async def test_clean_unstarted_graph_replays_captured_input_without_history(
-    tmp_path: Path, input_mode: str,
+@pytest.mark.parametrize(("task_mode", "input_mode", "mode"), (
+    ("literal", "fixed_input", "declaration_graph"),
+    ("literal", "reproject_input", "declaration_graph"),
+    ("projected", "fixed_input", "declaration_graph"),
+    ("projected", "fixed_input", "materialized_graph"),
+    ("projected", "reproject_input", "declaration_graph"),
+))
+async def test_clean_unstarted_graph_preserves_captured_input_semantics(
+    tmp_path: Path, task_mode: str, input_mode: str, mode: str,
 ) -> None:
     work = tmp_path / "workspace"
     work.mkdir()
@@ -38,6 +44,11 @@ async def test_clean_unstarted_graph_replays_captured_input_without_history(
         session_metadata={"private": "historical session metadata"},
     )
     ready = False
+    projected_graphs = []
+
+    async def project(context: AgentTaskInputContext) -> str:
+        projected_graphs.append(context.graph_id)
+        return context.input["question"]
 
     async def gate(context: TaskNodeContext) -> str:
         if not ready:
@@ -48,12 +59,15 @@ async def test_clean_unstarted_graph_replays_captured_input_without_history(
                             storage=RuntimeStorage.filesystem(tmp_path / "state"),
                             capabilities=(workspace, group)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
-        agent_task = runtime.tasks.from_agent("clean.agent", runtime.agents.get())
+        agent_task = runtime.tasks.from_agent("clean.agent", runtime.agents.get(),
+            build_input=project if task_mode == "projected" else None)
         gate_task = Task("clean.gate", gate, effect_policy="none")
         engine = runtime.tasks.bind(agent_task, gate_task)
         source = await engine.start(TaskGraph("source", (
             TaskNode("agent", task=agent_task, input=AgentTaskInput(
-                "current prompt", files=("input.txt",),
+                "current prompt" if task_mode == "literal" else "",
+                parameters={"question": "current prompt"} if task_mode == "projected" else {},
+                files=("input.txt",),
                 input_context=context)),
         )), principal=principal, idempotency_key="source")
         assert (await source.wait()).status is TaskStatus.SUCCEEDED
@@ -71,12 +85,27 @@ async def test_clean_unstarted_graph_replays_captured_input_without_history(
         with pytest.raises(AIError) as unavailable:
             await blocked.execution("agent")
         assert unavailable.value.code is ErrorCode.EXECUTION_NOT_READY
+        with pytest.raises(AIError) as unavailable:
+            await runtime.tasks.capture_graph("blocked", CaptureGraphRequest(
+                principal, "captured-graph", mode=mode, context_policy="captured"))
+        assert unavailable.value.code is ErrorCode.INPUT_CONTEXT_UNAVAILABLE
+        assert unavailable.value.safe_details["reason"] == "graph_node_never_started"
+        if task_mode == "projected" and input_mode == "reproject_input":
+            with pytest.raises(AIError) as unavailable:
+                await runtime.tasks.capture_graph("blocked", CaptureGraphRequest(
+                    principal, "clean-graph", mode=mode, context_policy="clean"))
+            assert unavailable.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
+            assert unavailable.value.safe_details["reason"] == "graph_node_never_started"
+            assert projected_graphs == ["source"]
+            assert (await runtime._input_captures.read_task(task_capture, principal=principal)) == original
+            return
         graph_capture = await runtime.tasks.capture_graph(
-            "blocked", CaptureGraphRequest(principal, "clean-graph", context_policy="clean"))
+            "blocked", CaptureGraphRequest(principal, "clean-graph", mode=mode, context_policy="clean"))
         assert await runtime.tasks.capture_graph(
-            "blocked", CaptureGraphRequest(principal, "clean-graph", context_policy="clean")) == graph_capture
+            "blocked", CaptureGraphRequest(principal, "clean-graph", mode=mode, context_policy="clean")) == graph_capture
         template = await runtime._input_captures.read_graph(graph_capture, principal=principal)
-        clean = await runtime._input_captures.read_task(template.nodes[1].input_capture, principal=principal)
+        agent = next(node for node in template.nodes if node.node_id == "agent")
+        clean = await runtime._input_captures.read_task(agent.input_capture, principal=principal)
         assert clean.input_mode == original.input_mode
         for before, after in ((original.input, clean.input), (original.original_input, clean.original_input)):
             expected = dict(before)
@@ -90,6 +119,7 @@ async def test_clean_unstarted_graph_replays_captured_input_without_history(
         replay = await engine.start(TaskGraph("replay", template.nodes), principal=principal,
                                     idempotency_key="replay")
         assert (await replay.wait()).status is TaskStatus.SUCCEEDED
+        assert projected_graphs == (["source"] if task_mode == "projected" else [])
         replay_execution = await replay.execution("agent")
         interactions = await replay_execution.model_interactions(include_content=True)
         request = str(interactions.items[0].request)

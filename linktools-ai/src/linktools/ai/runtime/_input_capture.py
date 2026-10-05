@@ -645,14 +645,16 @@ class RuntimeInputCaptures:
                 if source is None:
                     if request.context_policy == "captured":
                         raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE, safe_details={"reason": "graph_node_never_started"})
-                    if declaration["config"]["input_mode"] == "projected":
+                    previous = None if input_capture is None else await self.read_task(input_capture, principal=principal)
+                    effective_input = body if previous is None else previous.input
+                    if (declaration["config"]["input_mode"] == "projected"
+                            and effective_input.get("capture_fixed_input") is not True):
                         raise AIError(ErrorCode.INPUT_CAPTURE_UNAVAILABLE, safe_details={"reason": "graph_node_never_started"})
                     original_input = dict(node.original_input if node.original_input is not None else node.input)
                     original_input.pop("capture_context", None)
                     original_input["session_id"] = None
                     original_input["memory_scope"] = None
-                    if input_capture is not None:
-                        previous = await self.read_task(input_capture, principal=principal)
+                    if previous is not None:
                         clean_input = dict(previous.input)
                         original_input = dict(previous.original_input)
                         for value in (clean_input, original_input):
