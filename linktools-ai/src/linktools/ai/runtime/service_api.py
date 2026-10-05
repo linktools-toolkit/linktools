@@ -13,7 +13,6 @@ from ..core import (
     ApprovalDecision,
     ApprovalStatus,
     CorrelationData,
-    EvaluationStatus,
     ExecutionLineageKind,
     ExecutionMode,
     ExecutionStatus,
@@ -33,6 +32,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent
+from ._execution_context import ExecutionInputContext
 from ._input_contract import (
     UserPromptInput,
     normalize_input_files,
@@ -79,8 +79,15 @@ class ExecutionRequest:
     thinking: ThinkingValue
     correlation: CorrelationData = field(default_factory=dict)
     files: tuple[str, ...] = ()
+    input_context: ExecutionInputContext | None = None
 
     def __post_init__(self) -> None:
+        if self.input_context is not None and not isinstance(self.input_context, ExecutionInputContext):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self.input_context is not None and self.input_context.unavailable_reason is not None:
+            raise AIError(ErrorCode.INPUT_CONTEXT_UNAVAILABLE)
+        if self.input_context is not None and self.memory_scope is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_owns_memory_scope"})
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
         files = normalize_input_files(self.files)
         validate_idempotency_key(self.idempotency_key)
@@ -745,73 +752,6 @@ class SessionView:
 
 
 @dataclass(frozen=True, slots=True)
-class StartEvaluationRequest:
-    principal: Principal
-    dataset_id: str
-    memory_scope: str
-    idempotency_key: str = ""
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.dataset_id, str) or not self.dataset_id.strip():
-            raise ValueError("evaluation dataset identity is required")
-        validate_memory_scope(self.memory_scope)
-        validate_idempotency_key(self.idempotency_key)
-
-
-@dataclass(frozen=True, slots=True)
-class CompareEvaluationRequest:
-    principal: Principal
-    baseline_id: str
-    candidate_id: str
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.baseline_id, str)
-            or not self.baseline_id.strip()
-            or not isinstance(self.candidate_id, str)
-            or not self.candidate_id.strip()
-        ):
-            raise ValueError("evaluation ids are required")
-
-
-@dataclass(frozen=True, slots=True)
-class ReplayEvaluationRequest:
-    principal: Principal
-    memory_scope: str
-    idempotency_key: str = ""
-
-    def __post_init__(self) -> None:
-        validate_memory_scope(self.memory_scope)
-        validate_idempotency_key(self.idempotency_key)
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationHandle:
-    evaluation_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationView:
-    evaluation_id: str
-    status: EvaluationStatus
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationComparison:
-    baseline_id: str
-    candidate_id: str
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.baseline_id, str)
-            or not self.baseline_id.strip()
-            or not isinstance(self.candidate_id, str)
-            or not self.candidate_id.strip()
-        ):
-            raise ValueError("evaluation comparison is invalid")
-
-
-@dataclass(frozen=True, slots=True)
 class ApprovalView:
     approval_id: str
     status: ApprovalStatus
@@ -1132,6 +1072,7 @@ class ExecutionService(Protocol):
         *,
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle: ...
     async def start_task(
         self,
@@ -1141,6 +1082,7 @@ class ExecutionService(Protocol):
         input: Mapping[str, JsonValue],
         idempotency_key: str,
         correlation: Mapping[str, str | int],
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle: ...
 
     async def claim_task_attempt(
@@ -1230,6 +1172,7 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> "ExecutionHandle | None": ...
     async def inspect(
         self, execution_id: str, *, principal: Principal
@@ -1366,6 +1309,7 @@ class SessionService(Protocol):
         *,
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle: ...
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
@@ -1376,28 +1320,6 @@ class SessionService(Protocol):
     async def close(
         self, session_id: str, request: CloseSessionRequest
     ) -> SessionView: ...
-
-
-class EvaluationService(Protocol):
-    async def start(
-        self,
-        binding_digest: str,
-        request: StartEvaluationRequest,
-        *,
-        binding_contract: "AgentBindingContract | None" = None,
-    ) -> EvaluationHandle: ...
-    async def inspect(
-        self, evaluation_id: str, *, principal: Principal
-    ) -> EvaluationView: ...
-    async def compare(
-        self, request: CompareEvaluationRequest
-    ) -> EvaluationComparison: ...
-    async def replay(
-        self,
-        agent_id: str,
-        evaluation_id: str,
-        request: ReplayEvaluationRequest,
-    ) -> ExecutionHandle: ...
 
 
 class ApprovalService(Protocol):
@@ -1460,12 +1382,7 @@ __all__ = [
     "CancelExecutionRequest",
     "CancelExecutionResult",
     "CloseSessionRequest",
-    "CompareEvaluationRequest",
     "CreateSessionRequest",
-    "EvaluationComparison",
-    "EvaluationHandle",
-    "EvaluationService",
-    "EvaluationView",
     "EventService",
     "ExternalCallFailed",
     "ExternalCallRetry",
@@ -1493,7 +1410,6 @@ __all__ = [
     "ListSessionRequest",
     "ModelInteractionItem",
     "Page",
-    "ReplayEvaluationRequest",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
     "SessionHistoryItem",
@@ -1502,7 +1418,6 @@ __all__ = [
     "SessionTurn",
     "SessionTurnItem",
     "SessionView",
-    "StartEvaluationRequest",
     "TaskGraphRunEvent",
     "TranscriptItem",
     "UpdateSessionRequest",

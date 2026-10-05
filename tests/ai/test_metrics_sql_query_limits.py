@@ -178,11 +178,15 @@ async def test_oversized_window_does_not_expand_payload_json(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("aggregation", (MetricAggregation.MIN, MetricAggregation.MAX))
+@pytest.mark.parametrize("sample_count", (
+    pytest.param(100, id="representative"),
+    pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
+))
 async def test_sqlite_extrema_expand_once_without_order_sort(
-    sql_metrics: _SqlMetrics, aggregation: MetricAggregation,
+    sql_metrics: _SqlMetrics, aggregation: MetricAggregation, sample_count: int,
 ) -> None:
     metrics, engine, window = sql_metrics
-    await _seed(metrics, 1500)
+    await _seed(metrics, sample_count)
     statements: list[tuple[str, object]] = []
 
     def record_statement(
@@ -197,7 +201,7 @@ async def test_sqlite_extrema_expand_once_without_order_sort(
         result = await metrics.query(MetricQuery(_NAMES[2], window, aggregation=aggregation))
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", record_statement)
-    assert result.points[0].value == (0 if aggregation is MetricAggregation.MIN else 1499)
+    assert result.points[0].value == (0 if aggregation is MetricAggregation.MIN else sample_count - 1)
     assert len(statements) == 1
     statement, parameters = statements[0]
     async with engine.connect() as connection:

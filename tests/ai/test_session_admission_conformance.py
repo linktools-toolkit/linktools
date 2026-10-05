@@ -273,8 +273,9 @@ class _RejectingBackend:
         commit: object,
         *,
         session_id: "str | None",
+        expected_execution: object | None = None,
     ) -> object:
-        del session_id
+        del session_id, expected_execution
         execution = commit.execution
         self.committed.append(execution.execution_id)
         repository = self._repository

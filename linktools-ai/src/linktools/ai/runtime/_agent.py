@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVa
 from pydantic import BaseModel
 from ..core import JsonValue, Page, Principal, ThinkingValue
 from ..errors import AIError, ErrorCode
+from ._execution_context import ExecutionInputContext
 from ._input_contract import UserPromptInput, validate_user_input
 from ._watch_cursor import (
     decode_execution_watch_cursor,
@@ -24,18 +25,15 @@ from .recovery import (
 from .service_api import (
     CancelExecutionRequest,
     CancelExecutionResult,
-    EvaluationHandle,
     ExecutionEvent,
     ExecutionHistoryItem,
     ExecutionResult,
     ExecutionTraceItem,
     ExecutionTreeEvent,
     ModelInteractionItem,
-    ReplayEvaluationRequest,
     SessionHistoryItem,
     SessionTurn,
     SessionView,
-    StartEvaluationRequest,
     TranscriptItem,
     UsageReadCutoff,
     _ExecutionStreamFailure,
@@ -572,6 +570,7 @@ class Agent(Generic[AppT]):
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
+        input_context: ExecutionInputContext | None = None,
     ) -> "Execution[AppT]":
         return await self._runtime._start_for_agent(
             self.id,
@@ -588,6 +587,7 @@ class Agent(Generic[AppT]):
             thinking=thinking,
             correlation=correlation,
             compiled_agent=self._compiled_agent,
+            input_context=input_context,
         )
 
     async def run(
@@ -604,6 +604,7 @@ class Agent(Generic[AppT]):
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
+        input_context: ExecutionInputContext | None = None,
     ) -> ExecutionResult:
         execution = await self.start(
             user_prompt,
@@ -616,6 +617,7 @@ class Agent(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             correlation=correlation,
+            input_context=input_context,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -690,31 +692,6 @@ class Agent(Generic[AppT]):
             session_id,
             principal,
             self._compiled_agent,
-        )
-
-    async def start_evaluation(
-        self,
-        request: StartEvaluationRequest,
-        *,
-        output: "type[BaseModel] | None" = None,
-    ) -> EvaluationHandle:
-        return await self._runtime._start_evaluation_for_agent(
-            self.id,
-            self._agent_revision,
-            request,
-            output=output,
-            compiled_agent=self._compiled_agent,
-        )
-
-    async def replay_evaluation(
-        self,
-        evaluation_id: str,
-        request: ReplayEvaluationRequest,
-    ) -> "Execution[AppT]":
-        return await self._runtime._replay_evaluation_for_agent(
-            self.id,
-            evaluation_id,
-            request,
         )
 
 __all__ = ["Agent", "Execution", "Session"]

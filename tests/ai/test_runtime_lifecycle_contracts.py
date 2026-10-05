@@ -30,6 +30,7 @@ class _Components:
     task_admissions = None
     tree_streamer = None
     binding_resolver = None
+    input_captures = None
 
     def __init__(self, close_callback) -> None:
         self.close_callback = close_callback

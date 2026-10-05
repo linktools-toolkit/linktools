@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from ..agent import (
     AgentBinding,
+    AgentBindingContract,
     AgentCatalog,
     AgentCompiler,
     CompiledAgent,
@@ -49,6 +50,8 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 
 if TYPE_CHECKING:
+    from ._evaluation import RuntimeEvaluations
+    from ._input_capture import RuntimeInputCaptures
     from ..observe import Metrics
     from ..task import TaskResultRecord
     from ._runtime_history import RuntimeHistory
@@ -81,6 +84,7 @@ from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeS
 from ._agent_task import RuntimeAgentTaskRunner
 from ._agent_task_input import AgentTaskInputBuilder
 from ._context import RuntimeContext
+from ._execution_context import ExecutionInputContext
 from ._input_contract import normalize_input_files
 from ._input import CanonicalUserInput
 from ._metrics import (
@@ -95,8 +99,6 @@ from .service_api import (
     CancelExecutionResult,
     CloseSessionRequest,
     CreateSessionRequest,
-    EvaluationHandle,
-    EvaluationService,
     EventService,
     ExternalService,
     ExecutionRequest,
@@ -104,12 +106,10 @@ from .service_api import (
     ExecutionService,
     ForkExecutionRequest,
     ForkSessionRequest,
-    ReplayEvaluationRequest,
     ResumeSessionRequest,
     RetryExecutionRequest,
     SessionService,
     SessionView,
-    StartEvaluationRequest,
     UpdateSessionRequest,
     ExecutionTreeEvent,
     TaskGraphRunEvent,
@@ -270,7 +270,7 @@ class Runtime(Generic[AppT]):
         execution: ExecutionService,
         session: SessionService,
         graph: TaskGraphService,
-        evaluation: EvaluationService,
+        evaluation: "RuntimeEvaluations",
         approval: ApprovalService,
         external: ExternalService,
         event: EventService,
@@ -285,6 +285,7 @@ class Runtime(Generic[AppT]):
         tree_streamer: "_ExecutionTreeStreamer | None" = None,
         metric_control: "_MetricControl | None" = None,
         _binding_resolver: "_AgentBindingResolver | None" = None,
+        input_captures: "RuntimeInputCaptures | None" = None,
     ) -> None:
         if any(
             value is None
@@ -308,7 +309,8 @@ class Runtime(Generic[AppT]):
         self._compiler = compiler
         self._task_owner_token = object()
         self._execution_service = execution
-        self.executions = RuntimeExecutions(execution, self._get_execution)
+        self._input_captures = input_captures
+        self.executions = RuntimeExecutions(execution, self._get_execution, input_captures)
         self._session_service = session
         self.sessions = RuntimeSessions(session, self._get_session)
         self._graph_service = graph
@@ -605,8 +607,12 @@ class Runtime(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
         compiled_agent: "CompiledAgent | None" = None,
         dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
+        input_context: ExecutionInputContext | None = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
+        if input_context is not None and session_id is not None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_requires_new_execution"})
         resolved_principal = self._resolve_principal(principal)
         effective_correlation = _overlay_request_correlation(
             self.correlation,
@@ -633,12 +639,14 @@ class Runtime(Generic[AppT]):
             thinking=resolved_thinking,
             correlation=effective_correlation,
             files=resolved_files,
+            input_context=input_context,
         )
         if session_id is None:
             handle = await self._execution_service.start(
                 binding.binding_digest,
                 request,
                 dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=requires_task_invocation_capture,
                 binding_contract=binding.binding_contract,
             )
         else:
@@ -663,6 +671,7 @@ class Runtime(Generic[AppT]):
                 resume_request,
                 binding_contract=binding.binding_contract,
                 dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=requires_task_invocation_capture,
             )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s "
@@ -835,46 +844,11 @@ class Runtime(Generic[AppT]):
             ),
         )
 
-    async def _start_evaluation_for_agent(
-        self,
-        agent_id: str,
-        agent_revision: int,
-        request: StartEvaluationRequest,
-        *,
-        output: "type[BaseModel] | None",
-        compiled_agent: "CompiledAgent | None" = None,
-    ) -> EvaluationHandle:
-        binding = await self._resolve_agent_binding(
-            self._bind_agent(
-                agent_id,
-                agent_revision,
-                output=output,
-                compiled_agent=compiled_agent,
-            )
-        )
-        return await self.evaluations.start(
-            binding.binding_digest,
-            request,
-            binding_contract=binding.binding_contract,
-        )
-
-    async def _replay_evaluation_for_agent(
-        self,
-        agent_id: str,
-        evaluation_id: str,
-        request: ReplayEvaluationRequest,
-    ) -> "Execution[AppT]":
-        handle = await self.evaluations.replay(
-            agent_id,
-            evaluation_id,
-            request,
-        )
-        return Execution(
-            self,
-            handle.execution_id,
-            request.principal,
-            self._watch_execution_tree,
-        )
+    def _task_from_agent_capture(self, task_id: str, binding: AgentBindingContract, *, revision: int) -> Task[AppT]:
+        restored = self._compiler.restore(binding)
+        compiled = restored.compiled_agent
+        agent = Agent(self, compiled.spec.id, compiled.spec.revision, compiled)
+        return self._task_from_agent(task_id, agent, revision=revision, build_input=None, binding_contract=binding)
 
     def _task_from_agent(
         self,
@@ -883,6 +857,7 @@ class Runtime(Generic[AppT]):
         *,
         revision: int,
         build_input: AgentTaskInputBuilder | None,
+        binding_contract: AgentBindingContract | None = None,
     ) -> Task[AppT]:
         self._ensure_open()
         if not isinstance(agent, Agent) or agent.runtime is not self:
@@ -890,7 +865,7 @@ class Runtime(Generic[AppT]):
         if build_input is not None and not inspect.iscoroutinefunction(build_input):
             raise TypeError("build_input must be async")
         compiled = self._compiled_agent(agent.id, agent.revision, agent.compiled)
-        binding_contract = self._compiler.bind(compiled).binding_contract
+        binding_contract = binding_contract or self._compiler.bind(compiled).binding_contract
         input_mode = "projected" if build_input is not None else "literal"
 
         async def start_execution(
@@ -918,8 +893,8 @@ class Runtime(Generic[AppT]):
                 not isinstance(output_type, type)
                 or not issubclass(output_type, BaseModel)
             ):
-                output_type = None
-            return await self._start_for_agent(
+                output_type = restore_output(binding_contract.output_mode, binding_contract.output_schema)
+            execution = await self._start_for_agent(
                 agent.id,
                 agent.revision,
                 prompt,
@@ -935,7 +910,14 @@ class Runtime(Generic[AppT]):
                 correlation=invocation.correlation,
                 compiled_agent=compiled,
                 dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=True,
+                input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
             )
+            return execution
+
+        async def record_invocation(execution_id: str, invocation: TaskNodeInvocation) -> None:
+            if self._input_captures is not None:
+                await self._input_captures.record_invocation(execution_id, invocation)
 
         async def get_execution(
             execution_id: str,
@@ -978,6 +960,7 @@ class Runtime(Generic[AppT]):
             binding_contract=binding_contract.to_payload(),
             build_input=build_input,
             start_execution=start_execution,
+            record_invocation=record_invocation,
             get_execution=get_execution,
             acquire_execution_hold=acquire_execution_hold,
             release_execution_hold=release_execution_hold,
@@ -1381,6 +1364,7 @@ async def _open_runtime(
             tree_streamer=components.tree_streamer,
             metric_control=components.metric_control,
             _binding_resolver=components.binding_resolver,
+            input_captures=components.input_captures,
         )
     except BaseException:
         try:

@@ -92,6 +92,7 @@ class _SessionExecutionService(ExecutionService, Protocol):
         *,
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle: ...
 
 
@@ -424,6 +425,7 @@ class DefaultSessionService:
         *,
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
         return await self._resume(
             agent_id,
@@ -432,6 +434,7 @@ class DefaultSessionService:
             request,
             binding_contract=binding_contract,
             dependency_hold_id=dependency_hold_id,
+            requires_task_invocation_capture=requires_task_invocation_capture,
         )
 
     async def _resume(
@@ -443,6 +446,7 @@ class DefaultSessionService:
         *,
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(
@@ -483,6 +487,7 @@ class DefaultSessionService:
                 execution_request,
                 binding_contract=binding_contract,
                 dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=requires_task_invocation_capture,
             )
 
     async def fork(

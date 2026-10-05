@@ -106,7 +106,7 @@ class _RemoteServer:
         async def echo(ctx: Context, value: str = "hello") -> str:
             self.effects.append(value)
             if not json_response:
-                await ctx.info("tool response is streaming")
+                await ctx.report_progress(0, 1, "tool response is streaming")
             self.call_started.set()
             if self.block_calls:
                 await self.release_call.wait()

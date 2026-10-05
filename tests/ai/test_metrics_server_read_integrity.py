@@ -103,13 +103,12 @@ async def _write_payload(engine: AsyncEngine, payload: dict[str, object]) -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", (_COUNT, _RATIO, _VALUE))
 @pytest.mark.parametrize("damage", (
     "envelope_version", "observation_version", "namespace", "value", "identity",
     "timestamp", "digest", "duplicate_measurement", "boolean_measurement",
 ))
 async def test_corrupt_record_fails_before_any_filter_or_aggregation(
-    server_metrics: _ServerMetrics, name: str, damage: str,
+    server_metrics: _ServerMetrics, damage: str,
 ) -> None:
     metrics, engine, _ = server_metrics
     await metrics.record_observations((_observation(),))
@@ -137,12 +136,13 @@ async def test_corrupt_record_fails_before_any_filter_or_aggregation(
             observation["measurements"][0]["value"] = True if damage == "boolean_measurement" else 99
         await _write_payload(engine, payload)
     code = ErrorCode.STORAGE_VERSION_UNSUPPORTED if damage.endswith("version") else ErrorCode.STORAGE_INTEGRITY_ERROR
-    # The invalid SUCCEEDED record must not disappear behind this FAILED filter.
-    with pytest.raises(AIError) as raised:
-        await metrics.query(MetricQuery(name, _WINDOW, filters={"status": "FAILED"}))
-    assert raised.value.code is code
-    async with engine.connect() as connection:
-        assert await connection.get_isolation_level() == "READ COMMITTED"
+    for name in (_COUNT, _RATIO, _VALUE):
+        # The invalid SUCCEEDED record must not disappear behind this FAILED filter.
+        with pytest.raises(AIError) as raised:
+            await metrics.query(MetricQuery(name, _WINDOW, filters={"status": "FAILED"}))
+        assert raised.value.code is code, name
+        async with engine.connect() as connection:
+            assert await connection.get_isolation_level() == "READ COMMITTED", name
 
 
 @pytest.mark.asyncio

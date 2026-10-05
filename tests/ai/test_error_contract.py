@@ -13,7 +13,6 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ToolCallFailed, ToolCallRetry
 from linktools.ai.runtime import ExecutionResult
 from linktools.ai.runtime._agent_executor import _execution_error
-from linktools.ai.runtime._evaluation import _stable_error
 from linktools.ai.runtime._execution import _terminal_error
 from linktools.ai.runtime._local import _secondary_execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
@@ -204,12 +203,6 @@ def test_secondary_terminal_error_preserves_primary_contract() -> None:
         "primary_error_code": ErrorCode.MODEL_REQUEST_REJECTED.value,
         "primary_safe_error_details": {"status_code": 400},
     }
-
-
-def test_persisted_evaluation_error_rejects_missing_or_unknown_code() -> None:
-    assert _stable_error(None).code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert _stable_error("UNKNOWN").code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert _stable_error(ErrorCode.MODEL_TIMEOUT.value).code is ErrorCode.MODEL_TIMEOUT
 
 
 def _tool_bridge() -> RuntimeToolOperationBridge:

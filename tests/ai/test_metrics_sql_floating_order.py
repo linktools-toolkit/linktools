@@ -159,7 +159,13 @@ async def test_floating_counter_preserves_integer_prefix(
 
 
 @pytest.mark.asyncio
-async def test_floating_reduction_uses_one_observation_statement(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sample_count", (
+    pytest.param(100, id="representative"),
+    pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
+))
+async def test_floating_reduction_uses_one_observation_statement(
+    tmp_path: Path, sample_count: int,
+) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'io.db'}")
     metrics = Metrics.sql(engine, namespace="floating-io")
     definition = _definition(MetricType.GAUGE)
@@ -175,16 +181,16 @@ async def test_floating_reduction_uses_one_observation_statement(tmp_path: Path)
     try:
         await provision_metrics_database(engine)
         await metrics.define(definition)
-        for offset in range(0, 1500, 250):
+        for offset in range(0, sample_count, 250):
             await metrics.record_observations(tuple(
                 _observation(index, index % 17 / 10)
-                for index in range(offset, offset + 250)
+                for index in range(offset, min(offset + 250, sample_count))
             ))
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         result = await metrics.query(MetricQuery(
             definition.name, MetricWindow.between(_START, _START + timedelta(seconds=1)),
         ))
-        assert result.points[0].sample_count == 1500
+        assert result.points[0].sample_count == sample_count
         assert len(statements) == 1
         assert "WITH RECURSIVE totals" in statements[0]
     finally:

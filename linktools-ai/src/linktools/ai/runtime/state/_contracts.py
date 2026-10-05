@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import binascii
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -19,10 +19,16 @@ from typing import TYPE_CHECKING, Protocol
 from pydantic_ai.messages import ModelMessage
 
 from ...agent import AgentBindingContract
+from ...evaluation import (
+    CaseContract, CaseRef, ComparisonReport, DatasetContract, DatasetRef,
+    EvaluationReport, EvaluationReadCutoff, EvidenceBundle, EvidenceRef,
+)
+from ._evaluation_records import (
+    EvaluationLaunchIntent, EvaluationRecord, EvaluationTrialEvidence, EvaluationSlotDisposition, EvaluationCleanupRecord,
+)
 from ...core import (
     ApprovalDecision,
     ApprovalStatus,
-    EvaluationStatus,
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionMode,
@@ -57,6 +63,8 @@ from ...task import (
     TaskEvent,
     TaskGraph,
     TaskGraphAdmission,
+    TaskGraphSubmission,
+    TaskSubmissionRef,
     TaskGraphLaunch,
     TaskGraphState,
     TaskGraphView,
@@ -709,16 +717,24 @@ class ExecutionRecord:
     conversation_agent_run_id: str | None = None
     result: ResultRecord | None = None
     repository_instructions: RuntimePayloadRef | None = None
+    input_context: RuntimePayloadRef | None = None
+    context_imported: bool = False
     error_diagnostics: ErrorDiagnostics | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
     task_attempt: int = 0
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
     dependency_hold_ids: tuple[str, ...] = ()
+    # Admission provenance persists even if invocation storage fails or holds are released.
+    requires_task_invocation_capture: bool = False
     retention_closed: bool = False
     started_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.context_imported, bool) or (self.input_context is not None and not isinstance(self.input_context, RuntimePayloadRef)):
+            raise TypeError("execution input context is invalid")
+        if self.context_imported and (self.input_context is None or self.session_id is not None):
+            raise ValueError("imported context must belong to an independent execution")
         agent_binding = isinstance(self.binding, AgentBindingContract)
         task_binding = isinstance(self.binding, TaskBindingContract)
         if agent_binding == task_binding:
@@ -744,6 +760,8 @@ class ExecutionRecord:
             if (
                 self.session_id is not None
                 or self.memory_scope is not None
+                or self.input_context is not None
+                or self.context_imported
                 or self.conversation_agent_run_id is not None
                 or self.parent_execution_id is not None
                 or self.parent_invocation_id is not None
@@ -761,6 +779,8 @@ class ExecutionRecord:
             for value in (self.task_deadline_at, self.task_next_attempt_at):
                 if value is not None and value.tzinfo is None:
                     raise ValueError("task execution timestamps must be timezone-aware")
+        if not isinstance(self.requires_task_invocation_capture, bool):
+            raise TypeError("execution task invocation capture requirement must be bool")
         holds = tuple(self.dependency_hold_ids)
         if (
             any(not isinstance(value, str) or not value.strip() for value in holds)
@@ -1096,34 +1116,6 @@ class ToolOperationRecord:
                 validate_lease_owner(self.owner)
         except AIError as error:
             raise ValueError("tool operation lease identity is invalid") from error
-
-
-@dataclass(frozen=True, slots=True)
-class EvaluationRecord:
-    evaluation_id: str
-    execution_id: str
-    dataset_id: str
-    status: EvaluationStatus
-    revision: int
-    created_at: datetime
-    updated_at: datetime
-
-    def __post_init__(self) -> None:
-        try:
-            validate_resource_id(self.evaluation_id)
-            validate_resource_id(self.execution_id)
-        except AIError as error:
-            raise ValueError("evaluation identity is invalid") from error
-        if not isinstance(self.status, EvaluationStatus):
-            raise TypeError("evaluation status is invalid")
-        if (
-            isinstance(self.revision, bool)
-            or not isinstance(self.revision, int)
-            or self.revision < 0
-        ):
-            raise ValueError("evaluation revision is invalid")
-        if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
-            raise ValueError("evaluation timestamps must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2299,6 +2291,18 @@ class TaskRepository(RuntimeRepository, Protocol):
 
 
 class TaskAdmissionRepository(RuntimeRepository, Protocol):
+    async def admit_prepared(
+        self, submission: TaskGraphSubmission
+    ) -> TaskGraphView: ...
+
+    async def submission_status(self, submission: TaskSubmissionRef) -> str | None: ...
+    async def prepare(
+        self, submission: TaskGraphSubmission
+    ) -> TaskGraphSubmission: ...
+    async def cancel_submission(
+        self, submission: TaskSubmissionRef, operation: OperationLedgerInput
+    ) -> bool: ...
+
     async def admit(
         self, admission: TaskGraphAdmission, graph: TaskGraph
     ) -> TaskGraphView: ...
@@ -2311,27 +2315,37 @@ class TaskAdmissionRepository(RuntimeRepository, Protocol):
 
 
 class EvaluationRepository(RuntimeRepository, Protocol):
-    async def get_header(
-        self, evaluation_id: str, *, tenant_id: str
-    ) -> ResourceRef | None: ...
-    async def create(self, record: EvaluationRecord) -> EvaluationRecord: ...
-    async def get(
-        self, evaluation_id: str, *, tenant_id: str
-    ) -> EvaluationRecord | None: ...
-    async def compare_and_swap(
-        self,
-        evaluation_id: str,
-        *,
-        tenant_id: str,
-        expected_revision: int,
-        next_record: EvaluationRecord,
-    ) -> EvaluationRecord: ...
-    async def list_by_execution(
-        self, execution_id: str, *, tenant_id: str
-    ) -> tuple[EvaluationRecord, ...]: ...
+    async def publish_dataset(self, dataset: DatasetContract, cases: tuple[CaseContract, ...],
+                              *, idempotency: IdempotencyRecord, owner_principal_id: str, content_expires_at: datetime | None = None) -> DatasetRef: ...
+    async def get_dataset(self, ref: DatasetRef) -> DatasetContract | None: ...
+    async def dataset_owner(self, ref: DatasetRef) -> str | None: ...
+    async def dataset_expiry(self, ref: DatasetRef) -> datetime | None: ...
+    async def case_owner(self, ref: CaseRef) -> str | None: ...
+    async def get_case(self, ref: CaseRef) -> CaseContract | None: ...
+    async def reserve_experiment(self, record: EvaluationRecord) -> EvaluationRecord: ...
+    async def get(self, experiment_id: str, *, tenant_id: str) -> EvaluationRecord | None: ...
+    async def update(self, experiment_id: str, change: Callable[[EvaluationRecord], EvaluationRecord]) -> EvaluationRecord: ...
+    async def register_launch_intent(self, experiment_id: str, intent: EvaluationLaunchIntent,
+                                     *, capacity: int) -> EvaluationRecord: ...
+    async def append_slot_disposition(self, experiment_id: str, item: EvaluationSlotDisposition) -> EvaluationRecord: ...
+    async def close_reservation_gate(self, experiment_id: str, *, budget: bool = False) -> EvaluationRecord: ...
+    async def settle_intent(self, experiment_id: str, slot_id: str,
+                            *, confirmed: bool, released: bool) -> EvaluationRecord: ...
+    async def publish_trial_evidence(self, experiment_id: str, evidence: EvaluationTrialEvidence) -> EvaluationRecord: ...
+    async def publish_evidence(self, evidence: EvidenceBundle) -> EvidenceBundle: ...
+    async def read_evidence(self, ref: EvidenceRef) -> EvidenceBundle | None: ...
+    async def publish_report(self, report: EvaluationReport | ComparisonReport) -> EvaluationReport | ComparisonReport: ...
+    async def purge_expired_datasets(self, *, now: datetime, owner_principal_id: str, limit: int) -> tuple[DatasetRef, ...]: ...
+    async def list_expired(self, *, now: datetime, limit: int, owner_principal_id: str | None = None) -> tuple[EvaluationRecord, ...]: ...
+    async def purge(self, experiment_id: str, *, now: datetime, objects: tuple[tuple[RuntimeDomain, ObjectRef], ...] = ()) -> tuple[tuple[RuntimeDomain, ObjectRef], ...]: ...
+    async def pending_cleanup(self, *, owner_principal_id: str, limit: int | None) -> tuple[EvaluationCleanupRecord, ...]: ...
+    async def acknowledge_cleanup(self, experiment_id: str, objects: tuple[tuple[RuntimeDomain, ObjectRef], ...]) -> None: ...
+    async def get_report_at(self, cutoff: EvaluationReadCutoff) -> EvaluationReport | None: ...
+    async def get_report(self, report_id: str) -> EvaluationReport | ComparisonReport | None: ...
 
 
 class MemoryRepository(RuntimeRepository, Protocol):
+    async def capture_scope(self, *, tenant_id: str, memory_scope_digest: str) -> tuple[MemoryRecord, ...]: ...
     async def get_header(
         self, memory_id: str, *, tenant_id: str
     ) -> ResourceRef | None: ...

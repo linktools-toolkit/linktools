@@ -27,7 +27,7 @@ from ..task import (
     TaskNodeRunResult,
     TaskResultRef,
 )
-from ._input import task_prompt_draft
+from ._input import decode_task_prompt_draft, task_prompt_draft
 from .state._contracts import StoredUserInput, TaskPreparedInputRecord
 from ._agent_task_input import (
     AgentTaskInput,
@@ -70,6 +70,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         restore_prepared_prompt: Callable[
             [StoredUserInput], Awaitable[CanonicalUserInput]
         ],
+        record_invocation: Callable[[str, TaskNodeInvocation], Awaitable[None]] | None = None,
     ) -> None:
         if input_mode not in {"literal", "projected"}:
             raise ValueError("Agent Task input mode is invalid")
@@ -89,6 +90,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         ).binding_digest
         self._build_input = build_input
         self._start_execution = start_execution
+        self._record_invocation = record_invocation
         self._get_execution = get_execution
         self._acquire_execution_hold = acquire_execution_hold
         self._release_execution_hold = release_execution_hold
@@ -125,6 +127,8 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
 
     def normalize(self, value: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
         task_input = AgentTaskInput.from_authoring(value)
+        if self.input_mode == "literal" and task_input.stored_prompt is None:
+            validate_user_input(task_input.prompt)
         normalized = dict(task_input)
         normalized["planning"] = (
             self._planning_default
@@ -142,7 +146,10 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         self,
         value: Mapping[str, JsonValue],
     ) -> Mapping[str, JsonValue]:
-        return dict(AgentTaskInput.from_mapping(value))
+        task_input = AgentTaskInput.from_mapping(value)
+        if self.input_mode == "literal" and task_input.stored_prompt is None:
+            validate_user_input(task_input.prompt)
+        return dict(task_input)
 
     async def run(
         self,
@@ -153,7 +160,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         task_input = AgentTaskInput.from_mapping(invocation.node.input)
         files = task_input.files
         request_identity: str | None = None
-        if self.input_mode == "literal":
+        if self.input_mode == "literal" or invocation.node.input.get("capture_fixed_input") is True:
             if task_input.parameters:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             if task_input.stored_prompt is None:
@@ -163,6 +170,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 prompt = await self._restore_prepared_prompt(task_input.stored_prompt)
                 files = ()
+            prompt = _append_captured_files(prompt, task_input)
         else:
             callback = self._build_input
             if callback is None:
@@ -230,6 +238,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
                         ErrorCode.TASK_INPUT_PROJECTION_FAILED,
                         safe_details={"cause_type": type(error).__name__},
                     ) from error
+                prompt = _append_captured_files(prompt, task_input)
                 stored = await self._store_prepared_prompt(
                     prompt,
                     files=task_input.files,
@@ -386,12 +395,42 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         elif current != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await control.handoff_execution(execution_id)
+        await self._capture_invocation(execution, execution_id, invocation)
         await self._release_execution_hold(
             execution_id,
             invocation.principal,
             hold_id,
         )
         return execution, execution_id
+
+    async def _capture_invocation(
+        self, execution: object, execution_id: str, invocation: TaskNodeInvocation,
+    ) -> None:
+        if self._record_invocation is None:
+            return
+        try:
+            await self._record_invocation(execution_id, invocation)
+        except BaseException:
+            cleanup = asyncio.create_task(execution.cancel())
+            interrupted = False
+            try:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        if cleanup.cancelled():
+                            raise
+                        interrupted = True
+                cleanup.result()
+            except BaseException as error:
+                raise TaskNodeRunError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    execution_id,
+                    safe_details={"phase": "task_invocation_capture_cancel"},
+                ) from error
+            if interrupted:
+                raise asyncio.CancelledError
+            raise
 
     async def wait_bound(
         self,
@@ -400,6 +439,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
     ) -> TaskNodeRunResult:
         execution = await self._get_execution(execution_id, invocation.principal)
         result = await execution.wait()
+        await self._capture_invocation(execution, execution_id, invocation)
         return _agent_task_result(result, execution_id)
 
     async def supply_input(
@@ -426,6 +466,18 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
             return
         execution = await self._get_execution(execution_id, invocation.principal)
         await execution.cancel()
+
+
+def _append_captured_files(prompt: CanonicalUserInput, task_input: AgentTaskInput) -> CanonicalUserInput:
+    payload = task_input.get("capture_files")
+    if payload is None:
+        return prompt
+    if not isinstance(payload, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    files = decode_task_prompt_draft(payload)
+    if isinstance(files, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return (*((prompt,) if isinstance(prompt, str) else prompt), *files)
 
 
 def _node_output_contract(invocation: TaskNodeInvocation) -> dict[str, JsonValue] | None:

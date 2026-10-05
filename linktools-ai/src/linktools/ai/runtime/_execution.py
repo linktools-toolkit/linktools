@@ -61,6 +61,7 @@ from ..storage import (
     StoredPayload,
     payload_fits_inline,
 )
+from ._execution_context import ExecutionInputContext
 from ._handoff import HandoffGate, HandoffState
 from ._input import (
     ExecutionInputMaterializer,
@@ -287,6 +288,7 @@ class _ExecutionRuntimePort(ExecutionBackend, Protocol):
         commit: ExecutionTerminalCommit,
         *,
         session_id: str | None,
+        expected_execution: ExecutionRecord | None = None,
     ) -> ExecutionTerminalCommitResult: ...
 
     async def verify_terminal_projection(
@@ -557,9 +559,12 @@ class DefaultExecutionService:
         execution: ExecutionRecord,
         binding: AgentBinding,
         request: ExecutionRequest,
+        *,
+        requires_task_invocation_capture: bool = False,
     ) -> None:
         if (
-            execution.binding_digest != binding.binding_digest
+            execution.requires_task_invocation_capture is not requires_task_invocation_capture
+            or execution.binding_digest != binding.binding_digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
         ):
@@ -676,7 +681,10 @@ class DefaultExecutionService:
         input: Mapping[str, JsonValue],
         idempotency_key: str,
         correlation: Mapping[str, str | int],
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
+        if not isinstance(requires_task_invocation_capture, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(binding, TaskBindingContract):
             raise TypeError("binding must be TaskBindingContract")
         normalized_input = normalize_json_value(dict(input))
@@ -707,6 +715,7 @@ class DefaultExecutionService:
                 "principal": principal_identity_payload(principal),
                 "binding_digest": binding.binding_digest,
                 "input_digest": stored_input.digest,
+                **({"requires_task_invocation_capture": True} if requires_task_invocation_capture else {}),
             }
         )
         now = datetime.now(timezone.utc)
@@ -734,6 +743,7 @@ class DefaultExecutionService:
             principal_kind=principal.kind,
             stored_user_input=stored_input,
             correlation=normalized_correlation,
+            requires_task_invocation_capture=requires_task_invocation_capture,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -754,7 +764,8 @@ class DefaultExecutionService:
         )
         current = reservation.execution
         if (
-            current.binding_digest != binding.binding_digest
+            current.requires_task_invocation_capture is not requires_task_invocation_capture
+            or current.binding_digest != binding.binding_digest
             or current.binding != binding
             or current.stored_user_input.digest != stored_input.digest
             or current.principal_id != principal.principal_id
@@ -1043,15 +1054,26 @@ class DefaultExecutionService:
             return _execution_view(current)
         if current.status is not ExecutionStatus.WAITING_DEFERRED:
             raise AIError(ErrorCode.TASK_NOT_READY)
-        await self._complete_task_output(
-            current,
-            principal=principal,
-            output=normalized,
-            terminal_event_payload={
-                "task_input": "supplied",
-                "task_input_value_digest": value_digest,
-            },
-        )
+        try:
+            await self._complete_task_output(
+                current,
+                principal=principal,
+                output=normalized,
+                terminal_event_payload={
+                    "task_input": "supplied",
+                    "task_input_value_digest": value_digest,
+                },
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.EXECUTION_RESULT_CONFLICT:
+                raise
+            latest = await self.inspect(execution_id, principal=principal)
+            if latest.status is not ExecutionStatus.SUCCEEDED:
+                raise
+            result = await self.result(execution_id, principal=principal)
+            if canonical_sha256(result.output) != value_digest:
+                raise
+            return latest
         return await self.inspect(execution_id, principal=principal)
 
     async def resume_task_not_applied(
@@ -1539,6 +1561,7 @@ class DefaultExecutionService:
         *,
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1546,6 +1569,7 @@ class DefaultExecutionService:
             scope="execution.run",
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
+            requires_task_invocation_capture=requires_task_invocation_capture,
             binding_contract=binding_contract,
         )
 
@@ -1555,7 +1579,10 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         binding_contract: "AgentBindingContract | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> "ExecutionHandle | None":
+        if not isinstance(requires_task_invocation_capture, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding = self._binding(binding_digest, binding_contract)
@@ -1574,6 +1601,7 @@ class DefaultExecutionService:
             parent_invocation_id=None,
             lineage_kind=ExecutionLineageKind.RUN,
             request_intent_digest=context.request_intent_digest,
+            requires_task_invocation_capture=requires_task_invocation_capture,
         )
         existing = await self._state.idempotency.get(
             scope,
@@ -1588,7 +1616,6 @@ class DefaultExecutionService:
             existing.scope != scope
             or existing.idempotency_key_digest != idempotency_key_digest
             or existing.resource_kind is not ResourceKind.EXECUTION
-            or existing.tenant_id != request.principal.tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if existing.status is IdempotencyStatus.START_UNKNOWN:
@@ -1612,7 +1639,10 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.status is ExecutionStatus.START_UNKNOWN:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        self._validate_replayed_execution(execution, binding, request)
+        self._validate_replayed_execution(
+            execution, binding, request,
+            requires_task_invocation_capture=requires_task_invocation_capture,
+        )
         if existing.status is IdempotencyStatus.COMPLETED:
             if not _terminal_idempotency_matches(existing, execution):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1652,6 +1682,7 @@ class DefaultExecutionService:
         *,
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1663,6 +1694,7 @@ class DefaultExecutionService:
             scope="session.resume",
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
+            requires_task_invocation_capture=requires_task_invocation_capture,
             binding_contract=binding_contract,
         )
 
@@ -1777,6 +1809,7 @@ class DefaultExecutionService:
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
         if session_id is None:
             return await self._start_unlocked(
@@ -1794,6 +1827,7 @@ class DefaultExecutionService:
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=requires_task_invocation_capture,
                 binding_contract=binding_contract,
             )
         async with self._session_guard(request.principal.tenant_id, session_id):
@@ -1812,6 +1846,7 @@ class DefaultExecutionService:
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
+                requires_task_invocation_capture=requires_task_invocation_capture,
                 binding_contract=binding_contract,
             )
 
@@ -1833,7 +1868,10 @@ class DefaultExecutionService:
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
+        requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
+        if not isinstance(requires_task_invocation_capture, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self._backend is None:
@@ -1901,6 +1939,7 @@ class DefaultExecutionService:
             parent_invocation_id=parent_invocation_id,
             lineage_kind=lineage_kind,
             request_intent_digest=context.request_intent_digest,
+            requires_task_invocation_capture=requires_task_invocation_capture,
         )
         existing = await self._state.idempotency.get(
             scope,
@@ -1917,7 +1956,10 @@ class DefaultExecutionService:
                     existing.resource_id, tenant_id=request.principal.tenant_id
                 )
                 if pending is not None:
-                    self._validate_replayed_execution(pending, binding, request)
+                    self._validate_replayed_execution(
+                        pending, binding, request,
+                        requires_task_invocation_capture=requires_task_invocation_capture,
+                    )
                 if pending is not None and pending.status is ExecutionStatus.STARTED:
                     request = await self._request_for_execution(request, pending)
                     await self._launch_started(
@@ -1954,7 +1996,10 @@ class DefaultExecutionService:
                     tenant_id=request.principal.tenant_id,
                 )
                 if terminal is not None:
-                    self._validate_replayed_execution(terminal, binding, request)
+                    self._validate_replayed_execution(
+                        terminal, binding, request,
+                        requires_task_invocation_capture=requires_task_invocation_capture,
+                    )
                     if (
                         scope == "session.resume"
                         and terminal.started_at is not None
@@ -1977,7 +2022,10 @@ class DefaultExecutionService:
             )
             if started is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_replayed_execution(started, binding, request)
+            self._validate_replayed_execution(
+                started, binding, request,
+                requires_task_invocation_capture=requires_task_invocation_capture,
+            )
             if existing.status is IdempotencyStatus.COMPLETED:
                 if not _terminal_idempotency_matches(existing, started):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2016,8 +2064,17 @@ class DefaultExecutionService:
         context = await self._freeze_input(context)
         request = context.request
 
+        input_context = None
         repository_instructions = None
-        if self._instruction_resolver is not None:
+        if request.input_context is not None:
+            if session_id is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            input_context = await self._materialize_repository_instructions(request.input_context, tenant_id=request.principal.tenant_id)
+            if request.input_context.repository_instructions is not None:
+                from ..spec import RepositoryInstructions
+                repository_instructions = await self._materialize_repository_instructions(
+                    RepositoryInstructions.from_payload(request.input_context.repository_instructions), tenant_id=request.principal.tenant_id)
+        elif self._instruction_resolver is not None:
             if lineage_kind is ExecutionLineageKind.SUBAGENT:
                 if parent is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2071,17 +2128,20 @@ class DefaultExecutionService:
             fork_base_execution_id=fork_base_execution_id,
             lineage_kind=lineage_kind,
             agent_run_sequence=0,
-            memory_scope=request.memory_scope,
+            memory_scope=("capture:" + execution_id) if request.input_context is not None else request.memory_scope,
             conversation_agent_run_id=conversation_agent_run_id,
             mode=request.mode,
             planning=request.planning,
             thinking=request.thinking,
             binding=binding.binding_contract,
             repository_instructions=repository_instructions,
+            input_context=input_context,
+            context_imported=request.input_context is not None,
             correlation=request.correlation,
             principal_id=request.principal.principal_id,
             principal_kind=request.principal.kind,
             stored_user_input=context.stored_user_input,
+            requires_task_invocation_capture=requires_task_invocation_capture,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -2103,7 +2163,10 @@ class DefaultExecutionService:
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            self._validate_replayed_execution(reservation.execution, binding, request)
+            self._validate_replayed_execution(
+                reservation.execution, binding, request,
+                requires_task_invocation_capture=requires_task_invocation_capture,
+            )
             if (
                 reservation.execution.status is ExecutionStatus.PENDING_START
                 and reservation.idempotency.status is IdempotencyStatus.RESERVED
@@ -2342,6 +2405,7 @@ class DefaultExecutionService:
                         ),
                     ),
                     session_id=None,
+                    expected_execution=current,
                 )
             except AIError as commit_error:
                 if commit_error.code not in {
@@ -2747,11 +2811,22 @@ class DefaultExecutionService:
         binding = self._binding(binding_digest, previous.binding)
         if binding.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        input_context = None
+        if previous.context_imported:
+            if previous.input_context is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            payload = previous.input_context.payload
+            value = (
+                payload.decode()
+                if payload.kind == "inline"
+                else json.loads(await read_runtime_object(self._object_store, payload.ref))
+            )
+            input_context = ExecutionInputContext.from_payload(value)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
-            memory_scope=previous.memory_scope,
+            memory_scope=None if input_context is not None else previous.memory_scope,
             mode=previous.mode,
             planning=previous.planning,
             thinking=previous.thinking,
@@ -2759,6 +2834,7 @@ class DefaultExecutionService:
                 previous.correlation, request.correlation
             ),
             files=request.files,
+            input_context=input_context,
         )
         return await self._start(
             binding_digest,
@@ -3213,6 +3289,7 @@ class DefaultExecutionService:
                 await self._terminal_committer.commit_terminal_checkpoint(
                     terminal_commit,
                     session_id=cancelling_current.session_id,
+                    expected_execution=cancelling_current,
                 )
             except AIError as error:
                 if error.code not in {
@@ -3719,6 +3796,7 @@ def _request_digest(
     parent_invocation_id: str | None,
     lineage_kind: ExecutionLineageKind,
     request_intent_digest: str | None = None,
+    requires_task_invocation_capture: bool = False,
 ) -> str:
     if request_intent_digest is None:
         user_prompt_identity = input_intent(
@@ -3730,6 +3808,8 @@ def _request_digest(
     return canonical_sha256(
         {
             "input_intent": user_prompt_identity,
+            **({"requires_task_invocation_capture": True} if requires_task_invocation_capture else {}),
+            **({"input_context_digest": request.input_context.digest} if request.input_context is not None else {}),
             "binding_digest": binding_digest,
             "scope": session_id or "execution",
             "principal": principal_identity_payload(request.principal),

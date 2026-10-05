@@ -603,9 +603,14 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("repetitions", (
+    pytest.param(1, id="representative"),
+    pytest.param(20, marks=pytest.mark.manual, id="stress-20"),
+))
 async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    repetitions: int,
 ) -> None:
     monkeypatch.setattr(RuntimeTaskNodeRunner, "run", _digest_run)
     monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
@@ -623,7 +628,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     ) as runtime:
         task = _agent_task(runtime)
         engine = runtime.tasks.bind(task)
-        for index in range(20):
+        for index in range(repetitions):
             graph = TaskGraph(
                 f"serial-{index}",
                 (
@@ -642,7 +647,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
                 node.status is TaskStatus.SUCCEEDED for node in result.node_results
             )
 
-        for index in range(20):
+        for index in range(repetitions):
             graph = TaskGraph(
                 f"parallel-{index}",
                 (

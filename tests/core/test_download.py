@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Tests for the Download module."""
 import hashlib
@@ -162,6 +163,8 @@ def test_http_transport_200(manager, tmp_path):
         assert result.path.read_bytes() == body
     finally:
         handle["server"].shutdown()
+        t.join()
+        handle["server"].server_close()
 
 
 def test_http_gzip_and_content_disposition(manager, tmp_path):
@@ -202,6 +205,8 @@ def test_http_gzip_and_content_disposition(manager, tmp_path):
         assert meta.get("filename") == "real-name.bin"
     finally:
         httpd.shutdown()
+        th.join()
+        httpd.server_close()
 
 
 # --------------------------------------------------------------------------- #
@@ -270,6 +275,8 @@ class _RangeServer:
 
     def shutdown(self):
         self._httpd.shutdown()
+        self._thread.join()
+        self._httpd.server_close()
 
 
 def _download_with_part(dst, part_bytes):

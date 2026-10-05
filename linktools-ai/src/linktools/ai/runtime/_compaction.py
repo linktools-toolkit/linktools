@@ -300,9 +300,11 @@ class CompactionCapability(AbstractCapability[None]):
             projected_context.messages,
             self._limits,
         )
+        # Harness may rewrite its context history; only the provider view is mutable.
+        projected_run_context = replace(ctx, messages=projected_context.messages)
         if self._target_tokens is None:
             projected_context = await self._deduplicate.before_model_request(
-                ctx,
+                projected_run_context,
                 projected_context,
             )
         else:
@@ -335,7 +337,7 @@ class CompactionCapability(AbstractCapability[None]):
                 target_tokens=self._target_tokens,
             )
             projected_context = await tiered.before_model_request(
-                ctx,
+                projected_run_context,
                 projected_context,
             )
         projected = tuple(projected_context.messages)

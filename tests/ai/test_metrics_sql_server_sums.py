@@ -224,7 +224,13 @@ def test_server_large_integer_correlation_filter(_server: tuple[str, list[str]])
     assert result == {((), None): (1.0 + (2**53 + 1), 2)}
 
 
-def test_server_sum_large_window_uses_one_source_scan(_server: tuple[str, list[str]]) -> None:
+@pytest.mark.parametrize("sample_count", (
+    pytest.param(100, id="representative"),
+    pytest.param(100000, marks=pytest.mark.manual, id="stress-100000"),
+))
+def test_server_sum_large_window_uses_one_source_scan(
+    _server: tuple[str, list[str]], sample_count: int,
+) -> None:
     name, command = _server
     plan = _plan()
     dialect = postgresql.dialect(paramstyle="named") if name == "postgresql" else mysql.dialect(paramstyle="named")
@@ -233,18 +239,19 @@ def test_server_sum_large_window_uses_one_source_scan(_server: tuple[str, list[s
     payload = json.dumps({"observation": {"measurements": [{"name": "value", "revision": 1, "value": 1.0}]}})
     if name == "postgresql":
         schema = "CREATE TEMPORARY TABLE ai_metric_observations (namespace_digest TEXT, kind TEXT, occurred_at TIMESTAMPTZ, observation_digest TEXT, payload_json JSON);"
-        seed = "INSERT INTO ai_metric_observations SELECT 'ns', 'business.numeric', CAST(:start AS TIMESTAMPTZ) + i * INTERVAL '1 microsecond', LPAD(CAST(i AS TEXT), 64, '0'), CAST(:payload AS JSON) FROM generate_series(0, 99999) AS n(i);"
+        seed = "INSERT INTO ai_metric_observations SELECT 'ns', 'business.numeric', CAST(:start AS TIMESTAMPTZ) + i * INTERVAL '1 microsecond', LPAD(CAST(i AS TEXT), 64, '0'), CAST(:payload AS JSON) FROM generate_series(0, :sample_count - 1) AS n(i);"
         explain = "EXPLAIN (ANALYZE, FORMAT JSON) " + sql
         result_query = "SELECT json_agg(q) FROM (" + sql + ") AS q;"
     else:
         schema = "CREATE TABLE ai_metric_observations (namespace_digest VARCHAR(64), kind VARCHAR(128), occurred_at DATETIME(6), observation_digest VARCHAR(64), payload_json JSON);"
         digits = " UNION ALL ".join(f"SELECT {i} AS d" for i in range(10))
-        number = " + ".join(f"d{i}.d * {10**i}" for i in range(5))
-        generator = " CROSS JOIN ".join(f"digits AS d{i}" for i in range(5))
-        seed = f"INSERT INTO ai_metric_observations WITH digits AS ({digits}), numbers AS (SELECT {number} AS i FROM {generator}) SELECT 'ns', 'business.numeric', TIMESTAMPADD(MICROSECOND, i, CAST(:start AS DATETIME(6))), LPAD(CAST(i AS CHAR), 64, '0'), CAST(:payload AS JSON) FROM numbers;"
+        digit_count = len(str(sample_count - 1))
+        number = " + ".join(f"d{i}.d * {10**i}" for i in range(digit_count))
+        generator = " CROSS JOIN ".join(f"digits AS d{i}" for i in range(digit_count))
+        seed = f"INSERT INTO ai_metric_observations WITH digits AS ({digits}), numbers AS (SELECT {number} AS i FROM {generator}) SELECT 'ns', 'business.numeric', TIMESTAMPADD(MICROSECOND, i, CAST(:start AS DATETIME(6))), LPAD(CAST(i AS CHAR), 64, '0'), CAST(:payload AS JSON) FROM numbers WHERE i < :sample_count;"
         explain = "EXPLAIN ANALYZE " + sql
         result_query = "SELECT JSON_OBJECT('sample_sum', q.sample_sum, 'sample_count', q.sample_count, 'invalid_count', q.invalid_count) FROM (" + sql + ") AS q;"
-    seed_sql = str(text(seed).bindparams(start=plan.start.replace(tzinfo=None), payload=payload).compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
+    seed_sql = str(text(seed).bindparams(start=plan.start.replace(tzinfo=None), payload=payload, sample_count=sample_count).compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
     script = "DROP TABLE IF EXISTS ai_metric_observations;\n" + schema + "\n" + seed_sql
     if name == "mysql":
         script += "\nTRUNCATE TABLE performance_schema.table_io_waits_summary_by_table;"
@@ -262,7 +269,8 @@ def test_server_sum_large_window_uses_one_source_scan(_server: tuple[str, list[s
     assert separator, completed.stdout
     rows = json.loads(result) if name == "postgresql" else [json.loads(line) for line in result.splitlines()]
     assert len(rows) == 1 and rows[0]["invalid_count"] == 0
-    assert rows[0]["sample_count"] == 100000 and rows[0]["sample_sum"] == 100000.0
+    assert rows[0]["sample_count"] == sample_count
+    assert rows[0]["sample_sum"] == float(sample_count)
     if name == "postgresql":
         pending = [json.loads(execution_plan)[0]["Plan"]]
         sources = []
@@ -278,4 +286,4 @@ def test_server_sum_large_window_uses_one_source_scan(_server: tuple[str, list[s
         # Table instrumentation measures the source even when that subtree is omitted.
         _, marker, reads = execution_plan.partition("__SOURCE_READS__\n")
         assert marker, execution_plan
-        assert 100000 <= int(reads.strip()) <= 100001, execution_plan
+        assert sample_count <= int(reads.strip()) <= sample_count + 1, execution_plan

@@ -154,8 +154,12 @@ async def test_pushdown_rejects_corrupt_records_before_filters(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sample_count", (
+    pytest.param(100, id="representative"),
+    pytest.param(1500, marks=pytest.mark.manual, id="stress-1500"),
+))
 async def test_validation_is_once_per_record_and_one_observation_statement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sample_count: int,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'once.db'}")
     metrics = Metrics.sql(engine, namespace="once")
@@ -174,7 +178,7 @@ async def test_validation_is_once_per_record_and_one_observation_statement(
 
     try:
         await provision_metrics_database(engine)
-        await _seed(metrics, 1500)
+        await _seed(metrics, sample_count)
         monkeypatch.setattr(sql_module, "_decode_observation_record", decode)
         event.listen(engine.sync_engine, "before_cursor_execute", before_execute)
         for name in ("business.integrity.count", "business.integrity.value"):
@@ -182,7 +186,7 @@ async def test_validation_is_once_per_record_and_one_observation_statement(
                 calls.clear()
                 statements.clear()
                 await metrics.query(MetricQuery(name, _WINDOW, filters=filters))
-                assert len(calls) == 1500
+                assert len(calls) == sample_count
                 assert len(statements) == 1
     finally:
         if event.contains(engine.sync_engine, "before_cursor_execute", before_execute):

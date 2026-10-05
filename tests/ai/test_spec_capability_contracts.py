@@ -612,6 +612,7 @@ def test_runtime_domain_object_store_trait_has_one_owner() -> None:
         RuntimeDomain.MEMORY,
         RuntimeDomain.ARTIFACT,
         RuntimeDomain.TASK,
+        RuntimeDomain.EVALUATION,
         RuntimeDomain.RECOVERY,
     }
     assert {
@@ -619,7 +620,6 @@ def test_runtime_domain_object_store_trait_has_one_owner() -> None:
         for domain in RuntimeDomain
         if runtime_domain_uses_object_store(domain)
     } == object_domains
-    assert not runtime_domain_uses_object_store(RuntimeDomain.EVALUATION)
 
 
 def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:

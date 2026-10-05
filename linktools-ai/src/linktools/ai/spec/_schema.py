@@ -4,6 +4,7 @@
 
 import json
 from collections.abc import Mapping, Sequence
+from functools import lru_cache
 from typing import cast
 
 from jsonschema import Draft202012Validator
@@ -14,6 +15,9 @@ from pydantic_core import core_schema
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
+
+_SCHEMA_VALIDATION_CACHE_MAXSIZE = 128
+_SCHEMA_VALIDATION_CACHE_MAX_BYTES = 64 * 1024
 
 _SCHEMA_MAP_KEYWORDS = frozenset(
     {"properties", "patternProperties", "dependentSchemas"}
@@ -106,17 +110,31 @@ def canonicalize_json_schema(
                 canonical_json_bytes(cast(JsonValue, dict(schema))).decode("utf-8")
             ),
         )
-        Draft202012Validator.check_schema(copied)
+        _check_schema(copied)
         result = _canonicalize_schema_resource(
             copied,
             generated_title_paths,
         )
-        Draft202012Validator.check_schema(result)
+        _check_schema(result)
         return cast("dict[str, JsonValue]", result)
     except AIError:
         raise
     except (TypeError, ValueError, SchemaError) as error:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+
+
+def _check_schema(schema: Mapping[str, JsonValue]) -> None:
+    payload = canonical_json_bytes(cast(JsonValue, dict(schema)))
+    # Bound retained schema bytes; larger contracts still validate uncached.
+    if len(payload) > _SCHEMA_VALIDATION_CACHE_MAX_BYTES:
+        Draft202012Validator.check_schema(schema)
+    else:
+        _check_schema_bytes(payload)
+
+
+@lru_cache(maxsize=_SCHEMA_VALIDATION_CACHE_MAXSIZE)
+def _check_schema_bytes(payload: bytes) -> None:
+    Draft202012Validator.check_schema(json.loads(payload))
 
 
 def _uses_default_model_title(

@@ -16,6 +16,7 @@ def _replay_values(
 ) -> tuple[SimpleNamespace, SimpleNamespace, SimpleNamespace]:
     binding_contract = object()
     execution = SimpleNamespace(
+        requires_task_invocation_capture=False,
         binding_digest="a" * 64,
         planning=False,
         thinking=False,
@@ -53,6 +54,7 @@ def test_execution_replay_uses_binding_digest() -> None:
 
     service = object.__new__(DefaultExecutionService)
     execution = SimpleNamespace(
+        requires_task_invocation_capture=False,
         binding_digest=durable.binding_digest,
         planning=False,
         thinking=False,

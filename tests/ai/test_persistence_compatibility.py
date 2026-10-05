@@ -11,11 +11,15 @@ import pytest
 from linktools.ai.agent import AgentBindingContract, AgentCompiler, CapabilityPin, bind_output, restore_output
 from linktools.ai.capability import CapabilityGroup, workspace_capabilities
 from linktools.ai.core import (
-    EvaluationStatus,
     IdempotencyStatus,
     JsonValue,
     OperationStatus,
     canonical_json_bytes,
+    service_principal,
+)
+from linktools.ai.evaluation import (
+    CandidateContract, CaseRef, DatasetRef, DimensionContract, EvaluationManifest,
+    EvaluationPolicy, ScorerContract, TrialPlan,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -28,7 +32,7 @@ from linktools.ai.runtime.state._contracts import (
     OperationTerminalUpdate,
 )
 from linktools.ai.spec import AgentSpec
-from linktools.ai.task import TaskNode
+from linktools.ai.task import TaskNode, TaskRef
 from linktools.ai.workspace import DisabledSandbox, Workspace
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
@@ -209,22 +213,23 @@ def test_custom_wire_v1_fixture_matches_current_shape() -> None:
     assert value == _custom_wire_values()
 
 
-def test_current_evaluation_requires_dataset_id() -> None:
+def test_current_evaluation_requires_immutable_manifest() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    current = EvaluationRecord(
-        evaluation_id="evaluation",
-        execution_id="execution",
-        dataset_id="dataset",
-        status=EvaluationStatus.SUCCEEDED,
-        revision=2,
-        created_at=now,
-        updated_at=now,
+    manifest = EvaluationManifest(
+        "evaluation", "experiment", None, DatasetRef("dataset", 1),
+        (CandidateContract("target", TaskRef("target", 1), None, ()),),
+        (ScorerContract("score", TaskRef("score", 1), {},
+                        (DimensionContract("quality", "number", "higher"),), {}),),
+        (TrialPlan("trial", CaseRef("dataset", "case", 1), "target", 1),), (),
+        EvaluationPolicy(), "fixed_input", service_principal("tenant", "principal"),
     )
+    current = EvaluationRecord(manifest, manifest.digest, "a" * 64, "b" * 64,
+                               "open", 0, now, now)
     payload = cast(
         dict[str, object],
         runtime_codec._encode_persisted_domain(current),
     )
-    payload["fields"].pop("dataset_id")
+    payload["fields"].pop("manifest")
 
     with pytest.raises(AIError) as raised:
         runtime_codec._decode_enveloped_domain(
