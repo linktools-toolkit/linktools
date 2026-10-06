@@ -24,7 +24,7 @@ from linktools.ai.runtime.service_api import (
     ExecutionView,
 )
 from linktools.ai.runtime.service_api import _ExecutionStreamFailure
-from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphResult
+from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphResult, TaskGraphState
 
 
 class _ExecutionService:
@@ -1168,14 +1168,14 @@ class _WaitGraphService:
         *,
         principal: Principal,
         timeout_seconds: float | None = None,
-    ) -> TaskGraphResult:
+    ) -> TaskGraphState:
         del principal, timeout_seconds
         assert graph_id == "graph"
         self.wait_started.set()
         if self.mode == "waiting":
-            return TaskGraphResult(graph_id, TaskStatus.WAITING, ())
+            return TaskGraphState(graph_id, TaskStatus.WAITING, (), ())
         if self.mode == "recovery":
-            return TaskGraphResult(graph_id, TaskStatus.RECOVERY_REQUIRED, ())
+            return TaskGraphState(graph_id, TaskStatus.RECOVERY_REQUIRED, (), ())
         if self.mode == "timeout":
             raise AIError(
                 ErrorCode.TASK_WAIT_TIMEOUT,

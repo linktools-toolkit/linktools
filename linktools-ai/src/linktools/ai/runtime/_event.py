@@ -5,6 +5,7 @@
 import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -22,6 +23,7 @@ from ..core import (
     Principal,
 )
 from ..errors import AIError, ErrorCode
+from ._task_observation import _is_observation_cleanup, _await_stream_cleanup
 from .service_api import (
     ExecutionEvent,
     ExecutionStreamEvent,
@@ -646,14 +648,15 @@ class DefaultEventService:
             raise
         except Exception as error:
             raise _ExecutionStreamFailure(error) from error
-        async for event in self._stream_with_live(
+        async with aclosing(self._stream_with_live(
             execution_id,
             principal=principal,
             after_sequence=after_sequence,
             live=live,
             authorized=True,
-        ):
-            yield event
+        )) as stream:
+            async for event in stream:
+                yield event
 
 
     async def _stream_with_live(
@@ -823,13 +826,20 @@ class DefaultEventService:
             stream_error = error
             raise
         finally:
-            if stream_error is None:
-                await _close_live(live)
-            else:
-                try:
-                    await live.close()
-                except Exception:
-                    pass
+            async def cleanup() -> None:
+                if stream_error is None:
+                    await _close_live(live)
+                else:
+                    try:
+                        await live.close()
+                    except AIError:
+                        if isinstance(stream_error, (_ExecutionStreamFailure, GeneratorExit)) or _is_observation_cleanup(stream_error):
+                            raise
+                    except Exception as error:
+                        if isinstance(stream_error, GeneratorExit) or _is_observation_cleanup(stream_error):
+                            raise _ExecutionStreamFailure(error) from error
+
+            await _await_stream_cleanup(cleanup(), stream_error)
 
         failure = self._worker_failure(execution_id, tenant_id=principal.tenant_id)
         if failure is not None:

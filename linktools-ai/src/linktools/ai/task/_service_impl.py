@@ -3,6 +3,7 @@
 """Persistence-backed TaskGraph service independent of Runtime composition."""
 
 import asyncio
+import math
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -648,11 +649,12 @@ class DefaultTaskGraphService(TaskGraphService):
         submitted = await self._start_graph(request)
         if _terminal(submitted.status):
             return submitted
-        return await self.wait(
+        state = await self.wait(
             submitted.graph_id,
             principal=request.principal,
             timeout_seconds=timeout_seconds,
         )
+        return _state_result(state)
 
     async def recover(
         self,
@@ -1742,15 +1744,16 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         principal: Principal,
         timeout_seconds: "float | None" = None,
-    ) -> TaskGraphResult:
+    ) -> TaskGraphState:
         if timeout_seconds is not None and (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
             or timeout_seconds < 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        async def consume() -> TaskGraphResult:
+        async def consume() -> TaskGraphState:
             tenant_id = principal.tenant_id
             await self._authorize_graph(
                 graph_id,
@@ -1767,16 +1770,16 @@ class DefaultTaskGraphService(TaskGraphService):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if _terminal(state.status):
                     await self._observe_metric_history(state, tenant_id=tenant_id)
-                    return _state_result(state)
+                    return state
                 if state.status is TaskStatus.RECOVERY_REQUIRED:
-                    return _state_result(state)
+                    return state
                 waiter = self._local_waiter
                 if _stable_waiting_state(state) and (
                     not _has_wait_bound_node(state)
                     or waiter is None
                     or not waiter.owns_graph(graph_id, tenant_id=tenant_id)
                 ):
-                    return _state_result(state)
+                    return state
                 if waiter is not None:
                     failure = waiter.graph_failure(graph_id, tenant_id=tenant_id)
                     if failure is not None:

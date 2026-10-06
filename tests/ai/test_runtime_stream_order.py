@@ -283,10 +283,10 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
             *,
             principal: Principal,
             timeout_seconds: float | None = None,
-        ) -> TaskGraphResult:
+        ) -> TaskGraphState:
             del principal, timeout_seconds
             await waiter_release.wait()
-            return TaskGraphResult(graph_id, TaskStatus.SUCCEEDED)
+            return TaskGraphState(graph_id, TaskStatus.SUCCEEDED, (), ())
 
         async def stream_events(
             self,

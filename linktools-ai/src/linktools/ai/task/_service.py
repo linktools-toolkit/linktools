@@ -103,7 +103,13 @@ class TaskGraphQueryService(Protocol):
         *,
         principal: Principal,
         timeout_seconds: "float | None" = None,
-    ) -> TaskGraphResult: ...
+    ) -> TaskGraphState:
+        """Return the stop-condition read, retaining its raw status and node set.
+
+        Terminal, recovery-required, and stable waiting states can satisfy the
+        wait. The graph can change again after this state is read.
+        """
+        ...
 
 
 class TaskGraphService(TaskGraphQueryService, Protocol):

@@ -9,6 +9,7 @@ from typing import Protocol
 
 from ..core import ExecutionEventType, ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
+from ._task_observation import _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup
 from .service_api import (
     ExecutionStreamEvent,
     ExecutionTreeEvent,
@@ -205,7 +206,6 @@ class ExecutionTreeStreamer:
 
         child_wait: asyncio.Task[tuple[str, ...]] | None = None
         discovery_wait: asyncio.Task[None] | None = None
-        cleaned_up = False
         try:
             for child in await self._executions.list_children(
                 execution_id,
@@ -228,145 +228,114 @@ class ExecutionTreeStreamer:
                 asyncio.sleep(discovery_backoff),
                 name=f"execution-tree-discovery-{execution_id}",
             )
-            try:
-                while True:
-                    if not pending:
-                        try:
-                            child_ids = subscription.drain()
-                        except AIError:
-                            raise
-                        except Exception as error:
-                            raise _ExecutionStreamFailure(error) from error
-                        for child_id in child_ids:
-                            await discover_child(child_id)
-                        if pending:
-                            continue
-                        if await discover_persisted_children():
-                            continue
-                        return
+            while True:
+                if not pending:
+                    try:
+                        child_ids = subscription.drain()
+                    except AIError:
+                        raise
+                    except Exception as error:
+                        raise _ExecutionStreamFailure(error) from error
+                    for child_id in child_ids:
+                        await discover_child(child_id)
+                    if pending:
+                        continue
+                    if await discover_persisted_children():
+                        continue
+                    return
 
-                    if child_wait is None or discovery_wait is None:
-                        raise RuntimeError("execution tree waiters are unavailable")
-                    done, _ = await asyncio.wait(
-                        (*pending.values(), child_wait, discovery_wait),
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-
-                    # Durable stream failures and cancellation take priority
-                    # over optional broker notifications from the same round.
-                    for task in done:
-                        if task.cancelled():
-                            task.result()
-                    for task in (*pending.values(), child_wait):
-                        if task not in done:
-                            continue
-                        error = task.exception()
-                        if error is not None and not isinstance(
-                            error, (StopAsyncIteration, _ExecutionStreamFailure)
-                        ) and (task is not child_wait or isinstance(error, AIError)):
-                            raise error
-                    if child_wait in done:
-                        try:
-                            child_ids = child_wait.result()
-                        except AIError:
-                            raise
-                        except Exception as error:
-                            raise _ExecutionStreamFailure(error) from error
-                        for child_id in child_ids:
-                            await discover_child(child_id)
-                        child_wait = asyncio.create_task(
-                            subscription.wait(),
-                            name=f"execution-tree-children-{execution_id}",
-                        )
-
-                    if discovery_wait in done:
-                        added = await discover_persisted_children()
-                        discovery_backoff = (
-                            _DISCOVERY_BACKOFF_INITIAL
-                            if added
-                            else min(
-                                _DISCOVERY_BACKOFF_MAX,
-                                discovery_backoff * 2,
-                            )
-                        )
-                        discovery_wait = asyncio.create_task(
-                            asyncio.sleep(discovery_backoff),
-                            name=f"execution-tree-discovery-{execution_id}",
-                        )
-
-                    ready = sorted(
-                        (
-                            execution_key,
-                            task,
-                        )
-                        for execution_key, task in pending.items()
-                        if task in done
-                    )
-                    for execution_key, task in ready:
-                        pending.pop(execution_key, None)
-                        try:
-                            event = task.result()
-                        except StopAsyncIteration:
-                            streams.pop(execution_key, None)
-                            continue
-
-                        view = views[execution_key]
-                        projected_event = _project_stream_event(
-                            event,
-                            include_content,
-                        )
-                        tree_event = ExecutionTreeEvent(
-                            view.execution_id,
-                            view.agent_id,
-                            view.lineage_kind,
-                            view.parent_execution_id,
-                            view.root_execution_id,
-                            view.parent_invocation_id,
-                            0 if execution_key == execution_id else 1,
-                            projected_event,
-                        )
-                        yield tree_event
-                        pending[execution_key] = _next_event_task(
-                            streams[execution_key],
-                            execution_key,
-                        )
-            finally:
-                active_error = sys.exc_info()[1]
-                cleanup_errors: list[BaseException] = []
-                wait_tasks = tuple(
-                    task
-                    for task in (child_wait, discovery_wait, *pending.values())
-                    if task is not None
+                if child_wait is None or discovery_wait is None:
+                    raise RuntimeError("execution tree waiters are unavailable")
+                done, _ = await asyncio.wait(
+                    (*pending.values(), child_wait, discovery_wait),
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                for task in wait_tasks:
+
+                # Durable stream failures and cancellation take priority
+                # over optional broker notifications from the same round.
+                for task in done:
                     if task.cancelled():
-                        try:
-                            task.result()
-                        except asyncio.CancelledError as error:
-                            cleanup_errors.append(error)
-                    elif not task.done():
-                        task.cancel()
-                await asyncio.gather(*wait_tasks, return_exceptions=True)
-                cleanup_errors.extend(_completed_errors(wait_tasks, child_wait))
-                for stream in tuple(streams.values()):
-                    close = getattr(stream, "aclose", None)
-                    if close is not None:
-                        try:
-                            await close()
-                        except BaseException as error:
-                            cleanup_errors.append(error)
-                cleaned_up = True
-                cleanup_error = _cleanup_failure(active_error, cleanup_errors)
-                if cleanup_error is not None:
-                    raise cleanup_error
+                        task.result()
+                for task in (*pending.values(), child_wait):
+                    if task not in done:
+                        continue
+                    error = task.exception()
+                    if error is not None and not isinstance(
+                        error, (StopAsyncIteration, _ExecutionStreamFailure)
+                    ) and (task is not child_wait or isinstance(error, AIError)):
+                        raise error
+                if child_wait in done:
+                    try:
+                        child_ids = child_wait.result()
+                    except AIError:
+                        raise
+                    except Exception as error:
+                        raise _ExecutionStreamFailure(error) from error
+                    for child_id in child_ids:
+                        await discover_child(child_id)
+                    child_wait = asyncio.create_task(
+                        subscription.wait(),
+                        name=f"execution-tree-children-{execution_id}",
+                    )
+
+                if discovery_wait in done:
+                    added = await discover_persisted_children()
+                    discovery_backoff = (
+                        _DISCOVERY_BACKOFF_INITIAL
+                        if added
+                        else min(
+                            _DISCOVERY_BACKOFF_MAX,
+                            discovery_backoff * 2,
+                        )
+                    )
+                    discovery_wait = asyncio.create_task(
+                        asyncio.sleep(discovery_backoff),
+                        name=f"execution-tree-discovery-{execution_id}",
+                    )
+
+                ready = sorted(
+                    (
+                        execution_key,
+                        task,
+                    )
+                    for execution_key, task in pending.items()
+                    if task in done
+                )
+                for execution_key, task in ready:
+                    pending.pop(execution_key, None)
+                    try:
+                        event = task.result()
+                    except StopAsyncIteration:
+                        streams.pop(execution_key, None)
+                        continue
+
+                    view = views[execution_key]
+                    projected_event = _project_stream_event(
+                        event,
+                        include_content,
+                    )
+                    tree_event = ExecutionTreeEvent(
+                        view.execution_id,
+                        view.agent_id,
+                        view.lineage_kind,
+                        view.parent_execution_id,
+                        view.root_execution_id,
+                        view.parent_invocation_id,
+                        0 if execution_key == execution_id else 1,
+                        projected_event,
+                    )
+                    yield tree_event
+                    pending[execution_key] = _next_event_task(
+                        streams[execution_key],
+                        execution_key,
+                    )
         finally:
             active_error = sys.exc_info()[1]
-            cleanup_error: BaseException | None = None
-            if not cleaned_up:
-                cleanup_errors = []
+
+            async def cleanup() -> None:
+                errors: list[BaseException] = []
                 wait_tasks = tuple(
-                    task
-                    for task in (child_wait, discovery_wait, *pending.values())
+                    task for task in (child_wait, discovery_wait, *pending.values())
                     if task is not None
                 )
                 for task in wait_tasks:
@@ -374,31 +343,29 @@ class ExecutionTreeStreamer:
                         try:
                             task.result()
                         except asyncio.CancelledError as error:
-                            cleanup_errors.append(error)
+                            errors.append(error)
                     elif not task.done():
-                        task.cancel()
+                        _cancel_stream_task(task)
                 await asyncio.gather(*wait_tasks, return_exceptions=True)
-                cleanup_errors.extend(_completed_errors(wait_tasks, child_wait))
+                errors.extend(_completed_errors(wait_tasks, child_wait))
                 for stream in tuple(streams.values()):
                     close = getattr(stream, "aclose", None)
                     if close is not None:
                         try:
                             await close()
                         except BaseException as error:
-                            cleanup_errors.append(error)
-                cleanup_error = _cleanup_failure(active_error, cleanup_errors)
-            try:
-                await subscription.close()
-            except AIError as error:
-                cleanup_error = _cleanup_failure(
-                    cleanup_error or active_error, [error],
-                ) or cleanup_error
-            except Exception as error:
-                cleanup_error = _cleanup_failure(
-                    cleanup_error or active_error, [_ExecutionStreamFailure(error)],
-                ) or cleanup_error
-            if cleanup_error is not None:
-                raise cleanup_error
+                            errors.append(error)
+                try:
+                    await subscription.close()
+                except AIError as error:
+                    errors.append(error)
+                except Exception as error:
+                    errors.append(_ExecutionStreamFailure(error))
+                failure = _cleanup_failure(active_error, errors)
+                if failure is not None:
+                    raise failure
+
+            await _await_stream_cleanup(cleanup(), active_error)
 
 
 
@@ -425,13 +392,16 @@ def _cleanup_failure(
     active_error: BaseException | None,
     errors: list[BaseException],
 ) -> BaseException | None:
-    if active_error is not None and not isinstance(active_error, _ExecutionStreamFailure):
+    if (active_error is not None
+            and not isinstance(active_error, (_ExecutionStreamFailure, GeneratorExit))
+            and not _is_observation_cleanup(active_error)):
         return None
     return next(
         (error for error in errors if isinstance(error, asyncio.CancelledError)),
         next(
             (error for error in errors if not isinstance(error, _ExecutionStreamFailure)),
-            errors[0] if errors and active_error is None else None,
+            errors[0] if errors and (active_error is None or isinstance(active_error, GeneratorExit)
+                                     or _is_observation_cleanup(active_error)) else None,
         ),
     )
 

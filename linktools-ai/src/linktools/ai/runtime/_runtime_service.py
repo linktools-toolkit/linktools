@@ -79,6 +79,7 @@ from ..task import (
 from ._agent import Agent, Execution, Session
 from ._agent_binding_resolver import _AgentBindingResolver
 from ._task import TaskGraphRun
+from ._task_observation import _ObservationSession
 from ._tasks import RuntimeTasks, TaskEngine
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
 from ._agent_task import RuntimeAgentTaskRunner
@@ -338,6 +339,7 @@ class Runtime(Generic[AppT]):
         self._binding_resolver = _binding_resolver
         self._closed = False
         self._closing = False
+        self._observation_sessions: set[_ObservationSession] = set()
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
 
@@ -1235,6 +1237,8 @@ class Runtime(Generic[AppT]):
                 return
             if not self._closing:
                 self._closing = True
+                for session in tuple(self._observation_sessions):
+                    session.seal()
                 _logger.info("runtime close started: tenant=%s", self.tenant_id)
             task = self._close_task
             retry = task is None
@@ -1279,7 +1283,22 @@ class Runtime(Generic[AppT]):
         except BaseException as error:  # noqa: BLE001
             _log_secondary_cleanup("runtime.close", error)
 
+    def _register_observation(self, session: _ObservationSession) -> None:
+        self._ensure_open()
+        self._observation_sessions.add(session)
+
+    def _release_observation(self, session: _ObservationSession) -> None:
+        self._observation_sessions.discard(session)
+
     async def _cleanup(self) -> None:
+        sessions = tuple(self._observation_sessions)
+        for session in sessions:
+            session.seal()
+        deadline = asyncio.get_running_loop().time() + max(
+            (session.close_timeout for session in sessions), default=0.0,
+        )
+        for session in sessions:
+            await session.close(deadline=deadline)
         if self._close_callback is not None:
             await self._close_callback()
         async with self._close_lock:

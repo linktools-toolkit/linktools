@@ -25,8 +25,13 @@ from ..task import (
     TaskEffectResolutionRequest,
     RecoverGraphRequest,
     TaskNodeResult,
+    TaskNodeView,
     TaskResultRef,
     TaskInputSupplyRequest,
+)
+from ._task_observation import (
+    _ObservationSession, _validate_timeout,
+    _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup,
 )
 from ._watch_cursor import (
     decode_graph_watch_cursor,
@@ -64,6 +69,19 @@ class _ExecutionTreeWatcher(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class TaskGraphWaitResult:
+    """One authoritative graph read and the last acknowledged observation cursor."""
+
+    graph: TaskGraphInfo | TaskGraphState
+    cursor: str | None
+    observation_error: TaskObservationError | None = None
+
+    @property
+    def status(self) -> TaskStatus:
+        return _public_task_status(self.graph.status, self.graph.node_states)
+
+
+@dataclass(frozen=True, slots=True)
 class TaskGraphRun(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     _graph: TaskGraphService
@@ -77,13 +95,46 @@ class TaskGraphRun(Generic[AppT]):
         *,
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult:
-        return _public_task_result(
+        return _state_result(
             await self._graph.wait(
                 self.graph_id,
                 principal=self._principal,
                 timeout_seconds=timeout_seconds,
             )
         )
+
+    async def wait_observed(
+        self,
+        observer: Callable[[TaskGraphRunEvent], Awaitable[None]],
+        *,
+        cursor: str | None = None,
+        include_content: bool = False,
+        timeout_seconds: float | None = None,
+        close_timeout_seconds: float = 5.0,
+    ) -> TaskGraphWaitResult:
+        """Wait for a stable graph state while best-effort observation is delivered.
+
+        Stream EOF is not completion. Caller cancellation and timeout stop only
+        local observation; graph control remains explicit. Cleanup is bounded
+        while the event loop can run, but cannot forcibly stop blocking Python.
+        """
+        if not callable(observer):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        _validate_timeout(timeout_seconds)
+        _validate_timeout(close_timeout_seconds, positive=True)
+        events = self.watch(cursor=cursor, include_content=include_content)
+        session = _ObservationSession(
+            self.graph_id, cursor, close_timeout_seconds,
+            self._runtime._release_observation,
+        )
+        self._runtime._register_observation(session)
+        state, observation_error = await session.wait(
+            self._observe_events(observer, events, cursor=cursor, session=session),
+            self._graph.wait(self.graph_id, principal=self._principal),
+            timeout_seconds,
+        )
+        graph = state if include_content else TaskGraphInfo.from_state(state)
+        return TaskGraphWaitResult(graph, session.cursor, observation_error)
 
     async def recover(self, *, idempotency_key: str | None = None) -> TaskGraphResult:
         await self._activate_for_control()
@@ -494,18 +545,42 @@ class TaskGraphRun(Generic[AppT]):
         if not callable(observer):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         events = self.watch(cursor=cursor, include_content=include_content)
+        await self._observe_events(observer, events, cursor=cursor)
+
+    async def _observe_events(
+        self,
+        observer: Callable[[TaskGraphRunEvent], Awaitable[None]],
+        events: AsyncIterator[TaskGraphRunEvent],
+        *,
+        cursor: str | None,
+        session: _ObservationSession | None = None,
+    ) -> None:
         last_cursor = cursor
         try:
             async for event in events:
+                if session is not None and session.closing:
+                    return
                 await _call_observer(observer, event, cursor=last_cursor)
                 last_cursor = event.cursor
+                if session is not None:
+                    session.cursor = last_cursor
+        except asyncio.CancelledError as error:
+            if session is not None and not _is_observation_cleanup(error):
+                session.observer_cancellation = error
+            raise
         finally:
             active_error = sys.exc_info()[1]
-            try:
-                await events.aclose()
-            except BaseException:
-                if active_error is None:
-                    raise
+
+            async def cleanup() -> None:
+                try:
+                    await events.aclose()
+                except BaseException as error:
+                    if (active_error is None or _is_observation_cleanup(active_error)
+                            or session is not None and isinstance(active_error, TaskObservationError)
+                            and not isinstance(error, TaskObservationError)):
+                        raise
+
+            await _await_stream_cleanup(cleanup(), active_error)
 
     def watch(
         self,
@@ -780,58 +855,66 @@ class TaskGraphRun(Generic[AppT]):
             ) from failure.cause
         finally:
             active_error = sys.exc_info()[1]
-            cleanup_errors: list[BaseException] = []
-            tasks = list(execution_tasks.values())
-            if graph_task is not None:
-                tasks.append(graph_task)
-            for task in tasks:
-                if task.cancelled():
-                    try:
-                        task.result()
-                    except asyncio.CancelledError as error:
-                        cleanup_errors.append(error)
-                elif not task.done():
-                    task.cancel()
-            if tasks:
-                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-                cleanup_errors.extend(
-                    outcome for outcome in outcomes
-                    if isinstance(outcome, BaseException)
-                    and not isinstance(outcome, (asyncio.CancelledError, StopAsyncIteration))
-                )
-            if graph_stream is not None:
-                close = getattr(graph_stream, "aclose", None)
-                if close is not None:
-                    try:
-                        await close()
-                    except BaseException as error:
-                        cleanup_errors.append(error)
-            for stream in tuple(execution_streams.values()):
-                close = getattr(stream, "aclose", None)
-                if close is not None:
-                    try:
-                        await close()
-                    except BaseException as error:
-                        cleanup_errors.append(error)
-            if cleanup_errors and (
-                active_error is None
-                or isinstance(active_error, TaskObservationError)
-                and active_error.origin == "stream"
-            ):
-                error = next(
-                    (error for error in cleanup_errors if isinstance(error, asyncio.CancelledError)),
-                    next(
-                        (error for error in cleanup_errors if not isinstance(error, _ExecutionStreamFailure)),
-                        cleanup_errors[0] if active_error is None else None,
-                    ),
-                )
-                if isinstance(error, _ExecutionStreamFailure):
-                    raise _task_stream_observation_error(
-                        error,
-                        last_delivered_cursor(),
-                    ) from error.cause
-                if error is not None:
-                    raise error
+
+            async def cleanup() -> None:
+                cleanup_errors: list[BaseException] = []
+                tasks = list(execution_tasks.values())
+                if graph_task is not None:
+                    tasks.append(graph_task)
+                for task in tasks:
+                    if task.cancelled():
+                        try:
+                            task.result()
+                        except asyncio.CancelledError as error:
+                            cleanup_errors.append(error)
+                    elif not task.done():
+                        _cancel_stream_task(task)
+                if tasks:
+                    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+                    cleanup_errors.extend(
+                        outcome for outcome in outcomes
+                        if isinstance(outcome, BaseException)
+                        and not isinstance(outcome, (asyncio.CancelledError, StopAsyncIteration))
+                    )
+                if graph_stream is not None:
+                    close = getattr(graph_stream, "aclose", None)
+                    if close is not None:
+                        try:
+                            await close()
+                        except BaseException as error:
+                            cleanup_errors.append(error)
+                for stream in tuple(execution_streams.values()):
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        try:
+                            await close()
+                        except BaseException as error:
+                            cleanup_errors.append(error)
+                if cleanup_errors and (
+                    active_error is None
+                    or isinstance(active_error, GeneratorExit)
+                    or _is_observation_cleanup(active_error)
+                    or isinstance(active_error, TaskObservationError)
+                    and active_error.origin == "stream"
+                ):
+                    error = next(
+                        (error for error in cleanup_errors if isinstance(error, asyncio.CancelledError)),
+                        next(
+                            (error for error in cleanup_errors if not isinstance(error, _ExecutionStreamFailure)),
+                            cleanup_errors[0] if (active_error is None or isinstance(active_error, GeneratorExit)
+                                                 or _is_observation_cleanup(active_error)) else None,
+                        ),
+                    )
+                    if isinstance(error, _ExecutionStreamFailure):
+                        raise _task_stream_observation_error(
+                            error,
+                            last_delivered_cursor(),
+                            cleanup=True,
+                        ) from error.cause
+                    if error is not None:
+                        raise error
+
+            await _await_stream_cleanup(cleanup(), active_error)
 
     async def _replay_events(
         self,
@@ -1043,34 +1126,35 @@ async def _call_observer(
 def _task_stream_observation_error(
     failure: _ExecutionStreamFailure,
     cursor: str | None,
+    *,
+    cleanup: bool = False,
 ) -> TaskObservationError:
     cause = failure.cause
+    details = dict(cause.safe_details) if isinstance(cause, AIError) else {"cause_type": type(cause).__name__}
+    if cleanup:
+        details["phase"] = "cleanup"
     return TaskObservationError(
         "stream",
         cursor=cursor,
         cause_code=cause.code.value if isinstance(cause, AIError) else None,
-        safe_details=(
-            dict(cause.safe_details)
-            if isinstance(cause, AIError)
-            else {"cause_type": type(cause).__name__}
-        ),
+        safe_details=details,
         diagnostics=cause.diagnostics if isinstance(cause, AIError) else None,
     )
 
 
-__all__ = ["TaskGraphRun"]
+__all__ = ["TaskGraphRun", "TaskGraphWaitResult"]
 
 
 def _public_task_status(
     status: TaskStatus,
-    states: object = (),
+    states: tuple[TaskNodeView | TaskNodeResult, ...] = (),
 ) -> TaskStatus:
-    if status is not TaskStatus.RUNNING or not isinstance(states, tuple):
+    if status is not TaskStatus.RUNNING:
         return status
     unfinished = tuple(
         state
         for state in states
-        if getattr(state, "status", None)
+        if state.status
         not in {
             TaskStatus.SUCCEEDED,
             TaskStatus.FAILED,
@@ -1079,10 +1163,10 @@ def _public_task_status(
         }
     )
     if unfinished and any(
-        getattr(state, "status", None) is TaskStatus.WAITING
+        state.status is TaskStatus.WAITING
         for state in unfinished
     ) and all(
-        getattr(state, "status", None)
+        state.status
         not in {TaskStatus.READY, TaskStatus.RUNNING}
         for state in unfinished
     ):
@@ -1091,33 +1175,8 @@ def _public_task_status(
 
 
 def _public_task_result(result: TaskGraphResult) -> TaskGraphResult:
-    if result.status is not TaskStatus.RUNNING:
-        return result
-    if not result.node_results:
-        return result
-    unfinished = tuple(
-        node
-        for node in result.node_results
-        if node.status
-        not in {
-            TaskStatus.SUCCEEDED,
-            TaskStatus.FAILED,
-            TaskStatus.BLOCKED,
-            TaskStatus.CANCELLED,
-        }
-    )
-    if unfinished and any(
-        node.status is TaskStatus.WAITING for node in unfinished
-    ) and all(
-        node.status not in {TaskStatus.READY, TaskStatus.RUNNING}
-        for node in unfinished
-    ):
-        return TaskGraphResult(
-            result.graph_id,
-            TaskStatus.WAITING,
-            result.node_results,
-        )
-    return result
+    status = _public_task_status(result.status, result.node_results)
+    return result if status is result.status else replace(result, status=status)
 
 
 def _state_result(state: TaskGraphState) -> TaskGraphResult:

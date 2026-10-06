@@ -730,3 +730,39 @@ async def test_tree_stream_preserves_authoritative_failure_during_cleanup() -> N
         await anext(streamer.stream("root", principal=Principal("owner", "tenant")))
 
     assert raised.value is cause
+
+
+@pytest.mark.asyncio
+async def test_tree_close_keeps_child_live_cleanup_authoritative_failure():
+    from linktools.ai.core import ExecutionDeltaType
+    from linktools.ai.runtime._event import DefaultEventService, ExecutionDelta
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    class Subscription:
+        def __init__(self, key):
+            self.key = key
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            if self.key == "root":
+                return ExecutionDelta("root", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "x")
+            await asyncio.Event().wait()
+        async def close(self):
+            if self.key == "child":
+                raise cause
+    class Live:
+        def claim_local_producer(self, key):
+            return Subscription(key)
+        def is_local_producer(self, key):
+            return True
+        def base_sequence(self, key):
+            return 0
+    class Events(DefaultEventService):
+        async def _authorize_read(self, *args):
+            pass
+    tree = ExecutionTreeStreamer(_ExecutionReader(), Events(None, None, None, None, Live()),
+                                 ExecutionTreeBroker())
+    stream = tree.stream("root", principal=Principal("owner", "tenant"))
+    await anext(stream)
+    with pytest.raises(AIError) as raised:
+        await stream.aclose()
+    assert raised.value is cause

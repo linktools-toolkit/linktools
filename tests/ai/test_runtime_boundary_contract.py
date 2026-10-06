@@ -546,3 +546,52 @@ async def test_live_stream_missing_base_sequence_is_authoritative(
         await anext(service.stream("execution", principal=Principal("owner", "tenant")))
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_live_close_authoritative_error_overrides_optional_broker_error():
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    class Live:
+        def is_local_producer(self, execution_id):
+            return True
+        def base_sequence(self, execution_id):
+            return 0
+        def subscribe(self, execution_id):
+            return self
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            raise RuntimeError("broker unavailable")
+        async def close(self):
+            raise cause
+    service = _event_service(_AllowAuthorization(), Live())
+    with pytest.raises(AIError) as raised:
+        await anext(service._stream_with_live("execution", principal=Principal("owner", "tenant"),
+                                             after_sequence=0, authorized=True))
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+async def test_event_stream_close_awaits_owned_live_subscription():
+    from linktools.ai.core import ExecutionDeltaType
+    from linktools.ai.runtime._event import ExecutionDelta
+    class Live:
+        closed = False
+        def claim_local_producer(self, execution_id):
+            return self
+        def is_local_producer(self, execution_id):
+            return True
+        def base_sequence(self, execution_id):
+            return 0
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            return ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "text")
+        async def close(self):
+            self.closed = True
+    live = Live()
+    service = _event_service(_AllowAuthorization(), live)
+    stream = service.stream("execution", principal=Principal("owner", "tenant"))
+    await anext(stream)
+    await stream.aclose()
+    assert live.closed

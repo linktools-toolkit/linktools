@@ -147,7 +147,7 @@ async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
         ]
 
         assert result.status is TaskStatus.RECOVERY_REQUIRED
-        assert result.node_results[0].status is TaskStatus.RECOVERY_REQUIRED
+        assert result.node_states[0].status is TaskStatus.RECOVERY_REQUIRED
         assert events[-1].node_id is None
         assert events[-1].status is TaskStatus.RECOVERY_REQUIRED
     finally:
