@@ -20,18 +20,6 @@ from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, Protocol
 
 from linktools.core import environ
-from openai import (
-    APIConnectionError as OpenAIAPIConnectionError,
-)
-from openai import (
-    APIError as OpenAIAPIError,
-)
-from openai import (
-    APIStatusError as OpenAIAPIStatusError,
-)
-from openai import (
-    APITimeoutError as OpenAIAPITimeoutError,
-)
 from pydantic import ValidationError
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import TextOutput, Tool
@@ -48,8 +36,6 @@ from pydantic_ai.capabilities import (
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
     ContentFilterError,
-    ModelAPIError,
-    ModelHTTPError,
     RunCancelled,
     UnexpectedModelBehavior,
     UserError,
@@ -110,6 +96,7 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ..model import model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ..spec import MCPServerSpecCodec, RepositoryInstructions
 from ..workspace import (
@@ -1340,24 +1327,15 @@ def _with_cleanup_diagnostic(error: AIError, source: BaseException) -> AIError:
     )
 
 
-def _model_http_error_code(status_code: int) -> ErrorCode:
-    if status_code == 408:
-        return ErrorCode.MODEL_TIMEOUT
-    if status_code == 429:
-        return ErrorCode.MODEL_RATE_LIMITED
-    if status_code >= 500:
-        return ErrorCode.MODEL_UNAVAILABLE
-    if 400 <= status_code < 500:
-        return ErrorCode.MODEL_REQUEST_REJECTED
-    return ErrorCode.MODEL_API_ERROR
-
-
 def _execution_error(
     error: Exception,
     *,
     usage_limits: UsageLimits,
     run_usage: RunUsage,
 ) -> AIError:
+    provider_error = model_binding_error(error)
+    if provider_error is not None:
+        return provider_error
     diagnostics = ErrorDiagnostics.from_exception(error)
     if isinstance(error, UsageLimitExceeded):
         return AIError(
@@ -1384,52 +1362,6 @@ def _execution_error(
     if isinstance(error, ContentFilterError):
         return AIError(
             ErrorCode.MODEL_CONTENT_FILTERED,
-            retryable=False,
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, ModelHTTPError):
-        details: dict[str, JsonValue] = {
-            "model_name": error.model_name,
-            "status_code": error.status_code,
-        }
-        retry_after = error.retry_after
-        if isinstance(retry_after, (int, float, str)) and not isinstance(
-            retry_after, bool
-        ):
-            details["retry_after"] = retry_after
-        return AIError(
-            _model_http_error_code(error.status_code),
-            safe_details=details,
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, ModelAPIError):
-        return AIError(
-            ErrorCode.MODEL_API_ERROR,
-            retryable=False,
-            safe_details={"model_name": error.model_name},
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, OpenAIAPITimeoutError):
-        return AIError(
-            ErrorCode.MODEL_TIMEOUT,
-            retryable=True,
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, OpenAIAPIConnectionError):
-        return AIError(
-            ErrorCode.MODEL_UNAVAILABLE,
-            retryable=True,
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, OpenAIAPIStatusError):
-        return AIError(
-            _model_http_error_code(error.status_code),
-            safe_details={"status_code": error.status_code},
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, OpenAIAPIError):
-        return AIError(
-            ErrorCode.MODEL_API_ERROR,
             retryable=False,
             diagnostics=diagnostics,
         )

@@ -2,19 +2,23 @@
 # -*- coding: utf-8 -*-
 """Model metric error classification and cancellation semantics."""
 
+import httpx
 import pytest
+from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError
+
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import model_binding_error
 from linktools.ai.observe import Observation
+from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._metric_capability import (
     ModelObservationCapability,
-    _http_error_code,
     _model_error_code,
 )
 from pydantic_ai import RunContext
-from pydantic_ai.exceptions import RunCancelled
+from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, RunCancelled
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 
 class _Recorder:
@@ -26,14 +30,87 @@ class _Recorder:
         return True
 
 
-def test_model_metric_http_error_classification_is_canonical() -> None:
-    assert _http_error_code(408) is ErrorCode.MODEL_TIMEOUT
-    assert _http_error_code(429) is ErrorCode.MODEL_RATE_LIMITED
-    assert _http_error_code(500) is ErrorCode.MODEL_UNAVAILABLE
-    assert _http_error_code(503) is ErrorCode.MODEL_UNAVAILABLE
-    assert _http_error_code(400) is ErrorCode.MODEL_REQUEST_REJECTED
-    assert _http_error_code(499) is ErrorCode.MODEL_REQUEST_REJECTED
-    assert _http_error_code(302) is ErrorCode.MODEL_API_ERROR
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_error", ("pydantic", "openai"))
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    (
+        (408, ErrorCode.MODEL_TIMEOUT),
+        (429, ErrorCode.MODEL_RATE_LIMITED),
+        (503, ErrorCode.MODEL_UNAVAILABLE),
+        (400, ErrorCode.MODEL_REQUEST_REJECTED),
+        (302, ErrorCode.MODEL_API_ERROR),
+    ),
+)
+async def test_provider_http_failures_keep_execution_and_observation_codes(
+    provider_error: str,
+    status_code: int,
+    expected: ErrorCode,
+) -> None:
+    if provider_error == "pydantic":
+        error = ModelHTTPError(
+            status_code,
+            "model",
+            body={"secret": "provider response"},
+            headers={"Retry-After": "3"},
+        )
+    else:
+        error = APIStatusError(
+            "provider secret",
+            response=httpx.Response(
+                status_code,
+                request=httpx.Request("POST", "https://provider.invalid"),
+                headers={"Retry-After": "3"},
+            ),
+            body={"secret": "provider response"},
+        )
+    observation = await _observe_failure(error)
+    projected = model_binding_error(error)
+    assert projected is not None
+    execution = _execution_error(
+        error, usage_limits=UsageLimits(), run_usage=RunUsage(),
+    )
+    assert projected.code is execution.code is expected
+    assert projected.retryable == execution.retryable
+    assert projected.safe_details == execution.safe_details
+    assert observation.status == "FAILED"
+    assert observation.error_code == expected.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    (
+        (
+            APITimeoutError(request=httpx.Request("POST", "https://provider.invalid")),
+            ErrorCode.MODEL_TIMEOUT,
+        ),
+        (
+            APIConnectionError(request=httpx.Request("POST", "https://provider.invalid")),
+            ErrorCode.MODEL_UNAVAILABLE,
+        ),
+        (
+            APIError(
+                "provider secret",
+                request=httpx.Request("POST", "https://provider.invalid"),
+                body={"secret": "provider response"},
+            ),
+            ErrorCode.MODEL_API_ERROR,
+        ),
+        (ModelAPIError("model", "provider secret"), ErrorCode.MODEL_API_ERROR),
+    ),
+)
+async def test_provider_transport_failures_keep_execution_and_observation_codes(
+    error: Exception,
+    expected: ErrorCode,
+) -> None:
+    observation = await _observe_failure(error)
+    execution = _execution_error(
+        error, usage_limits=UsageLimits(), run_usage=RunUsage(),
+    )
+    assert execution.code is expected
+    assert observation.status == "FAILED"
+    assert observation.error_code == expected.value
 
 
 def test_model_metric_preserves_runtime_ai_error_code() -> None:
@@ -49,6 +126,12 @@ def test_model_metric_unknown_error_matches_runtime_internal_error() -> None:
 
 @pytest.mark.asyncio
 async def test_model_cancellation_records_cancelled_observation() -> None:
+    observation = await _observe_failure(RunCancelled("cancelled by application"))
+    assert observation.status == "CANCELLED"
+    assert observation.error_code == ErrorCode.EXECUTION_CANCELLED.value
+
+
+async def _observe_failure(error: Exception) -> Observation:
     recorder = _Recorder()
     capability = ModelObservationCapability(
         recorder,
@@ -61,7 +144,7 @@ async def test_model_cancellation_records_cancelled_observation() -> None:
     )
 
     async def handler(_request: object) -> object:
-        raise RunCancelled("cancelled by application")
+        raise error
 
     model = TestModel()
     context = RunContext(
@@ -78,13 +161,13 @@ async def test_model_cancellation_records_cancelled_observation() -> None:
         model_request_parameters=ModelRequestParameters(),
     )
 
-    with pytest.raises(RunCancelled):
+    with pytest.raises(type(error)) as captured:
         await capability.wrap_model_request(
             context,
             request_context=request_context,
             handler=handler,  # type: ignore[arg-type]
         )
 
+    assert captured.value is error
     assert len(recorder.observations) == 1
-    assert recorder.observations[0].status == "CANCELLED"
-    assert recorder.observations[0].error_code == ErrorCode.EXECUTION_CANCELLED.value
+    return recorder.observations[0]

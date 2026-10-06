@@ -11,12 +11,6 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from linktools.core import environ
-from openai import (
-    APIConnectionError as OpenAIAPIConnectionError,
-    APIError as OpenAIAPIError,
-    APIStatusError as OpenAIAPIStatusError,
-    APITimeoutError as OpenAIAPITimeoutError,
-)
 from pydantic import ValidationError
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -26,8 +20,6 @@ from pydantic_ai.capabilities import (
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
     ContentFilterError,
-    ModelAPIError,
-    ModelHTTPError,
     RunCancelled,
     UnexpectedModelBehavior,
     UserError,
@@ -43,6 +35,7 @@ from pydantic_ai.usage import UsageLimitExceeded
 from ..capability import AgentContext
 from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode
+from ..model import model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
 from ._metrics import (
@@ -786,16 +779,9 @@ def _model_error_code(error: Exception) -> str:
         return ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED.value
     if isinstance(error, ContentFilterError):
         return ErrorCode.MODEL_CONTENT_FILTERED.value
-    if isinstance(error, ModelHTTPError):
-        return _http_error_code(error.status_code).value
-    if isinstance(error, OpenAIAPITimeoutError):
-        return ErrorCode.MODEL_TIMEOUT.value
-    if isinstance(error, OpenAIAPIConnectionError):
-        return ErrorCode.MODEL_UNAVAILABLE.value
-    if isinstance(error, OpenAIAPIStatusError):
-        return _http_error_code(error.status_code).value
-    if isinstance(error, (ModelAPIError, OpenAIAPIError)):
-        return ErrorCode.MODEL_API_ERROR.value
+    provider_error = model_binding_error(error)
+    if provider_error is not None:
+        return provider_error.code.value
     if isinstance(error, UnexpectedModelBehavior):
         return ErrorCode.MODEL_RESPONSE_INVALID.value
     if isinstance(error, ValidationError):
@@ -803,18 +789,6 @@ def _model_error_code(error: Exception) -> str:
     if isinstance(error, UserError):
         return ErrorCode.INTERNAL_ERROR.value
     return ErrorCode.INTERNAL_ERROR.value
-
-
-def _http_error_code(status_code: int) -> ErrorCode:
-    if status_code == 408:
-        return ErrorCode.MODEL_TIMEOUT
-    if status_code == 429:
-        return ErrorCode.MODEL_RATE_LIMITED
-    if status_code >= 500:
-        return ErrorCode.MODEL_UNAVAILABLE
-    if 400 <= status_code < 500:
-        return ErrorCode.MODEL_REQUEST_REJECTED
-    return ErrorCode.MODEL_API_ERROR
 
 
 __all__: list[str] = []

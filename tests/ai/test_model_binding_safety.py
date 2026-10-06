@@ -2,11 +2,20 @@
 # -*- coding: utf-8 -*-
 """Model binding must not expose credential material."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 import pytest
+from pydantic_ai.exceptions import ModelHTTPError, RunCancelled, UnexpectedModelBehavior
+from pydantic_ai.messages import ModelMessage
+from pydantic_ai.models import ModelRequestParameters, StreamedResponse
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.settings import ModelSettings
+from pydantic_ai.tools import RunContext
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry
-from linktools.ai.model._openai import _OpenAIModelBinding, _resolved_connection
+from linktools.ai.model import ModelRegistry, model_binding_error
+from linktools.ai.model._openai import _OpenAIModelBinding, _RetryingModel, _resolved_connection
 
 
 def test_model_binding_contract_excludes_secret_material() -> None:
@@ -97,3 +106,62 @@ def test_model_alias_requires_an_existing_target() -> None:
     with pytest.raises(AIError) as raised:
         ModelRegistry().register_alias("alias", "missing")
     assert raised.value.code is ErrorCode.MODEL_CONNECTION_NOT_FOUND
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        TimeoutError("execution deadline"),
+        RunCancelled("cancelled"),
+        UnexpectedModelBehavior("output"),
+    ),
+)
+def test_model_binding_projection_leaves_execution_and_output_failures_to_callers(
+    error: Exception,
+) -> None:
+    assert model_binding_error(error) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_stream_entry", (False, True))
+async def test_model_transport_retry_stops_after_stream_entry(
+    after_stream_entry: bool,
+) -> None:
+    error = ModelHTTPError(503, "model", body={"secret": "provider response"})
+
+    class Provider(TestModel):
+        attempts = 0
+
+        @asynccontextmanager
+        async def request_stream(
+            self,
+            messages: list[ModelMessage],
+            model_settings: ModelSettings | None,
+            model_request_parameters: ModelRequestParameters,
+            run_context: RunContext[object] | None = None,
+        ) -> AsyncIterator[StreamedResponse]:
+            self.attempts += 1
+            if self.attempts == 1 and not after_stream_entry:
+                raise error
+            async with super().request_stream(
+                messages, model_settings, model_request_parameters, run_context,
+            ) as response:
+                yield response
+                if after_stream_entry:
+                    raise error
+
+    provider = Provider()
+    model = _RetryingModel(provider, 2, 0, vision=False)
+
+    async def request() -> None:
+        async with model.request_stream([], None, ModelRequestParameters()):
+            pass
+
+    if after_stream_entry:
+        with pytest.raises(ModelHTTPError) as captured:
+            await request()
+        assert captured.value is error
+        assert provider.attempts == 1
+    else:
+        await request()
+        assert provider.attempts == 2
