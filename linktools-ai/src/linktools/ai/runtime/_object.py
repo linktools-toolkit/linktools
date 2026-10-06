@@ -14,8 +14,8 @@ from ..storage import (
     ObjectStore,
     namespace_digest,
     read_object,
-    runtime_object_key,
 )
+from ._storage_keys import runtime_object_key
 from .state import RuntimeDomain, runtime_domain_uses_object_store
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")

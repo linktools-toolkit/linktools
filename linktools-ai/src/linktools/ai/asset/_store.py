@@ -445,7 +445,16 @@ class AssetStore:
     async def list_versions(self, key: AssetKey) -> "tuple[VersionSummary, ...]":
         """List immutable file versions from newest to oldest."""
         self._ensure_ready()
-        return await self._storage.list_versions(key)
+        try:
+            return await self._storage.list_versions(key)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_LAYER_UNKNOWN:
+                raise
+            raise AIError(
+                ErrorCode.ASSET_VERSION_LAYER_UNKNOWN,
+                safe_details=error.safe_details,
+                diagnostics=error.diagnostics,
+            ) from error
 
     async def get_at_revision(
         self,
@@ -454,14 +463,19 @@ class AssetStore:
     ) -> "bytes | None":
         """Return bytes for one immutable file revision."""
         self._ensure_ready()
-        versions = await self._storage.list_versions(key)
+        versions = await self.list_versions(key)
         if not any(version.entry_revision == revision for version in versions):
             raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
-        return await self._storage.get_at_revision(key, revision)
-
-    async def get_at_version(self, key: AssetKey, version: int) -> "bytes | None":
-        """Return bytes for one positive integer file version."""
-        return await self.get_at_revision(key, StorageEntryRevision(version))
+        try:
+            return await self._storage.get_at_revision(key, revision)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_LAYER_UNKNOWN:
+                raise
+            raise AIError(
+                ErrorCode.ASSET_VERSION_LAYER_UNKNOWN,
+                safe_details=error.safe_details,
+                diagnostics=error.diagnostics,
+            ) from error
 
     async def snapshot(
         self,
@@ -858,9 +872,6 @@ class _SnapshotAssetStore(AssetStore):
         if info is None or info.revision != revision:
             raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
         return await self.get(key)
-
-    async def get_at_version(self, key: AssetKey, version: int) -> bytes | None:
-        return await self.get_at_revision(key, StorageEntryRevision(version))
 
     async def batch_result(
         self,

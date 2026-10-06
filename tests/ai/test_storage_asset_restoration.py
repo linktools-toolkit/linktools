@@ -387,8 +387,8 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
         first = await backend.put(key, b"one")
         second = await backend.put(key, b"two", expected_revision=first.entry_revision)
         deleted = await backend.delete(key, expected_revision=second.entry_revision)
-        assert await backend.get_at_version(key, 1) == b"one"
-        assert await backend.get_at_version(key, 2) == b"two"
+        assert await backend.get_at_revision(key, first.entry_revision) == b"one"
+        assert await backend.get_at_revision(key, second.entry_revision) == b"two"
         assert await backend.get(key) is None
         assert len(await backend.list_versions(key)) == 3
         reset = await backend.reset(key, expected_revision=deleted.entry_revision)

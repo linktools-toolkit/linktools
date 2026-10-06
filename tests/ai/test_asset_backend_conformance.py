@@ -46,7 +46,7 @@ async def test_asset_batch_replay_keeps_original_revision_precondition(asset_sto
     changes = (StorageChange(StorageOperation.PUT, key, b"one", None),)
     revision = await asset_store.current_revision()
     committed = await asset_store.apply_batch(changes, expected_revision=revision, idempotency_key="batch")
-    await asset_store.put(key, b"two")
+    second = await asset_store.put(key, b"two")
     current = await asset_store.current_revision()
 
     assert await asset_store.apply_batch(
@@ -55,6 +55,8 @@ async def test_asset_batch_replay_keeps_original_revision_precondition(asset_sto
     assert await asset_store.current_revision() == current
     assert await asset_store.get(key) == b"two"
     assert len(await asset_store.list_versions(key)) == 2
+    assert await asset_store.get_at_revision(key, committed.results[0].info.revision) == b"one"
+    assert await asset_store.get_at_revision(key, second.revision) == b"two"
     with pytest.raises(AIError) as conflict:
         await asset_store.apply_batch(
             (StorageChange(StorageOperation.PUT, key, b"different", None),),
@@ -121,5 +123,6 @@ async def test_empty_asset_bytes_round_trip_through_versions_and_snapshot(asset_
     await restored.initialize()
     try:
         assert await restored.get(key) == b""
+        assert await restored.get_at_revision(key, info.revision) == b""
     finally:
         await restored.close()

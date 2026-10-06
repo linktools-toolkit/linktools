@@ -984,7 +984,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if collected:
             return tuple(sorted(collected.values(), key=lambda version: version.entry_revision.value, reverse=True))
         if key not in state.layer_indexes:
-            raise AIError(ErrorCode.ASSET_VERSION_LAYER_UNKNOWN)
+            raise AIError(ErrorCode.STORAGE_LAYER_UNKNOWN)
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
     async def get_at_revision(self, key: KeyT, entry_revision: StorageEntryRevision) -> 'ValueT | None':
@@ -998,23 +998,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             if any(version.entry_revision == entry_revision for version in versions):
                 return await backend.get_at_revision(key, entry_revision)
         raise AIError(
-            ErrorCode.ASSET_VERSION_LAYER_UNKNOWN
-            if key not in state.layer_indexes
-            else ErrorCode.STORAGE_VERSION_UNSUPPORTED
-        )
-
-    async def get_at_version(self, key: KeyT, version: int) -> 'ValueT | None':
-        state = await self._state()
-        layer_indexes = tuple(range(len(self._views)))
-        for layer_index in layer_indexes:
-            backend = self._views[layer_index].backend
-            if not isinstance(backend, VersionedStorage):
-                continue
-            versions = tuple(await backend.list_versions(key))
-            if any(item.entry_revision.value == version for item in versions):
-                return await backend.get_at_version(key, version)
-        raise AIError(
-            ErrorCode.ASSET_VERSION_LAYER_UNKNOWN
+            ErrorCode.STORAGE_LAYER_UNKNOWN
             if key not in state.layer_indexes
             else ErrorCode.STORAGE_VERSION_UNSUPPORTED
         )

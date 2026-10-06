@@ -285,12 +285,6 @@ class DirectoryAssetBackend:
             raise TypeError("entry_revision must be StorageEntryRevision")
         return await self.get(key)
 
-    async def get_at_version(self, key: AssetKey, version: int) -> "bytes | None":
-        """Read the current directory file; directory sources ignore versions."""
-        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
-            raise ValueError("version must be positive")
-        return await self.get(key)
-
     def _scan(self) -> "tuple[_DirectoryEntry, ...]":
         if not self._directory.is_dir():
             self._entries.clear()

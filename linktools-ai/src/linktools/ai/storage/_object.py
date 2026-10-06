@@ -61,18 +61,6 @@ class ObjectStore(Protocol):
     def local_paths(self) -> tuple[Path, ...]: ...
 
 
-def runtime_object_key(
-    *,
-    namespace_digest: str,
-    tenant_digest: str,
-    stored_digest: str,
-) -> str:
-    """Build the tenant-scoped physical key for immutable Runtime bytes."""
-    for value in (namespace_digest, tenant_digest, stored_digest):
-        _validate_digest(value)
-    return f"v1/runtime/{namespace_digest}/{tenant_digest}/{stored_digest}"
-
-
 @runtime_checkable
 class ObjectStoreInspection(Protocol):
     def list_objects(self) -> AsyncIterator[ObjectStat]: ...
@@ -229,5 +217,4 @@ __all__ = [
     "ObjectStoreInspection",
     "ObjectStoreMaintenance",
     "read_object",
-    "runtime_object_key",
 ]

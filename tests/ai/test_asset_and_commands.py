@@ -60,7 +60,7 @@ def test_in_memory_asset_store_cas_tombstone_and_history() -> None:
         first = await store.put(key, b"first")
         second = await store.put(key, b"second", expected_revision=first.revision)
         assert await store.get(key) == b"second"
-        assert await store.get_at_version(key, first.revision.value) == b"first"
+        assert await store.get_at_revision(key, first.revision) == b"first"
         assert len(await store.list_versions(key)) == 2
         deleted = await store.delete(key, expected_revision=second.revision)
         assert deleted.deleted is True
@@ -253,3 +253,54 @@ def test_asset_store_reset_clears_writer_overlay_and_reveals_layer() -> None:
         assert await store.get(key) is None
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["list", "get"])
+async def test_asset_history_keeps_domain_error_for_missing_layer(operation: str) -> None:
+    from linktools.ai.storage import StorageEntryRevision
+
+    store, _storage = make_store(InMemoryAssetBackend())
+    await store.initialize()
+    try:
+        key = AssetKey("resource", "missing")
+        with pytest.raises(AIError) as raised:
+            if operation == "list":
+                await store.list_versions(key)
+            else:
+                await store.get_at_revision(key, StorageEntryRevision(1))
+
+        assert raised.value.code is ErrorCode.ASSET_VERSION_LAYER_UNKNOWN
+        assert isinstance(raised.value.__cause__, AIError)
+        assert raised.value.__cause__.code is ErrorCode.STORAGE_LAYER_UNKNOWN
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [ErrorCode.STORAGE_LAYER_UNKNOWN, ErrorCode.STORAGE_UNAVAILABLE])
+async def test_asset_history_maps_only_missing_layer_read_failures(code: ErrorCode) -> None:
+    from linktools.ai.storage import StorageEntryRevision
+
+    cause = AIError(code, safe_details={"phase": "history_read"})
+
+    class FailingHistoryBackend(InMemoryAssetBackend):
+        async def get_at_revision(self, key: AssetKey, entry_revision: StorageEntryRevision) -> bytes | None:
+            raise cause
+
+    store, _storage = make_store(FailingHistoryBackend())
+    await store.initialize()
+    try:
+        key = AssetKey("resource", "present")
+        written = await store.put(key, b"value")
+        with pytest.raises(AIError) as raised:
+            await store.get_at_revision(key, written.revision)
+
+        if code is ErrorCode.STORAGE_LAYER_UNKNOWN:
+            assert raised.value.code is ErrorCode.ASSET_VERSION_LAYER_UNKNOWN
+            assert raised.value.__cause__ is cause
+            assert raised.value.safe_details == {"phase": "history_read"}
+        else:
+            assert raised.value is cause
+    finally:
+        await store.close()

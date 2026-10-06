@@ -425,9 +425,6 @@ class FilesystemAssetBackend:
             return None
         return await self._read_info(info)
 
-    async def get_at_version(self, key: AssetKey, version: int) -> bytes | None:
-        return await self.get_at_revision(key, StorageEntryRevision(version))
-
     async def _mutate(
         self,
         operation: StorageOperation,
