@@ -55,3 +55,8 @@ checks:
   pytest:
     paths:
       - ../tests/ai
+    groups:
+      evaluation:
+        - test_evaluation*
+        - '*capture*'
+      runtime: []

@@ -55,19 +55,45 @@ The reusable workflow intentionally declares no tier input. It cannot accept an
 input does not select manual tests. No path, ready transition, release or timer
 automatically enables manual probes. There is no scheduled run.
 
-The execution plan in `scripts/check/matrix.py` owns the Python versions, group
-names, file-family classification and pytest options. Both execution and legacy
+The execution plan in `scripts/check/matrix.py` owns the Python versions and
+pytest execution options. Package group names and filename matching rules live
+in their existing `linktools.yml` under `checks.pytest.groups`. Both execution and legacy
 aggregate jobs consume that plan; automatic package discovery is retained. Non-AI
-packages keep one check per version. AI runs two disjoint file-family groups per
-version: `evaluation` selects `test_evaluation*` and filenames containing
-`capture`; `runtime` selects every other file under `tests/ai` or
-`linktools-ai/tests`. New files join a group automatically; no file manifest or recorded timing database is required.
-Grouping never changes tier eligibility. The default group is `all`, so local
-checks continue to cover the complete chosen tier. To run one group locally:
+packages keep one check per version unless their manifest declares groups. For
+example, `linktools-ai/linktools.yml` declares:
+
+```yaml
+checks:
+  pytest:
+    paths:
+      - ../tests/ai
+    groups:
+      evaluation:
+        - test_evaluation*
+        - '*capture*'
+      runtime: []
+```
+
+`paths` may be omitted when conventional test directories are present. A
+declared pytest check with no test paths fails rather than collecting the entire
+repository. Patterns are case-sensitive filename globs, not paths. Exactly one group must
+have an empty list: it receives every unmatched file, including newly added
+files. A file matching multiple non-default groups fails collection rather than
+relying on ordering. Group names must be simple letters, digits, hyphens or
+underscores; `all` is reserved for unfiltered execution. A package without groups
+gets one `all` job. No Python-side package name or file-family classifier is
+needed to add another grouped package.
+
+`manage.py check` validates the manifest and passes the selected package's
+resolved pytest configuration to its subprocess. Group filtering applies only
+within that package's test paths, including conventional directories. The default
+`all` group preserves complete local coverage; named groups must be declared in
+the selected package's manifest, and unknown groups fail clearly. Tier selection
+remains independent:
 
 ```bash
-PYTEST_ADDOPTS='--ai-group=evaluation' python manage.py check linktools-ai --test-tier daily
-PYTEST_ADDOPTS='--ai-group=runtime' python manage.py check linktools-ai --test-tier daily
+PYTEST_ADDOPTS='--test-group=evaluation' python manage.py check linktools-ai --test-tier daily
+PYTEST_ADDOPTS='--test-group=runtime' python manage.py check linktools-ai --test-tier daily
 ```
 
 The original `Python <version> linktools-ai checks` names remain as aggregate

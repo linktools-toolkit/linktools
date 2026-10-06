@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+import manage
+
 from scripts.check.matrix import package_checks
 from scripts.check.tiers import select_ci_tier
 
@@ -74,7 +76,19 @@ def test_manual_takes_precedence(): pass
     result.assert_outcomes(passed=passed, deselected=deselected, warnings=0)
 
 
-def test_ci_matrix_retains_new_packages_and_partitions_ai() -> None:
+def test_ci_matrix_retains_new_packages_and_partitions_ai(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = Path(manage.PROJECT_PATH)
+    for package in ("linktools", "linktools-ai", "linktools-new"):
+        folder = tmp_path / package
+        folder.mkdir()
+        (folder / "tests").mkdir()
+        data = {"checks": {"pytest": {"paths": ["tests"]}}}
+        if package == "linktools-ai":
+            data["checks"]["pytest"]["groups"] = yaml.safe_load(
+                (original / package / "linktools.yml").read_text()
+            )["checks"]["pytest"]["groups"]
+        (folder / "linktools.yml").write_text(yaml.safe_dump(data, sort_keys=False))
+    monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
     checks = package_checks(("linktools", "linktools-ai", "linktools-new"))
     assert [(check["package"], check["group"]) for check in checks] == [
         ("linktools", "all"), ("linktools-ai", "evaluation"),
@@ -96,6 +110,9 @@ def test_ai_groups_partition_file_families_without_changing_tiers(
     root = Path(__file__).resolve().parents[2]
     pytester.makeconftest((root / "conftest.py").read_text(encoding="utf-8"))
     pytester.makeini((root / "pytest.ini").read_text(encoding="utf-8"))
+    check = manage.load_project_checks("linktools-ai", str(root / "linktools-ai"))["pytest"]
+    check["paths"] = [str(pytester.path / "tests/ai"), str(pytester.path / "linktools-ai/tests")]
+    monkeypatch.setenv("LINKTOOLS_PYTEST", json.dumps(check))
     families = {
         "tests/ai/test_evaluation_new.py": "evaluation",
         "tests/ai/test_new_capture.py": "evaluation",
@@ -117,7 +134,7 @@ def test_merge(): pass
 def test_manual(): pass
 ''', encoding="utf-8")
     result = pytester.runpytest(
-        "-q", "-p", "no:asyncio", "--collect-only", "--test-tier", tier, "--ai-group", group,
+        "-q", "-p", "no:asyncio", "--collect-only", "--test-tier", tier, "--test-group", group,
     )
     assert result.ret == 0
     selected = {line for line in result.outlines if line.startswith(("tests/", "linktools-ai/tests/")) and "::test_" in line}
@@ -137,17 +154,20 @@ def test_empty_ai_group_fails_instead_of_reporting_coverage(
     monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
     root = Path(__file__).resolve().parents[2]
     pytester.makeconftest((root / "conftest.py").read_text(encoding="utf-8"))
+    check = manage.load_project_checks("linktools-ai", str(root / "linktools-ai"))["pytest"]
+    check["paths"] = [str(pytester.path / "tests/ai")]
+    monkeypatch.setenv("LINKTOOLS_PYTEST", json.dumps(check))
     path = pytester.path / "tests" / "ai" / "test_runtime.py"
     path.parent.mkdir(parents=True)
     path.write_text("def test_runtime(): pass\n", encoding="utf-8")
-    result = pytester.runpytest("-q", "-p", "no:asyncio", "--ai-group", "evaluation")
+    result = pytester.runpytest("-q", "-p", "no:asyncio", "--test-group", "evaluation")
     assert result.ret == pytest.ExitCode.NO_TESTS_COLLECTED
 
 
 def test_generated_ci_plan_keeps_execution_and_compatibility_versions_in_sync() -> None:
     root = Path(__file__).resolve().parents[2]
     plan = json.loads(subprocess.check_output(
-        [sys.executable, "-m", "scripts.check.matrix", json.dumps(["linktools", "linktools-ai", "linktools-new"])],
+        [sys.executable, "-m", "scripts.check.matrix", json.dumps(["linktools", "linktools-ai"])],
         cwd=root, text=True,
     ))
     assert plan["python-versions"] == ["3.10", "3.x"]
@@ -155,7 +175,7 @@ def test_generated_ci_plan_keeps_execution_and_compatibility_versions_in_sync() 
         options = shlex.split(check["pytest-args"])
         assert options[:2] == ["-n", "4"]
         assert "--dist=loadfile" in options
-        assert "--ai-group=" + check["group"] in options
+        assert "--test-group=" + check["group"] in options
         assert "-rs" in options
     workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
     jobs = workflow["jobs"]

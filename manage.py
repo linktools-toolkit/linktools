@@ -27,7 +27,7 @@ _INSTALL_MODULE_PATTERN = re.compile(
 _SUPPORTED_CHECKS = {"gate", "ruff", "pytest"}
 _GATE_FIELDS = {"modules"}
 _RUFF_FIELDS = {"select", "paths"}
-_PYTEST_FIELDS = {"paths"}
+_PYTEST_FIELDS = {"paths", "groups"}
 
 __missing__ = object()
 
@@ -352,7 +352,7 @@ def _default_pytest_paths(project: str, project_path: str) -> "typing.Tuple[str,
     ))
 
 
-def _load_project_checks(project: str, project_path: str) -> "typing.Dict[str, typing.Any]":
+def load_project_checks(project: str, project_path: str) -> "typing.Dict[str, typing.Any]":
     path = os.path.join(project_path, "linktools.yml")
     if not os.path.isfile(path):
         print("[-] %s Linktools config is missing: %s" % (project, path), file=sys.stderr)
@@ -402,17 +402,39 @@ def _load_project_checks(project: str, project_path: str) -> "typing.Dict[str, t
         if unknown:
             print("[-] %s checks.pytest has unknown field(s): %s" % (project, ", ".join(unknown)), file=sys.stderr)
             raise SystemExit(1)
-        paths = _require_string_list(pytest.get("paths"), "%s checks.pytest.paths" % project)
+        paths = _require_string_list(pytest["paths"], "%s checks.pytest.paths" % project) if "paths" in pytest else ()
         result["pytest"] = {
             "paths": _resolve_paths(project, project_path, paths, "pytest"),
         }
+        if "groups" in pytest:
+            groups = _require_mapping(pytest["groups"], "%s checks.pytest.groups" % project)
+            normalized = {}
+            for name, patterns in groups.items():
+                if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name) or name == "all":
+                    print("[-] %s has an invalid or reserved pytest group: %r" % (project, name), file=sys.stderr)
+                    raise SystemExit(1)
+                if not isinstance(patterns, list):
+                    print("[-] %s pytest group %s must be a list of filename patterns" % (project, name), file=sys.stderr)
+                    raise SystemExit(1)
+                patterns = _require_string_list(patterns, "%s pytest group %s" % (project, name)) if patterns else ()
+                if any("/" in pattern or "\\" in pattern for pattern in patterns):
+                    print("[-] %s pytest group patterns must match filenames, not paths" % project, file=sys.stderr)
+                    raise SystemExit(1)
+                normalized[name] = patterns
+            if sum(not patterns for patterns in normalized.values()) != 1:
+                print("[-] %s pytest groups require exactly one empty-list fallback group" % project, file=sys.stderr)
+                raise SystemExit(1)
+            result["pytest"]["groups"] = normalized
     paths = list(result.get("pytest", {}).get("paths", ()))
     for path in _default_pytest_paths(project, project_path):
         if not any(os.path.commonpath((path, declared)) == declared for declared in paths):
             paths = [declared for declared in paths if os.path.commonpath((path, declared)) != path]
             paths.append(path)
     if paths:
-        result["pytest"] = {"paths": tuple(paths)}
+        result.setdefault("pytest", {})["paths"] = tuple(paths)
+    elif "pytest" in result:
+        print("[-] %s declares pytest checks but has no test paths" % project, file=sys.stderr)
+        raise SystemExit(1)
     return result
 
 
@@ -491,7 +513,7 @@ def _run_pytest(
     print("[+] %s: pytest" % project)
     command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--test-tier", tier]
     command.extend(check["paths"])
-    _run_check(command, environment)
+    _run_check(command, dict(environment, LINKTOOLS_PYTEST=json.dumps(check)))
 
 
 def _normalize_version(value: str) -> str:
@@ -666,7 +688,7 @@ def handle_check(args: argparse.Namespace) -> None:
     for project in projects:
         project_path = modules[project]["path"]
         requirements[project] = _read_requires_python(project, project_path)
-        checks[project] = _load_project_checks(project, project_path)
+        checks[project] = load_project_checks(project, project_path)
 
     compatible = _compatible_projects(args, projects, requirements)
     environment = _check_environment()

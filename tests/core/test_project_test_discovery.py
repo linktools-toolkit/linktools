@@ -42,7 +42,7 @@ def test_new_package_discovers_conventional_tests(
         _write_test(tmp_path / path)
     monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
 
-    checks = manage._load_project_checks("linktools-example", str(project))
+    checks = manage.load_project_checks("linktools-example", str(project))
 
     assert checks["pytest"]["paths"] == tuple(str(tmp_path / path) for path in test_paths)
 
@@ -56,7 +56,7 @@ def test_new_package_without_pytest_files_needs_no_pytest_gate(
     _write_test(tmp_path / "tests" / "unrelated")
     monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
 
-    checks = manage._load_project_checks("linktools-example", str(project))
+    checks = manage.load_project_checks("linktools-example", str(project))
 
     assert "pytest" not in checks
 
@@ -85,7 +85,7 @@ def test_explicit_pytest_paths_cannot_hide_conventional_tests(
         file.write("  pytest:\n    paths:\n      - acceptance\n")
     monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
 
-    checks = manage._load_project_checks("linktools-example", str(project))
+    checks = manage.load_project_checks("linktools-example", str(project))
 
     assert checks["pytest"]["paths"] == (
         str(project / "acceptance"), str(project / "tests"), str(tmp_path / "tests" / "example"),
@@ -102,7 +102,7 @@ def test_explicit_pytest_paths_do_not_duplicate_conventional_tests(
         file.write("  pytest:\n    paths:\n      - tests\n      - ../tests\n")
     monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
 
-    checks = manage._load_project_checks("linktools-example", str(project))
+    checks = manage.load_project_checks("linktools-example", str(project))
 
     assert checks["pytest"]["paths"] == (str(project / "tests"), str(tmp_path / "tests"))
 
@@ -117,7 +117,7 @@ def test_conventional_directory_replaces_narrow_explicit_paths(
         file.write("  pytest:\n    paths:\n      - tests/test_example.py\n")
     monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
 
-    checks = manage._load_project_checks("linktools-example", str(project))
+    checks = manage.load_project_checks("linktools-example", str(project))
 
     assert checks["pytest"]["paths"] == (str(project / "tests"),)
 
@@ -130,7 +130,7 @@ def test_conventional_discovery_recurses_for_pytest_default_filenames(
     _write_test(project / "tests" / "nested", name)
     monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
 
-    checks = manage._load_project_checks("linktools-example", str(project))
+    checks = manage.load_project_checks("linktools-example", str(project))
 
     assert checks["pytest"]["paths"] == (str(project / "tests"),)
 
@@ -138,7 +138,7 @@ def test_conventional_discovery_recurses_for_pytest_default_filenames(
 def test_core_keeps_explicit_core_and_cli_test_paths() -> None:
     root = Path(manage.PROJECT_PATH)
 
-    checks = manage._load_project_checks("linktools", str(root / "linktools"))
+    checks = manage.load_project_checks("linktools", str(root / "linktools"))
 
     assert checks["pytest"]["paths"] == (str(root / "tests" / "core"), str(root / "tests" / "cli"))
 
@@ -150,7 +150,7 @@ def test_default_core_discovery_does_not_collect_other_packages(
     _write_test(tmp_path / "tests" / "unrelated")
     monkeypatch.setattr(manage, "PROJECT_PATH", str(tmp_path))
 
-    checks = manage._load_project_checks("linktools", str(project))
+    checks = manage.load_project_checks("linktools", str(project))
 
     assert "pytest" not in checks
 
@@ -167,7 +167,7 @@ def test_discovered_tests_cannot_escape_repository(
     monkeypatch.setattr(manage, "PROJECT_PATH", str(root))
 
     with pytest.raises(SystemExit, match="1"):
-        manage._load_project_checks("linktools-example", str(project))
+        manage.load_project_checks("linktools-example", str(project))
 
     assert "pytest path escapes repository" in capsys.readouterr().err
 
