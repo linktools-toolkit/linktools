@@ -46,7 +46,12 @@ from .recovery import (
 
 
 class _ExecutionStreamFailure(Exception):
-    """Marks a live stream or pure tree projection failure for TaskGraph views."""
+    """Marks an optional broker or validated presentation-only failure.
+
+    Authoritative reads, durable decoding, identity/cursor validation and
+    cancellation retain their original exceptions. Broker boundaries must
+    preserve AIError rather than classifying it as an optional failure.
+    """
 
     def __init__(self, cause: Exception) -> None:
         super().__init__(type(cause).__name__)

@@ -566,6 +566,8 @@ async def _iterate_live(
             yield item
     except asyncio.CancelledError:
         raise
+    except AIError:
+        raise
     except Exception as error:
         raise _ExecutionStreamFailure(error) from error
 
@@ -574,6 +576,8 @@ async def _close_live(subscription: _LiveSubscription) -> None:
     try:
         await subscription.close()
     except asyncio.CancelledError:
+        raise
+    except AIError:
         raise
     except Exception as error:
         raise _ExecutionStreamFailure(error) from error
@@ -591,6 +595,8 @@ async def _wait_live_activity(
             timeout=timeout,
         )
     except (asyncio.CancelledError, asyncio.TimeoutError):
+        raise
+    except AIError:
         raise
     except Exception as error:
         raise _ExecutionStreamFailure(error) from error
@@ -636,10 +642,8 @@ class DefaultEventService:
         await self._authorize_read(execution_id, principal)
         try:
             live = self._live.claim_local_producer(execution_id)
-        except AIError as error:
-            if error.code is ErrorCode.EXECUTION_NOT_READY:
-                raise
-            raise _ExecutionStreamFailure(error) from error
+        except AIError:
+            raise
         except Exception as error:
             raise _ExecutionStreamFailure(error) from error
         async for event in self._stream_with_live(
@@ -665,6 +669,8 @@ class DefaultEventService:
             await self._authorize_read(execution_id, principal)
         try:
             is_local_producer = self._live.is_local_producer(execution_id)
+        except AIError:
+            raise
         except Exception as error:
             raise _ExecutionStreamFailure(error) from error
         if not is_local_producer:
@@ -678,14 +684,17 @@ class DefaultEventService:
 
         try:
             base_sequence = self._live.base_sequence(execution_id)
+        except AIError:
+            raise
         except Exception as error:
             raise _ExecutionStreamFailure(error) from error
         if base_sequence is None:
-            error = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            raise _ExecutionStreamFailure(error) from error
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if live is None:
             try:
                 live = self._live.subscribe(execution_id)
+            except AIError:
+                raise
             except Exception as error:
                 raise _ExecutionStreamFailure(error) from error
         cursor = after_sequence
@@ -892,6 +901,8 @@ class DefaultEventService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
                 is_local_producer = self._live.is_local_producer(execution_id)
+            except AIError:
+                raise
             except Exception as error:
                 raise _ExecutionStreamFailure(error) from error
             if is_local_producer:

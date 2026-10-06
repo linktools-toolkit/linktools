@@ -473,3 +473,76 @@ async def test_event_list_preserves_repository_failure() -> None:
     with pytest.raises(RuntimeError) as caught:
         await service.list("execution", principal=Principal("principal", "tenant", "service"))
     assert caught.value is failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["claim_local_producer", "is_local_producer", "base_sequence", "subscribe"])
+@pytest.mark.parametrize("typed", [False, True])
+async def test_event_broker_preserves_typed_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    typed: bool,
+) -> None:
+    from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+
+    cause = AIError(ErrorCode.STORAGE_UNAVAILABLE) if typed else OSError("broker failed")
+    broker = LiveExecutionEventBroker()
+    broker.register_local_producer("execution", 0)
+
+    def fail(*args, **kwargs):
+        raise cause
+
+    monkeypatch.setattr(broker, operation, fail)
+    service = _event_service(_AllowAuthorization(), broker)
+    with pytest.raises(AIError if typed else _ExecutionStreamFailure) as raised:
+        await anext(service.stream("execution", principal=Principal("owner", "tenant")))
+
+    assert (raised.value if typed else raised.value.cause) is cause
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["iterate", "close", "activity"])
+@pytest.mark.parametrize("typed", [False, True])
+async def test_live_subscription_preserves_typed_failures(operation: str, typed: bool) -> None:
+    from linktools.ai.runtime._event import _close_live, _iterate_live, _wait_live_activity
+    from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+
+    cause = AIError(ErrorCode.STORAGE_UNAVAILABLE) if typed else OSError("broker failed")
+
+    class Subscription:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise cause
+
+        async def close(self):
+            raise cause
+
+        async def wait_for_activity(self, _execution_id):
+            raise cause
+
+    subscription = Subscription()
+    with pytest.raises(AIError if typed else _ExecutionStreamFailure) as raised:
+        if operation == "iterate":
+            await anext(_iterate_live(subscription))
+        elif operation == "close":
+            await _close_live(subscription)
+        else:
+            await _wait_live_activity(subscription, "execution", timeout=1)
+
+    assert (raised.value if typed else raised.value.cause) is cause
+
+
+@pytest.mark.asyncio
+async def test_live_stream_missing_base_sequence_is_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = LiveExecutionEventBroker()
+    broker.register_local_producer("execution", 0)
+    monkeypatch.setattr(broker, "base_sequence", lambda _execution_id: None)
+    service = _event_service(_AllowAuthorization(), broker)
+    with pytest.raises(AIError) as raised:
+        await anext(service.stream("execution", principal=Principal("owner", "tenant")))
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

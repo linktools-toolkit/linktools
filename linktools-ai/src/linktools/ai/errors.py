@@ -357,7 +357,14 @@ class AssetError(AIError):
 
 
 class TaskObservationError(AIError):
-    """An observer or presentation stream failed without changing Task state."""
+    """An observer or optional presentation stream failed without changing Task state.
+
+    Callback failures preserve the original cause and last acknowledged cursor.
+    Stream failures exclude authoritative reads, durable decoding and protocol
+    validation errors. Cancellation is never converted to this error. A stream
+    failure during cleanup may indicate unfinished local work and is not a
+    successful observation result.
+    """
 
     def __init__(
         self,

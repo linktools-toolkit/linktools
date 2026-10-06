@@ -540,7 +540,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
 
 
 @pytest.mark.asyncio
-async def test_task_graph_watch_classifies_missing_dynamic_node_as_stream_error() -> None:
+async def test_task_graph_watch_preserves_missing_dynamic_node_integrity_error() -> None:
     cause_details = {"graph_id": "graph", "node_id": "late-node"}
 
     class MissingNodeGraphService:
@@ -590,15 +590,12 @@ async def test_task_graph_watch_classifies_missing_dynamic_node_as_stream_error(
         _watch_tree,
     )
 
-    with pytest.raises(TaskObservationError) as raised:
+    with pytest.raises(AIError) as raised:
         await anext(run.watch())
 
-    assert raised.value.origin == "stream"
-    assert raised.value.cause_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
+    assert not isinstance(raised.value, TaskObservationError)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert raised.value.safe_details == cause_details
-    assert isinstance(raised.value.__cause__, AIError)
-    assert raised.value.__cause__.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert raised.value.__cause__.safe_details == cause_details
 
 
 @pytest.mark.asyncio
@@ -1301,10 +1298,7 @@ async def test_task_graph_observer_error_does_not_start_graph_wait() -> None:
 
 @pytest.mark.asyncio
 async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -> None:
-    cause = AIError(
-        ErrorCode.STORAGE_INTEGRITY_ERROR,
-        safe_details={"execution_id": "execution"},
-    )
+    cause = RuntimeError("optional broker is unavailable")
 
     def failed_watch_tree(
         execution_id,
@@ -1335,8 +1329,8 @@ async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -
             delivered.append(await anext(stream))
 
     assert raised.value.origin == "stream"
-    assert raised.value.cause_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
-    assert raised.value.safe_details == {"execution_id": "execution"}
+    assert raised.value.cause_code is None
+    assert raised.value.safe_details == {"cause_type": "RuntimeError"}
     assert delivered
     assert raised.value.cursor == delivered[-1].cursor
     assert raised.value.__cause__ is cause
@@ -1468,3 +1462,161 @@ def test_task_run_event_rejects_execution_without_node() -> None:
     )
     with pytest.raises(ValueError):
         TaskGraphRunEvent("graph", None, event)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["initial_state", "dynamic_state", "inspect"])
+@pytest.mark.parametrize("typed", [False, True])
+async def test_task_graph_watch_preserves_authoritative_read_failures(
+    boundary: str,
+    typed: bool,
+) -> None:
+    cause = AIError(ErrorCode.STORAGE_UNAVAILABLE) if typed else OSError("read failed")
+
+    class BrokenGraphService(_TaskGraphService):
+        async def state(self, graph_id: str, *, principal: Principal):
+            if boundary == "initial_state":
+                raise cause
+            snapshot = await super().state(graph_id, principal=principal)
+            if boundary == "dynamic_state":
+                if getattr(self, "read", False):
+                    raise cause
+                self.read = True
+                snapshot.nodes = ()
+            return snapshot
+
+    class BrokenExecutions(_ExecutionService):
+        async def inspect(self, execution_id: str, *, principal: Principal):
+            if boundary == "inspect":
+                raise cause
+            return await super().inspect(execution_id, principal=principal)
+
+    runtime = _Runtime()
+    runtime.graph = BrokenGraphService()
+    runtime.executions = BrokenExecutions()
+    run = _task_graph_run(runtime, "graph", Principal("owner", "tenant"), _watch_tree)
+
+    with pytest.raises(type(cause)) as raised:
+        async for _event in run.watch():
+            pass
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["encode_graph_watch_cursor", "encode_execution_watch_cursor"])
+async def test_task_graph_watch_preserves_cursor_protocol_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    cause = ValueError("invalid cursor identity")
+
+    def fail(*args, **kwargs):
+        raise cause
+
+    monkeypatch.setattr(f"linktools.ai.runtime._task.{encoding}", fail)
+    run = _task_graph_run(_Runtime(), "graph", Principal("owner", "tenant"), _watch_tree)
+
+    with pytest.raises(ValueError) as raised:
+        async for _event in run.watch():
+            pass
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["sync", "async", "cancel"])
+async def test_task_graph_observer_preserves_cause_and_last_acknowledged_cursor(
+    failure: str,
+) -> None:
+    cause = (
+        asyncio.CancelledError("callback cancelled")
+        if failure == "cancel"
+        else AIError(ErrorCode.STORAGE_UNAVAILABLE, safe_details={"source": "callback"})
+    )
+    run = _task_graph_run(_Runtime(), "graph", Principal("owner", "tenant"), _watch_tree)
+    delivered: list[TaskGraphRunEvent] = []
+
+    async def callback(event: TaskGraphRunEvent) -> None:
+        await asyncio.sleep(0)
+        if delivered:
+            raise cause
+        delivered.append(event)
+
+    def observer(event: TaskGraphRunEvent):
+        if delivered and failure == "sync":
+            raise cause
+        return callback(event)
+
+    with pytest.raises(asyncio.CancelledError if failure == "cancel" else TaskObservationError) as raised:
+        await run.observe(observer)
+
+    assert len(delivered) == 1
+    if failure == "cancel":
+        assert raised.value is cause
+    else:
+        assert raised.value.origin == "callback"
+        assert raised.value.__cause__ is cause
+        assert raised.value.cursor == delivered[0].cursor
+        assert raised.value.cause_code == ErrorCode.STORAGE_UNAVAILABLE.value
+        assert raised.value.safe_details == {"source": "callback"}
+
+
+@pytest.mark.asyncio
+async def test_task_graph_watch_preserves_same_round_durable_failure() -> None:
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    class BrokenGraphService(_TaskGraphService):
+        def stream_events(self, *args, **kwargs):
+            async def values():
+                raise cause
+                yield
+            return values()
+
+    def broken_tree(*args, **kwargs):
+        async def values():
+            raise _ExecutionStreamFailure(OSError("broker failed"))
+            yield
+        return values()
+
+    runtime = _Runtime()
+    runtime.graph = BrokenGraphService()
+    run = _task_graph_run(runtime, "graph", Principal("owner", "tenant"), broken_tree)
+
+    with pytest.raises(AIError) as raised:
+        await anext(run.watch(after_graph_sequence=1))
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+async def test_task_graph_watch_preserves_authoritative_failure_during_cleanup() -> None:
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    started = asyncio.Event()
+
+    class BrokenGraphService(_TaskGraphService):
+        def stream_events(self, *args, **kwargs):
+            async def values():
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise cause
+                yield
+            return values()
+
+    def broken_tree(*args, **kwargs):
+        async def values():
+            await started.wait()
+            raise _ExecutionStreamFailure(OSError("broker failed"))
+            yield
+        return values()
+
+    runtime = _Runtime()
+    runtime.graph = BrokenGraphService()
+    run = _task_graph_run(runtime, "graph", Principal("owner", "tenant"), broken_tree)
+
+    with pytest.raises(AIError) as raised:
+        await anext(run.watch(after_graph_sequence=1))
+
+    assert raised.value is cause

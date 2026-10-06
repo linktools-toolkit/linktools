@@ -593,3 +593,140 @@ async def test_subagent_execution_cannot_be_retried_or_forked(
             ForkExecutionRequest("fork", principal, "fork-key"),
         )
     assert fork_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["root", "child", "event_identity", "model_payload"])
+async def test_tree_stream_protocol_failures_remain_authoritative(invalid: str) -> None:
+    reader = _ExecutionReader()
+    if invalid == "root":
+        reader.root = replace(reader.root, execution_id="other-root")
+    elif invalid == "child":
+        reader.child = replace(reader.child, parent_execution_id="other-root")
+
+    class InvalidEvents(_EventStreamer):
+        def stream(self, execution_id: str, **kwargs):
+            if invalid not in {"event_identity", "model_payload"}:
+                return super().stream(execution_id, **kwargs)
+
+            async def values():
+                yield ExecutionStreamEvent(
+                    "other" if invalid == "event_identity" else execution_id,
+                    1,
+                    ExecutionEventType.MODEL_REQUEST_STARTED.value,
+                    [] if invalid == "model_payload" else {},
+                )
+            return values()
+
+    streamer = ExecutionTreeStreamer(reader, InvalidEvents(), ExecutionTreeBroker())
+    with pytest.raises(ValueError if invalid == "event_identity" else AIError) as raised:
+        await anext(streamer.stream("root", principal=Principal("owner", "tenant")))
+
+    if invalid != "event_identity":
+        assert raised.value.code is (
+            ErrorCode.REQUEST_FIELD_INVALID if invalid == "root" else ErrorCode.STORAGE_INTEGRITY_ERROR
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["subscribe", "wait", "drain", "close"])
+@pytest.mark.parametrize("typed", [False, True])
+async def test_tree_broker_wraps_only_untyped_optional_failures(
+    operation: str,
+    typed: bool,
+) -> None:
+    from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+
+    cause = AIError(ErrorCode.STORAGE_UNAVAILABLE) if typed else OSError("broker failed")
+
+    class Subscription:
+        async def wait(self):
+            if operation == "wait":
+                raise cause
+            await asyncio.Event().wait()
+
+        def drain(self):
+            if operation == "drain":
+                raise cause
+            return ()
+
+        async def close(self):
+            if operation == "close":
+                raise cause
+
+    class Broker:
+        def subscribe(self, _execution_id):
+            if operation == "subscribe":
+                raise cause
+            return Subscription()
+
+    streamer = ExecutionTreeStreamer(_RootOnlyExecutionReader(), _EventStreamer(), Broker())
+    with pytest.raises(AIError if typed else _ExecutionStreamFailure) as raised:
+        async for _event in streamer.stream("root", principal=Principal("owner", "tenant")):
+            pass
+
+    assert (raised.value if typed else raised.value.cause) is cause
+
+
+@pytest.mark.asyncio
+async def test_tree_stream_durable_error_wins_over_same_round_broker_failure() -> None:
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    class BrokenEvents:
+        def stream(self, *args, **kwargs):
+            async def values():
+                raise cause
+                yield
+            return values()
+
+    class Subscription:
+        async def wait(self):
+            raise OSError("broker failed")
+
+        async def close(self):
+            pass
+
+    class Broker:
+        def subscribe(self, _execution_id):
+            return Subscription()
+
+    streamer = ExecutionTreeStreamer(_RootOnlyExecutionReader(), BrokenEvents(), Broker())
+    with pytest.raises(AIError) as raised:
+        await anext(streamer.stream("root", principal=Principal("owner", "tenant")))
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+async def test_tree_stream_preserves_authoritative_failure_during_cleanup() -> None:
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    started = asyncio.Event()
+
+    class BrokenEvents:
+        def stream(self, *args, **kwargs):
+            async def values():
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise cause
+                yield
+            return values()
+
+    class Subscription:
+        async def wait(self):
+            await started.wait()
+            raise OSError("broker failed")
+
+        async def close(self):
+            pass
+
+    class Broker:
+        def subscribe(self, _execution_id):
+            return Subscription()
+
+    streamer = ExecutionTreeStreamer(_RootOnlyExecutionReader(), BrokenEvents(), Broker())
+    with pytest.raises(AIError) as raised:
+        await anext(streamer.stream("root", principal=Principal("owner", "tenant")))
+
+    assert raised.value is cause

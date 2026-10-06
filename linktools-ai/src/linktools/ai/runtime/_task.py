@@ -578,83 +578,73 @@ class TaskGraphRun(Generic[AppT]):
         execution_tasks: dict[str, asyncio.Task[ExecutionTreeEvent]] = {}
 
         async def start_execution(node_id: str, execution_id: str) -> None:
-            try:
-                current = execution_ids.get(node_id)
-                if current is not None:
-                    if current != execution_id:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    return
-                execution_ids[node_id] = execution_id
-                node = nodes.get(node_id)
-                if node is None:
-                    snapshot = await self._state()
-                    refreshed_states = {
-                        item.node_id: item for item in snapshot.node_states
-                    }
-                    refreshed_nodes = {
-                        item.node_id: item for item in snapshot.nodes
-                    }
-                    if (
-                        len(refreshed_states) != len(snapshot.node_states)
-                        or len(refreshed_nodes) != len(snapshot.nodes)
-                        or set(refreshed_states) != set(refreshed_nodes)
-                    ):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    states.clear()
-                    states.update(refreshed_states)
-                    nodes.clear()
-                    nodes.update(refreshed_nodes)
-                    node = nodes.get(node_id)
-                if node is None:
-                    raise AIError(
-                        ErrorCode.STORAGE_INTEGRITY_ERROR,
-                        safe_details={
-                            "graph_id": self.graph_id,
-                            "node_id": node_id,
-                        },
-                    )
+            current = execution_ids.get(node_id)
+            if current is not None:
+                if current != execution_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return
+            execution_ids[node_id] = execution_id
+            node = nodes.get(node_id)
+            if node is None:
+                snapshot = await self._state()
+                refreshed_states = {
+                    item.node_id: item for item in snapshot.node_states
+                }
+                refreshed_nodes = {
+                    item.node_id: item for item in snapshot.nodes
+                }
                 if (
-                    node.task is not None
-                    and node.task.id == "linktools.ai.input"
-                    and node.task.revision == 1
+                    len(refreshed_states) != len(snapshot.node_states)
+                    or len(refreshed_nodes) != len(snapshot.nodes)
+                    or set(refreshed_states) != set(refreshed_nodes)
                 ):
-                    return
-                execution = await self._runtime.executions.inspect(
-                    execution_id,
-                    principal=self._principal,
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                states.clear()
+                states.update(refreshed_states)
+                nodes.clear()
+                nodes.update(refreshed_nodes)
+                node = nodes.get(node_id)
+            if node is None:
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    safe_details={
+                        "graph_id": self.graph_id,
+                        "node_id": node_id,
+                    },
                 )
-                if execution.binding_kind == "task":
-                    return
-                stream = self._watch_tree(
-                    execution_id,
-                    principal=self._principal,
-                    after_sequences=after_execution_sequences.get(node_id),
-                    include_content=include_content,
-                )
-                execution_streams[node_id] = stream
-                execution_tasks[node_id] = asyncio.create_task(
-                    stream.__anext__(),
-                    name=f"task-run-execution-{self.graph_id}-{node_id}",
-                )
-            except asyncio.CancelledError:
-                raise
-            except _ExecutionStreamFailure:
-                raise
-            except Exception as error:
-                raise _ExecutionStreamFailure(error) from error
+            if (
+                node.task is not None
+                and node.task.id == "linktools.ai.input"
+                and node.task.revision == 1
+            ):
+                return
+            execution = await self._runtime.executions.inspect(
+                execution_id,
+                principal=self._principal,
+            )
+            if execution.binding_kind == "task":
+                return
+            stream = self._watch_tree(
+                execution_id,
+                principal=self._principal,
+                after_sequences=after_execution_sequences.get(node_id),
+                include_content=include_content,
+            )
+            execution_streams[node_id] = stream
+            execution_tasks[node_id] = asyncio.create_task(
+                stream.__anext__(),
+                name=f"task-run-execution-{self.graph_id}-{node_id}",
+            )
 
         def last_delivered_cursor() -> str | None:
-            try:
-                return encode_graph_watch_cursor(
-                    self._runtime.namespace,
-                    self._principal.tenant_id,
-                    self.graph_id,
-                    include_content=include_content,
-                    graph_sequence=cursor_graph_sequence,
-                    execution_sequences=cursor_execution_sequences,
-                )
-            except Exception:
-                return None
+            return encode_graph_watch_cursor(
+                self._runtime.namespace,
+                self._principal.tenant_id,
+                self.graph_id,
+                include_content=include_content,
+                graph_sequence=cursor_graph_sequence,
+                execution_sequences=cursor_execution_sequences,
+            )
 
         try:
             graph_stream = self._graph.stream_events(
@@ -679,6 +669,19 @@ class TaskGraphRun(Generic[AppT]):
                     waiters,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                # An optional stream failure must not hide a durable failure
+                # that has already completed in the same observation round.
+                for task in done:
+                    if task.cancelled():
+                        task.result()
+                for task in waiters:
+                    if task not in done:
+                        continue
+                    error = task.exception()
+                    if error is not None and not isinstance(
+                        error, (StopAsyncIteration, _ExecutionStreamFailure)
+                    ):
+                        raise error
                 if graph_task is not None and graph_task in done:
                     task = graph_task
                     graph_task = None
@@ -693,22 +696,19 @@ class TaskGraphRun(Generic[AppT]):
                             if event.node_id is None:
                                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                             await start_execution(event.node_id, event.execution_id)
-                        try:
-                            projected_event = TaskGraphRunEvent(
+                        projected_event = TaskGraphRunEvent(
+                            self.graph_id,
+                            event.node_id,
+                            event,
+                            encode_graph_watch_cursor(
+                                self._runtime.namespace,
+                                self._principal.tenant_id,
                                 self.graph_id,
-                                event.node_id,
-                                event,
-                                encode_graph_watch_cursor(
-                                    self._runtime.namespace,
-                                    self._principal.tenant_id,
-                                    self.graph_id,
-                                    include_content=include_content,
-                                    graph_sequence=event.sequence,
-                                    execution_sequences=cursor_execution_sequences,
-                                ),
-                            )
-                        except Exception as error:
-                            raise _ExecutionStreamFailure(error) from error
+                                include_content=include_content,
+                                graph_sequence=event.sequence,
+                                execution_sequences=cursor_execution_sequences,
+                            ),
+                        )
                         yield projected_event
                         cursor_graph_sequence = event.sequence
                         graph_task = asyncio.create_task(
@@ -743,32 +743,29 @@ class TaskGraphRun(Generic[AppT]):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         node_sequences[event.execution_id] = durable_sequence
                     node_sequences = next_execution_sequences.get(node_id, {})
-                    try:
-                        event_with_cursor = replace(
-                            event,
-                            cursor=encode_execution_watch_cursor(
-                                self._runtime.namespace,
-                                self._principal.tenant_id,
-                                event.root_execution_id,
-                                include_content=include_content,
-                                sequences=node_sequences,
-                            ),
-                        )
-                        projected_event = TaskGraphRunEvent(
+                    event_with_cursor = replace(
+                        event,
+                        cursor=encode_execution_watch_cursor(
+                            self._runtime.namespace,
+                            self._principal.tenant_id,
+                            event.root_execution_id,
+                            include_content=include_content,
+                            sequences=node_sequences,
+                        ),
+                    )
+                    projected_event = TaskGraphRunEvent(
+                        self.graph_id,
+                        node_id,
+                        event_with_cursor,
+                        encode_graph_watch_cursor(
+                            self._runtime.namespace,
+                            self._principal.tenant_id,
                             self.graph_id,
-                            node_id,
-                            event_with_cursor,
-                            encode_graph_watch_cursor(
-                                self._runtime.namespace,
-                                self._principal.tenant_id,
-                                self.graph_id,
-                                include_content=include_content,
-                                graph_sequence=cursor_graph_sequence,
-                                execution_sequences=next_execution_sequences,
-                            ),
-                        )
-                    except Exception as error:
-                        raise _ExecutionStreamFailure(error) from error
+                            include_content=include_content,
+                            graph_sequence=cursor_graph_sequence,
+                            execution_sequences=next_execution_sequences,
+                        ),
+                    )
                     yield projected_event
                     cursor_execution_sequences = next_execution_sequences
                     stream = execution_streams[node_id]
@@ -788,10 +785,20 @@ class TaskGraphRun(Generic[AppT]):
             if graph_task is not None:
                 tasks.append(graph_task)
             for task in tasks:
-                if not task.done():
+                if task.cancelled():
+                    try:
+                        task.result()
+                    except asyncio.CancelledError as error:
+                        cleanup_errors.append(error)
+                elif not task.done():
                     task.cancel()
             if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+                cleanup_errors.extend(
+                    outcome for outcome in outcomes
+                    if isinstance(outcome, BaseException)
+                    and not isinstance(outcome, (asyncio.CancelledError, StopAsyncIteration))
+                )
             if graph_stream is not None:
                 close = getattr(graph_stream, "aclose", None)
                 if close is not None:
@@ -806,14 +813,25 @@ class TaskGraphRun(Generic[AppT]):
                         await close()
                     except BaseException as error:
                         cleanup_errors.append(error)
-            if active_error is None and cleanup_errors:
-                error = cleanup_errors[0]
+            if cleanup_errors and (
+                active_error is None
+                or isinstance(active_error, TaskObservationError)
+                and active_error.origin == "stream"
+            ):
+                error = next(
+                    (error for error in cleanup_errors if isinstance(error, asyncio.CancelledError)),
+                    next(
+                        (error for error in cleanup_errors if not isinstance(error, _ExecutionStreamFailure)),
+                        cleanup_errors[0] if active_error is None else None,
+                    ),
+                )
                 if isinstance(error, _ExecutionStreamFailure):
                     raise _task_stream_observation_error(
                         error,
                         last_delivered_cursor(),
                     ) from error.cause
-                raise error
+                if error is not None:
+                    raise error
 
     async def _replay_events(
         self,
