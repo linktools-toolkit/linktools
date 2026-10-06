@@ -30,7 +30,7 @@ from ._durability import CommitObservation, DurableCommitState, run_durable_comm
 from ._repositories import (
     EventRepositoryImpl,
     ExecutionRepositoryImpl,
-    OperationLedgerRepository,
+    OperationLedgerRepositoryImpl,
     ToolRepositoryImpl,
 )
 from ._repository_common import (
@@ -48,10 +48,10 @@ class RuntimeRecoveryCommands:
         self,
         execution: ExecutionRepositoryImpl,
         events: EventRepositoryImpl,
-        operations: OperationLedgerRepository,
+        operations: OperationLedgerRepositoryImpl,
         tools: ToolRepositoryImpl,
         *,
-        execution_operations: OperationLedgerRepository,
+        execution_operations: OperationLedgerRepositoryImpl,
         background_tasks: "set[asyncio.Task[object]]",
     ) -> None:
         self._execution = execution

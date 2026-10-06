@@ -98,7 +98,7 @@ class EvaluationRecord:
             raise ValueError("live evaluation requires its graph template content")
 
     @property
-    def evaluation_id(self) -> str:
+    def experiment_id(self) -> str:
         return self.manifest.experiment_id
 
 

@@ -62,18 +62,18 @@ class EvaluationRetention:
         purged, blocked, ready = [], [], []
         for record in records:
             await self._authorization.authorize(principal, AuthorizationAction.EVALUATION_PURGE,
-                ResourceRef(ResourceKind.EVALUATION, record.evaluation_id, principal.tenant_id,
+                ResourceRef(ResourceKind.EVALUATION, record.experiment_id, principal.tenant_id,
                             record.manifest.principal.principal_id))
-            record = await repository.close_reservation_gate(record.evaluation_id)
+            record = await repository.close_reservation_gate(record.experiment_id)
             for intent in record.intents:
                 if intent.released:
                     continue
                 outcome = await self._graph.cancel_submission(intent.submission.ref, principal=principal,
-                    idempotency_key=f"evaluation-expire:{record.evaluation_id}:{intent.slot_id}")
-                record = await repository.settle_intent(record.evaluation_id, intent.slot_id,
+                    idempotency_key=f"evaluation-expire:{record.experiment_id}:{intent.slot_id}")
+                record = await repository.settle_intent(record.experiment_id, intent.slot_id,
                     confirmed=outcome.admitted, released=outcome.status in _TERMINAL)
             if any(not intent.released for intent in record.intents):
-                blocked.append(record.evaluation_id)
+                blocked.append(record.experiment_id)
                 continue
             ready.append(record)
 
@@ -97,8 +97,8 @@ class EvaluationRetention:
                 if record.owned_input_captures:
                     references = await self._captures.task_input_objects(record.owned_input_captures, principal=principal)
                     objects.extend((RuntimeDomain.TASK, reference) for reference in references)
-                await repository.purge(record.evaluation_id, now=now, objects=tuple(objects))
-                purged.append(record.evaluation_id)
+                await repository.purge(record.experiment_id, now=now, objects=tuple(objects))
+                purged.append(record.experiment_id)
 
             datasets = await repository.purge_expired_datasets(now=now, owner_principal_id=principal.principal_id, limit=limit)
             expired_inputs = await self._captures.expire_inputs(principal=principal, now=now, limit=limit)

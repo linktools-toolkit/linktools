@@ -22,7 +22,7 @@ from ._store import (
     alias_digest,
 )
 from ._repository_common import (
-    OperationLedgerRepository,
+    OperationLedgerRepositoryImpl,
     RepositoryBase as _RepositoryBase,
     ResourceRepository as _ResourceRepository,
     projected_record as _projected_record,
@@ -1426,7 +1426,7 @@ def build_recovery_repository_bundle(
     tenant_id: str,
 ) -> dict[str, _RepositoryBase]:
     return {
-        "operations": OperationLedgerRepository(store, namespace=namespace, tenant_id=tenant_id, domain=RuntimeDomain.RECOVERY),
+        "operations": OperationLedgerRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=RuntimeDomain.RECOVERY),
         "approvals": RecoveryApprovalRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
         "external_calls": RecoveryExternalCallRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
         "checkpoints": _RecoveryCheckpointRepository(store, namespace=namespace, tenant_id=tenant_id),

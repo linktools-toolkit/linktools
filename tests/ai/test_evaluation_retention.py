@@ -443,7 +443,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
         await storage.evaluation.records.reserve_experiment(record)
         reference = await put(objects, "private-evidence", "private content")
         bundle = EvidenceBundle(EvidenceRef("evaluation", "tenant", "bundle", "0" * 64),
-            TargetTrialRef(record.evaluation_id, "trial"),
+            TargetTrialRef(record.experiment_id, "trial"),
             ExecutionTargetEvidence(ExecutionSubjectRef("evaluation", "tenant", "source"), "succeeded"),
             attachments=(EvidenceAttachmentRef("raw", "text/plain", reference),))
         bundle = replace(bundle, ref=replace(bundle.ref, digest=bundle.digest))
@@ -459,7 +459,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
             await retention.purge_expired(principal=service_principal("tenant", "owner"),
                 now=now + timedelta(seconds=120), exclusive=guard)
         with pytest.raises(AIError) as unavailable:
-            await storage.evaluation.records.get(record.evaluation_id, tenant_id="tenant")
+            await storage.evaluation.records.get(record.experiment_id, tenant_id="tenant")
         assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
         assert await objects.stat(reference.key) is not None
         assert await storage.evaluation.records.pending_cleanup(owner_principal_id="owner", limit=100)

@@ -173,9 +173,9 @@ class RuntimeEvaluations:
         seen: set[str] = set()
         now = _now()
         while True:
-            if record.evaluation_id in seen:
+            if record.experiment_id in seen:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            seen.add(record.evaluation_id)
+            seen.add(record.experiment_id)
             require_evaluation_content(record, now=now)
             source = record.manifest.source_experiment_id
             if source is None:
@@ -315,8 +315,8 @@ class RuntimeEvaluations:
             content_expires_at=min(deadlines) if deadlines else None,
             metadata_expires_at=None if spec.policy.metadata_retention_seconds is None else now + timedelta(seconds=spec.policy.metadata_retention_seconds),
             owned_input_captures=tuple(dict.fromkeys(owned_captures))))
-        self._watch(record.evaluation_id, bound, principal)
-        return EvaluationRun(self, record.evaluation_id, principal)
+        self._watch(record.experiment_id, bound, principal)
+        return EvaluationRun(self, record.experiment_id, principal)
 
     async def get(self, experiment_id: str, *, principal: Principal) -> "EvaluationRun":
         await self._record(experiment_id, principal)
@@ -473,9 +473,9 @@ class RuntimeEvaluations:
         evidence = {item.trial: item.evidence_ref for item in record.evidence}
         candidates = {item.slot_id: item for item in record.manifest.candidates}
         result = []
-        revisions = {f"evaluation:{record.evaluation_id}": record.revision}
+        revisions = {f"evaluation:{record.experiment_id}": record.revision}
         for plan in record.manifest.trials:
-            trial = TargetTrialRef(record.evaluation_id, plan.trial_id)
+            trial = TargetTrialRef(record.experiment_id, plan.trial_id)
             slot = _target_slot(trial)
             item = TrialView(trial, plan.case_ref, plan.candidate_slot_id, plan.repetition,
                              disposition=dispositions.get(slot), evidence_ref=evidence.get(trial))
@@ -528,8 +528,8 @@ class RuntimeEvaluations:
                     reference = intent.submission.graph.nodes[-1].input["evidence_ref"]
                     evidence_ref = EvidenceRef(reference["namespace"], reference["tenant_id"],
                                                reference["evidence_id"], reference["digest"])
-                results.append(ScoreAttemptView(record.evaluation_id,
-                    None if node is None or node.execution_id is None else canonical_sha256({"experiment": record.evaluation_id, "slot": slot}),
+                results.append(ScoreAttemptView(record.experiment_id,
+                    None if node is None or node.execution_id is None else canonical_sha256({"experiment": record.experiment_id, "slot": slot}),
                     trial.trial, scorer.slot_id, scorer.task, status,
                     scorer_execution=None if node is None or node.execution_id is None else ExecutionSubjectRef(
                         self._namespace, record.manifest.principal.tenant_id, node.execution_id),
@@ -655,7 +655,7 @@ class RuntimeEvaluations:
         left, left_report = snapshots[spec.baseline.experiment_id]
         right, right_report = snapshots[spec.candidate.experiment_id]
         scoring = tuple(report.cutoff for identity, (_, report) in snapshots.items()
-                        if identity not in {left.evaluation_id, right.evaluation_id})
+                        if identity not in {left.experiment_id, right.experiment_id})
         cutoff = ComparisonReadCutoff(left_report.cutoff, right_report.cutoff, scoring)
         if spec.cutoff is not None and spec.cutoff != cutoff:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "requested cutoff is no longer current")
@@ -811,7 +811,7 @@ class RuntimeEvaluations:
                 try:
                     graph = await self._compiler.graph(candidates[trial.candidate_slot_id], cases[trial.case_ref],
                         graph_id=canonical_sha256({"experiment": experiment_id, "slot": slot}),
-                        principal=record.manifest.principal, input_mode=record.manifest.input_mode, owner_id=record.evaluation_id,
+                        principal=record.manifest.principal, input_mode=record.manifest.input_mode, owner_id=record.experiment_id,
                         owned_captures=list(record.owned_input_captures))
                     candidate = candidates[trial.candidate_slot_id]
                     limits = (record.manifest.policy.target_graph_limits if candidate.graph_template is None
@@ -862,21 +862,21 @@ class RuntimeEvaluations:
         policy = record.manifest.policy
         slot = _target_slot(trial) if scorer is None else _score_slot(trial, scorer.slot_id)
         capacity = policy.target_concurrency if scorer is None else policy.scorer_concurrency
-        current = await self._record(record.evaluation_id, record.manifest.principal)
+        current = await self._record(record.experiment_id, record.manifest.principal)
         if current.gate != "open" or sum(not item.released and (item.scorer_slot_id is None) == (scorer is None)
                                           for item in current.intents) >= capacity:
             return
         if scorer is not None:
             engine = engine.with_definitions(self._recorder)
         submission = await engine.describe_submission(graph, principal=record.manifest.principal,
-            idempotency_key=f"evaluation:{record.evaluation_id}:{slot}", limits=limits,
-            correlation={"evaluation_experiment": record.evaluation_id, "evaluation_trial": trial.trial_id,
+            idempotency_key=f"evaluation:{record.experiment_id}:{slot}", limits=limits,
+            correlation={"evaluation_experiment": record.experiment_id, "evaluation_trial": trial.trial_id,
                          "evaluation_slot": slot})
         timeout = (policy.trial_timeout_seconds if scorer is None else
                    policy.human_timeout_seconds if scorer.task == TaskRef.deferred_input() else policy.scorer_timeout_seconds)
         intent = EvaluationLaunchIntent(slot, trial, None if scorer is None else scorer.slot_id,
                                         submission, None if timeout is None else _now() + timedelta(seconds=timeout))
-        registered = await self._state.register_launch_intent(record.evaluation_id, intent, capacity=capacity)
+        registered = await self._state.register_launch_intent(record.experiment_id, intent, capacity=capacity)
         selected = next((item for item in registered.intents if item.slot_id == slot), None)
         if selected is None:
             return
@@ -884,20 +884,20 @@ class RuntimeEvaluations:
             await self._cancel_intent(registered, selected, record.manifest.principal)
             return
         result = await engine.start_prepared(selected.submission)
-        await self._state.settle_intent(record.evaluation_id, slot,
+        await self._state.settle_intent(record.experiment_id, slot,
                                        confirmed=result.admitted, released=not result.admitted)
         if not result.admitted:
-            await self._disposition(record.evaluation_id, slot, "submission_cancelled", cancelled=True)
+            await self._disposition(record.experiment_id, slot, "submission_cancelled", cancelled=True)
 
     async def _cancel_intent(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, principal: Principal,
     ) -> None:
         result = await self._graph.cancel_submission(intent.submission.ref, principal=principal,
-            idempotency_key=f"evaluation-cancel:{record.evaluation_id}:{intent.slot_id}")
-        await self._state.settle_intent(record.evaluation_id, intent.slot_id,
+            idempotency_key=f"evaluation-cancel:{record.experiment_id}:{intent.slot_id}")
+        await self._state.settle_intent(record.experiment_id, intent.slot_id,
                                        confirmed=result.admitted, released=result.status in _TERMINAL)
         if not result.admitted:
-            await self._disposition(record.evaluation_id, intent.slot_id, "submission_cancelled", cancelled=True)
+            await self._disposition(record.experiment_id, intent.slot_id, "submission_cancelled", cancelled=True)
 
     async def _capture_evidence(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
@@ -911,7 +911,7 @@ class RuntimeEvaluations:
         if candidate.task is not None:
             node = nodes["target"]
             if node.execution_id is None:
-                await self._disposition(record.evaluation_id, intent.slot_id, node.error_code or "execution_unavailable")
+                await self._disposition(record.experiment_id, intent.slot_id, node.error_code or "execution_unavailable")
                 return
             value = (InlineValue.from_value(await self._history.task_result(state.graph_id, "target", principal=principal))
                      if node.status is TaskStatus.SUCCEEDED else None)
@@ -973,7 +973,7 @@ class RuntimeEvaluations:
                 for item in usage.cutoffs]}, model_usage=model_usage)
         bundle = replace(bundle, ref=replace(bundle.ref, digest=bundle.digest))
         await self._state.publish_evidence(bundle)
-        await self._state.publish_trial_evidence(record.evaluation_id, EvaluationTrialEvidence(intent.trial, bundle.ref))
+        await self._state.publish_trial_evidence(record.experiment_id, EvaluationTrialEvidence(intent.trial, bundle.ref))
 
     async def _capture_target_input(
         self, state: TaskGraphState, principal: Principal, *, graph_target: bool,
@@ -1096,10 +1096,10 @@ class RuntimeEvaluations:
         elif scorer.input_projection["kind"] == "agent_literal":
             data = dict(AgentTaskInput(scorer.input_projection["instructions"] + "\nDATA\n" +
                                        canonical_json_bytes(data).decode("utf-8")))
-        return TaskGraph(canonical_sha256({"experiment": record.evaluation_id, "slot": slot}), (
+        return TaskGraph(canonical_sha256({"experiment": record.experiment_id, "slot": slot}), (
             TaskNode("score", task=scorer.task, input=data, output_type=ScoreBundle, failure_policy="isolate"),
             TaskNode("record", task=self._recorder.ref, dependencies=("score",),
-                input={"experiment_id": record.evaluation_id, "slot_id": slot, "evidence_ref": sample.evidence_ref.to_mapping()},
+                input={"experiment_id": record.experiment_id, "slot_id": slot, "evidence_ref": sample.evidence_ref.to_mapping()},
                 dependency_policy="all_terminal", failure_policy="isolate", max_attempts=3),
         ))
 
@@ -1116,7 +1116,7 @@ class RuntimeEvaluations:
     async def _collect_score(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
     ) -> None:
-        record = await self._record(record.evaluation_id, record.manifest.principal, allow_expired=True)
+        record = await self._record(record.experiment_id, record.manifest.principal, allow_expired=True)
         if any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in record.scores):
             return
         node = next(item for item in state.node_states if item.node_id == "score")
@@ -1150,8 +1150,8 @@ class RuntimeEvaluations:
         decision = next((item for item in record.human_decisions if item.slot_id == intent.slot_id), None)
         if node.execution_id is None:
             status = "not_attempted"
-        result = ScoreAttemptView(record.evaluation_id,
-            None if node.execution_id is None else canonical_sha256({"experiment": record.evaluation_id, "slot": intent.slot_id}),
+        result = ScoreAttemptView(record.experiment_id,
+            None if node.execution_id is None else canonical_sha256({"experiment": record.experiment_id, "slot": intent.slot_id}),
             intent.trial, scorer.slot_id, scorer.task, status, score,
             None if node.execution_id is None else ExecutionSubjectRef(self._namespace, record.manifest.principal.tenant_id, node.execution_id),
             GraphSubjectRef(self._namespace, record.manifest.principal.tenant_id, state.graph_id),
@@ -1163,7 +1163,7 @@ class RuntimeEvaluations:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return value
             return replace(value, scores=(*value.scores, result))
-        await self._state.update(record.evaluation_id, append)
+        await self._state.update(record.experiment_id, append)
 
     async def _model_usage(
         self, summary: UsageSummary, principal: Principal,
@@ -1263,8 +1263,8 @@ class RuntimeEvaluations:
             content_expires_at=min(source_deadlines) if source_deadlines else None,
             metadata_expires_at=None if source.manifest.policy.metadata_retention_seconds is None else
             now + timedelta(seconds=source.manifest.policy.metadata_retention_seconds)))
-        self._watch(record.evaluation_id, bound, principal)
-        return EvaluationRun(self, record.evaluation_id, principal)
+        self._watch(record.experiment_id, bound, principal)
+        return EvaluationRun(self, record.experiment_id, principal)
 
     async def _human_score(
         self, experiment_id: str, principal: Principal, request: HumanScoreRequest,

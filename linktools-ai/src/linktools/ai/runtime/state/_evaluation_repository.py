@@ -178,11 +178,11 @@ class EvaluationRepositoryImpl(RepositoryBase):
                 return existing_record
             reservation = IdempotencyRecord(
                 scope, record.idempotency_key_digest, record.request_digest,
-                ResourceKind.EVALUATION, record.evaluation_id, IdempotencyStatus.COMPLETED,
+                ResourceKind.EVALUATION, record.experiment_id, IdempotencyStatus.COMPLETED,
                 record.manifest_digest, None, record.created_at, record.created_at,
             )
             await self._put(transaction, "idempotency", identity, reservation)
-            await self._put(transaction, "evaluation", record.evaluation_id, record)
+            await self._put(transaction, "evaluation", record.experiment_id, record)
             return record
         async def readback() -> EvaluationRecord | None:
             receipt = await self._get("idempotency", ["evaluation.run", record.idempotency_key_digest], IdempotencyRecord)
@@ -334,7 +334,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
 
     async def _source_expired(self, transaction: StateTransaction, record: EvaluationRecord, now: datetime) -> bool:
         source_id = record.manifest.source_experiment_id
-        seen = {record.evaluation_id}
+        seen = {record.experiment_id}
         while source_id is not None:
             if source_id in seen:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -442,7 +442,7 @@ class EvaluationRepositoryImpl(RepositoryBase):
                 scores = tuple(replace(item, score=None if item.score is None else numerical_score(item.score),
                     evidence_ref=None, reason=None if item.reason is None else "evidence_deleted") for item in record.scores)
                 decisions = tuple(replace(item, score=numerical_score(item.score)) for item in record.human_decisions)
-                target_trials = (tuple((record.evaluation_id, trial.trial_id) for trial in record.manifest.trials)
+                target_trials = (tuple((record.experiment_id, trial.trial_id) for trial in record.manifest.trials)
                                  if record.manifest.kind == "experiment" else
                                  tuple((trial.target_experiment_id, trial.trial_id) for trial in record.manifest.source_trials))
                 slots = (*("target:" + trial.trial_id for trial in record.manifest.trials),
