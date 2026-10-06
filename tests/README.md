@@ -73,8 +73,10 @@ with an independent package. Each member still runs its own `manage.py check`,
 with separate logs and summaries. An ordinary failure does not skip later members;
 the job ultimately fails. Cancellation signals stop the loop. New packages without
 `ci-pool` remain independent. Core, common and mobile currently share the `linktools`
-pool under `Python <version> linktools checks`; the separate common/mobile check
-names are no longer emitted. Core retains its full-package installation.
+pool. Its job title lists the members, for example
+`Python <version> linktools + linktools-common + linktools-mobile checks`.
+Adding a member through its manifest also updates the title. Separate common/mobile
+check names are no longer emitted. Core retains its full-package installation.
 
 Packages can instead declare test groups. For example,
 `linktools-ai/linktools.yml` declares:

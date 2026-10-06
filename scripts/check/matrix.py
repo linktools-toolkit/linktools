@@ -35,7 +35,7 @@ def package_checks(packages: "typing.Iterable[str]") -> "typing.List[typing.Dict
                 # Core checks exercise every installed package's command entry points.
                 "install": "" if "linktools" in bundle else " ".join(bundle),
                 "name": "%s checks%s" % (
-                    package, " (%s)" % group if group != "all" else "",
+                    " + ".join(bundle), " (%s)" % group if group != "all" else "",
                 ),
                 "pytest-args": "-n 4 --dist=loadfile --capture=fd -rs --test-group=%s%s" % (
                     group, " --durations=50" if group != "all" else "",

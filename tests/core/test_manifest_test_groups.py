@@ -311,13 +311,28 @@ def test_ci_pools_are_manifest_owned_and_new_packages_stay_independent(repositor
         _set_ci_pool(project, "quick")
     rows = package_checks((second.name, first.name, new.name))
     assert [(row["name"], row["packages"]) for row in rows] == [
-        ("quick checks", "%s %s" % (second.name, first.name)),
+        ("%s + %s checks" % (second.name, first.name), "%s %s" % (second.name, first.name)),
         ("linktools-new checks", new.name),
     ]
     assert [row["install"] for row in rows] == [row["packages"] for row in rows]
     assert all(row["group"] == "all" for row in rows)
     _set_ci_pool(second, "other")
     assert len(package_checks((second.name, first.name, new.name))) == 3
+
+
+def test_ci_pool_title_tracks_new_members_from_manifests(repository: Path) -> None:
+    projects = tuple(_new_package(repository, "linktools-" + name) for name in ("first", "second", "new"))
+    packages = tuple(project.name for project in projects)
+    for project in projects[:2]:
+        _set_ci_pool(project, "quick")
+    rows = package_checks(packages)
+    assert rows[0]["name"] == " + ".join(packages[:2]) + " checks"
+    assert rows[1]["name"] == packages[2] + " checks"
+    _set_ci_pool(projects[2], "quick")
+    rows = package_checks(packages)
+    assert len(rows) == 1
+    assert rows[0]["name"] == " + ".join(packages) + " checks"
+    assert rows[0]["packages"].split() == list(packages)
 
 
 def test_ci_pool_including_core_keeps_full_install_regardless_of_order(repository: Path) -> None:
@@ -356,12 +371,14 @@ def test_ci_pool_cannot_mix_with_pytest_groups(
 def test_repository_pool_preserves_all_discovered_package_coverage() -> None:
     modules = manage.get_modules()
     rows = package_checks(modules)
-    core = next(row for row in rows if row["name"] == "linktools checks")
+    core = next(row for row in rows if "linktools" in row["packages"].split())
     assert {"linktools", "linktools-common", "linktools-mobile"} <= set(core["packages"].split())
+    assert core["name"] == " + ".join(core["packages"].split()) + " checks"
     assert core["install"] == ""
     ai = [row for row in rows if row["packages"] == "linktools-ai"]
     assert {"evaluation", "runtime"} <= {row["group"] for row in ai}
     assert all(row["install"] == "linktools-ai" for row in ai)
+    assert all(row["name"] == "linktools-ai checks (%s)" % row["group"] for row in ai)
     cntr = next(row for row in rows if row["name"] == "linktools-cntr checks")
     assert cntr["packages"] == cntr["install"] == "linktools-cntr"
     expected = {
