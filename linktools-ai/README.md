@@ -862,3 +862,11 @@ optional stdio sandbox protocols. `ErrorDiagnostics` is available from
 `linktools.ai.errors`.
 
 Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.
+
+### Observe a TaskGraph while waiting
+
+Use `TaskGraphRun.wait_observed(observer, ...)` for a single managed observation
+and authoritative wait. It returns `TaskGraphWaitResult` with the same-read graph,
+public status, acknowledged cursor, and optional observation diagnostics.
+See [TaskGraph observation and source migration](docs/task-observation.md) for
+error, cancellation, cleanup, paging, and downstream integration contracts.
