@@ -144,9 +144,10 @@ Other source migrations in this change:
   a non-object JSON root or insertion-order bytes must explicitly serialize their
   required bytes and use the byte writer
 - Replace `get_at_version(key, integer)` with `get_at_revision(key,
-  StorageEntryRevision(integer))`; for overlay reads preserve the actual layer
-  in the revision instead of inventing one. Asset versions and `list_versions`
-  retain their separate resource-version meaning
+  StorageEntryRevision(integer))`; prefer reusing the returned `entry_revision`.
+  Revisions retain their integer representation and overlays keep their existing
+  ordered layer-selection semantics. Asset versions and `list_versions` retain
+  their separate resource-version meaning
 - `EvaluationRecord.experiment_id` replaces its derived `evaluation_id` property.
   Tombstone and cleanup wire fields named `evaluation_id` are unchanged
 - The concrete ledger implementation is `OperationLedgerRepositoryImpl`; the
