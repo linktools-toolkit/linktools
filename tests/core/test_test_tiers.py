@@ -183,7 +183,7 @@ def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
     jobs = workflow["jobs"]
     assert jobs["python"]["strategy"]["matrix"]["python-version"] == "${{ fromJSON(needs.discover.outputs.plan).python-versions }}"
     assert jobs["python"]["strategy"]["fail-fast"] is False
-    assert jobs["coverage"]["name"] == "Python test coverage"
+    assert jobs["coverage"]["name"] == "Python checks passed"
 
 
 def test_ci_coverage_rejects_every_incomplete_dependency(tmp_path: Path) -> None:

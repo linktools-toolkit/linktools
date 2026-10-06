@@ -116,7 +116,7 @@ PYTEST_ADDOPTS='--test-group=evaluation' python manage.py check linktools-ai --t
 PYTEST_ADDOPTS='--test-group=runtime' python manage.py check linktools-ai --test-tier daily
 ```
 
-The `Python test coverage` gate directly requires discovery, compatibility and
+The `Python checks passed` gate directly requires discovery, compatibility and
 the entire package matrix to succeed; cancelled, skipped or failed jobs and empty test groups do not
 count as completed coverage. Per-job summaries identify package, Python, group,
 tier and outcome; pytest also prints skip reasons. The final summary states the

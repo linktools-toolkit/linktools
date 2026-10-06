@@ -159,7 +159,7 @@ jobs:
           fi
 
   coverage:
-    name: Python test coverage
+    name: Python checks passed
     needs: [discover, python36, python]
     if: ${{ always() }}
     runs-on: ubuntu-latest
