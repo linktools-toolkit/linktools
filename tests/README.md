@@ -70,7 +70,8 @@ checks:
     groups:
       evaluation:
         - test_evaluation*
-        - '*capture*'
+        - test_captured*
+        - test_graph_capture*
       runtime: []
 ```
 

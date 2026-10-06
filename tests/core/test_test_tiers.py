@@ -115,10 +115,12 @@ def test_ai_groups_partition_file_families_without_changing_tiers(
     monkeypatch.setenv("LINKTOOLS_PYTEST", json.dumps(check))
     families = {
         "tests/ai/test_evaluation_new.py": "evaluation",
-        "tests/ai/test_new_capture.py": "evaluation",
+        "tests/ai/test_new_capture.py": "runtime",
+        "tests/ai/test_captured_new.py": "evaluation",
+        "tests/ai/test_graph_capture_new.py": "evaluation",
         "tests/ai/test_new_feature.py": "runtime",
         "linktools-ai/tests/test_evaluation_local.py": "evaluation",
-        "linktools-ai/tests/test_local_capture.py": "evaluation",
+        "linktools-ai/tests/test_local_capture.py": "runtime",
         "linktools-ai/tests/test_local_feature.py": "runtime",
         "tests/core/test_evaluation_other.py": "all",
     }
