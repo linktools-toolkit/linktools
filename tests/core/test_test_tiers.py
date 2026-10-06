@@ -201,3 +201,107 @@ def test_ci_aggregates_reject_every_incomplete_dependency(tmp_path: Path, job: s
         environment.update(zip(results, states))
         outcome = subprocess.run(["bash", "-e", "-c", step["run"]], env=environment, capture_output=True, check=False)
         assert (outcome.returncode == 0) == all(state == "success" for state in states)
+
+
+@pytest.mark.parametrize("code,signal", (
+    (0, ""), (1, ""), (2, ""), (124, ""), (130, ""), (143, ""), (130, "INT"), (143, "TERM"),
+))
+@pytest.mark.parametrize("failed_index", (0, 1))
+def test_ci_package_loop_preserves_failures_and_stops_on_signals(
+    tmp_path: Path, code: int, signal: str, failed_index: int,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
+    step = next(step for step in workflow["jobs"]["python"]["steps"] if step.get("id") == "checks")
+    stub = tmp_path / "python"
+    stub.write_text(
+        "#!/bin/bash\n"
+        "printf '%s|%s\\n' \"$*\" \"$PYTEST_ADDOPTS\" >> \"$CALLS\"\n"
+        "if [ \"$3\" = \"$FAILED_PACKAGE\" ]; then\n"
+        "  if [ -n \"$SIGNAL\" ]; then kill -s \"$SIGNAL\" \"$PPID\"; fi\n"
+        "  exit \"$EXIT_CODE\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    packages = ("linktools", "linktools-common", "linktools-mobile")
+    options = "-n 4 --dist=loadfile --capture=fd -rs --test-group=all"
+    calls = tmp_path / "calls"
+    summary = tmp_path / "summary"
+    environment = dict(
+        os.environ, PATH=str(tmp_path) + os.pathsep + os.environ["PATH"],
+        PACKAGES=" ".join(packages), PYTEST_ADDOPTS=options, PYTHON="3.10", GROUP="all",
+        TEST_TIER="merge", GITHUB_STEP_SUMMARY=str(summary), CALLS=str(calls),
+        FAILED_PACKAGE=packages[failed_index], EXIT_CODE=str(code), SIGNAL=signal,
+    )
+    outcome = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", step["run"]],
+        env=environment, capture_output=True, text=True, check=False,
+    )
+    assert outcome.returncode == (code if code >= 128 else int(code != 0))
+    attempted = packages[:failed_index + 1] if code >= 128 else packages
+    assert calls.read_text().splitlines() == [
+        "manage.py check %s --skip-compatibility --test-tier merge|%s" % (package, options)
+        for package in attempted
+    ]
+    summarized = attempted[:-1] if signal else attempted
+    assert (summary.read_text().splitlines() if summary.exists() else []) == [
+        "%s / Python 3.10 / all / merge: %s" % (
+            package, "failure" if code and package == packages[failed_index] else "success",
+        ) for package in summarized
+    ]
+    assert outcome.stdout.count("::group::") == len(attempted)
+    assert outcome.stdout.count("::endgroup::") == len(summarized)
+
+
+def test_ci_package_loop_rejects_an_empty_plan(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
+    step = next(step for step in workflow["jobs"]["python"]["steps"] if step.get("id") == "checks")
+    environment = dict(os.environ, PACKAGES="", GITHUB_STEP_SUMMARY=str(tmp_path / "summary"))
+    outcome = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", step["run"]], env=environment, capture_output=True, check=False,
+    )
+    assert outcome.returncode != 0
+
+
+@pytest.mark.parametrize("child,expected", (
+    ("raise SystemExit(1)", 1),
+    ("raise SystemExit(2)", 1),
+    ("raise SystemExit(130)", 130),
+    ("raise SystemExit(143)", 143),
+    ("import os, signal; os.kill(os.getpid(), signal.SIGINT)", 130),
+    ("import os, signal; os.kill(os.getpid(), signal.SIGTERM)", 143),
+))
+def test_manage_preserves_interrupted_gate_exit_status(child: str, expected: int) -> None:
+    root = Path(__file__).resolve().parents[2]
+    source = (
+        "import manage, sys\n"
+        "manage._run_ruff = lambda project, check, environment: "
+        "manage._run_check([sys.executable, '-c', %r], environment)\n"
+        "sys.argv = ['manage.py', 'check', 'linktools-common', '--skip-compatibility']\n"
+        "manage.main()\n"
+    ) % child
+    outcome = subprocess.run(
+        [sys.executable, "-c", source], cwd=root, capture_output=True, text=True, check=False,
+    )
+    assert outcome.returncode == expected, outcome.stderr
+    if expected == 1:
+        assert "CalledProcessError" in outcome.stderr
+
+
+def test_ci_summary_distinguishes_job_failure_from_package_results(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
+    step = next(step for step in workflow["jobs"]["python"]["steps"] if step.get("name") == "Summarize check")
+    summary = tmp_path / "summary"
+    summary.write_text("linktools / Python 3.10 / all / merge: success\n", encoding="utf-8")
+    environment = dict(
+        os.environ, PACKAGE="linktools", PYTHON="3.10", GROUP="all", TEST_TIER="merge",
+        RESULT="failure", GITHUB_STEP_SUMMARY=str(summary),
+    )
+    subprocess.run(["bash", "-e", "-c", step["run"]], env=environment, check=True)
+    assert summary.read_text().splitlines() == [
+        "linktools / Python 3.10 / all / merge: success",
+        "Job linktools / Python 3.10 / all / merge: failure",
+    ]

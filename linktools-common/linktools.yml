@@ -33,6 +33,7 @@ convert:
     dest: src/linktools/assets/tools/linktools-common.json
 
 checks:
+  ci-pool: linktools
   ruff:
     select:
       - E9

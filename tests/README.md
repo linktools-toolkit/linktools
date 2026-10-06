@@ -58,9 +58,26 @@ automatically enables manual probes. There is no scheduled run.
 The execution plan in `scripts/check/matrix.py` owns the Python versions and
 pytest execution options. Package group names and filename matching rules live
 in their existing `linktools.yml` under `checks.pytest.groups`. Both execution and legacy
-aggregate jobs consume that plan; automatic package discovery is retained. Non-AI
-packages keep one check per version unless their manifest declares groups. For
-example, `linktools-ai/linktools.yml` declares:
+aggregate jobs consume that plan; automatic package discovery is retained. Packages
+default to an independent check per Python version. Short packages can share one
+job by declaring the same pool in their existing manifest:
+
+```yaml
+checks:
+  ci-pool: linktools
+```
+
+`ci-pool` shares setup and installs all pool members and their dependency closure.
+It cannot be combined with `checks.pytest.groups`, and its name must not collide
+with an independent package. Each member still runs its own `manage.py check`,
+with separate logs and summaries. An ordinary failure does not skip later members;
+the job ultimately fails. Cancellation signals stop the loop. New packages without
+`ci-pool` remain independent. Core, common and mobile currently share the `linktools`
+pool under `Python <version> linktools checks`; the separate common/mobile check
+names are no longer emitted. Core retains its full-package installation.
+
+Packages can instead declare test groups. For example,
+`linktools-ai/linktools.yml` declares:
 
 ```yaml
 checks:
@@ -82,7 +99,7 @@ have an empty list: it receives every unmatched file, including newly added
 files. A file matching multiple non-default groups fails collection rather than
 relying on ordering. Group names must be simple letters, digits, hyphens or
 underscores; `all` is reserved for unfiltered execution. A package without groups
-gets one `all` job. No Python-side package name or file-family classifier is
+gets one `all` execution, in its declared pool or an independent job. No Python-side package name or file-family classifier is
 needed to add another grouped package.
 
 `manage.py check` validates the manifest and passes the selected package's
@@ -106,7 +123,7 @@ count as completed coverage. Per-job summaries identify package, Python, group,
 tier and outcome; pytest also prints skip reasons. The final summary states the
 selected tier. Repository protection settings are managed separately.
 
-The current five packages use 17 jobs: 12 execution jobs, discovery, Python 3.6
+The current five packages use 13 jobs: 8 execution jobs, discovery, Python 3.6
 compatibility, two legacy AI aggregates and final coverage. Each AI group installs its
 local dependency closure and runs the package architecture/lint gates before
 its own tests; files stay intact for fixture reuse and four-worker `loadfile` scheduling.

@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -282,3 +283,89 @@ def test_explicit_invalid_paths_are_not_replaced_by_conventional_discovery(
     with pytest.raises(SystemExit, match="1"):
         manage.load_project_checks(project.name, str(project))
     assert "checks.pytest.paths must be a non-empty list of strings" in capsys.readouterr().err
+
+
+def _set_ci_pool(project: Path, pool: object) -> None:
+    path = project / "linktools.yml"
+    data = yaml.safe_load(path.read_text())
+    data["checks"]["ci-pool"] = pool
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize("pool", (None, "", True, [], {}, "bad name", "-bad"))
+def test_invalid_ci_pool_names_fail_closed(
+    repository: Path, capsys: pytest.CaptureFixture, pool: object,
+) -> None:
+    project = _new_package(repository)
+    _set_ci_pool(project, pool)
+    with pytest.raises(SystemExit, match="1"):
+        package_checks((project.name,))
+    assert "checks.ci-pool must be a non-empty pool name" in capsys.readouterr().err
+
+
+def test_ci_pools_are_manifest_owned_and_new_packages_stay_independent(repository: Path) -> None:
+    first = _new_package(repository, "linktools-first")
+    second = _new_package(repository, "linktools-second")
+    new = _new_package(repository, "linktools-new")
+    for project in (first, second):
+        _set_ci_pool(project, "quick")
+    rows = package_checks((second.name, first.name, new.name))
+    assert [(row["name"], row["packages"]) for row in rows] == [
+        ("quick checks", "%s %s" % (second.name, first.name)),
+        ("linktools-new checks", new.name),
+    ]
+    assert [row["install"] for row in rows] == [row["packages"] for row in rows]
+    assert all(row["group"] == "all" for row in rows)
+    _set_ci_pool(second, "other")
+    assert len(package_checks((second.name, first.name, new.name))) == 3
+
+
+def test_ci_pool_including_core_keeps_full_install_regardless_of_order(repository: Path) -> None:
+    core = _new_package(repository, "linktools")
+    other = _new_package(repository, "linktools-other")
+    for project in (core, other):
+        _set_ci_pool(project, "quick")
+    rows = package_checks((other.name, core.name))
+    assert len(rows) == 1
+    assert rows[0]["packages"] == "%s %s" % (other.name, core.name)
+    assert rows[0]["install"] == ""
+
+
+def test_ci_pool_cannot_hide_an_independent_package(
+    repository: Path, capsys: pytest.CaptureFixture,
+) -> None:
+    first = _new_package(repository, "linktools-first")
+    second = _new_package(repository, "linktools-second")
+    _set_ci_pool(second, first.name)
+    with pytest.raises(SystemExit, match="1"):
+        package_checks((first.name, second.name))
+    assert "conflicts with an independent package" in capsys.readouterr().err
+
+
+def test_ci_pool_cannot_mix_with_pytest_groups(
+    repository: Path, capsys: pytest.CaptureFixture,
+) -> None:
+    project = _new_package(repository)
+    _write_manifest(project, {"specific": ["test_alpha.py"], "remaining": []})
+    _set_ci_pool(project, "quick")
+    with pytest.raises(SystemExit, match="1"):
+        package_checks((project.name,))
+    assert "cannot combine checks.ci-pool and pytest.groups" in capsys.readouterr().err
+
+
+def test_repository_pool_preserves_all_discovered_package_coverage() -> None:
+    modules = manage.get_modules()
+    rows = package_checks(modules)
+    core = next(row for row in rows if row["name"] == "linktools checks")
+    assert {"linktools", "linktools-common", "linktools-mobile"} <= set(core["packages"].split())
+    assert core["install"] == ""
+    ai = [row for row in rows if row["packages"] == "linktools-ai"]
+    assert {"evaluation", "runtime"} <= {row["group"] for row in ai}
+    assert all(row["install"] == "linktools-ai" for row in ai)
+    cntr = next(row for row in rows if row["name"] == "linktools-cntr checks")
+    assert cntr["packages"] == cntr["install"] == "linktools-cntr"
+    expected = {
+        package: len(manage.load_project_checks(package, module["path"]).get("pytest", {}).get("groups", {"all": ()}))
+        for package, module in modules.items()
+    }
+    assert Counter(package for row in rows for package in row["packages"].split()) == expected

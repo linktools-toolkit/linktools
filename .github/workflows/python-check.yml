@@ -114,11 +114,36 @@ jobs:
           python manage.py install "${packages[@]}" --editable --quiet
       - name: Run checks
         id: checks
+        shell: bash
         env:
           PYTEST_ADDOPTS: ${{ matrix.check.pytest-args }}
-          PACKAGE: ${{ matrix.check.package }}
+          PACKAGES: ${{ matrix.check.packages }}
+          PYTHON: ${{ matrix.python-version }}
+          GROUP: ${{ matrix.check.group }}
           TEST_TIER: ${{ needs.discover.outputs.test-tier }}
-        run: python manage.py check "$PACKAGE" --skip-compatibility --test-tier "$TEST_TIER"
+        run: |
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          read -r -a packages <<< "$PACKAGES"
+          test "${#packages[@]}" -gt 0
+          status=0
+          for package in "${packages[@]}"; do
+            echo "::group::$package"
+            if python manage.py check "$package" --skip-compatibility --test-tier "$TEST_TIER"; then
+              code=0
+              result=success
+            else
+              code=$?
+              result=failure
+              status=1
+            fi
+            echo '::endgroup::'
+            printf '%s / Python %s / %s / %s: %s\n' "$package" "$PYTHON" "$GROUP" "$TEST_TIER" "$result" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$code" -ge 128 ]; then
+              exit "$code"
+            fi
+          done
+          exit "$status"
       - name: Summarize check
         if: ${{ always() }}
         env:
@@ -128,7 +153,7 @@ jobs:
           TEST_TIER: ${{ needs.discover.outputs.test-tier }}
           RESULT: ${{ steps.checks.outcome }}
         run: |
-          printf '%s / Python %s / %s / %s: %s\n' "$PACKAGE" "$PYTHON" "$GROUP" "$TEST_TIER" "$RESULT" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Job %s / Python %s / %s / %s: %s\n' "$PACKAGE" "$PYTHON" "$GROUP" "$TEST_TIER" "$RESULT" >> "$GITHUB_STEP_SUMMARY"
           if [ "$RESULT" = skipped ]; then
             echo 'Checks did not run; inspect checkout/setup/install results above.' >> "$GITHUB_STEP_SUMMARY"
           fi

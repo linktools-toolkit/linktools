@@ -24,7 +24,7 @@ _VERSION_LINE_PATTERN = re.compile(r"(?m)^version:[^\r\n]*$")
 _INSTALL_MODULE_PATTERN = re.compile(
     r"^([A-Za-z0-9_-]+)(?:\[([A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*)\])?$"
 )
-_SUPPORTED_CHECKS = {"gate", "ruff", "pytest"}
+_SUPPORTED_CHECKS = {"gate", "ruff", "pytest", "ci-pool"}
 _GATE_FIELDS = {"modules"}
 _RUFF_FIELDS = {"select", "paths"}
 _PYTEST_FIELDS = {"paths", "groups"}
@@ -372,6 +372,12 @@ def load_project_checks(project: str, project_path: str) -> "typing.Dict[str, ty
         raise SystemExit(1)
 
     result = {}
+    if "ci-pool" in checks:
+        pool = checks["ci-pool"]
+        if not isinstance(pool, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", pool):
+            print("[-] %s checks.ci-pool must be a non-empty pool name" % project, file=sys.stderr)
+            raise SystemExit(1)
+        result["ci-pool"] = pool
     if "gate" in checks:
         gate = _require_mapping(checks["gate"], "%s checks.gate" % project)
         unknown = _unknown_fields(gate, _GATE_FIELDS, "%s checks.gate" % project)
@@ -425,6 +431,9 @@ def load_project_checks(project: str, project_path: str) -> "typing.Dict[str, ty
                 print("[-] %s pytest groups require exactly one empty-list fallback group" % project, file=sys.stderr)
                 raise SystemExit(1)
             result["pytest"]["groups"] = normalized
+    if "ci-pool" in result and "groups" in result.get("pytest", {}):
+        print("[-] %s cannot combine checks.ci-pool and pytest.groups" % project, file=sys.stderr)
+        raise SystemExit(1)
     paths = list(result.get("pytest", {}).get("paths", ()))
     for path in _default_pytest_paths(project, project_path):
         if not any(os.path.commonpath((path, declared)) == declared for declared in paths):
@@ -470,7 +479,14 @@ def _check_environment() -> "typing.Dict[str, str]":
 
 
 def _run_check(command: "typing.Sequence[str]", environment: "typing.Dict[str, str]") -> None:
-    subprocess.check_call(list(command), cwd=PROJECT_PATH, env=environment)
+    try:
+        subprocess.check_call(list(command), cwd=PROJECT_PATH, env=environment)
+    except subprocess.CalledProcessError as error:
+        if error.returncode < 0:
+            raise SystemExit(128 - error.returncode)
+        if error.returncode >= 128:
+            raise SystemExit(error.returncode)
+        raise
 
 
 def _run_python36_gate(
