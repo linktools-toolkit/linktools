@@ -437,3 +437,65 @@ def test_wait_observed_synchronous_callback_requires_schedulable_loop():
     ''')
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_runtime_close_cancels_all_sessions_before_draining_resistant_callback():
+    graph = Graph()
+    graph.emit = True
+    graph.release.clear()
+    cancelled_waiters = []
+    async def wait(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled_waiters.append(asyncio.current_task())
+            raise
+    graph.wait = wait
+    storage_closed = []
+    async def close_storage():
+        storage_closed.append(True)
+    runtime, run = make_run(graph, close_storage)
+    gates = [asyncio.Event(), asyncio.Event()]
+    entered = {}
+    cancelled = set()
+    effects = set()
+    resistant = None
+    async def callback(label, event):
+        entered[label] = asyncio.current_task()
+        try:
+            await gates[label].wait()
+        except asyncio.CancelledError:
+            cancelled.add(label)
+            if label != resistant:
+                raise
+            await gates[label].wait()
+        effects.add(label)
+    calls = [asyncio.create_task(run.wait_observed(
+        lambda event, label=label: callback(label, event), close_timeout_seconds=0.02,
+    )) for label in range(2)]
+    while len(entered) < 2:
+        await asyncio.sleep(0)
+    # Select the first drained session to exercise the early-budget-exhaustion case.
+    first = next(iter(runtime._observation_sessions))
+    resistant = next(label for label, task in entered.items() if task in first.tasks)
+    cooperative = 1 - resistant
+    try:
+        with pytest.raises(TaskObservationError) as raised:
+            await runtime.close()
+        assert raised.value.safe_details["cleanup_pending"]
+        assert not storage_closed
+        assert not runtime._closed
+        gates[cooperative].set()
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert cancelled == {0, 1}
+        assert len(cancelled_waiters) == 2
+        assert cooperative not in effects
+        assert calls[cooperative].done()
+    finally:
+        gates[resistant].set()
+        await runtime.close()
+        await asyncio.gather(*calls, return_exceptions=True)
+    assert storage_closed == [True]
+    assert not runtime._observation_sessions

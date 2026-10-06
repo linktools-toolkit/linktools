@@ -102,11 +102,13 @@ class _ObservationSession:
             self.cancelled_by_owner.add(task)
             task.cancel(_CLEANUP_CANCEL)
 
-    def seal(self) -> None:
+    def stop(self) -> None:
         self.closing = True
+        for task in self.tasks:
+            self._cancel(task)
 
     async def close(self, *, deadline: float | None = None) -> None:
-        self.seal()
+        self.stop()
         loop = asyncio.get_running_loop()
         if deadline is None:
             deadline = loop.time() + self.close_timeout
@@ -115,8 +117,6 @@ class _ObservationSession:
             if not pending:
                 self._release(self)
                 return
-            for task in pending:
-                self._cancel(task)
             remaining = max(0.0, deadline - loop.time())
             if remaining == 0:
                 raise self.cleanup_error()
@@ -161,7 +161,7 @@ class _ObservationSession:
         except BaseException as error:
             primary = error
         finally:
-            self.seal()
+            self.stop()
             try:
                 await self.close()
             except BaseException as error:

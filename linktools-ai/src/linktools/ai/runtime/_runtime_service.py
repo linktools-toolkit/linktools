@@ -1238,7 +1238,7 @@ class Runtime(Generic[AppT]):
             if not self._closing:
                 self._closing = True
                 for session in tuple(self._observation_sessions):
-                    session.seal()
+                    session.stop()
                 _logger.info("runtime close started: tenant=%s", self.tenant_id)
             task = self._close_task
             retry = task is None
@@ -1293,7 +1293,7 @@ class Runtime(Generic[AppT]):
     async def _cleanup(self) -> None:
         sessions = tuple(self._observation_sessions)
         for session in sessions:
-            session.seal()
+            session.stop()
         deadline = asyncio.get_running_loop().time() + max(
             (session.close_timeout for session in sessions), default=0.0,
         )
