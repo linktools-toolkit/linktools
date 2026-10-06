@@ -32,6 +32,7 @@ from ..task import (
 from ._task_observation import (
     _ObservationSession, _validate_timeout,
     _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup,
+    _active_observation, _report_observation_error,
 )
 from ._watch_cursor import (
     decode_graph_watch_cursor,
@@ -564,10 +565,6 @@ class TaskGraphRun(Generic[AppT]):
                 last_cursor = event.cursor
                 if session is not None:
                     session.cursor = last_cursor
-        except asyncio.CancelledError as error:
-            if session is not None and not _is_observation_cleanup(error):
-                session.observer_cancellation = error
-            raise
         finally:
             active_error = sys.exc_info()[1]
 
@@ -866,22 +863,29 @@ class TaskGraphRun(Generic[AppT]):
                         try:
                             task.result()
                         except asyncio.CancelledError as error:
+                            _report_observation_error(error)
                             cleanup_errors.append(error)
                     elif not task.done():
                         _cancel_stream_task(task)
-                if tasks:
-                    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-                    cleanup_errors.extend(
-                        outcome for outcome in outcomes
-                        if isinstance(outcome, BaseException)
-                        and not isinstance(outcome, (asyncio.CancelledError, StopAsyncIteration))
+                pending_tasks = set(tasks)
+                while pending_tasks:
+                    done, pending_tasks = await asyncio.wait(
+                        pending_tasks, return_when=asyncio.FIRST_COMPLETED,
                     )
+                    for task in done:
+                        if task.cancelled():
+                            continue
+                        error = task.exception()
+                        if error is not None and not isinstance(error, StopAsyncIteration):
+                            _report_observation_error(error)
+                            cleanup_errors.append(error)
                 if graph_stream is not None:
                     close = getattr(graph_stream, "aclose", None)
                     if close is not None:
                         try:
                             await close()
                         except BaseException as error:
+                            _report_observation_error(error)
                             cleanup_errors.append(error)
                 for stream in tuple(execution_streams.values()):
                     close = getattr(stream, "aclose", None)
@@ -889,6 +893,7 @@ class TaskGraphRun(Generic[AppT]):
                         try:
                             await close()
                         except BaseException as error:
+                            _report_observation_error(error)
                             cleanup_errors.append(error)
                 if cleanup_errors and (
                     active_error is None
@@ -1106,6 +1111,7 @@ async def _call_observer(
     *,
     cursor: str | None,
 ) -> None:
+    token = _active_observation.set(None)
     try:
         await observer(event)
     except asyncio.CancelledError:
@@ -1121,6 +1127,9 @@ async def _call_observer(
             ),
             diagnostics=(error.diagnostics if isinstance(error, AIError) else None),
         ) from error
+
+    finally:
+        _active_observation.reset(token)
 
 
 def _task_stream_observation_error(

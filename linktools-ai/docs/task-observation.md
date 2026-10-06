@@ -62,7 +62,9 @@ Only proven optional presentation/broker failures become a returned
 `observation_error`. State/history reads, authorization, durable decoding,
 integrity, lineage and cursor failures propagate unchanged. Callback failure
 raises `TaskObservationError(origin="callback")` with its original cause and
-last acknowledged cursor. `CancelledError` propagates unchanged.
+last acknowledged cursor. Callback and authoritative observer failures start
+bounded cleanup before the stream finishes closing; a stalled close cannot hide
+an already-raised primary error. `CancelledError` propagates unchanged.
 
 Errors visible in the same completion/cleanup window have stable priority:
 caller or callback cancellation, authoritative failure, callback failure,

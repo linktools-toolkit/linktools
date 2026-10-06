@@ -5,13 +5,25 @@
 import asyncio
 import math
 from collections.abc import Callable, Coroutine
+from contextvars import ContextVar
 from typing import Any, TypeVar
 
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode, TaskObservationError
+from .service_api import _ExecutionStreamFailure
 
 _CLEANUP_CANCEL = object()
+_active_observation: ContextVar["_ObservationSession | None"] = ContextVar(
+    "linktools_ai_active_observation", default=None,
+)
+
+
+def _report_observation_error(error: BaseException | None) -> None:
+    session = _active_observation.get()
+    if session is not None and error is not None:
+        session.record_error(error)
+
 
 def _is_observation_cleanup(error: BaseException | None) -> bool:
     return (
@@ -32,6 +44,7 @@ async def _await_stream_cleanup(
     cleanup: Coroutine[Any, Any, None], active_error: BaseException | None,
 ) -> None:
     """Finish owned cleanup even if cancellation arrives while it is unwinding."""
+    _report_observation_error(active_error)
     task = asyncio.create_task(cleanup, name="task-stream-cleanup")
     cancellation: asyncio.CancelledError | None = None
     while True:
@@ -75,10 +88,24 @@ class _ObservationSession:
         self.cursor = cursor
         self.close_timeout = close_timeout
         self.closing = False
-        self.observer_cancellation: asyncio.CancelledError | None = None
+        self.observer_error: BaseException | None = None
+        self._error_ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self.tasks: set[asyncio.Task[Any]] = set()
         self.cancelled_by_owner: set[asyncio.Task[Any]] = set()
         self._release = release
+
+    def record_error(self, error: BaseException) -> None:
+        if isinstance(error, (GeneratorExit, _ExecutionStreamFailure)) or _is_observation_cleanup(error):
+            return
+        if (isinstance(error, TaskObservationError) and error.origin == "stream"
+                and error.safe_details.get("phase") != "cleanup"):
+            return
+        if (self.observer_error is None
+                or _error_priority(error, authoritative=False)
+                < _error_priority(self.observer_error, authoritative=False)):
+            self.observer_error = error
+        if not self._error_ready.done():
+            self._error_ready.set_result(None)
 
     def track(self, task: asyncio.Task[T]) -> None:
         self.tasks.add(task)
@@ -136,16 +163,27 @@ class _ObservationSession:
     ) -> tuple[T, TaskObservationError | None]:
         loop = asyncio.get_running_loop()
         deadline = None if timeout_seconds is None else loop.time() + timeout_seconds
-        observer = self.start(observe, name=f"task-observe-{self.graph_id}")
-        waiter = self.start(wait, name=f"task-wait-{self.graph_id}")
+        token = _active_observation.set(self)
+        try:
+            observer = self.start(observe, name=f"task-observe-{self.graph_id}")
+        finally:
+            _active_observation.reset(token)
+        token = _active_observation.set(None)
+        try:
+            waiter = self.start(wait, name=f"task-wait-{self.graph_id}")
+        finally:
+            _active_observation.reset(token)
         observation_error: TaskObservationError | None = None
         primary: BaseException | None = None
         cleanup_error: BaseException | None = None
         try:
-            active = {observer, waiter}
+            active = {observer, waiter, self._error_ready}
             while True:
                 remaining = None if deadline is None else max(0.0, deadline - loop.time())
                 done, _ = await asyncio.wait(active, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                if self._error_ready in done:
+                    assert self.observer_error is not None
+                    raise self.observer_error
                 if observer in done:
                     active.discard(observer)
                     try:
@@ -170,8 +208,8 @@ class _ObservationSession:
         # Inspect both tasks after bounded cleanup so a simultaneous authoritative
         # failure cannot be hidden by observer completion or a successful wait.
         errors: list[tuple[int, BaseException]] = []
-        if self.observer_cancellation is not None:
-            errors.append((0, self.observer_cancellation))
+        if self.observer_error is not None:
+            errors.append((_error_priority(self.observer_error, authoritative=False), self.observer_error))
         if primary is not None:
             errors.append((_error_priority(primary, authoritative=False), primary))
         for task, authoritative in ((waiter, True), (observer, False)):

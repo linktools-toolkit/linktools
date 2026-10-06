@@ -9,7 +9,7 @@ from typing import Protocol
 
 from ..core import ExecutionEventType, ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
-from ._task_observation import _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup
+from ._task_observation import _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup, _report_observation_error
 from .service_api import (
     ExecutionStreamEvent,
     ExecutionTreeEvent,
@@ -343,21 +343,31 @@ class ExecutionTreeStreamer:
                         try:
                             task.result()
                         except asyncio.CancelledError as error:
+                            _report_observation_error(error)
                             errors.append(error)
                     elif not task.done():
                         _cancel_stream_task(task)
-                await asyncio.gather(*wait_tasks, return_exceptions=True)
-                errors.extend(_completed_errors(wait_tasks, child_wait))
+                pending_tasks = set(wait_tasks)
+                while pending_tasks:
+                    done, pending_tasks = await asyncio.wait(
+                        pending_tasks, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    completed_errors = _completed_errors(tuple(done), child_wait)
+                    for error in completed_errors:
+                        _report_observation_error(error)
+                    errors.extend(completed_errors)
                 for stream in tuple(streams.values()):
                     close = getattr(stream, "aclose", None)
                     if close is not None:
                         try:
                             await close()
                         except BaseException as error:
+                            _report_observation_error(error)
                             errors.append(error)
                 try:
                     await subscription.close()
                 except AIError as error:
+                    _report_observation_error(error)
                     errors.append(error)
                 except Exception as error:
                     errors.append(_ExecutionStreamFailure(error))
