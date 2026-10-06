@@ -158,27 +158,9 @@ jobs:
             echo 'Checks did not run; inspect checkout/setup/install results above.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  ai_coverage:
-    name: Python ${{ matrix.python-version }} linktools-ai checks
-    needs: [discover, python]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      matrix:
-        python-version: ${{ fromJSON(needs.discover.outputs.plan).python-versions }}
-    steps:
-      - name: Require completed package groups
-        env:
-          DISCOVER_RESULT: ${{ needs.discover.result }}
-          PYTHON_RESULT: ${{ needs.python.result }}
-        run: |
-          test "$DISCOVER_RESULT" = success
-          test "$PYTHON_RESULT" = success
-
   coverage:
     name: Python test coverage
-    needs: [discover, python36, python, ai_coverage]
+    needs: [discover, python36, python]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -188,12 +170,10 @@ jobs:
           DISCOVER_RESULT: ${{ needs.discover.result }}
           COMPATIBILITY_RESULT: ${{ needs.python36.result }}
           PYTHON_RESULT: ${{ needs.python.result }}
-          AI_RESULT: ${{ needs.ai_coverage.result }}
           TEST_TIER: ${{ needs.discover.outputs.test-tier }}
         run: |
           test "$DISCOVER_RESULT" = success
           test "$COMPATIBILITY_RESULT" = success
           test "$PYTHON_RESULT" = success
-          test "$AI_RESULT" = success
           case "$TEST_TIER" in daily|merge|all) ;; *) exit 1 ;; esac
           echo "Passed test coverage: $TEST_TIER" >> "$GITHUB_STEP_SUMMARY"

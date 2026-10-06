@@ -166,7 +166,7 @@ def test_empty_ai_group_fails_instead_of_reporting_coverage(
     assert result.ret == pytest.ExitCode.NO_TESTS_COLLECTED
 
 
-def test_generated_ci_plan_keeps_execution_and_compatibility_versions_in_sync() -> None:
+def test_generated_ci_plan_supplies_execution_versions_and_options() -> None:
     root = Path(__file__).resolve().parents[2]
     plan = json.loads(subprocess.check_output(
         [sys.executable, "-m", "scripts.check.matrix", json.dumps(["linktools", "linktools-ai"])],
@@ -181,22 +181,23 @@ def test_generated_ci_plan_keeps_execution_and_compatibility_versions_in_sync() 
         assert "-rs" in options
     workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
     jobs = workflow["jobs"]
-    assert jobs["python"]["strategy"]["matrix"]["python-version"] == jobs["ai_coverage"]["strategy"]["matrix"]["python-version"]
+    assert jobs["python"]["strategy"]["matrix"]["python-version"] == "${{ fromJSON(needs.discover.outputs.plan).python-versions }}"
     assert jobs["python"]["strategy"]["fail-fast"] is False
-    assert jobs["ai_coverage"]["name"] == "Python ${{ matrix.python-version }} linktools-ai checks"
     assert jobs["coverage"]["name"] == "Python test coverage"
 
 
-@pytest.mark.parametrize("job", ("ai_coverage", "coverage"))
-def test_ci_aggregates_reject_every_incomplete_dependency(tmp_path: Path, job: str) -> None:
+def test_ci_coverage_rejects_every_incomplete_dependency(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/python-check.yml").read_text())
-    definition = workflow["jobs"][job]
+    definition = workflow["jobs"]["coverage"]
+    assert definition["needs"] == ["discover", "python36", "python"]
     assert definition["if"] == "${{ always() }}"
     step = definition["steps"][0]
     results = [key for key in step["env"] if key.endswith("_RESULT")]
-    assert len(results) == len(definition["needs"])
-    for states in itertools.product(("success", "failure", "cancelled", "skipped"), repeat=len(results)):
+    assert {step["env"][key] for key in results} == {
+        "${{ needs.%s.result }}" % job for job in definition["needs"]
+    }
+    for states in itertools.product(("success", "failure", "cancelled", "skipped", ""), repeat=len(results)):
         environment = dict(os.environ, TEST_TIER="merge", GITHUB_STEP_SUMMARY=str(tmp_path / "summary"))
         environment.update(zip(results, states))
         outcome = subprocess.run(["bash", "-e", "-c", step["run"]], env=environment, capture_output=True, check=False)

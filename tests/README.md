@@ -57,8 +57,8 @@ automatically enables manual probes. There is no scheduled run.
 
 The execution plan in `scripts/check/matrix.py` owns the Python versions and
 pytest execution options. Package group names and filename matching rules live
-in their existing `linktools.yml` under `checks.pytest.groups`. Both execution and legacy
-aggregate jobs consume that plan; automatic package discovery is retained. Packages
+in their existing `linktools.yml` under `checks.pytest.groups`. Execution jobs consume
+that plan; automatic package discovery is retained. Packages
 default to an independent check per Python version. Short packages can share one
 job by declaring the same pool in their existing manifest:
 
@@ -116,17 +116,14 @@ PYTEST_ADDOPTS='--test-group=evaluation' python manage.py check linktools-ai --t
 PYTEST_ADDOPTS='--test-group=runtime' python manage.py check linktools-ai --test-tier daily
 ```
 
-The original `Python <version> linktools-ai checks` names remain as aggregate
-checks. They conservatively require the entire package matrix to succeed, so a
-failure in another package/version also fails both AI aggregates. The `Python
-test coverage` aggregate requires discovery, compatibility, all package groups
-and these aggregates to succeed; skipped/failed jobs or empty test groups do not
+The `Python test coverage` gate directly requires discovery, compatibility and
+the entire package matrix to succeed; cancelled, skipped or failed jobs and empty test groups do not
 count as completed coverage. Per-job summaries identify package, Python, group,
 tier and outcome; pytest also prints skip reasons. The final summary states the
 selected tier. Repository protection settings are managed separately.
 
-The current five packages use 13 jobs: 8 execution jobs, discovery, Python 3.6
-compatibility, two legacy AI aggregates and final coverage. Each AI group installs its
+The current five packages use 11 jobs: 8 execution jobs, discovery, Python 3.6
+compatibility and final coverage. Each AI group installs its
 local dependency closure and runs the package architecture/lint gates before
 its own tests; files stay intact for fixture reuse and four-worker `loadfile` scheduling.
 The file-family split preserves existing coverage and fixture locality, but is
