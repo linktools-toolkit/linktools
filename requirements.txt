@@ -1,6 +1,7 @@
 tomlkit
 pkginfo
 build
+packaging
 pip
 PyYAML==6.0.1; python_version < '3.8'
 PyYAML; python_version >= '3.8'

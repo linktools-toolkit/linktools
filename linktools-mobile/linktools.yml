@@ -35,6 +35,7 @@ convert:
     dest: src/linktools/assets/tools/linktools-mobile.json
 
 checks:
+  ci-pool: linktools
   ruff:
     select:
       - E9

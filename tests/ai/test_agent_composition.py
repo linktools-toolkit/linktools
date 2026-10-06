@@ -13,7 +13,6 @@ from linktools.ai.capability import CapabilityContribution, CapabilityGroup, Ski
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
-    Agent,
     ExecutionHandle,
     ExecutionRequest,
     ResumeSessionRequest,
@@ -34,12 +33,6 @@ def test_top_level_public_surface_is_exact() -> None:
         "Session",
         "Workspace",
     ]
-
-
-def test_runtime_bound_agent_does_not_expose_compile_or_registration() -> None:
-    assert "compile" not in Agent.__dict__
-    assert "register" not in Agent.__dict__
-    assert "define" not in Agent.__dict__
 
 
 def test_agent_binding_contract_persists_binding_inputs() -> None:

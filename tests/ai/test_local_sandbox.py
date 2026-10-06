@@ -417,9 +417,12 @@ async def test_local_sandbox_reaps_descendants_when_shell_is_already_reaped(
     import signal
 
     ready = tmp_path / "child.pid"
+    # Publish readiness only after the PID is complete; cleanup may kill the child immediately.
     code = (
         "import os,pathlib,time; "
-        f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid())); "
+        f"ready = pathlib.Path({str(ready)!r}); "
+        "pending = ready.with_suffix('.tmp'); "
+        "pending.write_text(str(os.getpid())); pending.replace(ready); "
         "time.sleep(60)"
     )
     redirect = "" if inherit_output else " >/dev/null 2>&1"

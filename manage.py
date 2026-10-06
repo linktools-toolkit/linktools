@@ -24,10 +24,10 @@ _VERSION_LINE_PATTERN = re.compile(r"(?m)^version:[^\r\n]*$")
 _INSTALL_MODULE_PATTERN = re.compile(
     r"^([A-Za-z0-9_-]+)(?:\[([A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*)\])?$"
 )
-_SUPPORTED_CHECKS = {"gate", "ruff", "pytest"}
+_SUPPORTED_CHECKS = {"gate", "ruff", "pytest", "ci-pool"}
 _GATE_FIELDS = {"modules"}
 _RUFF_FIELDS = {"select", "paths"}
-_PYTEST_FIELDS = {"paths"}
+_PYTEST_FIELDS = {"paths", "groups"}
 
 __missing__ = object()
 
@@ -340,7 +340,19 @@ def _resolve_gate_modules(project: str, values: "typing.Tuple[str, ...]") -> "ty
     return values
 
 
-def _load_project_checks(project: str, project_path: str) -> "typing.Dict[str, typing.Any]":
+def _default_pytest_paths(project: str, project_path: str) -> "typing.Tuple[str, ...]":
+    candidates = ["tests"]
+    if project != MODULE_NAME:
+        candidates.append(os.path.join("..", "tests", project[len(MODULE_NAME) + 1:]))
+    paths = tuple(path for path in candidates if os.path.isdir(os.path.join(project_path, path)))
+    paths = _resolve_paths(project, project_path, paths, "pytest")
+    return tuple(path for path in paths if any(
+        name.endswith("_test.py") or (name.startswith("test_") and name.endswith(".py"))
+        for _, _, names in os.walk(path) for name in names
+    ))
+
+
+def load_project_checks(project: str, project_path: str) -> "typing.Dict[str, typing.Any]":
     path = os.path.join(project_path, "linktools.yml")
     if not os.path.isfile(path):
         print("[-] %s Linktools config is missing: %s" % (project, path), file=sys.stderr)
@@ -360,6 +372,12 @@ def _load_project_checks(project: str, project_path: str) -> "typing.Dict[str, t
         raise SystemExit(1)
 
     result = {}
+    if "ci-pool" in checks:
+        pool = checks["ci-pool"]
+        if not isinstance(pool, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", pool):
+            print("[-] %s checks.ci-pool must be a non-empty pool name" % project, file=sys.stderr)
+            raise SystemExit(1)
+        result["ci-pool"] = pool
     if "gate" in checks:
         gate = _require_mapping(checks["gate"], "%s checks.gate" % project)
         unknown = _unknown_fields(gate, _GATE_FIELDS, "%s checks.gate" % project)
@@ -390,10 +408,42 @@ def _load_project_checks(project: str, project_path: str) -> "typing.Dict[str, t
         if unknown:
             print("[-] %s checks.pytest has unknown field(s): %s" % (project, ", ".join(unknown)), file=sys.stderr)
             raise SystemExit(1)
-        paths = _require_string_list(pytest.get("paths"), "%s checks.pytest.paths" % project)
+        paths = _require_string_list(pytest["paths"], "%s checks.pytest.paths" % project) if "paths" in pytest else ()
         result["pytest"] = {
             "paths": _resolve_paths(project, project_path, paths, "pytest"),
         }
+        if "groups" in pytest:
+            groups = _require_mapping(pytest["groups"], "%s checks.pytest.groups" % project)
+            normalized = {}
+            for name, patterns in groups.items():
+                if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name) or name == "all":
+                    print("[-] %s has an invalid or reserved pytest group: %r" % (project, name), file=sys.stderr)
+                    raise SystemExit(1)
+                if not isinstance(patterns, list):
+                    print("[-] %s pytest group %s must be a list of filename patterns" % (project, name), file=sys.stderr)
+                    raise SystemExit(1)
+                patterns = _require_string_list(patterns, "%s pytest group %s" % (project, name)) if patterns else ()
+                if any("/" in pattern or "\\" in pattern for pattern in patterns):
+                    print("[-] %s pytest group patterns must match filenames, not paths" % project, file=sys.stderr)
+                    raise SystemExit(1)
+                normalized[name] = patterns
+            if sum(not patterns for patterns in normalized.values()) != 1:
+                print("[-] %s pytest groups require exactly one empty-list fallback group" % project, file=sys.stderr)
+                raise SystemExit(1)
+            result["pytest"]["groups"] = normalized
+    if "ci-pool" in result and "groups" in result.get("pytest", {}):
+        print("[-] %s cannot combine checks.ci-pool and pytest.groups" % project, file=sys.stderr)
+        raise SystemExit(1)
+    paths = list(result.get("pytest", {}).get("paths", ()))
+    for path in _default_pytest_paths(project, project_path):
+        if not any(os.path.commonpath((path, declared)) == declared for declared in paths):
+            paths = [declared for declared in paths if os.path.commonpath((path, declared)) != path]
+            paths.append(path)
+    if paths:
+        result.setdefault("pytest", {})["paths"] = tuple(paths)
+    elif "pytest" in result:
+        print("[-] %s declares pytest checks but has no test paths" % project, file=sys.stderr)
+        raise SystemExit(1)
     return result
 
 
@@ -429,7 +479,14 @@ def _check_environment() -> "typing.Dict[str, str]":
 
 
 def _run_check(command: "typing.Sequence[str]", environment: "typing.Dict[str, str]") -> None:
-    subprocess.check_call(list(command), cwd=PROJECT_PATH, env=environment)
+    try:
+        subprocess.check_call(list(command), cwd=PROJECT_PATH, env=environment)
+    except subprocess.CalledProcessError as error:
+        if error.returncode < 0:
+            raise SystemExit(128 - error.returncode)
+        if error.returncode >= 128:
+            raise SystemExit(error.returncode)
+        raise
 
 
 def _run_python36_gate(
@@ -472,7 +529,7 @@ def _run_pytest(
     print("[+] %s: pytest" % project)
     command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--test-tier", tier]
     command.extend(check["paths"])
-    _run_check(command, environment)
+    _run_check(command, dict(environment, LINKTOOLS_PYTEST=json.dumps(check)))
 
 
 def _normalize_version(value: str) -> str:
@@ -516,22 +573,74 @@ def _install_requirements(
     if not args.module:
         return [(name, info["path"]) for name, info in modules.items()]
 
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
     order = []
     extras_by_module = {}
+    pending = []
+
+    def include(name: str, extras: "typing.Iterable[str]") -> None:
+        if name not in extras_by_module:
+            order.append(name)
+            extras_by_module[name] = []
+            pending.append(name)
+        for extra in extras:
+            extra = canonicalize_name(extra)
+            if extra not in extras_by_module[name]:
+                extras_by_module[name].append(extra)
+                if name not in pending:
+                    pending.append(name)
+
     for value in args.module:
         match = _INSTALL_MODULE_PATTERN.match(value)
         name = match.group(1) if match else None
         if name not in modules:
             print("[-] Unknown project module: %s" % value, file=sys.stderr)
             raise SystemExit(2)
-        if name not in extras_by_module:
-            order.append(name)
-            extras_by_module[name] = []
         extras = match.group(2)
-        if extras:
-            for extra in extras.split(","):
-                if extra not in extras_by_module[name]:
-                    extras_by_module[name].append(extra)
+        include(name, extras.split(",") if extras else ())
+
+    local_names = {canonicalize_name(name): name for name in modules}
+    dependency_keys = ["dependencies"]
+    if args.editable or os.environ.get("SETUP_EDITABLE_MODE", "false").lower() in ("true", "1", "yes"):
+        dependency_keys.append("dev-dependencies")
+    if os.environ.get("RELEASE", "false").lower() in ("true", "1", "yes"):
+        dependency_keys.append("release-dependencies")
+
+    configs = {}
+    while pending:
+        name = pending.pop(0)
+        if name not in configs:
+            path = os.path.join(modules[name]["path"], "linktools.yml")
+            with open(path, "r", encoding="utf-8") as file:
+                configs[name] = yaml.load(file, Loader=_UniqueKeyLoader)
+        config = configs[name]
+        extras = tuple(extras_by_module[name])
+        declarations = [
+            (value, ("",) + extras)
+            for key in dependency_keys for value in config.get(key, [])
+        ]
+        optional = {}
+        for extra, values in config.get("optional-dependencies", {}).items():
+            optional.setdefault(canonicalize_name(extra), []).extend(values)
+        for extra in extras:
+            values = (
+                [value for requirements in optional.values() for value in requirements]
+                if extra == "all" else optional.get(extra, [])
+            )
+            declarations.extend((value, (extra,)) for value in values)
+        for value, contexts in declarations:
+            requirement = Requirement(value)
+            dependency = local_names.get(canonicalize_name(requirement.name))
+            if dependency is None or requirement.url is not None:
+                continue
+            if requirement.marker is not None and not any(
+                requirement.marker.evaluate({"extra": extra}) for extra in contexts
+            ):
+                continue
+            # Keep the original metadata constraints for pip to resolve against local candidates.
+            include(dependency, sorted(requirement.extras))
 
     result = []
     for name in order:
@@ -595,7 +704,7 @@ def handle_check(args: argparse.Namespace) -> None:
     for project in projects:
         project_path = modules[project]["path"]
         requirements[project] = _read_requires_python(project, project_path)
-        checks[project] = _load_project_checks(project, project_path)
+        checks[project] = load_project_checks(project, project_path)
 
     compatible = _compatible_projects(args, projects, requirements)
     environment = _check_environment()
@@ -611,6 +720,8 @@ def handle_check(args: argparse.Namespace) -> None:
                 _run_ruff(project, project_checks["ruff"], environment)
             if "pytest" in project_checks:
                 _run_pytest(project, project_checks["pytest"], environment, args.test_tier)
+            else:
+                print("[+] %s: pytest skipped (no declared paths or conventional test files)" % project)
 
     mode = "compatibility" if args.compatibility else "check"
     print("[+] %s passed: %s" % (mode.capitalize(), ", ".join(compatible)))

@@ -19,13 +19,11 @@ from linktools.ai.runtime._tool_metrics import (
     ToolMetricsCapability,
     _ToolMetricContext,
 )
-from ._runtime_test_helpers import tool_with_metadata
+from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 from pydantic_ai.exceptions import SkipToolExecution
 from pydantic_ai.messages import ToolCallPart
-from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext, ToolDefinition
-from pydantic_ai.usage import RunUsage
 
 pytestmark = pytest.mark.asyncio
 
@@ -76,16 +74,6 @@ class _Bridge:
         self.calls.append("unknown")
 
 
-def _context() -> RunContext[None]:
-    return RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        run_id="run",
-        tool_call_id="call",
-    )
-
-
 def _metric_context(recorder: _Recorder) -> _ToolMetricContext:
     return _ToolMetricContext(
         recorder,
@@ -120,7 +108,7 @@ async def _boundary(
         tool_operations=bridge,
         tool_metrics=_metric_context(recorder),
     )
-    context = _context()
+    context = tool_run_context()
     tools = await boundary.get_tools(context)
     return boundary, bridge, context, tools["tool"]
 
@@ -262,7 +250,7 @@ async def test_capability_tool_signal_is_observed_before_control_conversion(
 
     with pytest.raises(type(signal)):
         await capability.wrap_tool_execute(
-            _context(),
+            tool_run_context(),
             call=call,
             tool_def=tool_def,
             args={},

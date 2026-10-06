@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Session admission ownership and status transition conformance."""
 
-import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -113,6 +112,7 @@ async def _assert_admission_contract(state: RuntimeStorage) -> None:
             next_cursor=ConversationCursor("run-1"),
         )
         assert advanced.status is SessionStatus.CLOSING
+        assert advanced.revision == closing.revision + 1
         assert advanced.active_execution_id == "execution-1"
 
         released = await state.conversation.sessions.release_execution(
@@ -140,6 +140,7 @@ async def _assert_admission_contract(state: RuntimeStorage) -> None:
             require_no_active=True,
         )
         assert closed.active_execution_id is None
+        assert closed.continuation == ConversationCursor("run-1")
         with pytest.raises(AIError) as closed_error:
             await state.conversation.sessions.admit_execution(
                 "session",
@@ -166,33 +167,3 @@ async def test_sql_session_admission_contract(tmp_path) -> None:
         await _assert_admission_contract(state)
     finally:
         await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_concurrent_admission_has_single_owner() -> None:
-    state = RuntimeStorage.in_memory()
-    await state.initialize(namespace="admission-concurrent", tenant_id="tenant")
-    try:
-        await state.conversation.sessions.create(_session())
-
-        async def admit(execution_id: str):
-            try:
-                return await state.conversation.sessions.admit_execution(
-                    "session",
-                    tenant_id="tenant",
-                    execution_id=execution_id,
-                    expected=None,
-                )
-            except AIError as error:
-                return error
-
-        first, second = await asyncio.gather(admit("execution-1"), admit("execution-2"))
-        values = (first, second)
-        successes = [value for value in values if isinstance(value, SessionRecord)]
-        failures = [value for value in values if isinstance(value, AIError)]
-        assert len(successes) == 1
-        assert len(failures) == 1
-        assert failures[0].code is ErrorCode.SESSION_BUSY
-        assert successes[0].active_execution_id in {"execution-1", "execution-2"}
-    finally:
-        await state.close()

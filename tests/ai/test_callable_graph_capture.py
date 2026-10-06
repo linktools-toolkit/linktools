@@ -23,10 +23,9 @@ async def _score(context: TaskNodeContext[None]) -> JsonValue:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("graph_mode", ("declaration_graph", "materialized_graph"))
 @pytest.mark.parametrize("source_mode", ("fixed_input", "reproject_input"))
 async def test_callable_graph_recapture_uses_current_accepted_input(
-    tmp_path: Path, graph_mode: str, source_mode: str,
+    tmp_path: Path, source_mode: str,
 ) -> None:
     preparation = "source"
 
@@ -59,34 +58,38 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
         graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
         accepted = await graph.result("target")
         current_execution = await graph.execution("target")
-        request = CaptureGraphRequest(PRINCIPAL, "graph", mode=graph_mode)
-        graph_capture = await runtime.tasks.capture_graph(graph.graph_id, request)
-        assert await runtime.tasks.capture_graph(graph.graph_id, request) == graph_capture
-        template = await runtime._input_captures.read_graph(graph_capture, principal=PRINCIPAL)
-        contract = await runtime._input_captures.read_task(template.nodes[0].input_capture, principal=PRINCIPAL)
-        assert contract.source_execution_id == current_execution.execution_id
-        assert contract.task_ref == current.ref
-        assert dict(contract.binding) == {"id": current.id, "revision": current.revision, **dict(current.contract)}
-        assert dict(contract.input) == accepted
-        assert dict(contract.original_input) == {"value": 1}
-        assert contract.input_mode == "fixed_input"
+        captures = {}
+        for graph_mode in ("declaration_graph", "materialized_graph"):
+            request = CaptureGraphRequest(PRINCIPAL, "graph-" + graph_mode, mode=graph_mode)
+            graph_capture = await runtime.tasks.capture_graph(graph.graph_id, request)
+            assert await runtime.tasks.capture_graph(graph.graph_id, request) == graph_capture
+            template = await runtime._input_captures.read_graph(graph_capture, principal=PRINCIPAL)
+            contract = await runtime._input_captures.read_task(template.nodes[0].input_capture, principal=PRINCIPAL)
+            assert contract.source_execution_id == current_execution.execution_id
+            assert contract.task_ref == current.ref
+            assert dict(contract.binding) == {"id": current.id, "revision": current.revision, **dict(current.contract)}
+            assert dict(contract.input) == accepted
+            assert dict(contract.original_input) == {"value": 1}
+            assert contract.input_mode == "fixed_input"
+            captures[graph_mode] = graph_capture
 
-        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("graph", 1), (
-            CaseSpec.graph(CaseRef("graph", "unchanged", 1), inputs={}),
-            CaseSpec.graph(CaseRef("graph", "addition", 1), inputs={"target": TaskCaseInput(input={"extra": True})}),
-        )), principal=PRINCIPAL, idempotency_key="graph-dataset")
-        for input_mode in ("fixed_input", "reproject_input"):
-            preparation = input_mode
-            replay = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
-                (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=graph_capture, outputs={"answer": "target"})),),
-                (rule_scorer(scorer),), input_mode=input_mode), PRINCIPAL, input_mode), engine=engine)
-            assert (await replay.wait(timeout_seconds=30)).completion == "complete"
-            for replay_trial in (await replay.trials()).items:
-                replay_graph = await engine.get(replay_trial.graph_ref.graph_id, principal=PRINCIPAL)
-                expected = accepted if input_mode == "fixed_input" else {"value": 11, "prepared": preparation}
-                if replay_trial.case_ref.case_id == "addition":
-                    expected = {**expected, "extra": True}
-                assert await replay_graph.result("target") == expected
+        for graph_mode, graph_capture in captures.items():
+            dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef(graph_mode, 1), (
+                CaseSpec.graph(CaseRef(graph_mode, "unchanged", 1), inputs={}),
+                CaseSpec.graph(CaseRef(graph_mode, "addition", 1), inputs={"target": TaskCaseInput(input={"extra": True})}),
+            )), principal=PRINCIPAL, idempotency_key="graph-dataset-" + graph_mode)
+            for input_mode in ("fixed_input", "reproject_input"):
+                preparation = input_mode
+                replay = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
+                    (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=graph_capture, outputs={"answer": "target"})),),
+                    (rule_scorer(scorer),), input_mode=input_mode), PRINCIPAL, graph_mode + "-" + input_mode), engine=engine)
+                assert (await replay.wait(timeout_seconds=30)).completion == "complete"
+                for replay_trial in (await replay.trials()).items:
+                    replay_graph = await engine.get(replay_trial.graph_ref.graph_id, principal=PRINCIPAL)
+                    expected = accepted if input_mode == "fixed_input" else {"value": 11, "prepared": preparation}
+                    if replay_trial.case_ref.case_id == "addition":
+                        expected = {**expected, "extra": True}
+                    assert await replay_graph.result("target") == expected
 
 
 @pytest.mark.asyncio

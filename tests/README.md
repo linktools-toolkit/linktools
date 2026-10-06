@@ -9,7 +9,7 @@ python manage.py check linktools-ai --test-tier merge
 python manage.py check linktools-ai --test-tier all # explicitly include manual probes
 ```
 
-`daily` includes all unmarked tests, including new tests/packages. `merge` adds
+`daily` includes all collected unmarked tests, including new test files. `merge` adds
 backend and recovery combinations. `all` adds manual scale and repeated-stress
 probes; it is not the release default. Direct pytest uses the same `--test-tier`
 option and defaults to `merge`, but does not replace the other `manage.py` gates.
@@ -29,6 +29,17 @@ precedence if a case has both marks. Do not classify tests only by duration.
 Unique cancellation, corruption, recovery, external-effect and regression
 obligations must retain automatic coverage.
 
+## Package test discovery
+
+Each package's `checks.pytest.paths` declares any nonconventional test locations.
+`manage.py check` also includes `<package>/tests` and `tests/<package short name>`
+when they contain pytest's default `test_*.py` or `*_test.py` filenames. These
+conventions apply to newly discovered packages without editing the CI workflow
+or maintaining a package list. Overlapping paths are collected once. A package
+with no declared or conventional tests may still run its architecture/lint gates;
+its log explicitly reports that no pytest tests were found. Other directory or
+filename conventions require explicit pytest configuration.
+
 ## CI selection
 
 | Event | Coverage |
@@ -44,34 +55,89 @@ The reusable workflow intentionally declares no tier input. It cannot accept an
 input does not select manual tests. No path, ready transition, release or timer
 automatically enables manual probes. There is no scheduled run.
 
-Both Python versions and automatic package discovery are retained. Non-AI
-packages keep one check per version. AI runs two disjoint file-family groups per
-version: `evaluation` selects `test_evaluation*` and filenames containing
-`capture`; `runtime` selects every other file under `tests/ai`. New files join a
-group automatically; no file manifest or recorded timing database is required.
-Grouping never changes tier eligibility. The default group is `all`, so local
-checks continue to cover the complete chosen tier. To run one group locally:
+The execution plan in `scripts/check/matrix.py` owns the Python versions and
+pytest execution options. Package group names and filename matching rules live
+in their existing `linktools.yml` under `checks.pytest.groups`. Execution jobs consume
+that plan; automatic package discovery is retained. Packages
+default to an independent check per Python version. Short packages can share one
+job by declaring the same pool in their existing manifest:
 
-```bash
-PYTEST_ADDOPTS='--ai-group=evaluation' python manage.py check linktools-ai --test-tier daily
-PYTEST_ADDOPTS='--ai-group=runtime' python manage.py check linktools-ai --test-tier daily
+```yaml
+checks:
+  ci-pool: linktools
 ```
 
-The original `Python <version> linktools-ai checks` names remain as aggregate
-checks. They conservatively require the entire package matrix to succeed, so a
-failure in another package/version also fails both AI aggregates. The `Python
-test coverage` aggregate requires discovery, compatibility, all package groups
-and these aggregates to succeed; skipped/failed jobs or empty test groups do not
-count as completed coverage. Its summary states the selected tier. Repository
-protection settings are managed separately.
+`ci-pool` shares setup and installs all pool members and their dependency closure.
+It cannot be combined with `checks.pytest.groups`, and its name must not collide
+with an independent package. Each member still runs its own `manage.py check`,
+with separate logs and summaries. An ordinary failure does not skip later members;
+the job ultimately fails. Cancellation signals stop the loop. New packages without
+`ci-pool` remain independent. Core, common and mobile currently share the `linktools`
+pool. Its job title lists the members, for example
+`Python <version> linktools + linktools-common + linktools-mobile checks`.
+Adding a member through its manifest also updates the title. Separate common/mobile
+check names are no longer emitted. Core retains its full-package installation.
 
-With the current five packages this uses 17 jobs instead of 13: two additional
-AI execution jobs and two lightweight aggregates. Each AI group installs the
-same dependencies and runs the package architecture/lint gates before its own
-tests; files stay intact for fixture reuse and four-worker `loadfile` scheduling.
-The measured evaluation/capture family accounts for about 56% of cumulative
-daily test-call time, motivating two groups. That is not a wall-time prediction;
-extra runner startup, installation and gate work increase total runner usage.
+Packages can instead declare test groups. For example,
+`linktools-ai/linktools.yml` declares:
+
+```yaml
+checks:
+  pytest:
+    paths:
+      - ../tests/ai
+    groups:
+      evaluation:
+        - test_evaluation*
+        - test_captured*
+        - test_graph_capture*
+      runtime: []
+```
+
+`paths` may be omitted when conventional test directories are present. A
+declared pytest check with no test paths fails rather than collecting the entire
+repository. Patterns are case-sensitive filename globs, not paths. Exactly one group must
+have an empty list: it receives every unmatched file, including newly added
+files. A file matching multiple non-default groups fails collection rather than
+relying on ordering. Group names must be simple letters, digits, hyphens or
+underscores; `all` is reserved for unfiltered execution. A package without groups
+gets one `all` execution, in its declared pool or an independent job. No Python-side package name or file-family classifier is
+needed to add another grouped package.
+
+`manage.py check` validates the manifest and passes the selected package's
+resolved pytest configuration to its subprocess. Group filtering applies only
+within that package's test paths, including conventional directories. The default
+`all` group preserves complete local coverage; named groups must be declared in
+the selected package's manifest, and unknown groups fail clearly. Tier selection
+remains independent:
+
+```bash
+PYTEST_ADDOPTS='--test-group=evaluation' python manage.py check linktools-ai --test-tier daily
+PYTEST_ADDOPTS='--test-group=runtime' python manage.py check linktools-ai --test-tier daily
+```
+
+The `Python checks passed` gate directly requires discovery, compatibility and
+the entire package matrix to succeed; cancelled, skipped or failed jobs and empty test groups do not
+count as completed coverage. Per-job summaries identify package, Python, group,
+tier and outcome; pytest also prints skip reasons. The final summary states the
+selected tier. Repository protection settings are managed separately.
+
+The current five packages use 11 jobs: 8 execution jobs, discovery, Python 3.6
+compatibility and final coverage. Each AI group installs its
+local dependency closure and runs the package architecture/lint gates before
+its own tests; files stay intact for fixture reuse and four-worker `loadfile` scheduling.
+The file-family split preserves existing coverage and fixture locality, but is
+not a guarantee of balanced wall time. Runner startup, installation and repeated
+gates also affect both latency and total runner usage. Automatic execution jobs
+have a 20-minute limit; explicit `all` runs allow 60 minutes for manual probes.
+
+Named `manage.py install` selections include their transitive local dependencies
+and requested extras in the same pip resolution. CI uses this for all packages
+except core: core's CLI-help tests walk every installed package, so its jobs keep
+installing all packages to retain that cross-package coverage. Editable installs
+continue to include development dependencies; pip still enforces the original
+version constraints and resolves external dependencies. The existing pip cache
+and open dependency-update policy are unchanged.
 
 ## Coverage responsibilities
 

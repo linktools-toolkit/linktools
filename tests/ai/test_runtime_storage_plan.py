@@ -14,12 +14,6 @@ def test_runtime_storage_sqlite_route_normalizes_paths(tmp_path) -> None:
     assert RuntimeStorage.sqlite(tmp_path / "runtime.db").plan.durable_domains
 
 
-def test_runtime_storage_sqlite_uses_builtin_object_store_by_default(tmp_path) -> None:
-    state = RuntimeStorage.sqlite(tmp_path / "runtime.db")
-
-    assert state.plan.durable_domains
-
-
 def test_runtime_storage_plan_allows_sqlite_without_an_explicit_object_store(
     tmp_path,
 ) -> None:

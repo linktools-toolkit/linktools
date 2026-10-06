@@ -18,11 +18,9 @@ from linktools.ai.workspace import (
     ToolPermissionPolicy,
 )
 from pydantic_ai.exceptions import ApprovalRequired
-from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
-from pydantic_ai.tools import DeferredToolRequests, RunContext
-from pydantic_ai.usage import RunUsage
-from ._runtime_test_helpers import tool_with_metadata
+from pydantic_ai.tools import DeferredToolRequests
+from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 
 
 class _Bridge:
@@ -90,16 +88,6 @@ class _Store:
         execution_id: str | None = None,
     ) -> None:
         del event, execution_id
-
-
-def _context() -> RunContext[None]:
-    return RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        run_id="run",
-        tool_call_id="call",
-    )
 
 
 @pytest.mark.asyncio
@@ -194,7 +182,7 @@ async def test_ask_boundary_defers_before_runtime_operation() -> None:
         ),
         tool_operations=bridge,  # type: ignore[arg-type]
     )
-    context = _context()
+    context = tool_run_context()
     tools = await boundary.get_tools(context)
     with pytest.raises(ApprovalRequired):
         await boundary.call_tool(

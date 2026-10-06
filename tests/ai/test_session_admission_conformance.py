@@ -28,7 +28,7 @@ from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
+from linktools.ai.runtime.state._contracts import SessionRecord
 from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -150,53 +150,6 @@ async def test_sql_admission_is_atomic_and_token_survives_reopen(tmp_path) -> No
         if state.ready:
             await state.close()
         await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_closing_session_can_commit_owned_continuation_then_close() -> None:
-    state = RuntimeStorage.in_memory()
-    await state.initialize(namespace="session-admission-close", tenant_id="tenant")
-    try:
-        await state.conversation.sessions.create(_session())
-        await state.conversation.sessions.admit_execution(
-            "session",
-            tenant_id="tenant",
-            execution_id="execution",
-            expected=None,
-        )
-        closing = await state.conversation.sessions.transition_status(
-            "session",
-            tenant_id="tenant",
-            expected=frozenset({SessionStatus.OPEN}),
-            next_status=SessionStatus.CLOSING,
-        )
-        committed = await state.conversation.sessions.advance_continuation(
-            "session",
-            tenant_id="tenant",
-            execution_id="execution",
-            expected=None,
-            next_cursor=ConversationCursor("turn"),
-        )
-        assert committed.status is SessionStatus.CLOSING
-        assert committed.active_execution_id == "execution"
-        assert committed.revision == closing.revision + 1
-        await state.conversation.sessions.release_execution(
-            "session",
-            tenant_id="tenant",
-            execution_id="execution",
-        )
-        closed = await state.conversation.sessions.transition_status(
-            "session",
-            tenant_id="tenant",
-            expected=frozenset({SessionStatus.CLOSING}),
-            next_status=SessionStatus.CLOSED,
-            closed_at=datetime.now(timezone.utc),
-            require_no_active=True,
-        )
-        assert closed.active_execution_id is None
-        assert closed.continuation == ConversationCursor("turn")
-    finally:
-        await state.close()
 
 
 def _binding() -> AgentBindingContract:

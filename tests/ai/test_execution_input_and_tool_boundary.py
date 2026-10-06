@@ -8,10 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
-from pydantic_ai.tools import RunContext
-from pydantic_ai.usage import RunUsage
 
 from linktools.ai.core import HmacCursorSigner, Principal, PromptLimits, TenantAuthorizationPolicy
 from linktools.ai.capability import ToolCallRetry
@@ -41,7 +38,7 @@ from linktools.ai.workspace import (
     SandboxSession,
     WorkspaceAccess,
 )
-from ._runtime_test_helpers import tool_with_metadata
+from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 
 
 class _Session:
@@ -274,16 +271,6 @@ async def _echo_path(path: str) -> str:
     return path
 
 
-def _context() -> RunContext[None]:
-    return RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        run_id="run",
-        tool_call_id="call",
-    )
-
-
 def _workspace_boundary(sandbox_session: object) -> BoundaryToolset:
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
@@ -303,7 +290,7 @@ def _workspace_boundary(sandbox_session: object) -> BoundaryToolset:
 async def test_final_tool_boundary_canonicalizes_workspace_arguments() -> None:
     session = _Session({})
     boundary = _workspace_boundary(session)
-    context = _context()
+    context = tool_run_context()
     tools = await boundary.get_tools(context)
     args = {"path": "file.txt"}
 
@@ -321,7 +308,7 @@ async def test_final_tool_boundary_canonicalizes_workspace_arguments() -> None:
 @pytest.mark.asyncio
 async def test_final_tool_boundary_returns_model_retry_for_correctable_path_error() -> None:
     boundary = _workspace_boundary(_DeniedAccess())
-    context = _context()
+    context = tool_run_context()
     tools = await boundary.get_tools(context)
 
     with pytest.raises(ToolCallRetry, match="not allowed"):
@@ -336,7 +323,7 @@ async def test_final_tool_boundary_returns_model_retry_for_correctable_path_erro
 @pytest.mark.asyncio
 async def test_final_tool_boundary_does_not_freeze_transient_sandbox_failure() -> None:
     boundary = _workspace_boundary(_UnavailableAccess())
-    context = _context()
+    context = tool_run_context()
     tools = await boundary.get_tools(context)
 
     with pytest.raises(AIError) as raised:
