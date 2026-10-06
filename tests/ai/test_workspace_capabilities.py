@@ -21,9 +21,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.spec import (
     AgentSpec,
-    AgentSpecCodec,
     MCPServerSpec,
-    RepositoryInstructions,
     mcp_server_selector,
     mcp_tool_selector,
 )
@@ -173,17 +171,6 @@ class _BlockingCloseSession(_RecordingSession):
         self.closed += 1
         self.close_started.set()
         await self.close_release.wait()
-
-
-class _UnusedResolver:
-    async def resolve(
-        self,
-        target: str,
-        *,
-        exclude_sources: frozenset[str] = frozenset(),
-    ) -> RepositoryInstructions:
-        del target, exclude_sources
-        return RepositoryInstructions(())
 
 
 class _SpoofedSandboxCapability(AbstractCapability[object]):
@@ -436,12 +423,6 @@ def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) ->
         workspace_capabilities(workspace, ("read_file", "run_command"))
     assert raised.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
     assert workspace_capabilities(workspace, ()) == ()
-
-
-def test_workspace_capabilities_with_no_selected_tools_do_not_open_sandbox(tmp_path: Path) -> None:
-    sandbox = _RecordingSandbox()
-    assert workspace_capabilities(Workspace.load(tmp_path), ()) == ()
-    assert sandbox.sessions == []
 
 
 def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> None:

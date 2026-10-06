@@ -6,9 +6,8 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import BinaryContent, ToolReturn
-from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext
-from pydantic_ai.usage import RunUsage
+
+from ._runtime_test_helpers import tool_run_context
 
 from linktools.ai.capability import (
     CapabilityGroup,
@@ -73,16 +72,6 @@ class _RepositoryBoundary:
         self.path_fields = path_fields
 
 
-def _context() -> RunContext[None]:
-    return RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        run_id="run",
-        tool_call_id="call",
-    )
-
-
 async def _boundary(
     workspace: Workspace,
     session: _AttachmentSession,
@@ -111,7 +100,7 @@ async def _boundary(
         sandbox_session=session,  # type: ignore[arg-type]
         repository_boundary=repository,
     )
-    tools = await boundary.get_tools(_context())  # type: ignore[arg-type]
+    tools = await boundary.get_tools(tool_run_context())  # type: ignore[arg-type]
     return boundary, tools["attach_files"]
 
 
@@ -135,7 +124,7 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
     session = _AttachmentSession({"evidence.png": b"png"})
     repository = _RepositoryBoundary()
     boundary, tool = await _boundary(workspace, session, repository)
-    context = _context()
+    context = tool_run_context()
 
     result = await boundary.call_tool(  # type: ignore[arg-type]
         "attach_files",
@@ -171,7 +160,7 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
     result = await boundary.call_tool(  # type: ignore[arg-type]
         "attach_files",
         {"paths": [path]},
-        _context(),
+        tool_run_context(),
         tool,
     )
 
@@ -202,7 +191,7 @@ async def test_attach_files_returns_no_partial_result_when_one_file_fails(tmp_pa
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",
             {"paths": ["first.png", "missing.png"]},
-            _context(),
+            tool_run_context(),
             tool,
         )
 
@@ -219,7 +208,7 @@ async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Pat
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",
             {"paths": ["evidence.unknown"]},
-            _context(),
+            tool_run_context(),
             tool,
         )
 
@@ -241,7 +230,7 @@ async def test_attach_files_rejects_image_before_read_when_model_has_no_vision(
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",
             {"paths": ["evidence.png"]},
-            _context(),
+            tool_run_context(),
             tool,
         )
 

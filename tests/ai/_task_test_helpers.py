@@ -3,7 +3,7 @@
 """Shared Task test helpers and test-only legacy fixture adapters."""
 
 from collections.abc import Callable, Mapping
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 from linktools.ai.capability import CapabilityGroup as _CapabilityGroup
 from linktools.ai.core import Principal
@@ -221,14 +221,6 @@ async def task_graph_resume(
 ):
     run = await get_task_graph_run(runtime, graph_id)
     return await run.resume(node_id, request)  # type: ignore[arg-type]
-
-
-async def task_graph_cancel(runtime: Runtime[object], graph_id: str, request: object):
-    run = await get_task_graph_run(runtime, graph_id)
-    return await run.cancel(
-        idempotency_key=getattr(request, "idempotency_key"),
-        force=getattr(request, "force", False),
-    )
 
 
 async def task_result(runtime: Runtime[object], graph_id: str, node_id: str):

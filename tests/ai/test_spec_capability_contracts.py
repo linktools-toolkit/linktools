@@ -11,14 +11,14 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from pydantic_ai.models.test import TestModel
 from pydantic_ai import Tool
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
-from pydantic_ai.usage import RunUsage
 
 import linktools.ai.spec._naming as mcp_naming
 import linktools.ai.runtime._mcp as mcp_runtime
+from ._runtime_test_helpers import tool_run_context
+
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
     AssetSkillSource,
@@ -316,7 +316,7 @@ async def test_mcp_model_tool_mapping_calls_the_original_identity() -> None:
         "security/audit",
         frozenset({"scan:file"}),
     )
-    context = _context()
+    context = tool_run_context()
     tools = await wrapped.get_tools(context)
     model_name = _expected_mcp_tool_name("security/audit", "scan:file")
     assert tuple(tools) == (model_name,)
@@ -341,7 +341,7 @@ async def test_mcp_global_wildcard_still_requires_explicit_tool() -> None:
         frozenset({"missing"}),
     )
     with pytest.raises(AIError) as error:
-        await wrapped.get_tools(_context())
+        await wrapped.get_tools(tool_run_context())
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
@@ -392,7 +392,7 @@ async def test_mcp_model_tool_collision_fails_before_exposure(
         None,
     )
     with pytest.raises(AIError) as error:
-        await wrapped.get_tools(_context())
+        await wrapped.get_tools(tool_run_context())
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
@@ -567,7 +567,7 @@ async def test_business_tool_adapter_preserves_sync_execution_and_ctx_keyword() 
     group = CapabilityGroup[None]("business")
     tool = group.tool(blocking_tool, effect_policy="none")
     toolset = FunctionToolset([tool])
-    context = _context()
+    context = tool_run_context()
     tools = await toolset.get_tools(context)
 
     async def release_tool() -> None:
@@ -594,7 +594,7 @@ async def test_business_tool_adapter_preserves_ctx_keyword_for_async_tools() -> 
     group = CapabilityGroup[None]("business")
     tool = group.tool(business_tool, effect_policy="none")
     toolset = FunctionToolset([tool])
-    context = _context()
+    context = tool_run_context()
     tools = await toolset.get_tools(context)
 
     assert await toolset.call_tool(
@@ -1244,16 +1244,6 @@ async def _business(value: str) -> str:
     return value
 
 
-def _context() -> RunContext[None]:
-    return RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        run_id="run",
-        tool_call_id="call",
-    )
-
-
 @pytest.mark.asyncio
 async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> None:
     boundary = BoundaryToolset(
@@ -1279,7 +1269,7 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
         },
         id="business",
     )
-    context = _context()
+    context = tool_run_context()
     tools = await boundary.get_tools(context)
     assert await boundary.call_tool(
         "_business", {"value": "ok"}, context, tools["_business"]
@@ -1316,7 +1306,7 @@ async def test_runtime_tool_boundary_does_not_rewrite_explicit_descriptor() -> N
         },
         id="business",
     )
-    context = _context()
+    context = tool_run_context()
     tools = await boundary.get_tools(context)
     assert await boundary.call_tool(
         "_business", {"value": "ok"}, context, tools["_business"]

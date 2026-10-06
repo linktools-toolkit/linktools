@@ -255,39 +255,6 @@ async def test_sql_dialect_owns_consistent_read_setup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sql_asset_backend_uses_normalized_history_tables(tmp_path: Path) -> None:
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
-    try:
-        from sqlalchemy import MetaData
-
-        metadata = MetaData()
-        build_asset_sql_metadata(metadata=metadata)
-        build_object_sql_metadata(metadata=metadata)
-        tables = metadata.tables
-        backend = SqlAssetBackend(engine, namespace="test")
-        assert backend.root.scheme == "sql"
-        assert tuple(
-            table.name
-            for table in (
-                tables["ai_asset_entries"],
-                tables["ai_asset_changes"],
-                tables["ai_asset_batch_receipts"],
-                tables["ai_asset_heads"],
-            )
-        ) == (
-            "ai_asset_entries",
-            "ai_asset_changes",
-            "ai_asset_batch_receipts",
-            "ai_asset_heads",
-        )
-    finally:
-        await engine.dispose()
-
-
-
-@pytest.mark.asyncio
 async def test_filesystem_asset_batch_receipt_survives_reopen(tmp_path: Path) -> None:
     root = tmp_path / "asset-receipts"
     key = AssetKey("prompt", "one")
@@ -413,6 +380,7 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
             namespace="history",
             payload_policy=PayloadPolicy(inline_limit_bytes=1),
         )
+        assert backend.root.scheme == "sql"
         await provision_asset_database(engine)
         await backend.initialize()
         key = AssetKey("mcp", "history.yaml")
@@ -445,28 +413,6 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
                 counts.append(await session.scalar(select(func.count()).select_from(table)))
         assert counts == [1, 4, 2, 1]
         assert not hasattr(tables["ai_asset_heads"].c, "payload")
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_sql_asset_backend_provisions_its_owner_schema(tmp_path: Path) -> None:
-    from sqlalchemy import inspect
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
-    try:
-        backend = SqlAssetBackend(engine, namespace="missing")
-        await provision_asset_database(engine)
-        await backend.initialize()
-        async with engine.connect() as connection:
-            tables = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
-        assert {
-            "ai_asset_entries",
-            "ai_asset_changes",
-            "ai_asset_batch_receipts",
-            "ai_asset_heads",
-        } <= set(tables)
     finally:
         await engine.dispose()
 

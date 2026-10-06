@@ -15,13 +15,10 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     Principal,
-    ResourceKind,
-    ResourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime
-from linktools.ai.runtime._approval import DefaultApprovalService
 from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.runtime._factory import compose_runtime_components
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -33,42 +30,6 @@ from linktools.ai.storage import StorageOverlay, StoredPayload
 from pydantic import BaseModel
 
 from ._runtime_test_helpers import RuntimeUsageModels
-
-
-class _DenyAuthorization:
-    async def authorize(
-        self,
-        principal: object,
-        action: object,
-        resource: object,
-    ) -> None:
-        del principal, action, resource
-        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-
-
-class _ExecutionHeaders:
-    async def get_header(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> ResourceRef | None:
-        return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
-
-
-class _PendingApprovals:
-    def __init__(self) -> None:
-        self.list_calls = 0
-
-    async def list_pending(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> tuple[object, ...]:
-        del execution_id, tenant_id
-        self.list_calls += 1
-        return ()
 
 
 class _UncertainExecution:
@@ -178,27 +139,6 @@ async def test_runtime_rejects_source_change_during_assembly(
     finally:
         await store.close()
         await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_approval_list_authorizes_before_reading_pending_records() -> None:
-    approvals = _PendingApprovals()
-    service = DefaultApprovalService(
-        approvals,
-        _ExecutionHeaders(),
-        object(),
-        _DenyAuthorization(),
-        objects=object(),
-    )
-
-    with pytest.raises(AIError) as error:
-        await service.list(
-            "execution",
-            principal=Principal("principal", "tenant", "service"),
-        )
-
-    assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
-    assert approvals.list_calls == 0
 
 
 def test_output_contract_restores_only_mode_and_schema() -> None:

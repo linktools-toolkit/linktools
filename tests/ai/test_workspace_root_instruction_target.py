@@ -5,10 +5,7 @@
 from typing import Any
 
 import pytest
-from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
-from pydantic_ai.tools import RunContext
-from pydantic_ai.usage import RunUsage
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.capability import ToolCallRetry
@@ -16,7 +13,7 @@ from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     BoundaryToolset,
 )
-from ._runtime_test_helpers import tool_with_metadata
+from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 
 
 class _Session:
@@ -74,21 +71,11 @@ def _toolset(repository: _RepositoryBoundary) -> BoundaryToolset:
     )
 
 
-def _context() -> RunContext[None]:
-    return RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        run_id="run",
-        tool_call_id="call",
-    )
-
-
 @pytest.mark.asyncio
 async def test_empty_path_uses_workspace_root_before_instruction_lookup() -> None:
     repository = _RepositoryBoundary()
     toolset = _toolset(repository)
-    context = _context()
+    context = tool_run_context()
     tools = await toolset.get_tools(context)
 
     assert (
@@ -110,7 +97,7 @@ async def test_invalid_workspace_target_retries_before_instruction_lookup(
 ) -> None:
     repository = _RepositoryBoundary()
     toolset = _toolset(repository)
-    context = _context()
+    context = tool_run_context()
     tools = await toolset.get_tools(context)
 
     with pytest.raises(ToolCallRetry):
@@ -129,7 +116,7 @@ async def test_instruction_boundary_error_for_valid_root_target_is_fatal() -> No
     error = AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     repository = _RepositoryBoundary(error)
     toolset = _toolset(repository)
-    context = _context()
+    context = tool_run_context()
     tools = await toolset.get_tools(context)
 
     with pytest.raises(AIError) as raised:

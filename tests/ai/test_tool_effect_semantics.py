@@ -20,12 +20,9 @@ from pydantic_ai.exceptions import (
     CallDeferred,
     ModelRetry,
 )
-from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
-from pydantic_ai.tools import RunContext
-from pydantic_ai.usage import RunUsage
 from linktools.ai.workspace import ToolPermissionPolicy
-from ._runtime_test_helpers import tool_with_metadata
+from ._runtime_test_helpers import tool_run_context, tool_with_metadata
 
 
 class _Bridge:
@@ -84,16 +81,6 @@ class _Bridge:
         return False
 
 
-def _context() -> RunContext[None]:
-    return RunContext(
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        run_id="run",
-        tool_call_id="call",
-    )
-
-
 async def _call(
     handler: Any,
     descriptor: ManagedToolDescriptor,
@@ -109,7 +96,7 @@ async def _call(
         permission_policy=permission_policy,
         tool_operations=selected_bridge,  # type: ignore[arg-type]
     )
-    context = _context()
+    context = tool_run_context()
     tools = await boundary.get_tools(context)
     result = await boundary.call_tool(
         handler.__name__,

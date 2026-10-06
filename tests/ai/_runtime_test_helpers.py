@@ -15,7 +15,9 @@ from pydantic_ai.models import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.usage import RequestUsage
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RequestUsage, RunUsage
 
 from linktools.ai.capability import tool_metadata
 from linktools.ai.core import JsonValue
@@ -23,6 +25,16 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
+
+
+def tool_run_context() -> RunContext[None]:
+    return RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+        tool_call_id="call",
+    )
 
 
 def execution_owner_fields(prompt: str = "prompt") -> dict[str, object]:
