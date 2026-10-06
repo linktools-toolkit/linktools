@@ -189,7 +189,7 @@ class _ObservationSession:
         if cleanup_error is not None:
             errors.append((0 if isinstance(cleanup_error, asyncio.CancelledError) else 4, cleanup_error))
         if any(priority == 4 for priority, _ in errors) and any(priority < 4 for priority, _ in errors):
-            _logger.warning("task observation cleanup pending: graph_id=%s", self.graph_id)
+            _logger.warning("task observation cleanup failed: graph_id=%s", self.graph_id)
         if errors:
             errors.sort(key=lambda item: item[0])
             raise errors[0][1]
