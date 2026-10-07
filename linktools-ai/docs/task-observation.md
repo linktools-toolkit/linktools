@@ -13,7 +13,7 @@ async def publish(event: TaskGraphRunEvent) -> None:
 outcome = await run.wait(
     on_event=publish,
     cursor=saved_cursor,
-    include_content=False,
+    include_event_content=False,
     timeout_seconds=120.0,
     close_timeout_seconds=5.0,
 )
@@ -60,12 +60,21 @@ This is a computed property, not persisted state. `result.node_states` replaces
 old wait payloads' `node_results`; node output content remains in
 `results()`, `result()`, and `result_ref()`.
 
+The returned graph includes all current nodes, including dynamically expanded
+ones. `await run.state()` reads safe current metadata; use
+`await run.state(include_content=True)` for raw node definitions and invocation
+inputs together with their current state. This replaces the redundant SDK
+`inspect()` read. It is a fresh snapshot, not the original submitted definition
+or necessarily the same stopping snapshot returned by wait.
+
 Evaluation stops at complete, cancelled, or needs_attention. A return is not
 necessarily business success. Ordinary human scoring may remain running while a
 graph is WAITING, until a score is supplied or the wait times out.
 
 Without a callback, cursor must be None. With a callback, cursor and
-include_content identify the same observation scope as watch. New Agent/Session
+include_event_content identify the same observation scope as watch's
+include_content. Graph wait's separate include_content controls only the result;
+it does not change cursor compatibility or callback payloads. New Agent/Session
 run/plan calls do not accept a cursor: resume observation on the existing handle.
 
 ## Delivery, preparation, and cleanup
@@ -179,12 +188,47 @@ unpublished partial pages and restart, with a bounded application retry budget.
 Publish only after next_cursor is None. Respect content_included and byte limits;
 a result page and the earlier wait result are not a cross-store transaction.
 
+For example, collect a complete page set before publishing any of it:
+
+```python
+from linktools.ai.errors import AIError, ErrorCode
+
+for attempt in range(3):
+    items = []
+    cursor = None
+    try:
+        while True:
+            page = await run.results(cursor=cursor, include_content=True)
+            items.extend(page.items)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+    except AIError as error:
+        if error.code not in {ErrorCode.CURSOR_INVALID, ErrorCode.STORAGE_CONFLICT}:
+            raise
+        if attempt == 2:
+            raise  # Leave the previous published view intact.
+    else:
+        await publish_results(items)  # Application-owned publication.
+        break
+```
+
+This retry applies to graph results, not every `Page`: history cursors continue
+a fixed high-water range; model-interaction cursors fix request identities but
+allow their lifecycle state to advance. See [Runtime history](runtime-history.md).
+
 ## Unreleased source and wire migration
 
 This is a breaking pre-release change with no compatibility aliases:
 
 - Replace observe callbacks with async iteration over watch, and wait_observed
   with wait(on_event=...). Replace TaskGraphWaitResult with WaitResult
+- Wait/run/plan observation content uses include_event_content; graph wait's
+  include_content selects only its result projection. Watch keeps include_content
+- Trace no longer accepts include_content; read bodies using history or
+  model_interactions with the returned execution/run locators
+- TaskGraphRun.inspect is consolidated into state(include_content=True), which
+  also returns node states and the graph event sequence
 - Old result.output/status access on SDK wait/run/plan becomes
   outcome.result.output/status. Graph display status is result.wait_status
 - RuntimeHistory.task_events/list_events become

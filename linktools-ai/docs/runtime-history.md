@@ -23,6 +23,11 @@ scope can be broader than a history query. Read a deeper subagent using that eve
 `execution_id`, rather than substituting its parent's identity. Task and
 evaluation results remain in their own domains.
 
+Trace always returns step/status metadata and content locators. It has no
+include_content option; use those locators with history or model_interactions
+when the application needs a body. Keep watch as notification and request
+content explicitly from the owning Runtime read API.
+
 ## Read one tool call
 
 The default watch keeps safe locator and status metadata, including
@@ -182,7 +187,7 @@ restart. Those readers see what the configured execution archive has already
 materialized. No new durable content journal, database migration, or
 cross-process event/content transaction is introduced.
 
-Bodies are opt-in in responses. Model interaction and attachment-metadata reads
+Bodies are opt-in in content-bearing read responses; trace remains metadata-only. Model interaction and attachment-metadata reads
 do not resolve unrequested bodies. Existing archived history/transcript
 projection may still decode message chunks to identify items even when
 `include_content=False`; it does not return those bodies to the caller.

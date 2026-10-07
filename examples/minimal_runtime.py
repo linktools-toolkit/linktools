@@ -33,7 +33,7 @@ async def run(project: Path) -> object:
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         result = await runtime.agents.get("writer").run("Say hello.")
-        return result.output
+        return result.result.output
 
 
 if __name__ == "__main__":  # pragma: no cover - manual smoke
