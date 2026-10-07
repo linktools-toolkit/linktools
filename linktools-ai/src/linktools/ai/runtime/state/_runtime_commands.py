@@ -173,9 +173,9 @@ class RuntimeStateCommands:
         execution_id: str,
         tenant_id: str,
         expected_execution_revision: int,
-        expected_event_sequence: int,
+        expected_event_seq: int,
         expected_recovery_revision: int,
-        expected_agent_run_sequence: int,
+        expected_agent_run_seq: int,
         continuation: PendingToolContinuation,
         audit_events: Sequence[ExecutionEventAppend] = (),
         approval_records: Sequence[ApprovalRecord] = (),
@@ -286,9 +286,9 @@ class RuntimeStateCommands:
                     or current_checkpoint is None
                     or current_execution.status is not ExecutionStatus.STARTED
                     or current_execution.revision != expected_execution_revision
-                    or current_execution.event_sequence != expected_event_sequence
-                    or current_execution.agent_run_sequence
-                    != expected_agent_run_sequence
+                    or current_execution.event_seq != expected_event_seq
+                    or current_execution.agent_run_seq
+                    != expected_agent_run_seq
                     or current_checkpoint.revision != expected_recovery_revision
                     or current_checkpoint.state is not RecoveryCheckpointState.ACTIVE
                     or current_checkpoint.agent_run_id
@@ -305,8 +305,8 @@ class RuntimeStateCommands:
                         execution_id,
                         tenant_id=tenant_id,
                         expected_revision=expected_execution_revision,
-                        expected_event_sequence=expected_event_sequence,
-                        expected_agent_run_sequence=expected_agent_run_sequence,
+                        expected_event_seq=expected_event_seq,
+                        expected_agent_run_seq=expected_agent_run_seq,
                         audit_events=audit_events,
                         deferred_events=request_events,
                         occurred_at=occurred_at,
@@ -359,7 +359,7 @@ class RuntimeStateCommands:
                     )
             if (
                 execution.status is ExecutionStatus.WAITING_DEFERRED
-                and execution.agent_run_sequence == expected_agent_run_sequence
+                and execution.agent_run_seq == expected_agent_run_seq
                 and checkpoint.state is RecoveryCheckpointState.WAITING
                 and checkpoint.pending_tools == continuation
             ):
@@ -370,7 +370,7 @@ class RuntimeStateCommands:
             if (
                 execution.status is ExecutionStatus.STARTED
                 and execution.revision == expected_execution_revision
-                and execution.event_sequence == expected_event_sequence
+                and execution.event_seq == expected_event_seq
                 and checkpoint.revision == expected_recovery_revision
             ):
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
@@ -447,7 +447,7 @@ class RuntimeStateCommands:
                     or checkpoint is None
                     or execution.status is not ExecutionStatus.WAITING_DEFERRED
                     or execution.revision != commit.expected_revision
-                    or execution.event_sequence != commit.expected_event_sequence
+                    or execution.event_seq != commit.expected_event_seq
                     or checkpoint.revision != expected_recovery_revision
                     or checkpoint.state is not RecoveryCheckpointState.WAITING
                     or checkpoint.pending_tools != expected_pending_tools
@@ -540,8 +540,8 @@ class RuntimeStateCommands:
                     ExecutionStatus.FAILED,
                     ExecutionStatus.CANCELLED,
                 }
-                and execution.event_sequence
-                >= commit.expected_event_sequence + 1
+                and execution.event_seq
+                >= commit.expected_event_seq + 1
                 and checkpoint.state
                 in {
                     RecoveryCheckpointState.ACTIVE,
@@ -559,7 +559,7 @@ class RuntimeStateCommands:
             if (
                 execution.status is ExecutionStatus.WAITING_DEFERRED
                 and execution.revision == commit.expected_revision
-                and execution.event_sequence == commit.expected_event_sequence
+                and execution.event_seq == commit.expected_event_seq
                 and checkpoint.revision == expected_recovery_revision
                 and checkpoint.pending_tools == expected_pending_tools
             ):
@@ -583,9 +583,9 @@ class RuntimeStateCommands:
         execution_id: str,
         tenant_id: str,
         expected_execution_revision: int,
-        expected_event_sequence: int,
+        expected_event_seq: int,
         expected_recovery_revision: int,
-        expected_agent_run_sequence: int,
+        expected_agent_run_seq: int,
         expected_pending_tools: PendingToolContinuation,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
     ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
@@ -594,12 +594,12 @@ class RuntimeStateCommands:
         )
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        next_sequence = expected_agent_run_sequence + 1
+        next_sequence = expected_agent_run_seq + 1
         next_agent_run_id = agent_run_id(
             namespace=self._namespace,
             tenant_id=tenant_id,
             execution_id=execution_id,
-            agent_run_sequence=next_sequence,
+            agent_run_seq=next_sequence,
         )
 
         async def operation() -> tuple[ExecutionRecord, RecoveryCheckpoint]:
@@ -623,8 +623,8 @@ class RuntimeStateCommands:
                     or checkpoint is None
                     or execution.status is not ExecutionStatus.WAITING_DEFERRED
                     or execution.revision != expected_execution_revision
-                    or execution.event_sequence != expected_event_sequence
-                    or execution.agent_run_sequence != expected_agent_run_sequence
+                    or execution.event_seq != expected_event_seq
+                    or execution.agent_run_seq != expected_agent_run_seq
                     or checkpoint.revision != expected_recovery_revision
                     or checkpoint.state is not RecoveryCheckpointState.WAITING
                     or checkpoint.pending_tools != expected_pending_tools
@@ -636,8 +636,8 @@ class RuntimeStateCommands:
                         execution_id,
                         tenant_id=tenant_id,
                         expected_revision=expected_execution_revision,
-                        expected_event_sequence=expected_event_sequence,
-                        expected_agent_run_sequence=expected_agent_run_sequence,
+                        expected_event_seq=expected_event_seq,
+                        expected_agent_run_seq=expected_agent_run_seq,
                     )
                 )
                 updated_checkpoint = await self._recovery.compare_and_swap_in_transaction(
@@ -665,7 +665,7 @@ class RuntimeStateCommands:
                 return _partial_integrity()
             if (
                 execution.status is ExecutionStatus.STARTED
-                and execution.agent_run_sequence == next_sequence
+                and execution.agent_run_seq == next_sequence
                 and checkpoint.state is RecoveryCheckpointState.ACTIVE
                 and checkpoint.agent_run_id == next_agent_run_id
                 and checkpoint.pending_tools is None
@@ -761,7 +761,7 @@ class RuntimeStateCommands:
             ),
         )
         target_revision = commit.expected_revision + len(expected_events)
-        target_sequence = commit.expected_event_sequence + len(expected_events)
+        target_sequence = commit.expected_event_seq + len(expected_events)
 
         async def operation() -> ExecutionRecord:
             return await self._execution.request_cancel(commit, pending_events=audit_events)
@@ -780,12 +780,12 @@ class RuntimeStateCommands:
                 page = await self._events.list(
                     commit.execution_id,
                     tenant_id=self._tenant_id,
-                    after_sequence=commit.expected_event_sequence,
+                    after_event_seq=commit.expected_event_seq,
                     limit=len(expected_events) + 1,
                 )
                 items = page.items
                 if any(
-                    event.sequence != commit.expected_event_sequence + index
+                    event.event_seq != commit.expected_event_seq + index
                     for index, event in enumerate(items, 1)
                 ):
                     return CommitObservation(
@@ -793,12 +793,12 @@ class RuntimeStateCommands:
                         error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
                     )
                 revision_delta = execution.revision - commit.expected_revision
-                sequence_delta = execution.event_sequence - commit.expected_event_sequence
+                sequence_delta = execution.event_seq - commit.expected_event_seq
                 if (
                     revision_delta < 0
                     or sequence_delta < 0
                     or revision_delta < sequence_delta
-                    or items and items[-1].sequence > execution.event_sequence
+                    or items and items[-1].event_seq > execution.event_seq
                 ):
                     return CommitObservation(
                         DurableCommitState.PARTIAL_INTEGRITY_ERROR,
@@ -817,7 +817,7 @@ class RuntimeStateCommands:
                 if prefix_matches:
                     if (
                         execution.revision < target_revision
-                        or execution.event_sequence < target_sequence
+                        or execution.event_seq < target_sequence
                     ):
                         return CommitObservation(
                             DurableCommitState.PARTIAL_INTEGRITY_ERROR,
@@ -1023,12 +1023,12 @@ class RuntimeStateCommands:
         stores = [self._execution.state_store, self._recovery.state_store]
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        next_sequence = claim.expected_agent_run_sequence + 1
+        next_sequence = claim.expected_agent_run_seq + 1
         next_agent_run_id = agent_run_id(
             namespace=self._namespace,
             tenant_id=self._tenant_id,
             execution_id=claim.execution_id,
-            agent_run_sequence=next_sequence,
+            agent_run_seq=next_sequence,
         )
 
         async def callback(
@@ -1052,8 +1052,8 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if (
                 current_execution.revision != claim.expected_execution_revision
-                or current_execution.agent_run_sequence
-                != claim.expected_agent_run_sequence
+                or current_execution.agent_run_seq
+                != claim.expected_agent_run_seq
                 or current_recovery.revision != claim.expected_recovery_revision
                 or current_recovery.state is not claim.expected_recovery_state
             ):
@@ -1065,7 +1065,7 @@ class RuntimeStateCommands:
                 claim.execution_id,
                 tenant_id=self._tenant_id,
                 expected_revision=claim.expected_execution_revision,
-                expected_agent_run_sequence=claim.expected_agent_run_sequence,
+                expected_agent_run_seq=claim.expected_agent_run_seq,
             )
             updated_recovery = replace(
                 current_recovery,
@@ -1104,7 +1104,7 @@ class RuntimeStateCommands:
             execution_target = (
                 execution is not None
                 and execution.revision == claim.expected_execution_revision + 1
-                and execution.agent_run_sequence == next_sequence
+                and execution.agent_run_seq == next_sequence
             )
             recovery_target = (
                 recovery is not None
@@ -1115,7 +1115,7 @@ class RuntimeStateCommands:
             execution_predecessor = (
                 execution is not None
                 and execution.revision == claim.expected_execution_revision
-                and execution.agent_run_sequence == claim.expected_agent_run_sequence
+                and execution.agent_run_seq == claim.expected_agent_run_seq
             )
             recovery_predecessor = (
                 recovery is not None
@@ -1451,7 +1451,7 @@ class RuntimeStateCommands:
         if expected_execution is not None and (
             expected_execution.execution_id != commit.execution.execution_id
             or expected_execution.revision != commit.expected_revision
-            or expected_execution.event_sequence != commit.expected_event_sequence
+            or expected_execution.event_seq != commit.expected_event_seq
         ):
             raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         effective_commit = commit
@@ -2504,13 +2504,13 @@ class RuntimeStateCommands:
         if (
             execution.status is ExecutionStatus.PENDING_START
             and execution.revision == claim.expected_revision
-            and execution.event_sequence == claim.expected_event_sequence
+            and execution.event_seq == claim.expected_event_seq
         ):
             return None
         if (
             execution.status is not ExecutionStatus.STARTED
             or execution.revision != claim.expected_revision + 1
-            or execution.event_sequence != claim.expected_event_sequence + 1
+            or execution.event_seq != claim.expected_event_seq + 1
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         idempotency = await self._execution.get_start_idempotency(claim)
@@ -2519,12 +2519,12 @@ class RuntimeStateCommands:
         started_events = await self._events.list(
             claim.execution_id,
             tenant_id=self._tenant_id,
-            after_sequence=claim.expected_event_sequence,
+            after_event_seq=claim.expected_event_seq,
             limit=1,
         )
         if (
             len(started_events.items) != 1
-            or started_events.items[0].sequence != claim.expected_event_sequence + 1
+            or started_events.items[0].event_seq != claim.expected_event_seq + 1
             or started_events.items[0].event_type
             != ExecutionEventType.EXECUTION_STARTED.value
         ):
@@ -2586,7 +2586,7 @@ class RuntimeStateCommands:
             }
             if expected_execution is not None
             else execution.revision == commit.expected_revision
-            and execution.event_sequence == commit.expected_event_sequence
+            and execution.event_seq == commit.expected_event_seq
         ):
             head = await self._execution.get_history_head(
                 execution.execution_id, tenant_id=self._tenant_id,
@@ -2606,11 +2606,11 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
             return False
         expected_revision = commit.expected_revision + pending_event_count + 1
-        expected_sequence = commit.expected_event_sequence + pending_event_count + 1
+        expected_event_seq = commit.expected_event_seq + pending_event_count + 1
         expected_terminal = replace(
             commit.execution,
             revision=expected_revision,
-            event_sequence=expected_sequence,
+            event_seq=expected_event_seq,
             result=commit.result,
         )
         if not _same_execution_except_hold_metadata(execution, expected_terminal):
@@ -2687,14 +2687,14 @@ class RuntimeStateCommands:
         events = await self._events.list(
             commit.execution.execution_id,
             tenant_id=self._tenant_id,
-            after_sequence=commit.expected_event_sequence,
+            after_event_seq=commit.expected_event_seq,
             limit=pending_event_count + 1,
         )
         expected_events = tuple(audit_events) + (
             ExecutionEventAppend(commit.terminal_event_type, commit.terminal_event_payload),
         )
         if len(events.items) != len(expected_events) or any(
-            actual.sequence != commit.expected_event_sequence + index + 1
+            actual.event_seq != commit.expected_event_seq + index + 1
             or actual.event_type != expected.event_type
             or actual.payload != expected.payload
             for index, (actual, expected) in enumerate(

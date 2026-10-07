@@ -108,7 +108,7 @@ class _ObservedCompactionModel(WrapperModel):
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
-        request_sequence = fact.request_sequence
+        model_request_seq = fact.model_request_seq
         try:
             await self._notify(
                 fact,
@@ -127,7 +127,7 @@ class _ObservedCompactionModel(WrapperModel):
                 )
             except asyncio.CancelledError as error:
                 await self._finish(
-                    request_sequence,
+                    model_request_seq,
                     status="CANCELLED",
                     phase="cancelled",
                     response=None,
@@ -139,7 +139,7 @@ class _ObservedCompactionModel(WrapperModel):
                 raise
             except RunCancelled as error:
                 await self._finish(
-                    request_sequence,
+                    model_request_seq,
                     status="CANCELLED",
                     phase="cancelled",
                     response=None,
@@ -151,7 +151,7 @@ class _ObservedCompactionModel(WrapperModel):
                 raise
             except Exception as error:
                 await self._finish(
-                    request_sequence,
+                    model_request_seq,
                     status="FAILED",
                     phase="failed",
                     response=None,
@@ -161,7 +161,7 @@ class _ObservedCompactionModel(WrapperModel):
                     parameters=model_request_parameters,
                 )
                 raise
-            finished = self._journal.finish(request_sequence, status="SUCCEEDED")
+            finished = self._journal.finish(model_request_seq, status="SUCCEEDED")
             interrupted = await _await_request_handoff(
                 self._notify(
                     finished,
@@ -177,11 +177,11 @@ class _ObservedCompactionModel(WrapperModel):
                 raise asyncio.CancelledError
             return response
         finally:
-            self._journal.consume(request_sequence)
+            self._journal.consume(model_request_seq)
 
     async def _finish(
         self,
-        request_sequence: int,
+        model_request_seq: int,
         *,
         status: str,
         phase: str,
@@ -191,7 +191,7 @@ class _ObservedCompactionModel(WrapperModel):
         model_settings: ModelSettings | None,
         parameters: ModelRequestParameters,
     ) -> None:
-        finished = self._journal.finish(request_sequence, status=status)
+        finished = self._journal.finish(model_request_seq, status=status)
         interrupted = await _await_request_handoff(
             self._notify(
                 finished,

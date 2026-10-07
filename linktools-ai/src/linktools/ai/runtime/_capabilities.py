@@ -39,7 +39,7 @@ from ._harness_memory import (
 )
 from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
-from ._journal import DURATION_NS_METADATA_KEY, REQUEST_SEQUENCE_METADATA_KEY
+from ._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
@@ -237,11 +237,11 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         raise error
 
     def _tool_request_metadata(self, tool_call_id: str) -> dict[str, str]:
-        sequence = self.recorder.request_sequence_for_tool_call(tool_call_id)
+        sequence = self.recorder.model_request_seq_for_tool_call(tool_call_id)
         return (
             {}
             if sequence is None
-            else {REQUEST_SEQUENCE_METADATA_KEY: str(sequence)}
+            else {MODEL_REQUEST_SEQ_METADATA_KEY: str(sequence)}
         )
 
     async def before_tool_execute(
@@ -360,7 +360,7 @@ async def compose_platform_capabilities(
     agent_id: str,
     agent_run_id: str,
     execution_id: str | None = None,
-    agent_run_sequence: int | None,
+    agent_run_seq: int | None,
     history_id: str | None,
     memory_scope: str | None,
     run_store: AgentRunStore,
@@ -393,8 +393,8 @@ async def compose_platform_capabilities(
             **({} if history_id is None else {"history_id": history_id}),
             **(
                 {}
-                if agent_run_sequence is None
-                else {"agent_run_sequence": str(agent_run_sequence)}
+                if agent_run_seq is None
+                else {"agent_run_seq": str(agent_run_seq)}
             ),
         },
         deferred_pause_sink=deferred_pause_sink,

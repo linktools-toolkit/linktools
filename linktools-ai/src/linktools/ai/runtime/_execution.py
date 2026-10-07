@@ -729,8 +729,8 @@ class DefaultExecutionService:
             lineage_kind=ExecutionLineageKind.RUN,
             status=ExecutionStatus.PENDING_START,
             revision=0,
-            event_sequence=0,
-            agent_run_sequence=0,
+            event_seq=0,
+            agent_run_seq=0,
             error_code=None,
             safe_error_details={},
             created_at=now,
@@ -779,7 +779,7 @@ class DefaultExecutionService:
                 ExecutionStartClaim(
                     current.execution_id,
                     current.revision,
-                    current.event_sequence,
+                    current.event_seq,
                     scope,
                     key_digest,
                     request_digest,
@@ -867,7 +867,7 @@ class DefaultExecutionService:
             execution_id,
             tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
-            expected_event_sequence=current.event_sequence,
+            expected_event_seq=current.event_seq,
             expected_status=current.status,
             next_status=ExecutionStatus.STARTED,
             task_attempt=current.task_attempt + 1,
@@ -928,7 +928,7 @@ class DefaultExecutionService:
             execution_id,
             tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
-            expected_event_sequence=current.event_sequence,
+            expected_event_seq=current.event_seq,
             expected_status=ExecutionStatus.STARTED,
             next_status=ExecutionStatus.WAITING_RETRY,
             task_attempt=current.task_attempt,
@@ -967,7 +967,7 @@ class DefaultExecutionService:
             execution_id,
             tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
-            expected_event_sequence=current.event_sequence,
+            expected_event_seq=current.event_seq,
             expected_status=ExecutionStatus.STARTED,
             next_status=ExecutionStatus.RECOVERY_REQUIRED,
             task_attempt=current.task_attempt,
@@ -1008,7 +1008,7 @@ class DefaultExecutionService:
             execution_id,
             tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
-            expected_event_sequence=current.event_sequence,
+            expected_event_seq=current.event_seq,
             expected_status=ExecutionStatus.STARTED,
             next_status=ExecutionStatus.WAITING_DEFERRED,
             task_attempt=current.task_attempt,
@@ -1126,7 +1126,7 @@ class DefaultExecutionService:
             execution_id,
             tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
-            expected_event_sequence=current.event_sequence,
+            expected_event_seq=current.event_seq,
             expected_status=ExecutionStatus.RECOVERY_REQUIRED,
             next_status=ExecutionStatus.WAITING_RETRY,
             task_attempt=current.task_attempt,
@@ -1326,7 +1326,7 @@ class DefaultExecutionService:
         await self._state.executions.commit_terminal(
             ExecutionTerminalCommit(
                 current.revision,
-                current.event_sequence,
+                current.event_seq,
                 terminal,
                 result,
                 ExecutionEventType.EXECUTION_CANCELLED,
@@ -1414,7 +1414,7 @@ class DefaultExecutionService:
         await self._state.executions.commit_terminal(
             ExecutionTerminalCommit(
                 current.revision,
-                current.event_sequence,
+                current.event_seq,
                 terminal,
                 result,
                 ExecutionEventType.EXECUTION_SUCCEEDED,
@@ -1496,7 +1496,7 @@ class DefaultExecutionService:
         await self._state.executions.commit_terminal(
             ExecutionTerminalCommit(
                 current.revision,
-                current.event_sequence,
+                current.event_seq,
                 terminal,
                 result,
                 ExecutionEventType.EXECUTION_FAILED,
@@ -2119,7 +2119,7 @@ class DefaultExecutionService:
             parent_invocation_id=parent_invocation_id,
             status=ExecutionStatus.PENDING_START,
             revision=0,
-            event_sequence=0,
+            event_seq=0,
             error_code=None,
             safe_error_details={},
             created_at=now,
@@ -2127,7 +2127,7 @@ class DefaultExecutionService:
             previous_execution_id=previous_execution_id,
             fork_base_execution_id=fork_base_execution_id,
             lineage_kind=lineage_kind,
-            agent_run_sequence=0,
+            agent_run_seq=0,
             memory_scope=("capture:" + execution_id) if request.input_context is not None else request.memory_scope,
             conversation_agent_run_id=conversation_agent_run_id,
             mode=request.mode,
@@ -2380,7 +2380,7 @@ class DefaultExecutionService:
                 await self._terminal_committer.commit_terminal_checkpoint(
                     ExecutionTerminalCommit(
                         expected_revision=current.revision,
-                        expected_event_sequence=current.event_sequence,
+                        expected_event_seq=current.event_seq,
                         execution=terminal,
                         result=ResultRecord(
                             None,
@@ -2555,7 +2555,7 @@ class DefaultExecutionService:
                     ExecutionStartUnknownCommit(
                         execution.execution_id,
                         current.revision,
-                        current.event_sequence,
+                        current.event_seq,
                         scope,
                         idempotency_key_digest,
                         identity.request_digest,
@@ -3082,7 +3082,7 @@ class DefaultExecutionService:
                         ExecutionCancelRequestCommit(
                             execution_id=execution_id,
                             expected_revision=execution.revision,
-                            expected_event_sequence=execution.event_sequence,
+                            expected_event_seq=execution.event_seq,
                             operation_id=operation.operation_id,
                             requested_at=datetime.now(timezone.utc),
                         ),
@@ -3272,7 +3272,7 @@ class DefaultExecutionService:
             )
             terminal_commit = ExecutionTerminalCommit(
                 expected_revision=cancelling_current.revision,
-                expected_event_sequence=cancelling_current.event_sequence,
+                expected_event_seq=cancelling_current.event_seq,
                 execution=terminal,
                 result=result,
                 terminal_event_type=ExecutionEventType.EXECUTION_CANCELLED,
@@ -3587,8 +3587,8 @@ class DefaultExecutionService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
     ) -> "Page[ExecutionTraceItem]":
@@ -3600,8 +3600,8 @@ class DefaultExecutionService:
             cursor=cursor,
             include_content=include_content,
             limit=limit,
-            agent_run_sequence=agent_run_sequence,
-            request_sequence=request_sequence,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
             step_index=step_index,
             tool_call_id=tool_call_id,
         )
@@ -3635,11 +3635,11 @@ class DefaultExecutionService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
-        message_sequence: int | None = None,
+        message_seq: int | None = None,
         part_index: int | None = None,
     ) -> "Page[ExecutionHistoryItem]":
         if self._history_service is None:
@@ -3650,11 +3650,11 @@ class DefaultExecutionService:
             cursor=cursor,
             include_content=include_content,
             limit=limit,
-            agent_run_sequence=agent_run_sequence,
-            request_sequence=request_sequence,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
             step_index=step_index,
             tool_call_id=tool_call_id,
-            message_sequence=message_sequence,
+            message_seq=message_seq,
             part_index=part_index,
         )
 
@@ -3713,7 +3713,7 @@ def _require_task_attempt(
         return
     if (
         attempt.execution_id != execution.execution_id
-        or attempt.event_sequence != execution.event_sequence
+        or attempt.event_seq != execution.event_seq
         or attempt.task_attempt != execution.task_attempt
         or attempt.status is not execution.status
         or attempt.task_deadline_at != execution.task_deadline_at
@@ -3926,17 +3926,17 @@ def _next_execution(
     error_code: "str | None" = None,
     safe_error_details: "Mapping[str, JsonValue] | None" = None,
     error_diagnostics: "ErrorDiagnostics | None" = None,
-    agent_run_sequence: int | None = None,
+    agent_run_seq: int | None = None,
     terminal_event: bool = False,
 ) -> ExecutionRecord:
     return replace(
         record,
         status=status,
         revision=record.revision + 1,
-        event_sequence=record.event_sequence + (1 if terminal_event else 0),
-        agent_run_sequence=record.agent_run_sequence
-        if agent_run_sequence is None
-        else agent_run_sequence,
+        event_seq=record.event_seq + (1 if terminal_event else 0),
+        agent_run_seq=record.agent_run_seq
+        if agent_run_seq is None
+        else agent_run_seq,
         error_code=error_code,
         safe_error_details=(
             record.safe_error_details

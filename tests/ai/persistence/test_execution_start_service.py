@@ -60,11 +60,11 @@ class _History:
         tenant_id: str,
         cursor: str | None,
         limit: int,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
-        message_sequence: int | None = None,
+        message_seq: int | None = None,
         part_index: int | None = None,
     ) -> Page[object]:
         del execution_id, tenant_id, cursor, limit
@@ -77,8 +77,8 @@ class _History:
         tenant_id: str,
         cursor: str | None,
         limit: int,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
     ) -> Page[object]:
@@ -212,21 +212,21 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
         assert launcher.calls == 1
         started = await state.execution.executions.get(first.execution_id, tenant_id="tenant")
         assert started is not None
-        assert started.agent_run_sequence == 0
+        assert started.agent_run_seq == 0
         first_attempt = await state.execution.executions.claim_next_agent_run(
             first.execution_id,
             tenant_id="tenant",
             expected_revision=started.revision,
-            expected_agent_run_sequence=0,
+            expected_agent_run_seq=0,
         )
-        assert first_attempt.agent_run_sequence == 1
+        assert first_attempt.agent_run_seq == 1
         second_attempt = await state.execution.executions.claim_next_agent_run(
             first.execution_id,
             tenant_id="tenant",
             expected_revision=first_attempt.revision,
-            expected_agent_run_sequence=1,
+            expected_agent_run_seq=1,
         )
-        assert second_attempt.agent_run_sequence == 2
+        assert second_attempt.agent_run_seq == 2
     finally:
         await state.close()
 
@@ -299,7 +299,7 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
         )
         started = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
         assert started is not None
-        assert started.agent_run_sequence == 0
+        assert started.agent_run_seq == 0
     finally:
         await state.close()
         await engine.dispose()
@@ -324,7 +324,7 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
             tenant_id="tenant",
         )
         assert started is not None
-        assert started.agent_run_sequence == 0
+        assert started.agent_run_seq == 0
     finally:
         await state.close()
 

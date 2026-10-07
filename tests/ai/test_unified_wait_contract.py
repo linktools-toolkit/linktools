@@ -61,7 +61,7 @@ class _Tree:
         self.emit = False
 
     def stream(
-        self, execution_id: str, *, principal: Principal, after_sequences=None,
+        self, execution_id: str, *, principal: Principal, after_event_seqs=None,
         include_content: bool = False, ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         self.calls += 1
@@ -112,7 +112,7 @@ class _GraphService:
             raise self.error
         return self.result
 
-    async def stream_events(self, graph_id: str, *, principal: Principal, after_sequence=0):
+    async def stream_events(self, graph_id: str, *, principal: Principal, after_event_seq=0):
         self.stream_calls += 1
         try:
             await asyncio.Event().wait()
@@ -192,12 +192,12 @@ class _Bundle:
     def cursor(self, owner: str, *, identity: str | None = None, include_content=False) -> str:
         if owner in {"execution", "facade"}:
             return encode_execution_watch_cursor(
-                _NAMESPACE, "tenant", identity or "execution", include_content=include_content, sequences={},
+                _NAMESPACE, "tenant", identity or "execution", include_content=include_content, event_seqs={},
             )
         if owner == "graph":
             return encode_graph_watch_cursor(
                 _NAMESPACE, "tenant", identity or "graph", include_content=include_content,
-                graph_sequence=0, execution_sequences={},
+                graph_event_seq=0, execution_event_seqs={},
             )
         return encode_evaluation_watch_cursor(
             _NAMESPACE, "tenant", identity or "evaluation", include_content=include_content, graph_cursors={},
@@ -370,12 +370,12 @@ async def test_terminal_owner_validates_cursor_membership_before_authoritative_w
         tree = ExecutionTreeStreamer(Reader(), Events(), broker)
         bundle.execution_run = Execution(bundle.runtime, "execution", _PRINCIPAL, tree.stream)
         cursor = encode_execution_watch_cursor(
-            _NAMESPACE, "tenant", "execution", include_content=False, sequences={"outside": 1},
+            _NAMESPACE, "tenant", "execution", include_content=False, event_seqs={"outside": 1},
         )
     elif owner == "graph":
         cursor = encode_graph_watch_cursor(
             _NAMESPACE, "tenant", "graph", include_content=False,
-            graph_sequence=0, execution_sequences={"outside": {"outside-execution": 1}},
+            graph_event_seq=0, execution_event_seqs={"outside": {"outside-execution": 1}},
         )
     else:
         cursor = encode_evaluation_watch_cursor(
@@ -455,7 +455,7 @@ async def test_execution_wait_ack_advances_only_after_success_and_live_delta_kee
     cause = TimeoutError("callback-owned timeout")
 
     async def callback(event) -> None:
-        if event.event.durable_sequence == 2:
+        if event.event.durable_seq == 2:
             raise cause
         committed.append(event)
 
@@ -465,7 +465,7 @@ async def test_execution_wait_ack_advances_only_after_success_and_live_delta_kee
         assert raised.value.origin == "callback"
         assert raised.value.__cause__ is cause
         assert raised.value.cursor == committed[-1].cursor
-        assert [item.event.durable_sequence for item in committed] == [1, None]
+        assert [item.event.durable_seq for item in committed] == [1, None]
         assert [decode_execution_watch_cursor(
             _NAMESPACE, "tenant", "execution", item.cursor, include_content=False,
         ) for item in committed] == [{"execution": 1}, {"execution": 1}]
@@ -751,7 +751,7 @@ async def test_optional_root_broker_failure_cannot_skip_execution_cursor_validat
     tree = ExecutionTreeStreamer(Reader(), Events(), broker)
     run = Execution(bundle.runtime, "execution", _PRINCIPAL, tree.stream)
     cursor = encode_execution_watch_cursor(
-        _NAMESPACE, "tenant", "execution", include_content=False, sequences={"member": 1},
+        _NAMESPACE, "tenant", "execution", include_content=False, event_seqs={"member": 1},
     )
     try:
         if member == "valid":
@@ -799,12 +799,12 @@ async def test_optional_first_tree_failure_cannot_skip_later_graph_member_valida
             ExecutionLineageKind.RUN, None, execution_id, None,
         )
 
-    async def tree(execution_id: str, *, after_sequences=None, ready=None, **kwargs):
+    async def tree(execution_id: str, *, after_event_seqs=None, ready=None, **kwargs):
         checked.append(execution_id)
         try:
             if execution_id == "execution-a":
                 raise _ExecutionStreamFailure(optional)
-            assert after_sequences == {"member-b": 1}
+            assert after_event_seqs == {"member-b": 1}
             if second != "valid":
                 raise cause
             if ready is not None:
@@ -818,7 +818,7 @@ async def test_optional_first_tree_failure_cannot_skip_later_graph_member_valida
     run = TaskGraphRun(bundle.runtime, bundle.graph, "graph", _PRINCIPAL, tree)
     cursor = encode_graph_watch_cursor(
         _NAMESPACE, "tenant", "graph", include_content=False,
-        graph_sequence=0, execution_sequences={"b": {"member-b": 1}},
+        graph_event_seq=0, execution_event_seqs={"b": {"member-b": 1}},
     )
     try:
         if second == "valid":
@@ -851,7 +851,7 @@ async def test_optional_first_graph_failure_cannot_skip_later_evaluation_member_
     graph_cursors = {
         graph_id: encode_graph_watch_cursor(
             _NAMESPACE, "tenant", graph_id, include_content=False,
-            graph_sequence=0, execution_sequences={"node": {"member": 1}},
+            graph_event_seq=0, execution_event_seqs={"node": {"member": 1}},
         ) for graph_id in ("graph-a", "graph-b")
     }
     cursor = encode_evaluation_watch_cursor(

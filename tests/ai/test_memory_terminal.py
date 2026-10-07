@@ -87,8 +87,8 @@ async def test_in_memory_terminal_commit_validates_success_result(
             lineage_kind=ExecutionLineageKind.RUN,
             status=ExecutionStatus.STARTED,
             revision=1,
-            event_sequence=1,
-            agent_run_sequence=1,
+            event_seq=1,
+            agent_run_seq=1,
             error_code=None,
             safe_error_details={},
             created_at=now,
@@ -124,7 +124,7 @@ async def test_in_memory_terminal_commit_validates_success_result(
             execution,
             status=ExecutionStatus.SUCCEEDED,
             revision=2,
-            event_sequence=2,
+            event_seq=2,
             updated_at=now,
         )
         result = ResultRecord(

@@ -26,8 +26,8 @@ from ._attachment import request_attachment_facts
 from ._transcript_staging import StagedTranscript
 from ._journal import (
     DURATION_NS_METADATA_KEY,
-    REQUEST_SEQUENCE_METADATA_KEY,
-    MESSAGE_SEQUENCE_METADATA_KEY,
+    MODEL_REQUEST_SEQ_METADATA_KEY,
+    MESSAGE_SEQ_METADATA_KEY,
     MODEL_USAGE_CACHE_READ_METADATA_KEY,
     MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     MODEL_USAGE_INPUT_METADATA_KEY,
@@ -86,9 +86,9 @@ class AgentRunRecorder:
         self._execution_id = execution_id
         self._agent_run_id = agent_run_id
         self._run: AgentRunRecord | None = None
-        self._event_sequence = 0
+        self._next_event_index = 0
         self._tool_events: dict[str, set[str]] = {}
-        self._request_sequence_by_tool_call: dict[str, int] = {}
+        self._model_request_seq_by_tool_call: dict[str, int] = {}
         self._initial_attachments = tuple(dict(value) for value in initial_attachments)
         self._accepted_attachment_ids = {
             attachment_id
@@ -161,18 +161,18 @@ class AgentRunRecorder:
             self._transcript_messages = list(freeze_model_messages(previous.messages))
         events = await self._store.list_events(agent_run_id=record.agent_run_id)
         for event in events:
-            message_sequence = event.metadata.get(MESSAGE_SEQUENCE_METADATA_KEY)
-            if event.event_type == "MODEL_REQUEST_SUCCEEDED" and message_sequence is not None:
-                request_sequence = event.metadata.get(REQUEST_SEQUENCE_METADATA_KEY)
+            message_seq = event.metadata.get(MESSAGE_SEQ_METADATA_KEY)
+            if event.event_type == "MODEL_REQUEST_SUCCEEDED" and message_seq is not None:
+                model_request_seq = event.metadata.get(MODEL_REQUEST_SEQ_METADATA_KEY)
                 if (
-                    not message_sequence.isdigit()
-                    or int(message_sequence) < 1
-                    or request_sequence is None
-                    or not request_sequence.isdigit()
-                    or int(request_sequence) < 1
+                    not message_seq.isdigit()
+                    or int(message_seq) < 1
+                    or model_request_seq is None
+                    or not model_request_seq.isdigit()
+                    or int(model_request_seq) < 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                message_index = int(message_sequence) - 1
+                message_index = int(message_seq) - 1
                 if message_index >= len(self._transcript_messages):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 response = self._transcript_messages[message_index]
@@ -180,17 +180,17 @@ class AgentRunRecorder:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 for part in response.parts:
                     if isinstance(part, ToolCallPart):
-                        previous_request = self._request_sequence_by_tool_call.get(part.tool_call_id)
-                        if previous_request is not None and previous_request != int(request_sequence):
+                        previous_request = self._model_request_seq_by_tool_call.get(part.tool_call_id)
+                        if previous_request is not None and previous_request != int(model_request_seq):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        self._request_sequence_by_tool_call[part.tool_call_id] = int(request_sequence)
+                        self._model_request_seq_by_tool_call[part.tool_call_id] = int(model_request_seq)
             if event.tool_call_id is not None and event.event_type.startswith(
                 "TOOL_CALL_"
             ):
                 self._tool_events.setdefault(event.tool_call_id, set()).add(
                     event.event_type
                 )
-        self._event_sequence = max((event.event_index for event in events), default=-1) + 1
+        self._next_event_index = max((event.event_index for event in events), default=-1) + 1
 
     async def append_event(self, event: StepEvent) -> None:
         if event.agent_run_id != self._agent_run_id:
@@ -213,8 +213,8 @@ class AgentRunRecorder:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if tool_call_id is not None and event_type.startswith("TOOL_CALL_"):
             self._tool_events.setdefault(tool_call_id, set()).add(event_type)
-        event_index = self._event_sequence
-        self._event_sequence += 1
+        event_index = self._next_event_index
+        self._next_event_index += 1
         await self.append_event(
             StepEvent(
                 agent_run_id=run.agent_run_id,
@@ -281,11 +281,11 @@ class AgentRunRecorder:
     ) -> None:
         if "TOOL_CALL_STARTED" in self._tool_events.get(part.tool_call_id, ()):
             return
-        request_sequence = self.request_sequence_for_tool_call(part.tool_call_id)
+        model_request_seq = self.model_request_seq_for_tool_call(part.tool_call_id)
         metadata = (
             {}
-            if request_sequence is None
-            else {REQUEST_SEQUENCE_METADATA_KEY: str(request_sequence)}
+            if model_request_seq is None
+            else {MODEL_REQUEST_SEQ_METADATA_KEY: str(model_request_seq)}
         )
         await self.record_event(
             "TOOL_CALL_STARTED",
@@ -299,11 +299,11 @@ class AgentRunRecorder:
         self, part: ToolReturnPart | RetryPromptPart, step_index: int
     ) -> None:
         recorded = self._tool_events.get(part.tool_call_id, set())
-        request_sequence = self.request_sequence_for_tool_call(part.tool_call_id)
+        model_request_seq = self.model_request_seq_for_tool_call(part.tool_call_id)
         metadata = (
             {}
-            if request_sequence is None
-            else {REQUEST_SEQUENCE_METADATA_KEY: str(request_sequence)}
+            if model_request_seq is None
+            else {MODEL_REQUEST_SEQ_METADATA_KEY: str(model_request_seq)}
         )
         await self.record_tool_start(part, step_index)
         if not recorded.intersection({"TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"}):
@@ -504,7 +504,7 @@ class AgentRunRecorder:
             StagedModelInteraction(
                 agent_run_id=self._agent_run_id,
                 step_index=fact.step_index,
-                request_sequence=fact.request_sequence,
+                model_request_seq=fact.model_request_seq,
                 purpose=fact.purpose,
                 output_retry_index=fact.output_retry_index,
                 model=model_value,
@@ -520,10 +520,10 @@ class AgentRunRecorder:
                 finished_at=None,
             )
         )
-        self._interaction_projections[fact.request_sequence] = projection
-        self._interaction_payloads[fact.request_sequence] = digest
-        self._interaction_models[fact.request_sequence] = model_value
-        self._interaction_attachments[fact.request_sequence] = attachments
+        self._interaction_projections[fact.model_request_seq] = projection
+        self._interaction_payloads[fact.model_request_seq] = digest
+        self._interaction_models[fact.model_request_seq] = model_value
+        self._interaction_attachments[fact.model_request_seq] = attachments
 
     def finish_model_interaction(
         self,
@@ -537,12 +537,12 @@ class AgentRunRecorder:
         usage: object | None,
     ) -> None:
         del model
-        request_sequence = fact.request_sequence
+        model_request_seq = fact.model_request_seq
         try:
-            projection = self._interaction_projections.pop(request_sequence)
-            envelope_digest = self._interaction_payloads.pop(request_sequence)
-            model_value = self._interaction_models.pop(request_sequence)
-            attachments = self._interaction_attachments.pop(request_sequence)
+            projection = self._interaction_projections.pop(model_request_seq)
+            envelope_digest = self._interaction_payloads.pop(model_request_seq)
+            model_value = self._interaction_models.pop(model_request_seq)
+            attachments = self._interaction_attachments.pop(model_request_seq)
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -560,7 +560,7 @@ class AgentRunRecorder:
             StagedModelInteraction(
                 agent_run_id=self._agent_run_id,
                 step_index=fact.step_index,
-                request_sequence=request_sequence,
+                model_request_seq=model_request_seq,
                 purpose=fact.purpose,
                 output_retry_index=fact.output_retry_index,
                 model=model_value,
@@ -577,8 +577,8 @@ class AgentRunRecorder:
             )
         )
 
-    def request_sequence_for_tool_call(self, tool_call_id: str) -> int | None:
-        return self._request_sequence_by_tool_call.get(tool_call_id)
+    def model_request_seq_for_tool_call(self, tool_call_id: str) -> int | None:
+        return self._model_request_seq_by_tool_call.get(tool_call_id)
 
     async def record_model_event(
         self,
@@ -613,16 +613,16 @@ class AgentRunRecorder:
                 if (
                     not isinstance(call_id, str)
                     or not call_id
-                    or call_id in self._request_sequence_by_tool_call
+                    or call_id in self._model_request_seq_by_tool_call
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                self._request_sequence_by_tool_call[call_id] = fact.request_sequence
+                self._model_request_seq_by_tool_call[call_id] = fact.model_request_seq
         metadata = fact.metadata(
             include_observation=include_observation and fact.duration_ns is not None
         )
         if fact.purpose == "agent" and phase == "completed" and response is not None:
             self.append_transcript_message(response)
-            metadata[MESSAGE_SEQUENCE_METADATA_KEY] = str(len(self._transcript_messages))
+            metadata[MESSAGE_SEQ_METADATA_KEY] = str(len(self._transcript_messages))
         if not include_observation:
             metadata.pop(DURATION_NS_METADATA_KEY, None)
         if response is not None:

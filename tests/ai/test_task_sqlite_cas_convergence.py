@@ -489,7 +489,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
             execution_id: str,
             *,
             principal: Principal,
-            after_sequences: dict[str, int] | None = None,
+            after_event_seqs: dict[str, int] | None = None,
             include_content: bool = False,
             ready: asyncio.Event | None = None,
         ) -> AsyncIterator[ExecutionTreeEvent]:
@@ -497,7 +497,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
             if ready is not None:
                 ready.set()
             assert principal == principal_arg
-            after = dict(after_sequences or {})
+            after = dict(after_event_seqs or {})
             stream_requests.append((execution_id, after))
             event_type = (
                 ExecutionEventType.EXECUTION_FAILED.value

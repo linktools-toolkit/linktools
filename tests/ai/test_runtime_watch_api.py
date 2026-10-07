@@ -39,14 +39,14 @@ class _ExecutionService:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ):
         if ready is not None:
             ready.set()
         del principal, include_content
-        after = 0 if after_sequences is None else after_sequences.get(execution_id, 0)
+        after = 0 if after_event_seqs is None else after_event_seqs.get(execution_id, 0)
 
         async def values():
             if after >= 1:
@@ -82,7 +82,7 @@ class _TaskGraphService:
             execution_id = "execution"
 
         class Snapshot:
-            event_sequence = 4
+            event_seq = 4
             node_states = (State(),)
             nodes = (type("Node", (), {"node_id": "node", "task": None})(),)
 
@@ -94,7 +94,7 @@ class _TaskGraphService:
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ):
         del principal
 
@@ -145,7 +145,7 @@ class _TaskGraphService:
                 ),
             )
             for event in events:
-                if event.sequence > after_sequence:
+                if event.event_seq > after_event_seq:
                     yield event
 
         return values()
@@ -215,7 +215,7 @@ def _watch_tree(
     execution_id,
     *,
     principal,
-    after_sequences=None,
+    after_event_seqs=None,
     include_content=False,
     ready: asyncio.Event | None = None,
 ):
@@ -224,7 +224,7 @@ def _watch_tree(
     return _ExecutionService().stream(
         execution_id,
         principal=principal,
-        after_sequences=after_sequences,
+        after_event_seqs=after_event_seqs,
         include_content=include_content,
     )
 
@@ -273,13 +273,13 @@ async def test_task_graph_watch_forwards_model_request_progress_with_execution_i
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ):
         if ready is not None:
             ready.set()
-        del principal, after_sequences, include_content
+        del principal, after_event_seqs, include_content
 
         async def values():
             yield ExecutionTreeEvent(
@@ -296,8 +296,8 @@ async def test_task_graph_watch_forwards_model_request_progress_with_execution_i
                     ExecutionEventType.MODEL_REQUEST_STARTED.value,
                     {
                         "execution_id": execution_id,
-                        "agent_run_sequence": 2,
-                        "request_sequence": 1,
+                        "agent_run_seq": 2,
+                        "model_request_seq": 1,
                         "purpose": "agent",
                         "status": "RUNNING",
                     },
@@ -324,7 +324,7 @@ async def test_task_graph_watch_forwards_model_request_progress_with_execution_i
     assert len(progress) == 1
     assert progress[0].execution_id == "execution"
     assert progress[0].event.payload["execution_id"] == "execution"  # type: ignore[index]
-    assert progress[0].event.payload["request_sequence"] == 1  # type: ignore[index]
+    assert progress[0].event.payload["model_request_seq"] == 1  # type: ignore[index]
 
 
 @pytest.mark.asyncio
@@ -335,13 +335,13 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ):
         if ready is not None:
             ready.set()
-        del principal, after_sequences, include_content
+        del principal, after_event_seqs, include_content
         started.append(execution_id)
 
         async def values():
@@ -395,7 +395,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
                 "Snapshot",
                 (),
                 {
-                    "event_sequence": 4,
+                    "event_seq": 4,
                     "node_states": tuple(
                         type(
                             "NodeState",
@@ -421,7 +421,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
             requested_graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             assert requested_graph_id == graph_id
             assert principal == principal_arg
@@ -465,10 +465,10 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
                     ),
                 )
                 for event in events:
-                    if event.sequence == 2:
+                    if event.event_seq == 2:
                         await expand.wait()
                         self.expanded = True
-                    if event.sequence > after_sequence:
+                    if event.event_seq > after_event_seq:
                         yield event
 
             return values()
@@ -493,7 +493,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ):
@@ -501,7 +501,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
             ready.set()
         del include_content
         assert principal == principal_arg
-        after_sequence = (after_sequences or {}).get(execution_id, 0)
+        after_event_seq = (after_event_seqs or {}).get(execution_id, 0)
         event_type = (
             ExecutionEventType.EXECUTION_FAILED.value
             if execution_id == "execution-failed"
@@ -509,7 +509,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         )
 
         async def values():
-            if after_sequence >= 1:
+            if after_event_seq >= 1:
                 return
             yield ExecutionTreeEvent(
                 execution_id,
@@ -530,7 +530,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
     try:
         first = await anext(first_watch)
         assert isinstance(first.event, TaskEvent)
-        assert first.event.sequence == 1
+        assert first.event.event_seq == 1
         expand.set()
         observed = [first]
         observed.extend([item async for item in first_watch])
@@ -538,7 +538,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         await first_watch.aclose()
 
     task_events = [item for item in observed if isinstance(item.event, TaskEvent)]
-    assert [item.event.sequence for item in task_events] == [1, 2, 3]
+    assert [item.event.event_seq for item in task_events] == [1, 2, 3]
     execution_events = [
         item.event.event
         for item in observed
@@ -583,11 +583,11 @@ async def test_task_graph_watch_preserves_missing_dynamic_node_integrity_error()
             return type(
                 "Snapshot",
                 (),
-                {"event_sequence": 4, "node_states": (state,), "nodes": (node,)},
+                {"event_seq": 4, "node_states": (state,), "nodes": (node,)},
             )()
 
-        def stream_events(self, graph_id: str, *, principal: Principal, after_sequence: int = 0):
-            del principal, after_sequence
+        def stream_events(self, graph_id: str, *, principal: Principal, after_event_seq: int = 0):
+            del principal, after_event_seq
 
             async def values():
                 yield TaskEvent(
@@ -674,7 +674,7 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
                 "Snapshot",
                 (),
                 {
-                    "event_sequence": 4,
+                    "event_seq": 4,
                     "node_states": (state,),
                     "nodes": (
                         type("Node", (), {"node_id": "node", "task": None})(),
@@ -687,9 +687,9 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
-            del graph_id, principal, after_sequence
+            del graph_id, principal, after_event_seq
             self.stream_calls += 1
 
             async def values():
@@ -713,7 +713,7 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
     )
     stream = run.watch(cursor=encode_graph_watch_cursor(
         "watch-test", "tenant", "graph", include_content=False,
-        graph_sequence=0, execution_sequences={"node": {"execution": 1}},
+        graph_event_seq=0, execution_event_seqs={"node": {"execution": 1}},
     ))
     try:
         with pytest.raises(AIError) as raised:
@@ -740,7 +740,7 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
                     "graph_id": graph_id,
                     "wait_status": property(lambda state: TaskGraphResult(state.graph_id, state.status, state.node_states).wait_status),
                     "status": TaskStatus.RUNNING,
-                    "event_sequence": 2,
+                    "event_seq": 2,
                     "node_states": (),
                     "nodes": (),
                 },
@@ -751,12 +751,12 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
             assert graph_id == "graph"
-            if after_sequence == 0:
+            if after_event_seq == 0:
                 return Page(
                     (
                         TaskEvent(
@@ -804,8 +804,8 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
 
     async def observer(event: TaskGraphRunEvent) -> None:
         assert isinstance(event.event, TaskEvent)
-        observed.append(event.event.sequence)
-        if event.event.sequence == 1:
+        observed.append(event.event.event_seq)
+        if event.event.event_seq == 1:
             observed_first.set()
 
     await asyncio.wait_for(run.replay(observer), timeout=1)
@@ -827,7 +827,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                     "graph_id": "graph",
                     "wait_status": property(lambda state: TaskGraphResult(state.graph_id, state.status, state.node_states).wait_status),
                     "status": TaskStatus.RUNNING,
-                    "event_sequence": 2,
+                    "event_seq": 2,
                     "node_states": (
                         type(
                             "State",
@@ -853,7 +853,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
@@ -890,7 +890,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                     TaskStatus.RUNNING,
                 ),
             )
-            return Page(tuple(value for value in values if value.sequence > after_sequence))
+            return Page(tuple(value for value in values if value.event_seq > after_event_seq))
 
     class ReplayExecutionService:
         async def inspect(self, execution_id: str, *, principal: Principal):
@@ -904,7 +904,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                 None,
                 "execution",
                 None,
-                event_sequence=2,
+                event_seq=2,
             )
 
         async def list_children(
@@ -923,7 +923,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
@@ -933,7 +933,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                 ExecutionEvent(execution_id, 2, "EXECUTION_SUCCEEDED", {"raw": "two"}),
                 ExecutionEvent(execution_id, 3, "LATE_EVENT", {"raw": "late"}),
             )
-            return Page(tuple(value for value in values if value.sequence > after_sequence))
+            return Page(tuple(value for value in values if value.event_seq > after_event_seq))
 
     replay_execution = ReplayExecutionService()
     replay_events = ReplayEventService()
@@ -964,7 +964,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
 
     assert result.status is TaskStatus.WAITING
     assert [
-        event.event.sequence
+        event.event.event_seq
         for event in observed
         if isinstance(event.event, TaskEvent)
     ] == [1, 2]
@@ -973,7 +973,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
         for event in observed
         if isinstance(event.event, ExecutionTreeEvent)
     ]
-    assert [event.durable_sequence for event in execution_events] == [1, 2]
+    assert [event.durable_seq for event in execution_events] == [1, 2]
     assert execution_events[0].payload == {"call_id": "call", "tool_name": "tool"}
     assert execution_events[1].payload == {}
     assert all(event.cursor is not None for event in observed)
@@ -1001,7 +1001,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
                     "graph_id": graph_id,
                     "wait_status": property(lambda state: TaskGraphResult(state.graph_id, state.status, state.node_states).wait_status),
                     "status": TaskStatus.RUNNING,
-                    "event_sequence": 1,
+                    "event_seq": 1,
                     "node_states": (
                         type(
                             "State",
@@ -1027,7 +1027,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
@@ -1041,7 +1041,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
                     TaskStatus.PENDING,
                 ),
             )
-            return Page(tuple(value for value in values if value.sequence > after_sequence))
+            return Page(tuple(value for value in values if value.event_seq > after_event_seq))
 
     views = {
         "root": ExecutionView(
@@ -1052,7 +1052,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
             None,
             "root",
             None,
-            event_sequence=1,
+            event_seq=1,
         ),
         "child": ExecutionView(
             "child",
@@ -1062,7 +1062,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
             "root",
             "root",
             "call-child",
-            event_sequence=1,
+            event_seq=1,
         ),
         "grandchild": ExecutionView(
             "grandchild",
@@ -1072,7 +1072,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
             "child",
             "root",
             "call-grandchild",
-            event_sequence=1,
+            event_seq=1,
         ),
     }
 
@@ -1096,7 +1096,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
@@ -1104,7 +1104,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
                 ExecutionEvent(execution_id, 1, "EXECUTION_STARTED", {"raw": "one"}),
                 ExecutionEvent(execution_id, 2, "LATE_EVENT", {"raw": "late"}),
             )
-            return Page(tuple(value for value in values if value.sequence > after_sequence))
+            return Page(tuple(value for value in values if value.event_seq > after_event_seq))
 
     replay_execution = ExecutionService()
     replay_events = EventService()
@@ -1139,7 +1139,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
         if isinstance(event.event, ExecutionTreeEvent)
     ]
     assert [
-        (event.execution_id, event.depth, event.event.durable_sequence)
+        (event.execution_id, event.depth, event.event.durable_seq)
         for event in execution_events
     ] == (
         [("root", 0, 1), ("child", 1, 1), ("grandchild", 2, 1)]
@@ -1158,16 +1158,16 @@ class _WaitGraphService:
     async def state(self, graph_id: str, *, principal: Principal):
         del principal
         assert graph_id == "graph"
-        return type("Snapshot", (), {"event_sequence": 4, "node_states": (), "nodes": ()})()
+        return type("Snapshot", (), {"event_seq": 4, "node_states": (), "nodes": ()})()
 
     def stream_events(
         self,
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ):
-        del principal, after_sequence
+        del principal, after_event_seq
 
         async def values():
             if self.mode == "observer_error":
@@ -1336,13 +1336,13 @@ async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -
         execution_id,
         *,
         principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content=False,
         ready: asyncio.Event | None = None,
     ):
         if ready is not None:
             ready.set()
-        del execution_id, principal, after_sequences, include_content
+        del execution_id, principal, after_event_seqs, include_content
 
         async def values():
             await delivered_first.wait()
@@ -1381,9 +1381,9 @@ async def test_task_graph_durable_stream_integrity_error_remains_raw() -> None:
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
-            del graph_id, principal, after_sequence
+            del graph_id, principal, after_event_seq
 
             async def values():
                 if False:
@@ -1623,7 +1623,7 @@ async def test_task_graph_watch_preserves_same_round_durable_failure() -> None:
     with pytest.raises(AIError) as raised:
         await anext(run.watch(cursor=encode_graph_watch_cursor(
             "watch-test", "tenant", "graph", include_content=False,
-            graph_sequence=1, execution_sequences={},
+            graph_event_seq=1, execution_event_seqs={},
         )))
 
     assert raised.value is cause
@@ -1659,7 +1659,7 @@ async def test_task_graph_watch_preserves_authoritative_failure_during_cleanup()
     with pytest.raises(AIError) as raised:
         await anext(run.watch(cursor=encode_graph_watch_cursor(
             "watch-test", "tenant", "graph", include_content=False,
-            graph_sequence=1, execution_sequences={},
+            graph_event_seq=1, execution_event_seqs={},
         )))
 
     assert raised.value is cause
@@ -1680,14 +1680,14 @@ async def test_graph_live_subagent_root_cursor_binds_selected_execution():
     class Graph:
         async def state(self, graph_id, *, principal):
             return state
-        async def stream_events(self, graph_id, *, principal, after_sequence=0):
-            if after_sequence < 1:
+        async def stream_events(self, graph_id, *, principal, after_event_seq=0):
+            if after_event_seq < 1:
                 yield TaskEvent(1, "graph", 1, TaskEventType.GRAPH_ADMITTED,
                                 datetime.now(timezone.utc), TaskStatus.PENDING)
     async def inspect(execution_id, *, principal):
         assert execution_id == "selected"
         return SimpleNamespace(binding_kind="agent")
-    async def tree(execution_id, *, principal, after_sequences=None, include_content=False, ready=None):
+    async def tree(execution_id, *, principal, after_event_seqs=None, include_content=False, ready=None):
         assert execution_id == "selected"
         if ready is not None:
             ready.set()

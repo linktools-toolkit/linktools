@@ -75,7 +75,7 @@ async def _emit_trace(
         for item in page.items:
             payload = item.payload if isinstance(item.payload, Mapping) else {}
             table.add_row(
-                str(item.sequence),
+                str(item.step_event_seq),
                 _scope(payload),
                 _value(payload.get("step_index")),
                 _value(payload.get("kind")),
@@ -92,11 +92,11 @@ async def _emit_trace(
 
 def _scope(payload: Mapping[object, object]) -> str:
     value = payload.get("scope")
-    agent_run_sequence = payload.get("agent_run_sequence")
+    agent_run_seq = payload.get("agent_run_seq")
     if value is None:
         return "-"
-    if agent_run_sequence is not None:
-        return f"{value}/{agent_run_sequence}"
+    if agent_run_seq is not None:
+        return f"{value}/{agent_run_seq}"
     return str(value)
 
 
@@ -104,7 +104,7 @@ def _detail(payload: Mapping[object, object]) -> str:
     tool = payload.get("tool_name")
     if isinstance(tool, str) and tool:
         return tool
-    request = payload.get("request_sequence")
+    request = payload.get("model_request_seq")
     purpose = payload.get("purpose")
     usage = payload.get("token_usage")
     parts: list[str] = []

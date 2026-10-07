@@ -192,7 +192,7 @@ async def _emit_history_rows(
             table.add_column("Content", overflow="fold")
             for item in page.items:
                 table.add_row(
-                    str(item.sequence),
+                    str(item.message_seq),
                     item.item_kind,
                     item.tool_name or "-",
                     _preview(item.content),
@@ -233,7 +233,7 @@ async def _emit_transcript_rows(
             table.add_column("#", justify="right", style="dim")
             table.add_column("Text", overflow="fold")
             for item in page.items:
-                table.add_row(str(item.sequence), _preview(item.text))
+                table.add_row(str(item.message_seq), _preview(item.text))
             console.print(table)
             emitted = True
             first = False
@@ -271,8 +271,8 @@ async def _emit_model_interactions(
             table.add_column("Tokens", justify="right")
             for item in items:
                 table.add_row(
-                    str(item.request_sequence),
-                    f"{item.agent_run_sequence}/{item.depth}",
+                    str(item.model_request_seq),
+                    f"{item.agent_run_seq}/{item.depth}",
                     item.purpose,
                     _status_text(item.status),
                     _model_label(item.model),
@@ -320,7 +320,7 @@ def _prompt_architecture_tree(interaction: ModelInteractionItem) -> Tree:
         Text.assemble(
             ("Prompt Architecture", "bold"),
             (
-                f"  request #{interaction.request_sequence} · "
+                f"  request #{interaction.model_request_seq} · "
                 f"{interaction.purpose} · {_model_label(interaction.model)}",
                 "dim",
             ),

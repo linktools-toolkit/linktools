@@ -178,7 +178,7 @@ class _TaskRepository(Protocol):
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]: ...
 
@@ -1575,10 +1575,10 @@ class DefaultTaskGraphService(TaskGraphService):
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
         limit: int = 100,
     ) -> Page[TaskEvent]:
-        _validate_event_window(after_sequence, limit)
+        _validate_event_window(after_event_seq, limit)
         tenant_id = principal.tenant_id
         await self._authorize_graph(
             graph_id,
@@ -1588,15 +1588,15 @@ class DefaultTaskGraphService(TaskGraphService):
         page = await self._persistence.tasks.list_events(
             graph_id,
             tenant_id=tenant_id,
-            after_sequence=after_sequence,
+            after_event_seq=after_event_seq,
             limit=limit,
         )
-        _validate_event_page(graph_id, after_sequence, page)
-        if after_sequence == 0 and (
+        _validate_event_page(graph_id, after_event_seq, page)
+        if after_event_seq == 0 and (
             not page.items or page.items[0].event_type.value != "GRAPH_ADMITTED"
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if after_sequence > 0 and not page.items:
+        if after_event_seq > 0 and not page.items:
             latest = await self._persistence.tasks.latest_event(
                 graph_id,
                 tenant_id=tenant_id,
@@ -1610,12 +1610,12 @@ class DefaultTaskGraphService(TaskGraphService):
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ) -> AsyncIterator[TaskEvent]:
         return self._observe_graph_events(
             graph_id,
             principal=principal,
-            after_sequence=after_sequence,
+            after_event_seq=after_event_seq,
         )
 
     async def _observe_graph_events(
@@ -1623,9 +1623,9 @@ class DefaultTaskGraphService(TaskGraphService):
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int,
+        after_event_seq: int,
     ) -> AsyncIterator[TaskEvent]:
-        _validate_event_window(after_sequence, _TASK_EVENT_READ_LIMIT)
+        _validate_event_window(after_event_seq, _TASK_EVENT_READ_LIMIT)
         tenant_id = principal.tenant_id
         await self._authorize_graph(
             graph_id,
@@ -1635,7 +1635,7 @@ class DefaultTaskGraphService(TaskGraphService):
         async for event in self._observe_graph_events_authorized(
             graph_id,
             tenant_id=tenant_id,
-            after_sequence=after_sequence,
+            after_event_seq=after_event_seq,
         ):
             yield event
 
@@ -1644,9 +1644,9 @@ class DefaultTaskGraphService(TaskGraphService):
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
     ) -> AsyncIterator[TaskEvent]:
-        cursor = after_sequence
+        cursor = after_event_seq
         pending_wait_error: AIError | None = None
         fallback_backoff = 1.0
         while True:
@@ -1657,7 +1657,7 @@ class DefaultTaskGraphService(TaskGraphService):
             page = await self._persistence.tasks.list_events(
                 graph_id,
                 tenant_id=tenant_id,
-                after_sequence=cursor,
+                after_event_seq=cursor,
                 limit=_TASK_EVENT_READ_LIMIT,
             )
             _validate_event_page(graph_id, cursor, page)
@@ -1669,7 +1669,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 pending_wait_error = None
                 fallback_backoff = 1.0
                 for event in page.items:
-                    cursor = event.sequence
+                    cursor = event.event_seq
                     yield event
                     if event.node_id is None and _observation_boundary(event.status):
                         return
@@ -1683,7 +1683,7 @@ class DefaultTaskGraphService(TaskGraphService):
             if (
                 latest.node_id is None
                 and _observation_boundary(latest.status)
-                and latest.sequence <= cursor
+                and latest.event_seq <= cursor
             ):
                 return
             if pending_wait_error is not None:
@@ -2616,11 +2616,11 @@ class DefaultTaskGraphService(TaskGraphService):
             )
 
 
-def _validate_event_window(after_sequence: int, limit: int) -> None:
+def _validate_event_window(after_event_seq: int, limit: int) -> None:
     if (
-        isinstance(after_sequence, bool)
-        or not isinstance(after_sequence, int)
-        or after_sequence < 0
+        isinstance(after_event_seq, bool)
+        or not isinstance(after_event_seq, int)
+        or after_event_seq < 0
     ):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
@@ -2629,14 +2629,14 @@ def _validate_event_window(after_sequence: int, limit: int) -> None:
 
 def _validate_event_page(
     graph_id: str,
-    after_sequence: int,
+    after_event_seq: int,
     page: Page[TaskEvent],
 ) -> None:
-    expected = after_sequence
+    expected = after_event_seq
     for event in page.items:
-        if event.graph_id != graph_id or event.sequence != expected + 1:
+        if event.graph_id != graph_id or event.event_seq != expected + 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        expected = event.sequence
+        expected = event.event_seq
 
 
 def _task_service_failure(

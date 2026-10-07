@@ -81,8 +81,8 @@ def _record() -> ExecutionRecord:
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=0,
+        event_seq=0,
+        agent_run_seq=0,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -617,7 +617,7 @@ async def test_recovered_started_cancel_commits_cancel_event_before_terminal(
             current,
             status=ExecutionStatus.CANCELLING,
             revision=current.revision + 1,
-            event_sequence=current.event_sequence + 1,
+            event_seq=current.event_seq + 1,
         )
 
     async def commit_terminal(

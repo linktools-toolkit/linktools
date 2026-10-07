@@ -931,7 +931,7 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
             limit=100,
         )
         assert history.items
-        after_sequence = history.items[-1].sequence
+        after_event_seq = history.items[-1].event_seq
 
         snapshot_calls = 0
         original_snapshot = repository.graph_state
@@ -950,12 +950,12 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
             service.stream_events(
                 graph.graph_id,
                 principal=principal,
-                after_sequence=after_sequence,
+                after_event_seq=after_event_seq,
             ),
             service.stream_events(
                 graph.graph_id,
                 principal=principal,
-                after_sequence=after_sequence,
+                after_event_seq=after_event_seq,
             ),
         ]
         pending = [asyncio.create_task(anext(stream)) for stream in streams]
@@ -1026,7 +1026,7 @@ async def test_local_event_stream_observes_foreign_update_via_scheduler_notifica
         stream = service.stream_events(
             graph.graph_id,
             principal=principal,
-            after_sequence=history.items[-1].sequence,
+            after_event_seq=history.items[-1].event_seq,
         )
         pending = asyncio.create_task(anext(stream))
         await asyncio.sleep(0)

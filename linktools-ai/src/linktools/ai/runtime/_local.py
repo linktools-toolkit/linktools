@@ -435,7 +435,7 @@ class LocalExecutionBackend:
             ExecutionStartClaim(
                 execution.execution_id,
                 execution.revision,
-                execution.event_sequence,
+                execution.event_seq,
                 identity.scope,
                 identity.idempotency_key_digest,
                 identity.request_digest,
@@ -467,13 +467,13 @@ class LocalExecutionBackend:
     def _publish_recovery_resumed(
         self,
         execution_id: str,
-        event_sequence: int,
+        event_seq: int,
     ) -> None:
         self._live_broker.publish_event(
             execution_id,
             ExecutionEventType.EXECUTION_RESUMED,
             {},
-            durable_sequence=event_sequence,
+            durable_seq=event_seq,
         )
 
     def _prepare_recovery_relaunch(self, execution_id: str) -> bool:
@@ -629,13 +629,13 @@ class LocalExecutionBackend:
             self._confirm_committed_events(
                 execution_id,
                 pending_count=len(pending),
-                durable_sequence=committed.execution.event_sequence,
+                durable_seq=committed.execution.event_seq,
             )
         self._publish_terminal_event(
             execution_id,
             event_type=commit.terminal_event_type,
             payload=dict(commit.terminal_event_payload),
-            durable_sequence=committed.execution.event_sequence,
+            durable_seq=committed.execution.event_seq,
         )
         self._live_broker.complete(execution_id)
         self._record_committed_terminal(committed, session_id=session_id)
@@ -701,12 +701,12 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if (
                     current.revision != commit.expected_revision
-                    or current.event_sequence != commit.expected_event_sequence
+                    or current.event_seq != commit.expected_event_seq
                 ):
                     effective_commit = replace(
                         commit,
                         expected_revision=current.revision,
-                        expected_event_sequence=current.event_sequence,
+                        expected_event_seq=current.event_seq,
                     )
                 committed = await self._runtime_commands.commit_deferred_cancel_checkpoint(
                     effective_commit,
@@ -717,7 +717,7 @@ class LocalExecutionBackend:
             elif (
                 current.status is expected_status
                 and current.revision == commit.expected_revision
-                and current.event_sequence == commit.expected_event_sequence
+                and current.event_seq == commit.expected_event_seq
                 and current.status is not ExecutionStatus.WAITING_DEFERRED
             ):
                 committed = await self._runtime_commands.commit_cancel_checkpoint(
@@ -730,18 +730,18 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._pending_audit_events.pop(commit.execution_id, None)
             cancel_sequence = (
-                effective_commit.expected_event_sequence + len(pending) + 1
+                effective_commit.expected_event_seq + len(pending) + 1
             )
             self._confirm_committed_events(
                 commit.execution_id,
                 pending_count=len(pending),
-                durable_sequence=cancel_sequence,
+                durable_seq=cancel_sequence,
             )
             self._live_broker.publish_event(
                 commit.execution_id,
                 event_type=ExecutionEventType.CANCEL_REQUESTED,
                 payload={"operation_id": commit.operation_id},
-                durable_sequence=cancel_sequence,
+                durable_seq=cancel_sequence,
             )
             return committed
 
@@ -808,7 +808,7 @@ class LocalExecutionBackend:
             ExecutionStartClaim(
                 execution.execution_id,
                 execution.revision,
-                execution.event_sequence,
+                execution.event_seq,
                 identity.scope,
                 identity.idempotency_key_digest,
                 identity.request_digest,
@@ -976,7 +976,7 @@ class LocalExecutionBackend:
         if not self._live_broker.is_local_producer(current.execution_id):
             self._live_broker.register_local_producer(
                 current.execution_id,
-                current.event_sequence,
+                current.event_seq,
             )
         self._terminal_events[execution.execution_id] = asyncio.Event()
         task = asyncio.create_task(
@@ -1423,9 +1423,9 @@ class LocalExecutionBackend:
                 execution_id=execution.execution_id,
                 tenant_id=self._tenant_id,
                 expected_execution_revision=execution.revision,
-                expected_event_sequence=execution.event_sequence,
+                expected_event_seq=execution.event_seq,
                 expected_recovery_revision=checkpoint.revision,
-                expected_agent_run_sequence=execution.agent_run_sequence,
+                expected_agent_run_seq=execution.agent_run_seq,
                 continuation=continuation,
                 audit_events=pending_audit,
                 approval_records=approval_records,
@@ -1438,10 +1438,10 @@ class LocalExecutionBackend:
         if pending_audit:
             self._live_broker.confirm_events(
                 execution.execution_id,
-                first_sequence=execution.event_sequence + 1,
+                first_event_seq=execution.event_seq + 1,
                 count=len(pending_audit),
             )
-        offset = execution.event_sequence + len(pending_audit)
+        offset = execution.event_seq + len(pending_audit)
         for index, (kind, item) in enumerate(
             (
                 *(
@@ -1463,7 +1463,7 @@ class LocalExecutionBackend:
                     "tool_name": item.tool_name,
                     "arguments_digest": item.arguments_payload.digest,
                 },
-                durable_sequence=offset + index,
+                durable_seq=offset + index,
             )
         self._agent_run_only_worker_exits.add(execution.execution_id)
         return committed, committed_checkpoint
@@ -1518,9 +1518,9 @@ class LocalExecutionBackend:
             execution_id=execution.execution_id,
             tenant_id=self._tenant_id,
             expected_execution_revision=execution.revision,
-            expected_event_sequence=execution.event_sequence,
+            expected_event_seq=execution.event_seq,
             expected_recovery_revision=checkpoint.revision,
-            expected_agent_run_sequence=execution.agent_run_sequence,
+            expected_agent_run_seq=execution.agent_run_seq,
             expected_pending_tools=checkpoint.pending_tools,
             background_tasks=self._execution_task_set(execution.execution_id),
         )
@@ -1732,7 +1732,7 @@ class LocalExecutionBackend:
                         ExecutionCancelRequestCommit(
                             execution.execution_id,
                             execution.revision,
-                            execution.event_sequence,
+                            execution.event_seq,
                             operation_id,
                             datetime.now(timezone.utc),
                         ),
@@ -1944,7 +1944,7 @@ class LocalExecutionBackend:
                 execution.execution_id,
                 event_type=outcome.terminal_event_type,
                 payload=dict(outcome.terminal_event_payload),
-                durable_sequence=execution.event_sequence,
+                durable_seq=execution.event_seq,
             )
             _logger.info(
                 "recovery handoff completed: execution=%s",
@@ -2375,18 +2375,18 @@ class LocalExecutionBackend:
         )
         try:
             terminal_agent_run_id = handoff.source_agent_run_id
-            if terminal_agent_run_id is None and current.agent_run_sequence > 0:
+            if terminal_agent_run_id is None and current.agent_run_seq > 0:
                 terminal_agent_run_id = make_agent_run_id(
                     namespace=self._namespace,
                     tenant_id=self._tenant_id,
                     execution_id=current.execution_id,
-                    agent_run_sequence=current.agent_run_sequence,
+                    agent_run_seq=current.agent_run_seq,
                 )
             committed = await self._commit_execution_terminal_checkpoint(
                 current,
                 ExecutionTerminalCommit(
                     current.revision,
-                    current.event_sequence,
+                    current.event_seq,
                     terminal,
                     result,
                     outcome.terminal_event_type,
@@ -2766,7 +2766,7 @@ class LocalExecutionBackend:
                         AgentAttemptClaim(
                             execution_id=execution_id,
                             expected_execution_revision=current.revision,
-                            expected_agent_run_sequence=current.agent_run_sequence,
+                            expected_agent_run_seq=current.agent_run_seq,
                             expected_recovery_revision=checkpoint.revision,
                             expected_recovery_state=checkpoint.state,
                         )
@@ -2776,7 +2776,7 @@ class LocalExecutionBackend:
                 _logger.info(
                     "agent attempt activated: execution=%s sequence=%s",
                     execution_id,
-                    current.agent_run_sequence,
+                    current.agent_run_seq,
                 )
             elif checkpoint.state is RecoveryCheckpointState.WAITING:
                 if current.status is not ExecutionStatus.WAITING_DEFERRED:
@@ -3099,7 +3099,7 @@ class LocalExecutionBackend:
                         agent_conversation_id=agent_conversation_id,
                         run_store=self._run_store,
                         agent_run_id=agent_run_id,
-                        agent_run_sequence=current.agent_run_sequence,
+                        agent_run_seq=current.agent_run_seq,
                         history_id=history_id,
                         memory_store=memory if selected_memory else None,
                         plan_store_resolver=lambda _ctx: plan_store,
@@ -3489,13 +3489,13 @@ class LocalExecutionBackend:
         base = await self._execution.executions.get(
             execution.fork_base_execution_id, tenant_id=self._tenant_id
         )
-        if base is None or base.agent_run_sequence < 1:
+        if base is None or base.agent_run_seq < 1:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
         agent_run_id = make_agent_run_id(
             namespace=self._namespace,
             tenant_id=self._tenant_id,
             execution_id=base.execution_id,
-            agent_run_sequence=base.agent_run_sequence,
+            agent_run_seq=base.agent_run_seq,
         )
         try:
             return list(await _agent_run_messages(execution_run_store, agent_run_id))
@@ -3517,7 +3517,7 @@ class LocalExecutionBackend:
                 execution.execution_id,
                 event_type,
                 event_payload,
-                durable_sequence=None,
+                durable_seq=None,
             )
         _logger.debug(
             "execution audit event buffered: execution=%s type=%s pending=%s",
@@ -3534,12 +3534,12 @@ class LocalExecutionBackend:
         execution_id: str,
         *,
         pending_count: int,
-        durable_sequence: int,
+        durable_seq: int,
     ) -> None:
         if pending_count:
             self._live_broker.confirm_events(
                 execution_id,
-                first_sequence=durable_sequence - pending_count,
+                first_event_seq=durable_seq - pending_count,
                 count=pending_count,
             )
 
@@ -3549,13 +3549,13 @@ class LocalExecutionBackend:
         *,
         event_type: ExecutionEventType,
         payload: JsonValue,
-        durable_sequence: int,
+        durable_seq: int,
     ) -> None:
         self._live_broker.publish_event(
             execution_id,
             event_type,
             payload,
-            durable_sequence=durable_sequence,
+            durable_seq=durable_seq,
         )
 
     async def _publish_persisted_terminal_event(
@@ -3566,12 +3566,12 @@ class LocalExecutionBackend:
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
-        } or execution.event_sequence < 1:
+        } or execution.event_seq < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         page = await self._execution.events.list(
             execution.execution_id,
             tenant_id=self._tenant_id,
-            after_sequence=execution.event_sequence - 1,
+            after_event_seq=execution.event_seq - 1,
             limit=1,
         )
         if len(page.items) != 1:
@@ -3585,7 +3585,7 @@ class LocalExecutionBackend:
             else ExecutionEventType.EXECUTION_FAILED
         )
         if (
-            event.sequence != execution.event_sequence
+            event.event_seq != execution.event_seq
             or event.event_type != expected_type
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3593,7 +3593,7 @@ class LocalExecutionBackend:
             execution.execution_id,
             event_type=expected_type,
             payload=dict(event.payload),
-            durable_sequence=event.sequence,
+            durable_seq=event.event_seq,
         )
         self._live_broker.complete(execution.execution_id)
 
@@ -3683,14 +3683,14 @@ class LocalExecutionBackend:
         )
         if base is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if base.agent_run_sequence == 0:
+        if base.agent_run_seq == 0:
             return None
         return ConversationCursor(
             make_agent_run_id(
                 namespace=self._namespace,
                 tenant_id=self._tenant_id,
                 execution_id=base.execution_id,
-                agent_run_sequence=base.agent_run_sequence,
+                agent_run_seq=base.agent_run_seq,
             ),
             history_id=history_id,
         )
@@ -3775,7 +3775,7 @@ class LocalExecutionBackend:
             self._confirm_committed_events(
                 current.execution_id,
                 pending_count=len(pending),
-                durable_sequence=committed.event_sequence,
+                durable_seq=committed.event_seq,
             )
             self._live_broker.publish_event(
                 current.execution_id,
@@ -3784,7 +3784,7 @@ class LocalExecutionBackend:
                     "error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value,
                     "safe_error_details": details,
                 },
-                durable_sequence=committed.event_sequence,
+                durable_seq=committed.event_seq,
             )
             self._live_broker.complete(current.execution_id)
         _logger.error(
@@ -4074,7 +4074,7 @@ class LocalExecutionBackend:
                 ExecutionCancelRequestCommit(
                     cancelling.execution_id,
                     cancelling.revision,
-                    cancelling.event_sequence,
+                    cancelling.event_seq,
                     operation.operation_id,
                     datetime.now(timezone.utc),
                 ),
@@ -4554,7 +4554,7 @@ class LocalExecutionBackend:
         )
         terminal_commit = ExecutionTerminalCommit(
             current.revision,
-            current.event_sequence,
+            current.event_seq,
             terminal,
             ResultRecord(
                 output if status is ExecutionStatus.SUCCEEDED else None,
@@ -4592,7 +4592,7 @@ class LocalExecutionBackend:
             current.execution_id,
             event_type=terminal_commit.terminal_event_type,
             payload=dict(terminal_commit.terminal_event_payload),
-            durable_sequence=committed.execution.event_sequence,
+            durable_seq=committed.execution.event_seq,
         )
         _logger.info(
             "execution terminal committed: execution=%s status=%s",
@@ -4683,7 +4683,7 @@ class LocalExecutionBackend:
         )
         commit = ExecutionTerminalCommit(
             current.revision,
-            current.event_sequence,
+            current.event_seq,
             terminal,
             ResultRecord(
                 output if status is ExecutionStatus.SUCCEEDED else None,
@@ -4740,7 +4740,7 @@ class LocalExecutionBackend:
             current.execution_id,
             event_type=commit.terminal_event_type,
             payload=dict(commit.terminal_event_payload),
-            durable_sequence=committed.execution.event_sequence,
+            durable_seq=committed.execution.event_seq,
         )
         _logger.info(
             "same-group terminal checkpoint committed: execution=%s status=%s",
@@ -4778,9 +4778,9 @@ class LocalExecutionBackend:
                                 namespace=self._namespace,
                                 tenant_id=self._tenant_id,
                                 execution_id=current.execution_id,
-                                agent_run_sequence=sequence,
+                                agent_run_seq=sequence,
                             )
-                            for sequence in range(1, current.agent_run_sequence + 1)
+                            for sequence in range(1, current.agent_run_seq + 1)
                         )
                         candidate_agent_run_ids = await self._existing_execution_agent_run_ids(
                             candidate_agent_run_ids
@@ -4820,7 +4820,7 @@ class LocalExecutionBackend:
                     self._confirm_committed_events(
                         current.execution_id,
                         pending_count=pending_count,
-                        durable_sequence=committed.execution.event_sequence,
+                        durable_seq=committed.execution.event_seq,
                     )
                     if plan is not None:
                         await self._agent_run_lifecycle.finalize_execution_terminal_seal(
@@ -4891,7 +4891,7 @@ class LocalExecutionBackend:
                             self._confirm_committed_events(
                                 current.execution_id,
                                 pending_count=pending_count,
-                                durable_sequence=observed.event_sequence,
+                                durable_seq=observed.event_seq,
                             )
                             await asyncio.shield(
                                 self._agent_run_lifecycle.reconcile_execution_terminal_seal(
@@ -5022,9 +5022,9 @@ class LocalExecutionBackend:
                 namespace=self._namespace,
                 tenant_id=self._tenant_id,
                 execution_id=execution.execution_id,
-                agent_run_sequence=sequence,
+                agent_run_seq=sequence,
             )
-            for sequence in range(1, execution.agent_run_sequence + 1)
+            for sequence in range(1, execution.agent_run_seq + 1)
         )
         await self._agent_run_lifecycle.verify_terminal_attempts(
             candidate_agent_run_ids=candidates,
@@ -5049,7 +5049,7 @@ def _terminal_record(
         record,
         status=status,
         revision=record.revision + 1,
-        event_sequence=record.event_sequence + 1,
+        event_seq=record.event_seq + 1,
         error_code=error_code,
         safe_error_details={} if safe_error_details is None else safe_error_details,
         error_diagnostics=error_diagnostics,

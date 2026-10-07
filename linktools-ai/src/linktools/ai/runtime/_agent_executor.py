@@ -191,7 +191,7 @@ class _AgentRunScope:
     agent_conversation_id: str
     run_store: AgentRunStore
     agent_run_id: str
-    agent_run_sequence: int
+    agent_run_seq: int
     initial_attachments: tuple[Mapping[str, JsonValue], ...] = ()
     history_id: str | None = None
     memory_store: MemoryStore | None = None
@@ -537,7 +537,7 @@ class AgentExecutor:
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
             agent_run_id=scope.agent_run_id,
-            next_sequence=interaction_high_water + 1,
+            next_model_request_seq=interaction_high_water + 1,
         )
         agent, capabilities = await _materialize_agent(
             scope,
@@ -1003,7 +1003,7 @@ async def _materialize_agent(
         source_namespace=scope.context.namespace,
         tenant_id=scope.context.principal.tenant_id,
         execution_id=scope.context.execution_id,
-        agent_run_sequence=scope.agent_run_sequence,
+        agent_run_seq=scope.agent_run_seq,
         session_id=scope.context.session_id,
         agent_run_id=scope.agent_run_id,
         agent_id=compiled_agent.spec.id,
@@ -1016,7 +1016,7 @@ async def _materialize_agent(
         agent_id=compiled_agent.spec.id,
         agent_run_id=scope.agent_run_id,
         execution_id=scope.context.execution_id,
-        agent_run_sequence=scope.agent_run_sequence,
+        agent_run_seq=scope.agent_run_seq,
         history_id=scope.history_id,
         memory_scope=scope.context.memory_scope,
         run_store=scope.run_store,
@@ -1060,7 +1060,7 @@ async def _materialize_agent(
     )
     capabilities.append(
         _event_stream_capability(
-            scope.event_sink, run_recorder, scope.agent_run_sequence
+            scope.event_sink, run_recorder, scope.agent_run_seq
         )
     )
     return agent, tuple(capabilities)
@@ -1150,20 +1150,20 @@ def _assistant_text_output(value: str) -> AssistantTextOutput:
 def _event_stream_capability(
     sink: EventSink,
     recorder: AgentRunRecorder,
-    agent_run_sequence: int,
+    agent_run_seq: int,
 ) -> ProcessEventStream[AgentContext[object]]:
     async def forward(
         _ctx: PydanticRunContext[AgentContext[object]],
         events: AsyncIterable[AgentStreamEvent],
     ) -> None:
         async for event in events:
-            position: dict[str, JsonValue] = {"agent_run_sequence": agent_run_sequence}
+            position: dict[str, JsonValue] = {"agent_run_seq": agent_run_seq}
             if isinstance(event, PartStartEvent) and not isinstance(
                 event.part, (TextPart, ThinkingPart, BaseToolCallPart)
             ):
                 recorder.stage_response_part(event.part, event.index)
             if isinstance(event, PartEndEvent):
-                position["message_sequence"] = recorder.stage_response_part(
+                position["message_seq"] = recorder.stage_response_part(
                     event.part, event.index
                 )
                 position["part_index"] = event.index

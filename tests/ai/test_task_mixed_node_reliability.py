@@ -4079,7 +4079,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         events = await state.task.tasks.list_events(
             graph.graph_id,
             tenant_id="default",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
         expanded = {
@@ -4550,7 +4550,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
         events = await state.execution.events.list(
             node_state.execution_id,
             tenant_id="default",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
         assert events.items[-1].payload["task_effect"] == "applied"

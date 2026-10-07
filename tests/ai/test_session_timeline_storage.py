@@ -77,10 +77,10 @@ async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
         committed = await state.conversation.sessions.list_timeline_commits(
             "session",
             tenant_id="tenant",
-            start_sequence=1,
-            end_sequence=3,
+            start_turn_seq=1,
+            end_turn_seq=3,
         )
-        assert [(item.sequence, item.execution_id) for item in committed] == [
+        assert [(item.turn_seq, item.execution_id) for item in committed] == [
             (2, "success")
         ]
     finally:

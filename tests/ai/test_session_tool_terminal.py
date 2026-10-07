@@ -219,8 +219,8 @@ async def test_session_tool_turn_commits_terminal_and_history(
             )
             assert len(tool_items) == 2
             assert tool_items[0].tool_call_id == tool_items[1].tool_call_id
-            assert tool_items[0].request_sequence is not None
-            assert tool_items[1].request_sequence == tool_items[0].request_sequence
+            assert tool_items[0].model_request_seq is not None
+            assert tool_items[1].model_request_seq == tool_items[0].model_request_seq
             assert tool_items[0].tool_operation_id is not None
             assert tool_items[1].tool_operation_id == tool_items[0].tool_operation_id
             assert tool_items[0].started_at is not None
@@ -243,12 +243,12 @@ async def test_session_tool_turn_commits_terminal_and_history(
                 "TOOL_RESULT",
             ]
             assert (
-                tool_trace[0].payload["request_sequence"]
-                == tool_items[0].request_sequence
+                tool_trace[0].payload["model_request_seq"]
+                == tool_items[0].model_request_seq
             )
             assert (
-                tool_trace[1].payload["request_sequence"]
-                == tool_items[0].request_sequence
+                tool_trace[1].payload["model_request_seq"]
+                == tool_items[0].model_request_seq
             )
             assert all("purpose" not in item.payload for item in tool_trace)
 
@@ -927,7 +927,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
                 page = await state.execution.events.list(
                     execution.execution_id,
                     tenant_id=principal.tenant_id,
-                    after_sequence=0,
+                    after_event_seq=0,
                     limit=100,
                 )
                 return page.items
@@ -1058,7 +1058,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
             assert after_new_intent is not None
             assert after_new_intent.status is ExecutionStatus.RECOVERY_REQUIRED
             assert after_new_intent.revision == before_new_intent.revision + 1
-            assert after_new_intent.event_sequence == before_new_intent.event_sequence + 1
+            assert after_new_intent.event_seq == before_new_intent.event_seq + 1
             new_intent = await state.execution.operations.get(
                 idempotency_key_digest(new_key),
                 tenant_id=principal.tenant_id,
@@ -1096,7 +1096,7 @@ async def test_cancel_intent_replay_readback_preserves_sqlite_state(
             assert after_unreadable is not None
             assert after_unreadable.status is ExecutionStatus.RECOVERY_REQUIRED
             assert after_unreadable.revision == after_new_intent.revision + 1
-            assert after_unreadable.event_sequence == after_new_intent.event_sequence + 1
+            assert after_unreadable.event_seq == after_new_intent.event_seq + 1
             unreadable_intent = await original_get(
                 idempotency_key_digest(unknown_key),
                 tenant_id=principal.tenant_id,

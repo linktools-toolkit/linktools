@@ -82,7 +82,7 @@ class StagedContextProjection:
 class StagedModelInteraction:
     agent_run_id: str
     step_index: int
-    request_sequence: int
+    model_request_seq: int
     purpose: str
     output_retry_index: int | None
     model: Mapping[str, str]
@@ -101,7 +101,7 @@ class StagedModelInteraction:
         if (
             not self.agent_run_id
             or self.step_index < 0
-            or self.request_sequence < 1
+            or self.model_request_seq < 1
             or self.purpose not in {"agent", "compaction"}
             or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}
             or self.duration_ns is not None

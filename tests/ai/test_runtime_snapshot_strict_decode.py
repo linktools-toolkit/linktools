@@ -621,10 +621,10 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
 
 
 
-def _execution_stub(*, event_sequence: int) -> ExecutionRecord:
+def _execution_stub(*, event_seq: int) -> ExecutionRecord:
     execution = object.__new__(ExecutionRecord)
     object.__setattr__(execution, "execution_id", "execution")
-    object.__setattr__(execution, "event_sequence", event_sequence)
+    object.__setattr__(execution, "event_seq", event_seq)
     return execution
 
 
@@ -648,7 +648,7 @@ def _execution_fact(owner_key: bytes, sequence: int = 1) -> StoredFact:
 
 def test_snapshot_execution_facts_do_not_create_sequence_rows() -> None:
     owner_key = b"e" * 32
-    execution = _execution_stub(event_sequence=1)
+    execution = _execution_stub(event_seq=1)
     sequences = snapshot_validation._canonical_sequences(
         "runtime",
         "tenant",
@@ -663,7 +663,7 @@ def test_snapshot_execution_facts_do_not_create_sequence_rows() -> None:
 
 def test_snapshot_rejects_truncated_execution_event_stream() -> None:
     owner_key = b"e" * 32
-    execution = _execution_stub(event_sequence=2)
+    execution = _execution_stub(event_seq=2)
     owner_record = StoredRecord(
         owner_key,
         None,

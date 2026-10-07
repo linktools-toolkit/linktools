@@ -134,7 +134,7 @@ class AgentRunStore(Protocol):
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int | None = None,
+        after_model_request_seq: int | None = None,
         limit: int | None = None,
     ) -> list[object]: ...
 

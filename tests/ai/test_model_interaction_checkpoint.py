@@ -68,7 +68,7 @@ async def test_checkpoint_preserves_live_request_until_terminal(
             )
             assert await recovery.model_interaction_count(agent_run_id="run") == sequence - 1
             staged = await store.list_model_interactions(agent_run_id="run")
-            assert staged[-1].request_sequence == sequence
+            assert staged[-1].model_request_seq == sequence
             assert staged[-1].status == "RUNNING"
 
             response = (
@@ -76,7 +76,7 @@ async def test_checkpoint_preserves_live_request_until_terminal(
                 if status == "SUCCEEDED" else None
             )
             error_code = ErrorCode.MODEL_API_ERROR.value if status == "FAILED" else None
-            finished = journal.finish(fact.request_sequence, status=status)
+            finished = journal.finish(fact.model_request_seq, status=status)
             capture.finish_model_interaction(
                 finished,
                 model=TestModel(),
@@ -102,7 +102,7 @@ async def test_checkpoint_preserves_live_request_until_terminal(
             agent_run_id="run", require_complete=status == "SUCCEEDED",
         )
         archived = await recovery.list_model_interactions(agent_run_id="run")
-        assert [value.request_sequence for value in archived] == [1, 2]
+        assert [value.model_request_seq for value in archived] == [1, 2]
         assert [value.status for value in archived] == [status, status]
         assert [value.error_code for value in archived] == [error_code, error_code]
         assert [value.duration_ns for value in archived] == [1, 2]

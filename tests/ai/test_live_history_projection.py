@@ -59,7 +59,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
                 namespace="history",
                 tenant_id="tenant",
                 execution_id="execution",
-                agent_run_sequence=sequence,
+                agent_run_seq=sequence,
             )
             recorder = AgentRunRecorder(
                 state.run_store, execution_id="execution", agent_run_id=run_id
@@ -70,7 +70,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
                     agent_conversation_id=conversation,
                     agent_id="default",
                     metadata={
-                        "agent_run_sequence": str(sequence),
+                        "agent_run_seq": str(sequence),
                         "agent_id": "default",
                     },
                     started_at=datetime.now(timezone.utc),
@@ -107,11 +107,11 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
                 tenant_id="tenant",
                 cursor=None,
                 limit=10,
-                agent_run_sequence=sequence,
+                agent_run_seq=sequence,
                 tool_call_id="same-call",
             )
             assert page.items[0].content == {"run": sequence}
-            assert {item.agent_run_sequence for item in page.items} == {sequence}
+            assert {item.agent_run_seq for item in page.items} == {sequence}
             assert {item.status for item in page.items} == (
                 {"SUCCEEDED"} if outcome == "success" else {"FAILED"}
             )
@@ -130,7 +130,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
             tenant_id="tenant",
             cursor=None,
             limit=10,
-            agent_run_sequence=2,
+            agent_run_seq=2,
             tool_call_id="missing",
         )
         assert missing.items == ()
@@ -156,7 +156,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
             tenant_id="tenant",
             cursor=None,
             limit=10,
-            agent_run_sequence=2,
+            agent_run_seq=2,
             tool_call_id="same-call",
         )
         assert archived.items[0].content == {"run": 2}
@@ -171,7 +171,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
         (
             "TOOL_CALL_STARTED",
             {
-                "agent_run_sequence": 1,
+                "agent_run_seq": 1,
                 "call_id": "call",
                 "tool_name": "echo",
                 "arguments_digest": "digest",
@@ -179,13 +179,13 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
         ),
         (
             "TOOL_CALL_FINISHED",
-            {"agent_run_sequence": 1, "call_id": "call", "status": "FAILED"},
+            {"agent_run_seq": 1, "call_id": "call", "status": "FAILED"},
         ),
         (
             "ASSISTANT_PART_COMPLETED",
             {
-                "agent_run_sequence": 1,
-                "message_sequence": 2,
+                "agent_run_seq": 1,
+                "message_seq": 2,
                 "part_index": 0,
                 "part_type": "text",
             },
@@ -329,7 +329,7 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
             payload = tree.event.payload
             selector = {
                 key: payload[key]
-                for key in ("agent_run_sequence", "message_sequence", "part_index")
+                for key in ("agent_run_seq", "message_seq", "part_index")
             }
             assert selector["part_index"] == 1
             exact = await execution.history(include_content=True, **selector)
@@ -387,7 +387,7 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
         agent_conversation_id=agent_conversation_id(
             namespace="history", tenant_id="tenant", execution_id="execution"
         ),
-        metadata={"agent_run_sequence": "1", "agent_id": "default"},
+        metadata={"agent_run_seq": "1", "agent_id": "default"},
     )
     staging = _StagingStore()
     staging.runs[run.agent_run_id] = run
@@ -396,7 +396,7 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
         execution_id="execution",
         status=ExecutionStatus.STARTED,
         binding_kind="agent",
-        agent_run_sequence=1,
+        agent_run_seq=1,
         stored_user_input=StoredUserInput(
             "user-content-v1",
             StoredPayload.inline_json({"items": []}),
@@ -414,7 +414,7 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
         "execution", tenant_id="tenant", cursor=None, limit=10
     )
     assert [
-        (item.fact, item.attachment_id, item.request_sequence) for item in page.items
+        (item.fact, item.attachment_id, item.model_request_seq) for item in page.items
     ] == [("included_in_request", "a" * 64, 1)]
 
 

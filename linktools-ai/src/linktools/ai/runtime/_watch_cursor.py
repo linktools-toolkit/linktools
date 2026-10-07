@@ -25,9 +25,9 @@ def encode_execution_watch_cursor(
     execution_id: str,
     *,
     include_content: bool,
-    sequences: Mapping[str, int],
+    event_seqs: Mapping[str, int],
 ) -> str:
-    normalized = _execution_sequences(sequences)
+    normalized = _execution_event_seqs(event_seqs)
     return encode_runtime_cursor(
         _signer(namespace, "execution-watch"),
         tenant_id=tenant_id,
@@ -74,7 +74,7 @@ def decode_execution_watch_cursor(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.CURSOR_INVALID)
     try:
-        return _execution_sequences(value)
+        return _execution_event_seqs(value)
     except AIError as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
 
@@ -85,16 +85,16 @@ def encode_graph_watch_cursor(
     graph_id: str,
     *,
     include_content: bool,
-    graph_sequence: int,
-    execution_sequences: Mapping[str, Mapping[str, int]],
+    graph_event_seq: int,
+    execution_event_seqs: Mapping[str, Mapping[str, int]],
 ) -> str:
     if (
-        isinstance(graph_sequence, bool)
-        or not isinstance(graph_sequence, int)
-        or graph_sequence < 0
+        isinstance(graph_event_seq, bool)
+        or not isinstance(graph_event_seq, int)
+        or graph_event_seq < 0
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    normalized = _graph_execution_sequences(execution_sequences)
+    normalized = _graph_execution_event_seqs(execution_event_seqs)
     return encode_runtime_cursor(
         _signer(namespace, "task-graph-watch"),
         tenant_id=tenant_id,
@@ -106,8 +106,8 @@ def encode_graph_watch_cursor(
         ),
         position=json.dumps(
             {
-                "graph_sequence": graph_sequence,
-                "execution_sequences": normalized,
+                "graph_event_seq": graph_event_seq,
+                "execution_event_seqs": normalized,
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -142,22 +142,22 @@ def decode_graph_watch_cursor(
     except (TypeError, ValueError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
     if not isinstance(value, Mapping) or set(value) != {
-        "graph_sequence",
-        "execution_sequences",
+        "graph_event_seq",
+        "execution_event_seqs",
     }:
         raise AIError(ErrorCode.CURSOR_INVALID)
-    sequence = value.get("graph_sequence")
+    sequence = value.get("graph_event_seq")
     if (
         isinstance(sequence, bool)
         or not isinstance(sequence, int)
         or sequence < 0
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    raw_execution = value.get("execution_sequences")
+    raw_execution = value.get("execution_event_seqs")
     if not isinstance(raw_execution, Mapping):
         raise AIError(ErrorCode.CURSOR_INVALID)
     try:
-        execution = _graph_execution_sequences(raw_execution)
+        execution = _graph_execution_event_seqs(raw_execution)
     except AIError as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
     return sequence, execution
@@ -170,13 +170,13 @@ def encode_task_results_cursor(
     *,
     include_content: bool,
     max_content_bytes: int,
-    graph_sequence: int,
+    graph_event_seq: int,
     last_node_id: str,
 ) -> str:
     if (
-        isinstance(graph_sequence, bool)
-        or not isinstance(graph_sequence, int)
-        or graph_sequence < 0
+        isinstance(graph_event_seq, bool)
+        or not isinstance(graph_event_seq, int)
+        or graph_event_seq < 0
         or not isinstance(last_node_id, str)
         or not last_node_id
     ):
@@ -191,7 +191,7 @@ def encode_task_results_cursor(
             max_content_bytes=max_content_bytes,
         ),
         position=last_node_id,
-        revision=graph_sequence,
+        revision=graph_event_seq,
     )
 
 
@@ -272,7 +272,7 @@ def _results_filter_digest(
     )
 
 
-def _execution_sequences(value: Mapping[object, object]) -> dict[str, int]:
+def _execution_event_seqs(value: Mapping[object, object]) -> dict[str, int]:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     result: dict[str, int] = {}
@@ -289,7 +289,7 @@ def _execution_sequences(value: Mapping[object, object]) -> dict[str, int]:
     return result
 
 
-def _graph_execution_sequences(
+def _graph_execution_event_seqs(
     value: Mapping[object, object],
 ) -> dict[str, dict[str, int]]:
     if not isinstance(value, Mapping):
@@ -302,7 +302,7 @@ def _graph_execution_sequences(
             or not isinstance(raw_sequences, Mapping)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        result[node_id] = _execution_sequences(raw_sequences)
+        result[node_id] = _execution_event_seqs(raw_sequences)
     return result
 
 

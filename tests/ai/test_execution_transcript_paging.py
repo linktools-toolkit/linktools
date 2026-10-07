@@ -49,8 +49,8 @@ def _execution() -> ExecutionRecord:
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=1,
+        event_seq=0,
+        agent_run_seq=1,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -115,7 +115,7 @@ class _RangedStore:
             ),
             parent_agent_run_id=None,
             agent_id="default",
-            metadata={"agent_run_sequence": "1", "agent_id": "default"},
+            metadata={"agent_run_seq": "1", "agent_id": "default"},
             started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
@@ -147,7 +147,7 @@ async def test_execution_transcript_cursor_keeps_first_page_high_water() -> None
         namespace="history",
         tenant_id="tenant",
         execution_id=record.execution_id,
-        agent_run_sequence=1,
+        agent_run_seq=1,
     )
     store = _RangedStore(agent_run_id)
     reader = StepExecutionHistoryReader(
@@ -188,7 +188,7 @@ async def test_execution_transcript_cursor_resumes_from_message_range() -> None:
         namespace="history",
         tenant_id="tenant",
         execution_id=record.execution_id,
-        agent_run_sequence=1,
+        agent_run_seq=1,
     )
     store = _RangedStore(agent_run_id)
     reader = StepExecutionHistoryReader(

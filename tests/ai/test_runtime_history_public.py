@@ -82,31 +82,31 @@ class _Reader:
         tenant_id: str,
         cursor: str | None,
         limit: int,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
-        message_sequence: int | None = None,
+        message_seq: int | None = None,
         part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
         assert tenant_id == "tenant"
         assert cursor is None
         assert limit == 100
         self.history_filters = {
-            "agent_run_sequence": agent_run_sequence,
-            "request_sequence": request_sequence,
+            "agent_run_seq": agent_run_seq,
+            "model_request_seq": model_request_seq,
             "step_index": step_index,
             "tool_call_id": tool_call_id,
-            "message_sequence": message_sequence,
+            "message_seq": message_seq,
             "part_index": part_index,
         }
         return Page((ExecutionHistoryItem(
             execution_id,
-            0 if message_sequence is None else message_sequence,
+            0 if message_seq is None else message_seq,
             "user",
             "hello",
-            agent_run_sequence=agent_run_sequence,
-            request_sequence=request_sequence,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
             step_index=step_index,
             tool_call_id=tool_call_id,
             part_index=part_index,
@@ -119,15 +119,15 @@ class _Reader:
         tenant_id: str,
         cursor: str | None,
         limit: int,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
     ) -> Page[ExecutionTraceItem]:
         assert tenant_id == "tenant"
         self.trace_filters = {
-            "agent_run_sequence": agent_run_sequence,
-            "request_sequence": request_sequence,
+            "agent_run_seq": agent_run_seq,
+            "model_request_seq": model_request_seq,
             "step_index": step_index,
             "tool_call_id": tool_call_id,
         }
@@ -195,11 +195,11 @@ class _PagingReader(_Reader):
         tenant_id: str,
         cursor: str | None,
         limit: int,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
-        message_sequence: int | None = None,
+        message_seq: int | None = None,
         part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
         assert tenant_id == "tenant"
@@ -221,8 +221,8 @@ class _PagingReader(_Reader):
         tenant_id: str,
         cursor: str | None,
         limit: int,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
     ) -> Page[ExecutionTraceItem]:
@@ -285,7 +285,7 @@ class _EventExecutions:
             return SimpleNamespace(
                 execution_id=execution_id,
                 tenant_id=tenant_id,
-                event_sequence=2,
+                event_seq=2,
             )
         return None
 
@@ -303,7 +303,7 @@ class _Events:
         execution_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[ExecutionEvent]:
         assert execution_id == "execution"
@@ -311,7 +311,7 @@ class _Events:
         selected = tuple(
             value
             for value in self.values
-            if value.sequence > after_sequence
+            if value.event_seq > after_event_seq
         )[:limit]
         return Page(selected, None)
 
@@ -340,7 +340,7 @@ async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
         principal=principal,
         limit=1,
     )
-    assert [event.sequence for event in first.items] == [1]
+    assert [event.event_seq for event in first.items] == [1]
     assert first.items[0].payload == {}
     assert first.next_cursor is not None
 
@@ -360,7 +360,7 @@ async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
         cursor=first.next_cursor,
         limit=1,
     )
-    assert [event.sequence for event in second.items] == [2]
+    assert [event.event_seq for event in second.items] == [2]
     assert second.items[0].payload == {}
     assert second.next_cursor is None
 
@@ -937,13 +937,13 @@ async def test_execution_query_cursor_binds_exact_selector(query: str) -> None:
     principal = Principal("caller", "tenant", "service")
     read = getattr(service, query)
     filters = {
-        "agent_run_sequence": 1,
-        "request_sequence": 2,
+        "agent_run_seq": 1,
+        "model_request_seq": 2,
         "step_index": 0,
         "tool_call_id": "call",
     }
     if query == "history":
-        filters.update(message_sequence=3, part_index=0)
+        filters.update(message_seq=3, part_index=0)
     page = await read("execution", principal=principal, **filters)
     assert page.next_cursor is not None
     for name, value in filters.items():
@@ -961,7 +961,7 @@ async def test_execution_query_cursor_binds_exact_selector(query: str) -> None:
         )
     assert error.value.code is ErrorCode.CURSOR_INVALID
     second = await read("execution", principal=principal, cursor=page.next_cursor, **filters)
-    assert second.items[0].sequence == 1
+    assert (second.items[0].message_seq if query == "history" else second.items[0].step_event_seq) == 1
     assert second.next_cursor is None
 
 
@@ -987,12 +987,12 @@ async def test_execution_history_and_trace_forward_filters(
     args = () if entrypoint == "execution" else ("execution",)
     kwargs = {} if entrypoint == "execution" else {"principal": principal}
     trace_filters = {
-        "agent_run_sequence": 2,
-        "request_sequence": 3,
+        "agent_run_seq": 2,
+        "model_request_seq": 3,
         "step_index": 0,
         "tool_call_id": "call",
     }
-    history_filters = {**trace_filters, "message_sequence": 4, "part_index": 0}
+    history_filters = {**trace_filters, "message_seq": 4, "part_index": 0}
     history = await target.history(
         *args, include_content=include_content, **kwargs, **history_filters,
     )
@@ -1003,8 +1003,8 @@ async def test_execution_history_and_trace_forward_filters(
     assert reader.trace_filters == trace_filters
     item = history.items[0]
     assert (
-        item.execution_id, item.agent_run_sequence, item.request_sequence,
-        item.step_index, item.sequence, item.part_index, item.tool_call_id,
+        item.execution_id, item.agent_run_seq, item.model_request_seq,
+        item.step_index, item.message_seq, item.part_index, item.tool_call_id,
     ) == ("execution", 2, 3, 0, 4, 0, "call")
     assert item.content_included is include_content
     assert item.content == ("hello" if include_content else None)
@@ -1021,13 +1021,13 @@ async def test_execution_query_accepts_independent_filters(query: str) -> None:
     principal = Principal("caller", "tenant", "service")
     read = getattr(service, query)
     filters = {
-        "agent_run_sequence": 2,
-        "request_sequence": 3,
+        "agent_run_seq": 2,
+        "model_request_seq": 3,
         "step_index": 0,
         "tool_call_id": "call",
     }
     if query == "history":
-        filters.update(message_sequence=4, part_index=0)
+        filters.update(message_seq=4, part_index=0)
     for name, value in filters.items():
         page = await read("execution", principal=principal, **{name: value})
         assert len(page.items) == 1
@@ -1043,9 +1043,9 @@ async def test_execution_query_rejects_invalid_filter_values(query: str) -> None
     )
     principal = Principal("caller", "tenant", "service")
     read = getattr(service, query)
-    integer_filters = {"agent_run_sequence": 1, "request_sequence": 1, "step_index": 0}
+    integer_filters = {"agent_run_seq": 1, "model_request_seq": 1, "step_index": 0}
     if query == "history":
-        integer_filters.update(message_sequence=1, part_index=0)
+        integer_filters.update(message_seq=1, part_index=0)
     invalid = [
         (name, value)
         for name, minimum in integer_filters.items()

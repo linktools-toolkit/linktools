@@ -26,14 +26,14 @@ evaluation results remain in their own domains.
 ## Read one tool call
 
 The default watch keeps safe locator and status metadata, including
-`agent_run_sequence` and `call_id`, without exposing arguments or results.
+`agent_run_seq` and `call_id`, without exposing arguments or results.
 
 ```python
 payload = event.event.payload  # ExecutionTreeEvent from execution.watch()
 page = await runtime.executions.history(
     event.execution_id,
     principal=principal,
-    agent_run_sequence=payload["agent_run_sequence"],
+    agent_run_seq=payload["agent_run_seq"],
     tool_call_id=payload["call_id"],
     include_content=True,
 )
@@ -63,14 +63,14 @@ one-based history message sequence:
 page = await runtime.executions.history(
     event.execution_id,
     principal=principal,
-    agent_run_sequence=payload["agent_run_sequence"],
-    message_sequence=payload["message_sequence"],
+    agent_run_seq=payload["agent_run_seq"],
+    message_seq=payload["message_seq"],
     part_index=payload["part_index"],
     include_content=True,
 )
 ```
 
-`agent_run_sequence` limits the query to that exact execution and run. All selectors are optional and combine with AND; they may also be used
+`agent_run_seq` limits the query to that exact execution and run. All selectors are optional and combine with AND; they may also be used
 independently. Different runs and child executions may reuse a call ID. Selectors,
 execution identity, content mode, and tenant are bound to the cursor.
 
@@ -87,57 +87,75 @@ tool arguments and tool returns belong to `history`.
 
 ## Request identity and step filters
 
-A model request is identified by `(execution_id, agent_run_sequence,
-request_sequence)`, exactly the identity returned by `ModelInteractionItem`.
-`agent_run_sequence` is a one-based run sequence within an execution, not a
-session turn or child-execution ID. `request_sequence` is a one-based logical
+A model request is identified by `(execution_id, agent_run_seq,
+model_request_seq)`, exactly the identity returned by `ModelInteractionItem`.
+`agent_run_seq` is a one-based run sequence within an execution, not a
+session turn or child-execution ID. `model_request_seq` is a one-based logical
 model-request sequence within that run. Its journal includes agent requests,
 output-correction retries and compaction requests; it is not a provider request
 ID or a count of transport attempts. The sequence continues from recorded
 requests when the same run is recovered.
 
-`step_index` is the SDK's non-negative execution-step index within the run.
-Several requests can belong to the same step. It is useful for grouping, but
-cannot replace the request identity. `message_sequence` is the one-based raw
-transcript message coordinate (`ExecutionHistoryItem.sequence`), and
-`part_index` is the zero-based part coordinate inside that message. A trace
-item's `sequence` instead locates its step event; none of these coordinates are
-interchangeable.
+`step_index` retains the SDK's execution-step meaning within the run; it is
+non-negative but is not guaranteed to start at zero. Several requests can
+belong to the same step. It is useful for grouping, but cannot replace the
+request identity. `message_seq` is the one-based raw transcript message
+coordinate on `ExecutionHistoryItem`, `TranscriptItem`, and `SessionHistoryItem`.
+It counts messages, so multiple projected parts from one message share the same
+value. `part_index` is the original zero-based part coordinate inside that
+message, even when other parts are filtered out.
 
-For assistant response parts and tool calls, history's `request_sequence`
+`ExecutionTraceItem.step_event_seq` is the raw `StepEvent` ordinal plus one,
+within its agent run. Trace filtering does not renumber it, so results can have
+gaps. It is distinct from `step_index` and from the one-based durable
+`ExecutionEvent.event_seq` / `TaskEvent.event_seq` owned by their execution or
+graph. `ExecutionStreamEvent.durable_seq` is that durable event coordinate, or
+`None` while the live event has no durable coordinate, including live deltas.
+None of these coordinates are interchangeable.
+
+Session timeline references use one-based `turn_seq` within their owning
+session; `timeline_parent_turn_seq` fixes the parent-session turn cutoff for
+a fork. These do not replace `SessionTurnItem.ordinal`. Generic storage fact
+and operation sequences remain separate storage coordinates.
+
+These names define the current pre-release API and wire contract. The field
+rename is breaking: callers and current serialized data must use the new
+names; compatibility aliases are not provided.
+
+For assistant response parts and tool calls, history's `model_request_seq`
 identifies the request that **produced** the response. For tool returns and
 call-specific retry prompts it identifies the request that **initiated the
 call**, even when a later model request carries that return. History's
 `step_index` is the originating model request's step. The existing successful
-model step event records the actual raw response's `message_sequence`; trace
+model step event records the actual raw response's `message_seq`; trace
 exposes that coordinate on its model response item. Tool trace events retain
 their own occurrence step and the originating request sequence.
 
 User/system messages, unassociated retry prompts, incomplete response parts,
-and facts without a recorded association have `request_sequence=None` and
+and facts without a recorded association have `model_request_seq=None` and
 `step_index=None`. No association is guessed from time, message order, or
 matching text. Compaction requests appear in model interactions and trace but
 do not invent a response in conversation history. To inspect all inputs carried
 by a request, read its `ModelInteractionItem.request`; history is an occurrence
 view, not a duplicate of every model input context.
 
-Both `history(...)` and `trace(...)` accept `agent_run_sequence`,
-`request_sequence`, `step_index`, and `tool_call_id`. History additionally
-accepts `message_sequence` and `part_index`. Without a run selector, a request
+Both `history(...)` and `trace(...)` accept `agent_run_seq`,
+`model_request_seq`, `step_index`, and `tool_call_id`. History additionally
+accepts `message_seq` and `part_index`. Without a run selector, a request
 or call selector matches each run in the normal query scope; always retain
 returned execution/run coordinates to disambiguate results. For example:
 
 ```python
 page = await execution.history(
-    agent_run_sequence=1, request_sequence=2, include_content=True, limit=20,
+    agent_run_seq=1, model_request_seq=2, include_content=True, limit=20,
 )
 trace_page = await runtime.history.trace(
     execution.execution_id, principal=principal,
-    agent_run_sequence=1, request_sequence=2, limit=20,
+    agent_run_seq=1, model_request_seq=2, limit=20,
 )
 # Continue with the same selectors and content mode.
 page = await execution.history(
-    agent_run_sequence=1, request_sequence=2, include_content=True,
+    agent_run_seq=1, model_request_seq=2, include_content=True,
     limit=20, cursor=page.next_cursor,
 )
 ```

@@ -74,7 +74,7 @@ def _execution(
     *,
     status: ExecutionStatus = ExecutionStatus.STARTED,
     revision: int = 0,
-    event_sequence: int = 0,
+    event_seq: int = 0,
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
@@ -87,8 +87,8 @@ def _execution(
         lineage_kind=ExecutionLineageKind.RUN,
         status=status,
         revision=revision,
-        event_sequence=event_sequence,
-        agent_run_sequence=0,
+        event_seq=event_seq,
+        agent_run_seq=0,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -130,15 +130,15 @@ class _EventReader:
         execution_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[ExecutionEvent]:
         del execution_id, tenant_id, limit
-        if self.started is not None and after_sequence == 0:
+        if self.started is not None and after_event_seq == 0:
             self.started.set()
             assert self.release is not None
             await self.release.wait()
-        return Page(self.pages.get(after_sequence, ()), None)
+        return Page(self.pages.get(after_event_seq, ()), None)
 
 
 def _service(
@@ -164,11 +164,11 @@ async def test_unconfirmed_terminal_event_converges_to_durable_tail() -> None:
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {},
-        durable_sequence=None,
+        durable_seq=None,
     )
     broker.complete("execution")
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, event_sequence=1),
+        _execution(status=ExecutionStatus.SUCCEEDED, event_seq=1),
         _EventReader(
             {0: (ExecutionEvent("execution", 1, "EXECUTION_SUCCEEDED", {}),)}
         ),
@@ -184,7 +184,7 @@ async def test_unconfirmed_terminal_event_converges_to_durable_tail() -> None:
     ]
 
     assert len(streamed) == 1
-    assert streamed[0].durable_sequence is None
+    assert streamed[0].durable_seq is None
     assert streamed[0].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
 
 
@@ -197,11 +197,11 @@ async def test_unconfirmed_completion_rejects_missing_durable_tail() -> None:
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {},
-        durable_sequence=None,
+        durable_seq=None,
     )
     broker.complete("execution")
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, event_sequence=1),
+        _execution(status=ExecutionStatus.SUCCEEDED, event_seq=1),
         _EventReader({}),
         broker,
     )
@@ -222,7 +222,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
-    executions = _ExecutionReader(_execution(event_sequence=1))
+    executions = _ExecutionReader(_execution(event_seq=1))
     events = _EventReader(
         {0: (ExecutionEvent("execution", 1, "EXECUTION_STARTED", {}),)}
     )
@@ -293,9 +293,9 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ) -> AsyncIterator[TaskEvent]:
-            del principal, after_sequence
+            del principal, after_event_seq
             yield TaskEvent(
                 1,
                 graph_id,
@@ -315,11 +315,11 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences: Mapping[str, int] | None = None,
+        after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        del after_sequences, include_content
+        del after_event_seqs, include_content
         if ready is not None:
             ready.set()
         async for event in execution_service.stream(execution_id, principal=principal):
@@ -346,7 +346,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
                 None,
                 "execution",
                 None,
-                event_sequence=1,
+                event_seq=1,
             )
 
     runtime = SimpleNamespace(
@@ -369,7 +369,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
         observed.append(event)
         if (
             isinstance(event.event, ExecutionTreeEvent)
-            and event.event.event.durable_sequence is None
+            and event.event.event.durable_seq is None
         ):
             observed_live.set()
         if event.event == terminal_graph_event:
@@ -379,13 +379,13 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
         "execution",
         "EXECUTION_STARTED",
         {},
-        durable_sequence=1,
+        durable_seq=1,
     )
     broker.publish_event(
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {},
-        durable_sequence=None,
+        durable_seq=None,
     )
     async def observe():
         events = run.watch()
@@ -399,7 +399,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
 
     executions.execution = _execution(
         status=ExecutionStatus.SUCCEEDED,
-        event_sequence=2,
+        event_seq=2,
     )
     events.pages[1] = (
         ExecutionEvent("execution", 2, "EXECUTION_SUCCEEDED", {}),
@@ -432,26 +432,26 @@ async def test_live_semantic_events_keep_agent_source_order() -> None:
         "execution",
         ExecutionEventType.TOOL_CALL_STARTED,
         {"call_id": "call", "tool_name": "tool"},
-        durable_sequence=None,
+        durable_seq=None,
     )
     broker.publish(ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "after"))
-    broker.confirm_events("execution", first_sequence=2, count=1)
+    broker.confirm_events("execution", first_event_seq=2, count=1)
     broker.publish_event(
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {"agent_run_id": "run"},
-        durable_sequence=3,
+        durable_seq=3,
     )
     broker.complete("execution")
     items = [item async for item in live]
     assert isinstance(items[0], ExecutionDelta) and items[0].content == "before"
     assert isinstance(items[1], _LiveEvent)
     assert items[1].event_type == ExecutionEventType.TOOL_CALL_STARTED
-    assert items[1].durable_sequence == 2
+    assert items[1].durable_seq == 2
     assert isinstance(items[2], ExecutionDelta) and items[2].content == "after"
     assert isinstance(items[3], _LiveEvent)
     assert items[3].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
-    assert items[3].durable_sequence == 3
+    assert items[3].durable_seq == 3
 
 
 @pytest.mark.asyncio
@@ -467,20 +467,20 @@ async def test_live_durable_terminal_publication_is_idempotent() -> None:
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         payload,
-        durable_sequence=1,
+        durable_seq=1,
     )
     broker.publish_event(
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         payload,
-        durable_sequence=1,
+        durable_seq=1,
     )
     with pytest.raises(AIError) as error:
         broker.publish_event(
             "execution",
             ExecutionEventType.EXECUTION_FAILED,
             {"error_code": "internal_error"},
-            durable_sequence=1,
+            durable_seq=1,
         )
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
@@ -507,10 +507,10 @@ async def test_public_stream_emits_pending_semantic_event_immediately() -> None:
         "execution",
         ExecutionEventType.TOOL_CALL_STARTED,
         {"call_id": "call", "tool_name": "tool"},
-        durable_sequence=None,
+        durable_seq=None,
     )
     event = await asyncio.wait_for(pending, timeout=1.0)
-    assert event.durable_sequence is None
+    assert event.durable_seq is None
     assert event.event_type == ExecutionEventType.TOOL_CALL_STARTED
 
     await iterator.aclose()
@@ -523,7 +523,7 @@ async def test_live_overflow_skips_semantic_events_already_emitted_ephemerally()
     broker.register_local_producer("execution", 0)
     events = _EventReader({})
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, revision=260, event_sequence=260),
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=260, event_seq=260),
         events,
         broker,
     )
@@ -540,13 +540,13 @@ async def test_live_overflow_skips_semantic_events_already_emitted_ephemerally()
         "execution",
         ExecutionEventType.TOOL_CALL_STARTED,
         first_payload,
-        durable_sequence=None,
+        durable_seq=None,
     )
     first = await asyncio.wait_for(first_task, timeout=1.0)
-    assert first.durable_sequence is None
+    assert first.durable_seq is None
     assert first.payload == first_payload
 
-    broker.confirm_events("execution", first_sequence=1, count=1)
+    broker.confirm_events("execution", first_event_seq=1, count=1)
     durable = tuple(
         ExecutionEvent(
             "execution",
@@ -566,12 +566,12 @@ async def test_live_overflow_skips_semantic_events_already_emitted_ephemerally()
             event.execution_id,
             event.event_type,
             event.payload,
-            durable_sequence=event.sequence,
+            durable_seq=event.event_seq,
         )
     broker.complete("execution")
 
     remaining = [item async for item in iterator]
-    assert [item.durable_sequence for item in remaining] == list(range(2, 261))
+    assert [item.durable_seq for item in remaining] == list(range(2, 261))
     assert remaining[-1].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
 
 
@@ -585,7 +585,7 @@ async def test_live_broker_durable_overflow_switches_to_repository_replay() -> N
             "execution",
             ExecutionEventType.TOOL_CALL_STARTED,
             {"call_id": f"call-{sequence}", "tool_name": "tool"},
-            durable_sequence=sequence,
+            durable_seq=sequence,
         )
 
     assert "execution" in broker._replay_required
@@ -606,7 +606,7 @@ async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
             "execution",
             ExecutionEventType.TOOL_CALL_STARTED,
             {"call_id": f"call-{index}", "tool_name": "tool"},
-            durable_sequence=None,
+            durable_seq=None,
         )
 
     assert first.replay_required
@@ -628,11 +628,11 @@ async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
         "execution",
         ExecutionEventType.TOOL_CALL_STARTED,
         {"call_id": "late-call", "tool_name": "tool"},
-        durable_sequence=None,
+        durable_seq=None,
     )
     assert not broker._activity["execution"].is_set()
 
-    broker.confirm_events("execution", first_sequence=1, count=301)
+    broker.confirm_events("execution", first_event_seq=1, count=301)
     assert broker._activity["execution"].is_set()
     assert "execution" not in broker._pending_event_counts
     await first.close()
@@ -662,7 +662,7 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
             event.execution_id,
             event.event_type,
             event.payload,
-            durable_sequence=event.sequence,
+            durable_seq=event.event_seq,
         )
     broker.complete("execution")
 
@@ -670,7 +670,7 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
         _execution(
             status=ExecutionStatus.SUCCEEDED,
             revision=300,
-            event_sequence=300,
+            event_seq=300,
         ),
         _EventReader({0: durable}),
         broker,
@@ -684,7 +684,7 @@ async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
         )
     ]
 
-    assert [item.durable_sequence for item in streamed] == list(range(1, 301))
+    assert [item.durable_seq for item in streamed] == list(range(1, 301))
     assert streamed[-1].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
 
 
@@ -713,14 +713,14 @@ async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path:
         assert after == before + 1
         assert committed.status is ExecutionStatus.CANCELLING
         assert committed.revision == 3
-        assert committed.event_sequence == 3
+        assert committed.event_seq == 3
         page = await state.execution.events.list(
             "execution",
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=10,
         )
-        assert [event.sequence for event in page.items] == [1, 2, 3]
+        assert [event.event_seq for event in page.items] == [1, 2, 3]
         assert [event.event_type for event in page.items] == [
             ExecutionEventType.ASSISTANT_PART_COMPLETED,
             ExecutionEventType.TOOL_CALL_STARTED,
@@ -732,7 +732,7 @@ async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path:
 
 @pytest.mark.asyncio
 async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
-    terminal = _execution(status=ExecutionStatus.SUCCEEDED, revision=1, event_sequence=1)
+    terminal = _execution(status=ExecutionStatus.SUCCEEDED, revision=1, event_seq=1)
 
     class _ExecutionRepo:
         tenant_id = "tenant"
@@ -756,12 +756,12 @@ async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
             execution_id: str,
             *,
             tenant_id: str,
-            after_sequence: int,
+            after_event_seq: int,
             limit: int,
         ) -> Page[object]:
-            del execution_id, tenant_id, after_sequence, limit
+            del execution_id, tenant_id, after_event_seq, limit
             event = SimpleNamespace(
-                sequence=1,
+                event_seq=1,
                 event_type=ExecutionEventType.EXECUTION_SUCCEEDED,
                 payload={},
             )
@@ -795,13 +795,13 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
         "execution",
         ExecutionEventType.TOOL_CALL_STARTED,
         {"call_id": "call", "tool_name": "tool"},
-        durable_sequence=None,
+        durable_seq=None,
     )
     pending = ExecutionEventAppend(
         ExecutionEventType.TOOL_CALL_STARTED,
         {"call_id": "call", "tool_name": "tool"},
     )
-    committed = _execution(status=ExecutionStatus.CANCELLING, revision=2, event_sequence=2)
+    committed = _execution(status=ExecutionStatus.CANCELLING, revision=2, event_seq=2)
 
     class _Commands:
         def __init__(self) -> None:
@@ -860,10 +860,10 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     first = await live.__anext__()
     second = await live.__anext__()
     await live.close()
-    assert isinstance(first, _LiveEvent) and first.durable_sequence == 1
+    assert isinstance(first, _LiveEvent) and first.durable_seq == 1
     assert isinstance(second, _LiveEvent)
     assert second.event_type == ExecutionEventType.CANCEL_REQUESTED
-    assert second.durable_sequence == 2
+    assert second.durable_seq == 2
 
 
 @pytest.mark.asyncio
@@ -874,7 +874,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
         "execution",
         ExecutionEventType.ASSISTANT_PART_COMPLETED,
         {"part": "text"},
-        durable_sequence=None,
+        durable_seq=None,
     )
     pending = ExecutionEventAppend(ExecutionEventType.ASSISTANT_PART_COMPLETED, {"part": "text"})
     current = _execution()
@@ -882,7 +882,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
         current,
         status=ExecutionStatus.FAILED,
         revision=2,
-        event_sequence=2,
+        event_seq=2,
         error_code=ErrorCode.EXECUTION_FAILED.value,
         safe_error_details={},
     )
@@ -955,10 +955,10 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     first = await live.__anext__()
     second = await live.__anext__()
     await live.close()
-    assert isinstance(first, _LiveEvent) and first.durable_sequence == 1
+    assert isinstance(first, _LiveEvent) and first.durable_seq == 1
     assert isinstance(second, _LiveEvent)
     assert second.event_type == ExecutionEventType.EXECUTION_FAILED
-    assert second.durable_sequence == 2
+    assert second.durable_seq == 2
 
 
 @pytest.mark.asyncio
@@ -970,7 +970,7 @@ async def test_second_subscriber_pins_buffer_during_durable_prefix() -> None:
     events.started = asyncio.Event()
     events.release = asyncio.Event()
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=2),
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_seq=2),
         events,
         broker,
     )
@@ -986,15 +986,15 @@ async def test_second_subscriber_pins_buffer_during_durable_prefix() -> None:
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {},
-        durable_sequence=2,
+        durable_seq=2,
     )
     broker.complete("execution")
     events.release.set()
     streamed = await task
-    assert streamed[0].durable_sequence == 1
-    assert streamed[1].durable_sequence is None
+    assert streamed[0].durable_seq == 1
+    assert streamed[1].durable_seq is None
     assert streamed[1].payload["text"] == "live"
-    assert streamed[2].durable_sequence == 2
+    assert streamed[2].durable_seq == 2
     assert streamed[2].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
 
 
@@ -1023,7 +1023,7 @@ async def test_local_completion_without_terminal_is_integrity_error() -> None:
 async def test_durable_stream_stops_when_terminal_cursor_already_seen() -> None:
     broker = LiveExecutionEventBroker()
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=2),
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_seq=2),
         _EventReader({}),
         broker,
     )
@@ -1033,7 +1033,7 @@ async def test_durable_stream_stops_when_terminal_cursor_already_seen() -> None:
         async for item in service.stream(
             "execution",
             principal=principal,
-            after_sequence=2,
+            after_event_seq=2,
         )
     ]
     assert streamed == []
@@ -1048,11 +1048,11 @@ async def test_local_stream_skips_already_seen_terminal_and_stops() -> None:
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {},
-        durable_sequence=1,
+        durable_seq=1,
     )
     broker.complete("execution")
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, revision=1, event_sequence=1),
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=1, event_seq=1),
         _EventReader({}),
         broker,
     )
@@ -1062,7 +1062,7 @@ async def test_local_stream_skips_already_seen_terminal_and_stops() -> None:
         async for item in service.stream(
             "execution",
             principal=principal,
-            after_sequence=1,
+            after_event_seq=1,
         )
     ]
     assert streamed == []
@@ -1098,25 +1098,25 @@ async def test_reconnect_aligns_to_confirmed_cursor_before_replaying_deltas() ->
         "execution",
         ExecutionEventType.TOOL_CALL_STARTED,
         {"call_id": "call", "tool_name": "tool"},
-        durable_sequence=None,
+        durable_seq=None,
     )
     broker.publish(
         ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "after")
     )
-    service = _service(_execution(revision=1, event_sequence=1), _EventReader({}), broker)
+    service = _service(_execution(revision=1, event_seq=1), _EventReader({}), broker)
     principal = Principal("user", "tenant", "user")
     iterator = service.stream(
         "execution",
         principal=principal,
-        after_sequence=2,
+        after_event_seq=2,
     ).__aiter__()
     first_task = asyncio.create_task(anext(iterator))
     await asyncio.sleep(0)
     assert not first_task.done()
 
-    broker.confirm_events("execution", first_sequence=2, count=1)
+    broker.confirm_events("execution", first_event_seq=2, count=1)
     first = await asyncio.wait_for(first_task, timeout=1.0)
-    assert first.durable_sequence is None
+    assert first.durable_seq is None
     assert first.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA
     assert first.payload["text"] == "after"
 
@@ -1124,11 +1124,11 @@ async def test_reconnect_aligns_to_confirmed_cursor_before_replaying_deltas() ->
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {},
-        durable_sequence=3,
+        durable_seq=3,
     )
     broker.complete("execution")
     terminal = await asyncio.wait_for(anext(iterator), timeout=1.0)
-    assert terminal.durable_sequence == 3
+    assert terminal.durable_seq == 3
     assert terminal.event_type == ExecutionEventType.EXECUTION_SUCCEEDED
     with pytest.raises(StopAsyncIteration):
         await anext(iterator)
@@ -1146,7 +1146,7 @@ async def test_reconnect_after_terminal_cursor_does_not_replay_deltas() -> None:
         "execution",
         ExecutionEventType.TOOL_CALL_STARTED,
         {"call_id": "call", "tool_name": "tool"},
-        durable_sequence=2,
+        durable_seq=2,
     )
     broker.publish(
         ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "after")
@@ -1155,11 +1155,11 @@ async def test_reconnect_after_terminal_cursor_does_not_replay_deltas() -> None:
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {},
-        durable_sequence=3,
+        durable_seq=3,
     )
     broker.complete("execution")
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, revision=3, event_sequence=3),
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=3, event_seq=3),
         _EventReader({}),
         broker,
     )
@@ -1169,7 +1169,7 @@ async def test_reconnect_after_terminal_cursor_does_not_replay_deltas() -> None:
         async for item in service.stream(
             "execution",
             principal=principal,
-            after_sequence=3,
+            after_event_seq=3,
         )
     ]
     assert streamed == []
@@ -1185,7 +1185,7 @@ async def test_durable_stream_rejects_sequence_gap() -> None:
         {},
     )
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=2),
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_seq=2),
         _EventReader({0: (gap,)}),
         broker,
     )
@@ -1200,7 +1200,7 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
     winner = _execution(
         status=ExecutionStatus.CANCELLING,
         revision=1,
-        event_sequence=1,
+        event_seq=1,
     )
 
     class _ExecutionRepo:
@@ -1225,10 +1225,10 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
             execution_id: str,
             *,
             tenant_id: str,
-            after_sequence: int,
+            after_event_seq: int,
             limit: int,
         ) -> Page[ExecutionEvent]:
-            del execution_id, tenant_id, after_sequence, limit
+            del execution_id, tenant_id, after_event_seq, limit
             return Page(
                 (
                     ExecutionEvent(
@@ -1266,7 +1266,7 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
     advanced = _execution(
         status=ExecutionStatus.STARTED,
         revision=1,
-        event_sequence=0,
+        event_seq=0,
     )
 
     class _ExecutionRepo:
@@ -1291,10 +1291,10 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
             execution_id: str,
             *,
             tenant_id: str,
-            after_sequence: int,
+            after_event_seq: int,
             limit: int,
         ) -> Page[ExecutionEvent]:
-            del execution_id, tenant_id, after_sequence, limit
+            del execution_id, tenant_id, after_event_seq, limit
             return Page((), None)
 
     commands = RuntimeStateCommands(
@@ -1322,7 +1322,7 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
     advanced = _execution(
         status=ExecutionStatus.CANCELLING,
         revision=2,
-        event_sequence=1,
+        event_seq=1,
     )
 
     class _ExecutionRepo:
@@ -1347,10 +1347,10 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
             execution_id: str,
             *,
             tenant_id: str,
-            after_sequence: int,
+            after_event_seq: int,
             limit: int,
         ) -> Page[ExecutionEvent]:
-            del execution_id, tenant_id, after_sequence, limit
+            del execution_id, tenant_id, after_event_seq, limit
             return Page(
                 (
                     ExecutionEvent(
@@ -1393,16 +1393,16 @@ async def test_local_replay_timeout_keeps_waiting_on_python310_semantics(
         "execution",
         ExecutionEventType.TOOL_CALL_STARTED,
         {"call_id": "call", "tool_name": "tool"},
-        durable_sequence=None,
+        durable_seq=None,
     )
     broker.publish_event(
         "execution",
         ExecutionEventType.EXECUTION_SUCCEEDED,
         {},
-        durable_sequence=2,
+        durable_seq=2,
     )
     service = _service(
-        _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=2),
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_seq=2),
         _EventReader({}),
         broker,
     )
@@ -1418,7 +1418,7 @@ async def test_local_replay_timeout_keeps_waiting_on_python310_semantics(
         calls += 1
         if calls == 1:
             raise asyncio.TimeoutError
-        broker.confirm_events("execution", first_sequence=1, count=1)
+        broker.confirm_events("execution", first_event_seq=1, count=1)
 
     monkeypatch.setattr(event_module.asyncio, "wait_for", wait_for)
     streamed = [
@@ -1426,13 +1426,13 @@ async def test_local_replay_timeout_keeps_waiting_on_python310_semantics(
         async for item in service.stream(
             "execution",
             principal=principal,
-            after_sequence=1,
+            after_event_seq=1,
         )
     ]
 
     assert calls == 2
     assert len(streamed) == 1
-    assert streamed[0].durable_sequence == 2
+    assert streamed[0].durable_seq == 2
     assert streamed[0].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
     broker.complete("execution")
 
@@ -1458,10 +1458,10 @@ async def test_remote_durable_polling_does_not_retain_broker_activity(
             execution_id: str,
             *,
             tenant_id: str,
-            after_sequence: int,
+            after_event_seq: int,
             limit: int,
         ) -> Page[ExecutionEvent]:
-            del execution_id, tenant_id, after_sequence, limit
+            del execution_id, tenant_id, after_event_seq, limit
             self.calls += 1
             return Page((), None) if self.calls == 1 else Page((terminal,), None)
 
@@ -1489,6 +1489,6 @@ async def test_remote_durable_polling_does_not_retain_broker_activity(
         )
     ]
 
-    assert [item.durable_sequence for item in streamed] == [1]
+    assert [item.durable_seq for item in streamed] == [1]
     assert delays == [1.0]
     assert broker._activity == {}

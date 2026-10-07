@@ -310,10 +310,10 @@ class _RunningTasks:
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]:
-        del graph_id, tenant_id, after_sequence, limit
+        del graph_id, tenant_id, after_event_seq, limit
         return Page(())
 
 

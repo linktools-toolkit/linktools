@@ -92,15 +92,15 @@ class _UsageStore:
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int | None = None,
+        after_model_request_seq: int | None = None,
         limit: int | None = None,
     ):
         assert agent_run_id == self.run.agent_run_id
-        after = 0 if after_request_sequence is None else after_request_sequence
+        after = 0 if after_model_request_seq is None else after_model_request_seq
         selected = tuple(
             value
             for value in self.interactions
-            if value.request_sequence > after
+            if value.model_request_seq > after
         )
         return list(selected if limit is None else selected[:limit])
 
@@ -114,7 +114,7 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
         namespace=namespace,
         tenant_id=tenant_id,
         execution_id=execution_id,
-        agent_run_sequence=1,
+        agent_run_seq=1,
     )
     agent_conversation_id = make_agent_conversation_id(
         namespace=namespace,
@@ -125,7 +125,7 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
         agent_run_id,
         agent_conversation_id,
         agent_id="agent",
-        metadata={"agent_run_sequence": "1", "agent_id": "agent"},
+        metadata={"agent_run_seq": "1", "agent_id": "agent"},
     )
     interactions = (
         _interaction(
@@ -172,7 +172,7 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
         execution_id=execution_id,
         binding_kind="agent",
         status=ExecutionStatus.STARTED,
-        agent_run_sequence=1,
+        agent_run_seq=1,
     )
     reader = StepExecutionHistoryReader(
         namespace=namespace,

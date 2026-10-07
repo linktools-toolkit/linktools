@@ -56,7 +56,7 @@ class _ExecutionTreeWatcher(Protocol):
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences: "Mapping[str, int] | None" = None,
+        after_event_seqs: "Mapping[str, int] | None" = None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
@@ -105,29 +105,29 @@ class Execution(Generic[AppT]):
             cursor, include_content=include_content,
         )
         stream = self._watch_tree(
-            self.execution_id, principal=self._principal, after_sequences=sequences,
+            self.execution_id, principal=self._principal, after_event_seqs=sequences,
             include_content=include_content, ready=ready,
         )
         return self._watch_with_cursor(stream, sequences, include_content, cursor)
 
     async def _watch_with_cursor(
         self, stream: AsyncIterator[ExecutionTreeEvent],
-        after_sequences: Mapping[str, int] | None, include_content: bool,
+        after_event_seqs: Mapping[str, int] | None, include_content: bool,
         cursor: str | None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        sequences = dict(after_sequences or {})
+        sequences = dict(after_event_seqs or {})
         last_cursor = cursor
         try:
             async for event in stream:
-                durable_sequence = event.event.durable_sequence
-                if durable_sequence is not None:
+                durable_seq = event.event.durable_seq
+                if durable_seq is not None:
                     previous = sequences.get(event.execution_id, 0)
-                    if durable_sequence <= previous:
+                    if durable_seq <= previous:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    sequences[event.execution_id] = durable_sequence
+                    sequences[event.execution_id] = durable_seq
                 last_cursor = encode_execution_watch_cursor(
                     self._runtime.namespace, self._principal.tenant_id, self.execution_id,
-                    include_content=include_content, sequences=sequences,
+                    include_content=include_content, event_seqs=sequences,
                 )
                 yield replace(event, cursor=last_cursor)
         except _ExecutionStreamFailure as failure:
@@ -264,11 +264,11 @@ class Execution(Generic[AppT]):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
-        message_sequence: int | None = None,
+        message_seq: int | None = None,
         part_index: int | None = None,
     ) -> "Page[ExecutionHistoryItem]":
         return await self._runtime.executions.history(
@@ -277,11 +277,11 @@ class Execution(Generic[AppT]):
             cursor=cursor,
             include_content=include_content,
             limit=limit,
-            agent_run_sequence=agent_run_sequence,
-            request_sequence=request_sequence,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
             step_index=step_index,
             tool_call_id=tool_call_id,
-            message_sequence=message_sequence,
+            message_seq=message_seq,
             part_index=part_index,
         )
 
@@ -291,8 +291,8 @@ class Execution(Generic[AppT]):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
     ) -> "Page[ExecutionTraceItem]":
@@ -302,8 +302,8 @@ class Execution(Generic[AppT]):
             cursor=cursor,
             include_content=include_content,
             limit=limit,
-            agent_run_sequence=agent_run_sequence,
-            request_sequence=request_sequence,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
             step_index=step_index,
             tool_call_id=tool_call_id,
         )

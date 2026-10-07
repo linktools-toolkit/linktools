@@ -85,14 +85,14 @@ class _HistoryStore:
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int | None = None,
+        after_model_request_seq: int | None = None,
         limit: int | None = None,
     ) -> list[ModelInteractionRecord]:
         values = [
             item
             for item in self.interactions.get(agent_run_id, ())
-            if after_request_sequence is None
-            or item.request_sequence > after_request_sequence
+            if after_model_request_seq is None
+            or item.model_request_seq > after_model_request_seq
         ]
         return values if limit is None else values[:limit]
 
@@ -117,7 +117,7 @@ class _StagingStore(_HistoryStore):
     ) -> int:
         archived = await self.list_model_interactions(agent_run_id=agent_run_id)
         return max(
-            max((item.request_sequence for item in archived), default=0),
+            max((item.model_request_seq for item in archived), default=0),
             max(self.staged.get(agent_run_id, {}), default=0),
         )
 
@@ -125,20 +125,20 @@ class _StagingStore(_HistoryStore):
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int,
+        after_model_request_seq: int,
         limit: int,
     ) -> tuple[list[object], list[StagedModelInteraction]]:
         staged = [
             item
             for sequence, item in sorted(self.staged.get(agent_run_id, {}).items())
-            if sequence > after_request_sequence
+            if sequence > after_model_request_seq
         ][:limit]
         for interaction in self.handoff_during_snapshot.pop(agent_run_id, ()):
             self.interactions.setdefault(agent_run_id, []).append(interaction)
-            self.staged.get(agent_run_id, {}).pop(interaction.request_sequence, None)
+            self.staged.get(agent_run_id, {}).pop(interaction.model_request_seq, None)
         archived = await self.list_model_interactions(
             agent_run_id=agent_run_id,
-            after_request_sequence=after_request_sequence,
+            after_model_request_seq=after_model_request_seq,
             limit=limit,
         )
         return archived, staged
@@ -160,7 +160,7 @@ def _record(execution_id: str, *, child: bool = False) -> object:
             ),
             "parent_invocation_id": "call-1" if child else None,
             "status": ExecutionStatus.STARTED,
-            "agent_run_sequence": 1,
+            "agent_run_seq": 1,
             "created_at": now + (timedelta(seconds=1) if child else timedelta()),
         },
     )()
@@ -173,7 +173,7 @@ def _interaction(agent_id: str, sequence: int) -> ModelInteractionRecord:
     return ModelInteractionRecord(
         agent_id,
         step_index=sequence,
-        request_sequence=sequence,
+        model_request_seq=sequence,
         purpose="agent",
         output_retry_index=None,
         model={"route_id": "default"},
@@ -195,19 +195,19 @@ def _interaction(agent_id: str, sequence: int) -> ModelInteractionRecord:
 def _running_interaction(
     execution_id: str,
     run_sequence: int,
-    request_sequence: int,
+    model_request_seq: int,
     started_at: datetime,
 ) -> StagedModelInteraction:
     run_id = agent_run_id(
         namespace="history",
         tenant_id="tenant",
         execution_id=execution_id,
-        agent_run_sequence=run_sequence,
+        agent_run_seq=run_sequence,
     )
     return StagedModelInteraction(
         agent_run_id=run_id,
-        step_index=request_sequence,
-        request_sequence=request_sequence,
+        step_index=model_request_seq,
+        model_request_seq=model_request_seq,
         purpose="agent",
         output_retry_index=None,
         model={"route_id": "default"},
@@ -247,13 +247,13 @@ def _reader() -> tuple[StepExecutionHistoryReader, _Executions, _StagingStore]:
         namespace="history",
         tenant_id="tenant",
         execution_id="root",
-        agent_run_sequence=1,
+        agent_run_seq=1,
     )
     store.runs[run_id] = AgentRunRecord(
         run_id,
         agent_conversation_id=conv_id,
         agent_id="agent",
-        metadata={"agent_run_sequence": "1"},
+        metadata={"agent_run_seq": "1"},
     )
     store.interactions[run_id] = []
     store.staged[run_id] = {
@@ -292,7 +292,7 @@ async def test_archive_terminal_wins_when_handoff_follows_staging_snapshot() -> 
         include_content=False,
     )
 
-    assert [(item.request_sequence, item.status) for item in page.items] == [
+    assert [(item.model_request_seq, item.status) for item in page.items] == [
         (1, "CANCELLED")
     ]
 
@@ -307,7 +307,7 @@ async def test_pages_refresh_states_without_expanding_captured_identity_set() ->
         limit=1,
         include_content=False,
     )
-    assert [(item.execution_id, item.request_sequence, item.status) for item in first.items] == [
+    assert [(item.execution_id, item.model_request_seq, item.status) for item in first.items] == [
         ("root", 1, "RUNNING")
     ]
     assert first.next_cursor is not None
@@ -329,13 +329,13 @@ async def test_pages_refresh_states_without_expanding_captured_identity_set() ->
         namespace="history",
         tenant_id="tenant",
         execution_id="child",
-        agent_run_sequence=1,
+        agent_run_seq=1,
     )
     store.runs[child_run_id] = AgentRunRecord(
         child_run_id,
         agent_conversation_id=child_conv_id,
         agent_id="child-agent",
-        metadata={"agent_run_sequence": "1"},
+        metadata={"agent_run_seq": "1"},
     )
     store.interactions[child_run_id] = []
     store.staged[child_run_id] = {
@@ -349,7 +349,7 @@ async def test_pages_refresh_states_without_expanding_captured_identity_set() ->
         limit=10,
         include_content=False,
     )
-    assert [(item.execution_id, item.request_sequence, item.status) for item in second.items] == [
+    assert [(item.execution_id, item.model_request_seq, item.status) for item in second.items] == [
         ("root", 2, "CANCELLED")
     ]
 
@@ -361,7 +361,7 @@ async def test_pages_refresh_states_without_expanding_captured_identity_set() ->
         include_content=False,
     )
     assert [
-        (item.execution_id, item.request_sequence, item.status)
+        (item.execution_id, item.model_request_seq, item.status)
         for item in refreshed.items
     ] == [
         ("root", 1, "CANCELLED"),
@@ -401,7 +401,7 @@ async def test_explicit_cutoffs_use_the_same_lifecycle_paging_contract() -> None
         cutoffs=cutoff,
         include_content=False,
     )
-    assert [(item.request_sequence, item.status) for item in page.items] == [
+    assert [(item.model_request_seq, item.status) for item in page.items] == [
         (1, "CANCELLED")
     ]
     assert page.next_cursor is not None
@@ -421,7 +421,7 @@ async def test_explicit_cutoffs_use_the_same_lifecycle_paging_contract() -> None
         cutoffs=cutoff,
         include_content=False,
     )
-    assert [(item.request_sequence, item.status) for item in omitted.items] == [
+    assert [(item.model_request_seq, item.status) for item in omitted.items] == [
         (2, "CANCELLED")
     ]
     assert omitted.items == same.items

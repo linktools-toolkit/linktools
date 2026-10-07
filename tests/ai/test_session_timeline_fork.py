@@ -72,8 +72,8 @@ def _execution(
         lineage_kind=ExecutionLineageKind.SESSION_RESUME,
         status=status,
         revision=1,
-        event_sequence=0,
-        agent_run_sequence=0,
+        event_seq=0,
+        agent_run_seq=0,
         error_code="MODEL_UNAVAILABLE" if status is ExecutionStatus.FAILED else None,
         safe_error_details={},
         created_at=now,
@@ -170,7 +170,7 @@ async def test_fork_freezes_terminal_turns_and_excludes_active_turn() -> None:
         child = await state.conversation.sessions.get("child", tenant_id="tenant")
         assert child is not None
         assert child.timeline_parent_session_id == "source"
-        assert child.timeline_parent_turn_sequence == 1
+        assert child.timeline_parent_turn_seq == 1
 
         page = await service.timeline("child", principal=principal)
         assert [turn.execution_id for turn in page.items] == ["stable"]

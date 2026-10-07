@@ -496,7 +496,7 @@ class RuntimeEvaluations:
                 state = await self._graph_state(intent, principal)
                 if state is not None:
                     graph_ref = GraphSubjectRef(self._namespace, principal.tenant_id, state.graph_id)
-                    revisions[f"graph:{state.graph_id}"] = state.event_sequence
+                    revisions[f"graph:{state.graph_id}"] = state.event_seq
                     if candidates[plan.candidate_slot_id].task is not None:
                         node = state.node_states[0]
                         subject = (None if node.execution_id is None else ExecutionSubjectRef(
@@ -505,7 +505,7 @@ class RuntimeEvaluations:
                         if subject is not None:
                             execution = await self._execution.inspect(subject.execution_id, principal=principal)
                             status = execution.status
-                            revisions[f"execution:{subject.execution_id}"] = execution.event_sequence
+                            revisions[f"execution:{subject.execution_id}"] = execution.event_seq
                         item = replace(item, graph_ref=graph_ref, graph_status=state.status, subject=subject,
                                        execution_status=status or state.status, error_code=node.error_code)
                     else:
@@ -536,7 +536,7 @@ class RuntimeEvaluations:
                     state = await self._graph_state(intent, record.manifest.principal)
                     if state is not None:
                         if revisions is not None:
-                            revisions[f"graph:{state.graph_id}"] = state.event_sequence
+                            revisions[f"graph:{state.graph_id}"] = state.event_seq
                         node = next(item for item in state.node_states if item.node_id == "score")
                     reference = intent.submission.graph.nodes[-1].input["evidence_ref"]
                     evidence_ref = EvidenceRef(reference["namespace"], reference["tenant_id"],
@@ -613,7 +613,7 @@ class RuntimeEvaluations:
             if intent.scorer_slot_id is not None:
                 state = await self._graph_state(intent, principal)
                 if state is not None:
-                    revisions[f"graph:{state.graph_id}"] = state.event_sequence
+                    revisions[f"graph:{state.graph_id}"] = state.event_seq
                     blocked |= state.status is TaskStatus.RECOVERY_REQUIRED
                     summary = await self._history.graph_usage(state.graph_id, principal=principal)
                     _, complete = await self._model_usage(summary, principal)
@@ -960,8 +960,8 @@ class RuntimeEvaluations:
                     page = await self._history.trace(execution_id, principal=principal, cursor=cursor,
                                                      include_content=True, limit=100)
                     for item in page.items:
-                        trace[(item.execution_id, item.sequence)] = {"execution_id": item.execution_id,
-                            "sequence": item.sequence, "payload": item.payload}
+                        trace[(item.execution_id, item.step_event_seq)] = {"execution_id": item.execution_id,
+                            "step_event_seq": item.step_event_seq, "payload": item.payload}
                     cursor = page.next_cursor
                     if cursor is None:
                         break
@@ -978,12 +978,12 @@ class RuntimeEvaluations:
             UsageMetrics(usage.logical_requests, 0, usage.input_tokens, usage.output_tokens,
                          usage.cache_read_tokens, usage.cache_write_tokens),
             usage_complete,
-            {"graph_sequence": state.event_sequence, "include_trace": include_trace,
+            {"graph_event_seq": state.event_seq, "include_trace": include_trace,
              "include_input": include_input and not input_issues, "input_issues": list(input_issues),
              "include_output": include_output,
              "include_attachments": include_attachments and not attachment_issues,
              "attachment_issues": list(attachment_issues), "attachment_sources": attachment_sources, "usage": [{"execution_id": item.execution_id,
-                "agent_run_sequence": item.agent_run_sequence, "request_sequence": item.request_sequence}
+                "agent_run_seq": item.agent_run_seq, "model_request_seq": item.model_request_seq}
                 for item in usage.cutoffs]}, model_usage=model_usage)
         bundle = replace(bundle, ref=replace(bundle.ref, digest=bundle.digest))
         await self._state.publish_evidence(bundle)
@@ -1498,7 +1498,7 @@ class EvaluationRun:
                         pending_members = members - known
                         for graph_id, sequence in tuple(inactive_sequences.items()):
                             state = await owner._graph.state(graph_id, principal=self._principal)
-                            if state.event_sequence > sequence:
+                            if state.event_seq > sequence:
                                 pending_members.add(graph_id)
                                 inactive_sequences.pop(graph_id)
                         preparation_failure: ObservationError | None = None

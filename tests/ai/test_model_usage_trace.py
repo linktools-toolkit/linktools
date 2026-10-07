@@ -179,7 +179,7 @@ async def test_model_usage_trace_does_not_depend_on_registration_order() -> None
         if event.event_type == "MODEL_REQUEST_STARTED"
     ]
     assert len(started) == 1
-    assert started[0].metadata["linktools.ai.request_sequence"] == "1"
+    assert started[0].metadata["linktools.ai.model_request_seq"] == "1"
     assert started[0].metadata["linktools.ai.request_purpose"] == "agent"
 
     completed = [
@@ -188,7 +188,7 @@ async def test_model_usage_trace_does_not_depend_on_registration_order() -> None
         if event.event_type == "MODEL_REQUEST_SUCCEEDED"
     ]
     assert len(completed) == 1
-    assert completed[0].metadata["linktools.ai.request_sequence"] == "1"
+    assert completed[0].metadata["linktools.ai.model_request_seq"] == "1"
     assert completed[0].metadata["linktools.ai.request_purpose"] == "agent"
     assert _project_event(completed[0]) == {
         "input_tokens": 101,
@@ -223,7 +223,7 @@ async def test_asyncio_model_cancellation_preserves_cancelled_status() -> None:
     cancelled = next(
         event for event in events if event.event_type == "MODEL_REQUEST_CANCELLED"
     )
-    assert cancelled.metadata["linktools.ai.request_sequence"] == "1"
+    assert cancelled.metadata["linktools.ai.model_request_seq"] == "1"
     assert cancelled.metadata["linktools.ai.request_purpose"] == "agent"
     item = _trace_item(
         SimpleNamespace(execution_id="execution"),
@@ -379,7 +379,7 @@ def test_model_response_trace_rejects_invalid_usage_value() -> None:
     "event_type",
     ("TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"),
 )
-def test_tool_trace_accepts_request_sequence_without_request_purpose(
+def test_tool_trace_accepts_model_request_seq_without_request_purpose(
     event_type: StepEventType,
 ) -> None:
     event = StepEvent(
@@ -388,7 +388,7 @@ def test_tool_trace_accepts_request_sequence_without_request_purpose(
         step_index=1,
         tool_call_id="call",
         tool_name="lookup",
-        metadata={"linktools.ai.request_sequence": "1"},
+        metadata={"linktools.ai.model_request_seq": "1"},
     )
     item = _trace_item(
         SimpleNamespace(execution_id="execution"),
@@ -398,7 +398,7 @@ def test_tool_trace_accepts_request_sequence_without_request_purpose(
         event,
     )
     assert item is not None
-    assert item.payload["request_sequence"] == 1
+    assert item.payload["model_request_seq"] == 1
     assert "purpose" not in item.payload
 
 
@@ -407,7 +407,7 @@ def test_model_trace_accepts_sparse_request_lineage() -> None:
         agent_run_id="run",
         event_type="MODEL_REQUEST_STARTED",
         step_index=1,
-        metadata={"linktools.ai.request_sequence": "1"},
+        metadata={"linktools.ai.model_request_seq": "1"},
     )
     item = _trace_item(
         SimpleNamespace(execution_id="execution"),
@@ -417,7 +417,7 @@ def test_model_trace_accepts_sparse_request_lineage() -> None:
         event,
     )
     assert item is not None
-    assert item.payload["request_sequence"] == 1
+    assert item.payload["model_request_seq"] == 1
     assert "purpose" not in item.payload
 
 
@@ -487,8 +487,8 @@ async def test_model_retry_records_each_request_usage() -> None:
 
     events = await store.list_events(agent_run_id="retry-run")
     completed = [event for event in events if event.event_type == "MODEL_REQUEST_SUCCEEDED"]
-    assert [event.metadata["linktools.ai.message_sequence"] for event in completed] == ["2", "4"]
-    assert [event.metadata["linktools.ai.request_sequence"] for event in completed] == ["1", "2"]
+    assert [event.metadata["linktools.ai.message_seq"] for event in completed] == ["2", "4"]
+    assert [event.metadata["linktools.ai.model_request_seq"] for event in completed] == ["1", "2"]
     transcript = store.staged_transcript("retry-run")
     assert transcript is not None
     assert len(transcript.messages) == 4

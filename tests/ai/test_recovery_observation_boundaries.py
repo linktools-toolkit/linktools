@@ -25,12 +25,12 @@ class _Authorization:
 
 
 class _Executions:
-    def __init__(self, *, event_sequence: int = 1) -> None:
+    def __init__(self, *, event_seq: int = 1) -> None:
         self.record = SimpleNamespace(
             execution_id="execution",
             tenant_id="tenant",
             status=ExecutionStatus.RECOVERY_REQUIRED,
-            event_sequence=event_sequence,
+            event_seq=event_seq,
         )
 
     async def get_header(self, execution_id: str, *, tenant_id: str) -> object:
@@ -54,18 +54,18 @@ class _DurableEvents:
         execution_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[object]:
         assert execution_id == "execution"
         assert tenant_id == "tenant"
         assert limit > 0
-        if after_sequence == 0:
+        if after_event_seq == 0:
             return Page(
                 (
                     SimpleNamespace(
                         execution_id="execution",
-                        sequence=1,
+                        event_seq=1,
                         event_type=ExecutionEventType.EXECUTION_RECOVERY_REQUIRED,
                         payload={
                             "error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value
@@ -86,7 +86,7 @@ async def test_live_recovery_event_ends_observation_cleanly() -> None:
         "execution",
         ExecutionEventType.EXECUTION_RECOVERY_REQUIRED,
         {"error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value},
-        durable_sequence=1,
+        durable_seq=1,
     )
     broker.complete("execution")
     service = DefaultEventService(
@@ -132,7 +132,7 @@ async def test_durable_recovery_event_ends_restart_observation_cleanly() -> None
         async for event in service.stream(
             "execution",
             principal=Principal("principal", "tenant"),
-            after_sequence=1,
+            after_event_seq=1,
         )
     ]
 

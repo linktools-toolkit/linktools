@@ -206,7 +206,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
     )
     commit = ExecutionTerminalCommit(
         current.revision,
-        current.event_sequence,
+        current.event_seq,
         terminal,
         result,
         ExecutionEventType.EXECUTION_FAILED,
@@ -311,7 +311,7 @@ async def test_unknown_terminal_commit_verifies_semantics_and_seal(
                     if post_commit_change == "status"
                     else replace(
                         value.execution,
-                        event_sequence=value.execution.event_sequence + 1,
+                        event_seq=value.execution.event_seq + 1,
                     )
                 )
                 await repository.compare_and_swap(
@@ -374,7 +374,7 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
     )
     commit = ExecutionTerminalCommit(
         current.revision,
-        current.event_sequence,
+        current.event_seq,
         terminal,
         result,
         ExecutionEventType.EXECUTION_FAILED,
@@ -438,7 +438,7 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
                 binding=replace(current.binding, model_contract={"model": "changed"}),
             )
             if drift == "binding"
-            else replace(current, event_sequence=current.event_sequence + 1)
+            else replace(current, event_seq=current.event_seq + 1)
             if drift == "event"
             else replace(current, status=ExecutionStatus.RECOVERY_REQUIRED)
         )
@@ -461,7 +461,7 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
         )
         assert await repository.get("execution", tenant_id="tenant") == before
         events = await state.execution.events.list(
-            "execution", tenant_id="tenant", after_sequence=0, limit=10
+            "execution", tenant_id="tenant", after_event_seq=0, limit=10
         )
         assert not events.items
     finally:

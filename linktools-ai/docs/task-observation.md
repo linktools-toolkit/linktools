@@ -73,7 +73,12 @@ run/plan calls do not accept a cursor: resume observation on the existing handle
 Callbacks run serially. A successful callback return acknowledges its item
 cursor. Failure, cancellation, or unfinished delivery keeps the previous ACK;
 if no item succeeds, the input cursor is preserved. Durable sequence watermarks
-advance only for durable events. Live deltas do not advance durable sequences.
+advance only for durable events. `ExecutionEvent.event_seq` and
+`TaskEvent.event_seq` are one-based within their execution or graph. Execution
+stream events expose this coordinate as `durable_seq`; live deltas have
+`durable_seq=None` and do not advance durable watermarks. Low-level event
+readers resume with `after_event_seq`; execution-tree readers use the
+per-execution `after_event_seqs` mapping.
 External side effects require an idempotent consumer; delivery is at least once.
 
 Cursors are opaque and bind namespace, tenant, operation identity, observation

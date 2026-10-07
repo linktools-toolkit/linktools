@@ -41,7 +41,7 @@ class _ExecutionRepository:
 
     async def get(self, execution_id: str, *, tenant_id: str) -> object:
         del execution_id, tenant_id
-        return SimpleNamespace(status=ExecutionStatus.STARTED, event_sequence=0)
+        return SimpleNamespace(status=ExecutionStatus.STARTED, event_seq=0)
 
 
 class _EventRepository:
@@ -50,10 +50,10 @@ class _EventRepository:
         execution_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[object]:
-        del execution_id, tenant_id, after_sequence, limit
+        del execution_id, tenant_id, after_event_seq, limit
         return Page(())
 
 
@@ -443,15 +443,15 @@ async def test_event_list_authorizes_before_reading_and_preserves_page(denied_at
     )
     if denied_at is not None:
         with pytest.raises(AIError) as caught:
-            await service.list("execution", principal=principal, after_sequence=6, limit=2)
+            await service.list("execution", principal=principal, after_event_seq=6, limit=2)
         assert caught.value.code is ErrorCode.AUTHORIZATION_DENIED
         if denied_at != "header":
             assert caught.value is error
         events.list.assert_not_awaited()
     else:
-        page = await service.list("execution", principal=principal, after_sequence=6, limit=2)
+        page = await service.list("execution", principal=principal, after_event_seq=6, limit=2)
         assert page == events.list.return_value
-        events.list.assert_awaited_once_with("execution", tenant_id="tenant", after_sequence=6, limit=2)
+        events.list.assert_awaited_once_with("execution", tenant_id="tenant", after_event_seq=6, limit=2)
     assert actions == {
         "header": [],
         "event": [AuthorizationAction.EVENT_READ],
@@ -476,7 +476,7 @@ async def test_event_list_preserves_repository_failure() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["claim_local_producer", "is_local_producer", "base_sequence", "subscribe"])
+@pytest.mark.parametrize("operation", ["claim_local_producer", "is_local_producer", "base_event_seq", "subscribe"])
 @pytest.mark.parametrize("typed", [False, True])
 async def test_event_broker_preserves_typed_failures(
     monkeypatch: pytest.MonkeyPatch,
@@ -540,7 +540,7 @@ async def test_live_stream_missing_base_sequence_is_authoritative(
 ) -> None:
     broker = LiveExecutionEventBroker()
     broker.register_local_producer("execution", 0)
-    monkeypatch.setattr(broker, "base_sequence", lambda _execution_id: None)
+    monkeypatch.setattr(broker, "base_event_seq", lambda _execution_id: None)
     service = _event_service(_AllowAuthorization(), broker)
     with pytest.raises(AIError) as raised:
         await anext(service.stream("execution", principal=Principal("owner", "tenant")))
@@ -554,7 +554,7 @@ async def test_live_close_authoritative_error_overrides_optional_broker_error():
     class Live:
         def is_local_producer(self, execution_id):
             return True
-        def base_sequence(self, execution_id):
+        def base_event_seq(self, execution_id):
             return 0
         def subscribe(self, execution_id):
             return self
@@ -567,7 +567,7 @@ async def test_live_close_authoritative_error_overrides_optional_broker_error():
     service = _event_service(_AllowAuthorization(), Live())
     with pytest.raises(AIError) as raised:
         await anext(service._stream_with_live("execution", principal=Principal("owner", "tenant"),
-                                             after_sequence=0, authorized=True))
+                                             after_event_seq=0, authorized=True))
     assert raised.value is cause
 
 
@@ -581,7 +581,7 @@ async def test_event_stream_close_awaits_owned_live_subscription():
             return self
         def is_local_producer(self, execution_id):
             return True
-        def base_sequence(self, execution_id):
+        def base_event_seq(self, execution_id):
             return 0
         def __aiter__(self):
             return self

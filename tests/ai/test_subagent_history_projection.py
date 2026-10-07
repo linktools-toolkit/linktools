@@ -57,8 +57,8 @@ def _record(
         ),
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=1,
+        event_seq=0,
+        agent_run_seq=1,
         error_code=None,
         safe_error_details={},
         created_at=created_at,
@@ -109,7 +109,7 @@ class _Store:
                 namespace="history",
                 tenant_id="tenant",
                 execution_id=record.execution_id,
-                agent_run_sequence=1,
+                agent_run_seq=1,
             )
             agent_conversation_id = make_agent_conversation_id(
                 namespace="history",
@@ -122,7 +122,7 @@ class _Store:
                     agent_run_id=agent_run_id,
                     agent_conversation_id=agent_conversation_id,
                     agent_id="default",
-                    metadata={"agent_run_sequence": "1", "agent_id": "default"},
+                    metadata={"agent_run_seq": "1", "agent_id": "default"},
                 ),
             )
 

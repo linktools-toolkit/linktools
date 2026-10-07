@@ -38,7 +38,7 @@ class Graph:
             raise self.error
         return self.value
 
-    async def stream_events(self, graph_id, *, principal, after_sequence=0):
+    async def stream_events(self, graph_id, *, principal, after_event_seq=0):
         if self.emit:
             for sequence in (1, 2):
                 yield TaskEvent(1, "graph", sequence, TaskEventType.GRAPH_CHANGED,
@@ -80,7 +80,7 @@ async def test_wait_observed_returns_authoritative_same_read(status, include_con
     outcome = await run.wait(on_event=ignore, include_content=include_content)
     assert isinstance(outcome, WaitResult)
     assert outcome.result.wait_status is status
-    assert outcome.result.event_sequence == 1
+    assert outcome.result.event_seq == 1
     assert isinstance(outcome.result, TaskGraphState if include_content else TaskGraphInfo)
     if include_content:
         assert outcome.result is graph.value

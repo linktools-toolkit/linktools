@@ -91,7 +91,7 @@ def _timeline_cursor(
     tenant_id: str,
     session_id: str,
     source_session_id: str,
-    before_sequence: int,
+    before_turn_seq: int,
     signer: CursorSigner,
 ) -> str:
     return encode_runtime_cursor(
@@ -100,7 +100,7 @@ def _timeline_cursor(
         resource_kind=_TIMELINE_CURSOR_KIND,
         filter_digest=_timeline_filter_digest(session_id),
         position=json.dumps(
-            [source_session_id, before_sequence],
+            [source_session_id, before_turn_seq],
             ensure_ascii=False,
             separators=(",", ":"),
         ),
@@ -179,8 +179,8 @@ async def _timeline_blocks(
             values = await conversation.sessions.list_timeline_turns(
                 source_id,
                 tenant_id=tenant_id,
-                start_sequence=start,
-                end_sequence=before,
+                start_turn_seq=start,
+                end_turn_seq=before,
             )
             newest_first.append((current, values))
             remaining -= len(values)
@@ -195,7 +195,7 @@ async def _timeline_blocks(
             source_id = ""
             break
         source_id = parent
-        source_before = current.timeline_parent_turn_sequence + 1
+        source_before = current.timeline_parent_turn_seq + 1
         current = None
 
     next_coordinate: tuple[str, int] | None = None
@@ -266,16 +266,16 @@ async def project_session_timeline(
     for record, values in blocks:
         if not values:
             continue
-        start = values[0].sequence
-        end = values[-1].sequence + 1
+        start = values[0].turn_seq
+        end = values[-1].turn_seq + 1
         committed = await conversation.sessions.list_timeline_commits(
             record.session_id,
             tenant_id=conversation.sessions.tenant_id,
-            start_sequence=start,
-            end_sequence=end,
+            start_turn_seq=start,
+            end_turn_seq=end,
         )
         for item in committed:
-            commits[(record.session_id, item.sequence)] = item
+            commits[(record.session_id, item.turn_seq)] = item
         if not committed:
             continue
         if record.continuation is None:
@@ -310,7 +310,7 @@ async def project_session_timeline(
             or execution.parent_execution_id is not None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        commit = commits.get((ref.session_id, ref.sequence))
+        commit = commits.get((ref.session_id, ref.turn_seq))
         items: tuple[SessionTurnItem, ...] = ()
         if commit is not None:
             if commit.execution_id != ref.execution_id:
@@ -344,7 +344,7 @@ async def project_session_timeline(
             tenant_id=principal.tenant_id,
             session_id=session_id,
             source_session_id=next_coordinate[0],
-            before_sequence=next_coordinate[1],
+            before_turn_seq=next_coordinate[1],
             signer=cursor_signer,
         )
     )

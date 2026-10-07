@@ -56,11 +56,11 @@ _OBSERVATION_BOUNDARY_STATUSES = frozenset(
 
 _BOUNDARY_METADATA_FIELDS = {
     ExecutionEventType.TOOL_CALL_STARTED.value: frozenset(
-        {"agent_run_sequence", "call_id", "tool_name", "arguments_digest"}
+        {"agent_run_seq", "call_id", "tool_name", "arguments_digest"}
     ),
     ExecutionEventType.TOOL_CALL_FINISHED.value: frozenset(
         {
-            "agent_run_sequence",
+            "agent_run_seq",
             "call_id",
             "tool_name",
             "result_digest",
@@ -70,8 +70,8 @@ _BOUNDARY_METADATA_FIELDS = {
     ),
     ExecutionEventType.ASSISTANT_PART_COMPLETED.value: frozenset(
         {
-            "agent_run_sequence",
-            "message_sequence",
+            "agent_run_seq",
+            "message_seq",
             "part_index",
             "part_type",
             "digest",
@@ -116,7 +116,7 @@ class _LiveEvent:
     execution_id: str
     event_type: str
     payload: JsonValue
-    durable_sequence: int | None = None
+    durable_seq: int | None = None
 
 
 
@@ -128,7 +128,7 @@ class _LiveReplayRequired:
 @dataclass(slots=True)
 class _PreparedStreamLease:
     execution_id: str
-    base_sequence: int | None = None
+    base_event_seq: int | None = None
 
 
 _OrderedItem = ExecutionDelta | _LiveEvent | _LiveReplayRequired
@@ -252,32 +252,32 @@ class LiveExecutionEventBroker:
         self._subscriptions: dict[str, set[_LiveSubscription]] = {}
         self._activity: dict[str, asyncio.Event] = {}
         self._completed: set[str] = set()
-        self._base_sequences: dict[str, int] = {}
+        self._base_event_seqs: dict[str, int] = {}
         self._prepared: dict[str, _PreparedStreamLease] = {}
         self._replay_required: set[str] = set()
         self._pending_event_counts: dict[str, int] = {}
 
-    def register_local_producer(self, execution_id: str, base_sequence: int) -> None:
-        if base_sequence < 0:
+    def register_local_producer(self, execution_id: str, base_event_seq: int) -> None:
+        if base_event_seq < 0:
             raise ValueError("local stream base sequence cannot be negative")
-        previous = self._base_sequences.get(execution_id)
+        previous = self._base_event_seqs.get(execution_id)
         if previous is not None:
-            if previous != base_sequence:
+            if previous != base_event_seq:
                 raise RuntimeError("local stream base sequence changed")
             return
-        self._base_sequences[execution_id] = base_sequence
+        self._base_event_seqs[execution_id] = base_event_seq
         lease = self._prepared.get(execution_id)
         if lease is not None:
-            lease.base_sequence = base_sequence
+            lease.base_event_seq = base_event_seq
         _logger.debug(
-            "local event producer registered: execution=%s base_sequence=%s",
+            "local event producer registered: execution=%s base_event_seq=%s",
             execution_id,
-            base_sequence,
+            base_event_seq,
         )
         self._signal(execution_id)
 
-    def base_sequence(self, execution_id: str) -> int | None:
-        return self._base_sequences.get(execution_id)
+    def base_event_seq(self, execution_id: str) -> int | None:
+        return self._base_event_seqs.get(execution_id)
 
     def publish(self, delta: ExecutionDelta) -> None:
         if not delta.content:
@@ -344,31 +344,31 @@ class LiveExecutionEventBroker:
         event_type: str,
         payload: JsonValue,
         *,
-        durable_sequence: int | None,
+        durable_seq: int | None,
     ) -> None:
         event_name = str(event_type)
         if not isinstance(event_type, str) or not event_name:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if execution_id not in self._base_sequences:
+        if execution_id not in self._base_event_seqs:
             return
-        if durable_sequence is None:
+        if durable_seq is None:
             self._pending_event_counts[execution_id] = (
                 self._pending_event_counts.get(execution_id, 0) + 1
             )
-        elif durable_sequence < 1:
+        elif durable_seq < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         if execution_id in self._replay_required:
-            if durable_sequence is not None:
+            if durable_seq is not None:
                 self._signal(execution_id)
             return
 
         buffer = self._buffers.setdefault(execution_id, deque())
-        if durable_sequence is not None:
+        if durable_seq is not None:
             for previous in buffer:
                 if (
                     isinstance(previous, _LiveEvent)
-                    and previous.durable_sequence == durable_sequence
+                    and previous.durable_seq == durable_seq
                 ):
                     if previous.event_type != event_name or previous.payload != payload:
                         raise AIError(
@@ -376,12 +376,12 @@ class LiveExecutionEventBroker:
                             safe_details={
                                 "phase": "live_durable_event_dedupe",
                                 "execution_id": execution_id,
-                                "durable_sequence": durable_sequence,
+                                "durable_seq": durable_seq,
                             },
                         )
                     return
 
-        event = _LiveEvent(execution_id, event_name, payload, durable_sequence)
+        event = _LiveEvent(execution_id, event_name, payload, durable_seq)
         value_size = _live_item_size(event)
         self._buffer_bytes.setdefault(execution_id, 0)
         while (
@@ -402,12 +402,12 @@ class LiveExecutionEventBroker:
         self,
         execution_id: str,
         *,
-        first_sequence: int,
+        first_event_seq: int,
         count: int,
     ) -> None:
-        if count < 0 or first_sequence < 1:
+        if count < 0 or first_event_seq < 1:
             raise ValueError("durable event confirmation range is invalid")
-        if count == 0 or execution_id not in self._base_sequences:
+        if count == 0 or execution_id not in self._base_event_seqs:
             return
         pending = self._pending_event_counts.get(execution_id, 0)
         if count > pending:
@@ -418,12 +418,12 @@ class LiveExecutionEventBroker:
         else:
             self._pending_event_counts.pop(execution_id, None)
         if execution_id not in self._replay_required:
-            sequence = first_sequence
+            sequence = first_event_seq
             confirmed = 0
             for value in self._buffers.get(execution_id, ()):
-                if not isinstance(value, _LiveEvent) or value.durable_sequence is not None:
+                if not isinstance(value, _LiveEvent) or value.durable_seq is not None:
                     continue
-                value.durable_sequence = sequence
+                value.durable_seq = sequence
                 sequence += 1
                 confirmed += 1
                 if confirmed == count:
@@ -450,7 +450,7 @@ class LiveExecutionEventBroker:
         lease = self._prepared.get(execution_id)
         if lease is None:
             return None
-        if lease.base_sequence is None:
+        if lease.base_event_seq is None:
             raise AIError(ErrorCode.EXECUTION_NOT_READY)
         self._prepared.pop(execution_id, None)
         subscription = _LiveSubscription(self, execution_id, self._max_bytes)
@@ -464,7 +464,7 @@ class LiveExecutionEventBroker:
         lease = self._prepared.pop(execution_id, None)
         if lease is None:
             return
-        if lease.base_sequence is None:
+        if lease.base_event_seq is None:
             self._release_execution(execution_id)
         elif (
             execution_id in self._completed
@@ -474,13 +474,13 @@ class LiveExecutionEventBroker:
         else:
             self._signal(execution_id)
         _logger.debug(
-            "local event stream lease abandoned: execution=%s base_sequence=%s",
+            "local event stream lease abandoned: execution=%s base_event_seq=%s",
             execution_id,
-            lease.base_sequence,
+            lease.base_event_seq,
         )
 
     def is_local_producer(self, execution_id: str) -> bool:
-        return execution_id in self._base_sequences
+        return execution_id in self._base_event_seqs
 
     def is_completed(self, execution_id: str) -> bool:
         return execution_id in self._completed
@@ -568,7 +568,7 @@ class LiveExecutionEventBroker:
         self._truncated.discard(execution_id)
         self._last_type.pop(execution_id, None)
         self._completed.discard(execution_id)
-        self._base_sequences.pop(execution_id, None)
+        self._base_event_seqs.pop(execution_id, None)
         self._activity.pop(execution_id, None)
         self._prepared.pop(execution_id, None)
         self._replay_required.discard(execution_id)
@@ -672,12 +672,12 @@ class DefaultEventService:
     def live_broker(self) -> LiveExecutionEventBroker:
         return self._live
 
-    async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> Page[ExecutionEvent]:
+    async def list(self, execution_id: str, *, principal: Principal, after_event_seq: int = 0, limit: int = 100) -> Page[ExecutionEvent]:
         await self._authorize_read(execution_id, principal)
         return await self._read_durable(
             execution_id,
             tenant_id=principal.tenant_id,
-            after_sequence=after_sequence,
+            after_event_seq=after_event_seq,
             limit=limit,
         )
 
@@ -686,7 +686,7 @@ class DefaultEventService:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         await self._authorize_read(execution_id, principal)
         try:
@@ -698,7 +698,7 @@ class DefaultEventService:
         async with aclosing(self._stream_with_live(
             execution_id,
             principal=principal,
-            after_sequence=after_sequence,
+            after_event_seq=after_event_seq,
             live=live,
             authorized=True,
         )) as stream:
@@ -711,7 +711,7 @@ class DefaultEventService:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequence: int,
+        after_event_seq: int,
         live: "_LiveSubscription | None" = None,
         authorized: bool = False,
     ) -> AsyncIterator[ExecutionStreamEvent]:
@@ -727,18 +727,18 @@ class DefaultEventService:
             async for event in self._stream_durable(
                 execution_id,
                 tenant_id=principal.tenant_id,
-                after_sequence=after_sequence,
+                after_event_seq=after_event_seq,
             ):
                 yield event
             return
 
         try:
-            base_sequence = self._live.base_sequence(execution_id)
+            base_event_seq = self._live.base_event_seq(execution_id)
         except AIError:
             raise
         except Exception as error:
             raise _ExecutionStreamFailure(error) from error
-        if base_sequence is None:
+        if base_event_seq is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if live is None:
             try:
@@ -747,33 +747,33 @@ class DefaultEventService:
                 raise
             except Exception as error:
                 raise _ExecutionStreamFailure(error) from error
-        cursor = after_sequence
+        cursor = after_event_seq
         stream_error: BaseException | None = None
         try:
-            while cursor < base_sequence:
+            while cursor < base_event_seq:
                 page = await self._read_durable(
                     execution_id,
                     tenant_id=principal.tenant_id,
-                    after_sequence=cursor,
-                    limit=min(200, base_sequence - cursor),
+                    after_event_seq=cursor,
+                    limit=min(200, base_event_seq - cursor),
                 )
-                items = tuple(item for item in page.items if item.sequence <= base_sequence)
+                items = tuple(item for item in page.items if item.event_seq <= base_event_seq)
                 if not items:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 for event in items:
-                    if event.sequence != cursor + 1:
+                    if event.event_seq != cursor + 1:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    cursor = event.sequence
+                    cursor = event.event_seq
                     yield ExecutionStreamEvent(
                         event.execution_id,
-                        event.sequence,
+                        event.event_seq,
                         event.event_type,
                         event.payload,
                     )
                     if event.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
                         return
 
-            replay_cursor = after_sequence if after_sequence > base_sequence else None
+            replay_cursor = after_event_seq if after_event_seq > base_event_seq else None
             ephemeral_semantic_count = 0
             poll_backoff = 1.0
             async for item in _iterate_live(live):
@@ -783,7 +783,7 @@ class DefaultEventService:
                     async for event in self._stream_durable(
                         execution_id,
                         tenant_id=principal.tenant_id,
-                        after_sequence=cursor,
+                        after_event_seq=cursor,
                     ):
                         if skipped < ephemeral_semantic_count:
                             skipped += 1
@@ -796,13 +796,13 @@ class DefaultEventService:
                     if isinstance(item, ExecutionDelta):
                         poll_backoff = 1.0
                         continue
-                    while item.durable_sequence is None:
+                    while item.durable_seq is None:
                         if live.replay_required:
                             await _close_live(live)
                             async for event in self._stream_durable(
                                 execution_id,
                                 tenant_id=principal.tenant_id,
-                                after_sequence=cursor,
+                                after_event_seq=cursor,
                             ):
                                 yield event
                             return
@@ -811,7 +811,7 @@ class DefaultEventService:
                             async for event in self._stream_durable(
                                 execution_id,
                                 tenant_id=principal.tenant_id,
-                                after_sequence=cursor,
+                                after_event_seq=cursor,
                             ):
                                 yield event
                             return
@@ -826,10 +826,10 @@ class DefaultEventService:
                         else:
                             poll_backoff = 1.0
                     poll_backoff = 1.0
-                    if item.durable_sequence <= replay_cursor:
+                    if item.durable_seq <= replay_cursor:
                         if item.event_type in _TERMINAL_EVENT_TYPES:
                             return
-                        if item.durable_sequence == replay_cursor:
+                        if item.durable_seq == replay_cursor:
                             replay_cursor = None
                         continue
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -842,7 +842,7 @@ class DefaultEventService:
                         {"text": item.content, "stream_truncated": item.stream_truncated},
                     )
                     continue
-                if item.durable_sequence is None:
+                if item.durable_seq is None:
                     ephemeral_semantic_count += 1
                     yield ExecutionStreamEvent(
                         item.execution_id,
@@ -852,18 +852,18 @@ class DefaultEventService:
                     )
                     continue
                 poll_backoff = 1.0
-                if item.durable_sequence <= after_sequence:
+                if item.durable_seq <= after_event_seq:
                     if item.event_type in _TERMINAL_EVENT_TYPES:
                         return
                     continue
-                expected_sequence = cursor + ephemeral_semantic_count + 1
-                if item.durable_sequence != expected_sequence:
+                expected_event_seq = cursor + ephemeral_semantic_count + 1
+                if item.durable_seq != expected_event_seq:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                cursor = item.durable_sequence
+                cursor = item.durable_seq
                 ephemeral_semantic_count = 0
                 yield ExecutionStreamEvent(
                     item.execution_id,
-                    item.durable_sequence,
+                    item.durable_seq,
                     item.event_type,
                     item.payload,
                 )
@@ -898,13 +898,13 @@ class DefaultEventService:
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.status in _OBSERVATION_BOUNDARY_STATUSES:
-            if cursor >= execution.event_sequence:
+            if cursor >= execution.event_seq:
                 return
             skipped = 0
             async for event in self._stream_durable(
                 execution_id,
                 tenant_id=principal.tenant_id,
-                after_sequence=cursor,
+                after_event_seq=cursor,
             ):
                 if skipped < ephemeral_semantic_count:
                     skipped += 1
@@ -920,26 +920,26 @@ class DefaultEventService:
         execution_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
     ) -> AsyncIterator[ExecutionStreamEvent]:
-        cursor = after_sequence
+        cursor = after_event_seq
         poll_backoff = 1.0
         while True:
             page = await self._read_durable(
                 execution_id,
                 tenant_id=tenant_id,
-                after_sequence=cursor,
+                after_event_seq=cursor,
                 limit=200,
             )
             if page.items:
                 poll_backoff = 1.0
                 for event in page.items:
-                    if event.sequence != cursor + 1:
+                    if event.event_seq != cursor + 1:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    cursor = event.sequence
+                    cursor = event.event_seq
                     yield ExecutionStreamEvent(
                         event.execution_id,
-                        event.sequence,
+                        event.event_seq,
                         event.event_type,
                         event.payload,
                     )
@@ -953,7 +953,7 @@ class DefaultEventService:
             if execution is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution.status in _OBSERVATION_BOUNDARY_STATUSES:
-                if cursor >= execution.event_sequence:
+                if cursor >= execution.event_seq:
                     return
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
@@ -989,18 +989,18 @@ class DefaultEventService:
         execution_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[ExecutionEvent]:
         page = await self._events.list(
             execution_id,
             tenant_id=tenant_id,
-            after_sequence=after_sequence,
+            after_event_seq=after_event_seq,
             limit=limit,
         )
         return Page(
             tuple(
-                ExecutionEvent(item.execution_id, item.sequence, item.event_type, item.payload)
+                ExecutionEvent(item.execution_id, item.event_seq, item.event_type, item.payload)
                 for item in page.items
             ),
             page.next_cursor,

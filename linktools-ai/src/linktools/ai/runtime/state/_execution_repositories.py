@@ -489,7 +489,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         current = await self._decode(execution_record, ExecutionRecord)
         if (
             current.revision != claim.expected_revision
-            or current.event_sequence != claim.expected_event_sequence
+            or current.event_seq != claim.expected_event_seq
             or current.status is not ExecutionStatus.PENDING_START
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -545,7 +545,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             current,
             status=ExecutionStatus.STARTED,
             revision=current.revision + 1,
-            event_sequence=current.event_sequence + 1,
+            event_seq=current.event_seq + 1,
             updated_at=now,
             started_at=current.started_at or now,
         )
@@ -589,7 +589,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             (
                 StoredFact(
                     stream,
-                    next_execution.event_sequence,
+                    next_execution.event_seq,
                     execution_key,
                     ExecutionEventType.EXECUTION_STARTED.value,
                     None,
@@ -611,7 +611,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_agent_run_sequence: int,
+        expected_agent_run_seq: int,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
 
@@ -621,7 +621,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 execution_id,
                 tenant_id=tenant_id,
                 expected_revision=expected_revision,
-                expected_agent_run_sequence=expected_agent_run_sequence,
+                expected_agent_run_seq=expected_agent_run_seq,
             )
 
         return await self._store.mutate(mutate)
@@ -633,7 +633,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_agent_run_sequence: int,
+        expected_agent_run_seq: int,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
         record = await transaction.get_record(self._key("execution", execution_id))
@@ -642,12 +642,12 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         current = await self._decode(record, ExecutionRecord)
         if (
             current.revision != expected_revision
-            or current.agent_run_sequence != expected_agent_run_sequence
+            or current.agent_run_seq != expected_agent_run_seq
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         next_value = replace(
             current,
-            agent_run_sequence=current.agent_run_sequence + 1,
+            agent_run_seq=current.agent_run_seq + 1,
             revision=current.revision + 1,
             updated_at=await transaction.now(),
         )
@@ -665,8 +665,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_event_sequence: int,
-        expected_agent_run_sequence: int,
+        expected_event_seq: int,
+        expected_agent_run_seq: int,
         audit_events: Sequence[ExecutionEventAppend] = (),
         deferred_events: Sequence[ExecutionEventAppend],
         occurred_at: datetime,
@@ -691,8 +691,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             current is None
             or current.status is not ExecutionStatus.STARTED
             or current.revision != expected_revision
-            or current.event_sequence != expected_event_sequence
-            or current.agent_run_sequence != expected_agent_run_sequence
+            or current.event_seq != expected_event_seq
+            or current.agent_run_seq != expected_agent_run_seq
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         last = deferred_events[-1]
@@ -700,7 +700,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             execution_id,
             tenant_id=tenant_id,
             expected_revision=expected_revision,
-            expected_event_sequence=expected_event_sequence,
+            expected_event_seq=expected_event_seq,
             expected_status=ExecutionStatus.STARTED,
             next_status=ExecutionStatus.WAITING_DEFERRED,
             pending_events=(*audit_events, *deferred_events[:-1]),
@@ -709,7 +709,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             updated_at=occurred_at,
             transaction=transaction,
         )
-        if updated.agent_run_sequence != expected_agent_run_sequence:
+        if updated.agent_run_seq != expected_agent_run_seq:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return updated
 
@@ -720,8 +720,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_event_sequence: int,
-        expected_agent_run_sequence: int,
+        expected_event_seq: int,
+        expected_agent_run_seq: int,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
         record = await transaction.get_record(self._key("execution", execution_id))
@@ -731,14 +731,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if (
             current.status is not ExecutionStatus.WAITING_DEFERRED
             or current.revision != expected_revision
-            or current.event_sequence != expected_event_sequence
-            or current.agent_run_sequence != expected_agent_run_sequence
+            or current.event_seq != expected_event_seq
+            or current.agent_run_seq != expected_agent_run_seq
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         next_value = replace(
             current,
             status=ExecutionStatus.STARTED,
-            agent_run_sequence=current.agent_run_sequence + 1,
+            agent_run_seq=current.agent_run_seq + 1,
             revision=current.revision + 1,
             updated_at=await transaction.now(),
         )
@@ -755,7 +755,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_event_sequence: int,
+        expected_event_seq: int,
         expected_status: ExecutionStatus,
         next_status: ExecutionStatus,
         task_attempt: int,
@@ -778,7 +778,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             execution_id,
             tenant_id=tenant_id,
             expected_revision=expected_revision,
-            expected_event_sequence=expected_event_sequence,
+            expected_event_seq=expected_event_seq,
             expected_status=expected_status,
             next_status=next_status,
             event_type=event_type,
@@ -800,7 +800,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             commit.execution_id,
             tenant_id=self._tenant_id,
             expected_revision=commit.expected_revision,
-            expected_event_sequence=commit.expected_event_sequence,
+            expected_event_seq=commit.expected_event_seq,
             next_status=ExecutionStatus.START_UNKNOWN,
             event_type=ExecutionEventType.EXECUTION_START_UNKNOWN,
             payload={},
@@ -834,7 +834,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             commit.execution_id,
             tenant_id=self._tenant_id,
             expected_revision=commit.expected_revision,
-            expected_event_sequence=commit.expected_event_sequence,
+            expected_event_seq=commit.expected_event_seq,
             expected_status=expected_status,
             next_status=ExecutionStatus.CANCELLING,
             event_type=ExecutionEventType.CANCEL_REQUESTED,
@@ -844,8 +844,8 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             transaction=transaction,
         )
 
-    async def advance_event_sequence(
-        self, execution_id: str, *, tenant_id: str, expected_sequence: int
+    async def advance_event_seq(
+        self, execution_id: str, *, tenant_id: str, expected_event_seq: int
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
 
@@ -854,11 +854,11 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current = await self._decode(record, ExecutionRecord)
-            if current.event_sequence != expected_sequence:
+            if current.event_seq != expected_event_seq:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             next_value = replace(
                 current,
-                event_sequence=current.event_sequence + 1,
+                event_seq=current.event_seq + 1,
                 revision=current.revision + 1,
                 updated_at=await transaction.now(),
             )
@@ -877,7 +877,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_event_sequence: int,
+        expected_event_seq: int,
         next_status: ExecutionStatus,
         expected_status: ExecutionStatus | None = None,
         event_type: str,
@@ -909,7 +909,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             stored_value = await self._decode(stored, ExecutionRecord)
             if (
                 stored_value.revision != expected_revision
-                or stored_value.event_sequence != expected_event_sequence
+                or stored_value.event_seq != expected_event_seq
                 or expected_status is not None
                 and stored_value.status is not expected_status
             ):
@@ -937,13 +937,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 stored_value,
                 status=next_status,
                 revision=stored_value.revision + event_count,
-                event_sequence=stored_value.event_sequence + event_count,
+                event_seq=stored_value.event_seq + event_count,
                 updated_at=updated_at,
                 **task_updates,
             )
             candidate = _projected_record(self, stored, next_value)
             await _replace_checked(transaction, candidate, stored.storage_version)
-            first_sequence = stored_value.event_sequence + 1
+            first_sequence = stored_value.event_seq + 1
             facts = [
                 StoredFact(
                     stream,
@@ -959,7 +959,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             facts.append(
                 StoredFact(
                     stream,
-                    next_value.event_sequence,
+                    next_value.event_seq,
                     key,
                     str(event_type),
                     None,
@@ -1058,7 +1058,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             stored_value = await self._decode(stored, ExecutionRecord)
             if (
                 stored_value.revision != commit.expected_revision
-                or stored_value.event_sequence != commit.expected_event_sequence
+                or stored_value.event_seq != commit.expected_event_seq
             ):
                 raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
             id_record = None
@@ -1097,7 +1097,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             next_execution = replace(
                 commit.execution,
                 revision=stored_value.revision + len(pending_events) + 1,
-                event_sequence=stored_value.event_sequence + len(pending_events) + 1,
+                event_seq=stored_value.event_seq + len(pending_events) + 1,
                 result=commit.result,
             )
             replacements = [
@@ -1128,7 +1128,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                         id_record.storage_version,
                     )
                 )
-            first_sequence = stored_value.event_sequence + 1
+            first_sequence = stored_value.event_seq + 1
             facts = [
                 StoredFact(
                     stream,
@@ -1144,7 +1144,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             facts.append(
                 StoredFact(
                     stream,
-                    next_execution.event_sequence,
+                    next_execution.event_seq,
                     key,
                     str(commit.terminal_event_type),
                     None,
@@ -1515,7 +1515,7 @@ class EventRepositoryImpl(_RepositoryBase):
         *,
         tenant_id: str,
         events: Sequence[ExecutionEventAppend],
-        expected_sequence: int | None = None,
+        expected_event_seq: int | None = None,
     ) -> tuple[ExecutionEventRecord, ...]:
         _require_repository_tenant(tenant_id, self._tenant_id)
         if not events:
@@ -1526,14 +1526,14 @@ class EventRepositoryImpl(_RepositoryBase):
                 execution_id,
                 tenant_id=tenant_id,
                 events=events,
-                expected_sequence=expected_sequence,
+                expected_event_seq=expected_event_seq,
             )
         )
         _logger.debug(
             "execution events appended: execution=%s count=%s last_sequence=%s",
             execution_id,
             len(events),
-            result[-1].sequence,
+            result[-1].event_seq,
         )
         return result
 
@@ -1544,7 +1544,7 @@ class EventRepositoryImpl(_RepositoryBase):
         *,
         tenant_id: str,
         events: Sequence[ExecutionEventAppend],
-        expected_sequence: int | None = None,
+        expected_event_seq: int | None = None,
     ) -> tuple[ExecutionEventRecord, ...]:
         _require_repository_tenant(tenant_id, self._tenant_id)
         if not events:
@@ -1568,16 +1568,16 @@ class EventRepositoryImpl(_RepositoryBase):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         execution = await self._decode(current, ExecutionRecord)
         if (
-            expected_sequence is not None
-            and execution.event_sequence != expected_sequence
+            expected_event_seq is not None
+            and execution.event_seq != expected_event_seq
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         now = await transaction.now()
-        first_sequence = execution.event_sequence + 1
-        last_sequence = execution.event_sequence + len(events)
+        first_sequence = execution.event_seq + 1
+        last_sequence = execution.event_seq + len(events)
         next_execution = replace(
             execution,
-            event_sequence=last_sequence,
+            event_seq=last_sequence,
             revision=execution.revision + len(events),
             updated_at=now,
         )
@@ -1621,7 +1621,7 @@ class EventRepositoryImpl(_RepositoryBase):
             execution_id,
             tenant_id=tenant_id,
             events=(ExecutionEventAppend(event_type, _event_payload(payload)),),
-            expected_sequence=None,
+            expected_event_seq=None,
         )
         return values[0]
 
@@ -1630,7 +1630,7 @@ class EventRepositoryImpl(_RepositoryBase):
         execution_id: str,
         *,
         tenant_id: str,
-        expected_sequence: int,
+        expected_event_seq: int,
         event_type: str,
         payload: object,
     ) -> ExecutionEventRecord:
@@ -1638,12 +1638,12 @@ class EventRepositoryImpl(_RepositoryBase):
             execution_id,
             tenant_id=tenant_id,
             events=(ExecutionEventAppend(event_type, _event_payload(payload)),),
-            expected_sequence=expected_sequence,
+            expected_event_seq=expected_event_seq,
         )
         return values[0]
 
     async def list(
-        self, execution_id: str, *, tenant_id: str, after_sequence: int, limit: int
+        self, execution_id: str, *, tenant_id: str, after_event_seq: int, limit: int
     ) -> Page[ExecutionEventRecord]:
         if tenant_id != self._tenant_id:
             return Page(())
@@ -1659,7 +1659,7 @@ class EventRepositoryImpl(_RepositoryBase):
             lambda transaction: transaction.list_facts(
                 FactQuery(
                     stream,
-                    after_sequence=after_sequence,
+                    after_sequence=after_event_seq,
                     limit=min(limit + 1, 1000),
                 )
             )
@@ -1686,7 +1686,7 @@ class EventRepositoryImpl(_RepositoryBase):
             for value in values[:limit]
         )
         return Page(
-            items, str(items[-1].sequence) if len(values) > limit and items else None
+            items, str(items[-1].event_seq) if len(values) > limit and items else None
         )
 
 

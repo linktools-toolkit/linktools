@@ -53,7 +53,7 @@ def _task_event_stream(
     return stream_digest(namespace, tenant_id, domain, "task_event", graph_id)
 
 
-def _task_event_sequence(
+def _task_event_seq(
     namespace: str,
     tenant_id: str,
     domain: str,
@@ -230,7 +230,7 @@ async def _append_task_events(
     if not owner_guarded:
         await _guard_task_event_owner(transaction, graph_key)
     final_sequence = await transaction.reserve_sequence(
-        _task_event_sequence(namespace, tenant_id, domain, graph_id),
+        _task_event_seq(namespace, tenant_id, domain, graph_id),
         len(drafts),
     )
     first_sequence = final_sequence - len(drafts) + 1
@@ -260,7 +260,7 @@ async def _append_task_events(
     facts = tuple(
         StoredFact(
             stream,
-            event.sequence,
+            event.event_seq,
             graph_key,
             event.event_type.value,
             None,

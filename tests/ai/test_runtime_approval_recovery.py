@@ -59,8 +59,8 @@ def _execution(now: datetime) -> ExecutionRecord:
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=1,
+        event_seq=0,
+        agent_run_seq=1,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -169,9 +169,9 @@ async def _enter_waiting(
         execution_id=execution.execution_id,
         tenant_id="tenant",
         expected_execution_revision=execution.revision,
-        expected_event_sequence=execution.event_sequence,
+        expected_event_seq=execution.event_seq,
         expected_recovery_revision=checkpoint.revision,
-        expected_agent_run_sequence=execution.agent_run_sequence,
+        expected_agent_run_seq=execution.agent_run_seq,
         continuation=continuation,
         approval_records=(_approval(execution, continuation, now),),
         occurred_at=now,
@@ -211,7 +211,7 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
         events = await state.execution.events.list(
             execution.execution_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=10,
         )
         assert tuple(event.event_type for event in events.items) == (
@@ -248,13 +248,13 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
             execution_id=execution.execution_id,
             tenant_id="tenant",
             expected_execution_revision=execution.revision + 1,
-            expected_event_sequence=execution.event_sequence + 1,
+            expected_event_seq=execution.event_seq + 1,
             expected_recovery_revision=checkpoint.revision + 1,
-            expected_agent_run_sequence=execution.agent_run_sequence,
+            expected_agent_run_seq=execution.agent_run_seq,
             expected_pending_tools=continuation,
         )
         assert resumed.status is ExecutionStatus.STARTED
-        assert resumed.agent_run_sequence == 2
+        assert resumed.agent_run_seq == 2
         assert active.state is RecoveryCheckpointState.ACTIVE
         assert active.pending_tools is None
         assert active.agent_run_id != continuation.source_agent_run_id
@@ -277,7 +277,7 @@ async def test_deferred_cancel_cancels_pending_approval_and_clears_frontier() ->
                 ExecutionCancelRequestCommit(
                     execution.execution_id,
                     current.revision,
-                current.event_sequence,
+                current.event_seq,
                 "cancel-operation",
                 datetime.now(timezone.utc),
             ),

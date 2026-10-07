@@ -239,7 +239,7 @@ class _ExecutionTreeStreamer(Protocol):
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences: Mapping[str, int] | None = None,
+        after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
@@ -426,7 +426,7 @@ class Runtime(Generic[AppT]):
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences: Mapping[str, int] | None = None,
+        after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
@@ -435,7 +435,7 @@ class Runtime(Generic[AppT]):
         return self._tree_streamer.stream(
             execution_id,
             principal=principal,
-            after_sequences=after_sequences,
+            after_event_seqs=after_event_seqs,
             include_content=include_content, ready=ready,
         )
 

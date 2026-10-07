@@ -745,7 +745,7 @@ not fail the graph or retry nodes.
 
 Execution and TaskGraph observation streams also expose
 `MODEL_REQUEST_STARTED` and `MODEL_REQUEST_FINISHED`. The request key is
-`(execution_id, agent_run_sequence, request_sequence)`; a started event means
+`(execution_id, agent_run_seq, model_request_seq)`; a started event means
 the Runtime accepted a logical handler call, not that a provider received
 network traffic. Default lightweight observation keeps only request identity,
 purpose, retry index, status, timestamps, duration, safe error code, and

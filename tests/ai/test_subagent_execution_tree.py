@@ -60,8 +60,8 @@ def _record(*, subagent: bool, parent_invocation_id: str | None) -> ExecutionRec
         ),
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=0,
+        event_seq=0,
+        agent_run_seq=0,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -141,12 +141,12 @@ class _EventStreamer:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ):
         del principal
 
         async def events():
-            sequence = after_sequence + 1
+            sequence = after_event_seq + 1
             yield ExecutionStreamEvent(
                 execution_id,
                 sequence,
@@ -170,7 +170,7 @@ async def test_tree_stream_projects_root_and_child_without_global_sequence() -> 
         async for item in streamer.stream(
             "root",
             principal=Principal("owner", "tenant", "service"),
-            after_sequences={"child": 4},
+            after_event_seqs={"child": 4},
         )
     ]
     assert {(item.execution_id, item.depth) for item in values} == {
@@ -181,7 +181,7 @@ async def test_tree_stream_projects_root_and_child_without_global_sequence() -> 
         item for item in values if item.execution_id == "child"
     )
     assert child.parent_invocation_id == "delegate-call"
-    assert child.event.durable_sequence == 5
+    assert child.event.durable_seq == 5
 
 
 @pytest.mark.parametrize("depth", [-1, True, 1.5])
@@ -207,13 +207,13 @@ async def test_tree_stream_validates_cursors_before_starting_event_sources() -> 
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             self.started.append(execution_id)
             return super().stream(
                 execution_id,
                 principal=principal,
-                after_sequence=after_sequence,
+                after_event_seq=after_event_seq,
             )
 
     events = RecordingEventStreamer()
@@ -225,7 +225,7 @@ async def test_tree_stream_validates_cursors_before_starting_event_sources() -> 
     stream = streamer.stream(
         "root",
         principal=Principal("owner", "tenant", "service"),
-        after_sequences={"unknown": 1},
+        after_event_seqs={"unknown": 1},
     )
 
     with pytest.raises(AIError) as error:
@@ -246,7 +246,7 @@ async def test_tree_stream_keeps_at_most_one_prefetched_event_per_execution() ->
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             del principal
 
@@ -257,7 +257,7 @@ async def test_tree_stream_keeps_at_most_one_prefetched_event_per_execution() ->
                     )
                     yield ExecutionStreamEvent(
                         execution_id,
-                        after_sequence + offset,
+                        after_event_seq + offset,
                         ExecutionEventType.EXECUTION_STARTED.value,
                         {},
                     )
@@ -293,7 +293,7 @@ async def test_tree_stream_does_not_close_terminal_source_before_delivery() -> N
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             del principal
 
@@ -301,7 +301,7 @@ async def test_tree_stream_does_not_close_terminal_source_before_delivery() -> N
                 try:
                     yield ExecutionStreamEvent(
                         execution_id,
-                        after_sequence + 1,
+                        after_event_seq + 1,
                         ExecutionEventType.EXECUTION_SUCCEEDED.value,
                         {},
                     )
@@ -366,7 +366,7 @@ async def test_tree_stream_discovers_persisted_child_without_local_notification(
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             del principal
 
@@ -375,7 +375,7 @@ async def test_tree_stream_discovers_persisted_child_without_local_notification(
                     await self.release_root.wait()
                 yield ExecutionStreamEvent(
                     execution_id,
-                    after_sequence + 1,
+                    after_event_seq + 1,
                     ExecutionEventType.EXECUTION_SUCCEEDED.value,
                     {},
                 )
@@ -427,7 +427,7 @@ async def test_tree_stream_adds_dynamic_direct_child_once() -> None:
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             del principal
 
@@ -436,7 +436,7 @@ async def test_tree_stream_adds_dynamic_direct_child_once() -> None:
                     await self.release_root.wait()
                 yield ExecutionStreamEvent(
                     execution_id,
-                    after_sequence + 1,
+                    after_event_seq + 1,
                     ExecutionEventType.EXECUTION_SUCCEEDED.value,
                     {},
                 )
@@ -736,7 +736,7 @@ async def test_tree_close_keeps_child_live_cleanup_authoritative_failure():
             return Subscription(key)
         def is_local_producer(self, key):
             return True
-        def base_sequence(self, key):
+        def base_event_seq(self, key):
             return 0
     class Events(DefaultEventService):
         async def _authorize_read(self, *args):
@@ -786,7 +786,7 @@ async def test_tree_stream_recurses_with_relative_depth_and_real_lineage(root_id
     ready = asyncio.Event()
     stream = ExecutionTreeStreamer(reader, _EventStreamer(), ExecutionTreeBroker()).stream(
         root_id, principal=Principal("owner", "tenant"),
-        after_sequences={"leaf": 8}, ready=ready,
+        after_event_seqs={"leaf": 8}, ready=ready,
     )
     values = [item async for item in stream]
     offset = 0 if root_id == "root" else 1
@@ -801,7 +801,7 @@ async def test_tree_stream_recurses_with_relative_depth_and_real_lineage(root_id
         assert item.parent_execution_id == view.parent_execution_id
         assert item.root_execution_id == "root"
         assert item.lineage_kind is view.lineage_kind
-    assert next(item for item in values if item.execution_id == "leaf").event.durable_sequence == 9
+    assert next(item for item in values if item.execution_id == "leaf").event.durable_seq == 9
 
 
 @pytest.mark.asyncio
@@ -819,7 +819,7 @@ async def test_tree_prepare_validates_cursor_ancestor_chain_before_ready() -> No
     reader.visible = {"root"}
     stream = ExecutionTreeStreamer(reader, _EventStreamer(), ExecutionTreeBroker()).stream(
         "root", principal=Principal("owner", "tenant"),
-        after_sequences={"leaf": 1}, ready=ready,
+        after_event_seqs={"leaf": 1}, ready=ready,
     )
     with pytest.raises(AIError) as raised:
         await anext(stream)
@@ -835,11 +835,11 @@ async def test_tree_cursor_resumes_descendants_missing_from_child_index() -> Non
         item async for item in ExecutionTreeStreamer(
             reader, _EventStreamer(), ExecutionTreeBroker(),
         ).stream(
-            "root", principal=Principal("owner", "tenant"), after_sequences={"leaf": 4},
+            "root", principal=Principal("owner", "tenant"), after_event_seqs={"leaf": 4},
         )
     ]
     assert {item.execution_id for item in values} == set(reader.views)
-    assert next(item for item in values if item.execution_id == "leaf").event.durable_sequence == 5
+    assert next(item for item in values if item.execution_id == "leaf").event.durable_seq == 5
 
 
 @pytest.mark.asyncio
@@ -860,7 +860,7 @@ async def test_tree_prepare_rejects_invalid_deep_membership(invalid: str) -> Non
         reader.views["leaf"] = replace(reader.views["leaf"], root_execution_id="foreign")
     stream = ExecutionTreeStreamer(reader, _EventStreamer(), ExecutionTreeBroker()).stream(
         "root", principal=Principal("owner", "tenant"),
-        after_sequences={"leaf": 2}, ready=ready,
+        after_event_seqs={"leaf": 2}, ready=ready,
     )
     with pytest.raises(AIError) as raised:
         await anext(stream)

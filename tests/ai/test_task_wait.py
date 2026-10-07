@@ -38,7 +38,7 @@ def _state(
     *,
     node_status: TaskStatus | None = None,
     nodes: tuple[TaskNode, ...] | None = None,
-    event_sequence: int = 7,
+    event_seq: int = 7,
 ) -> TaskGraphState:
     nodes = (TaskNode("node"),) if nodes is None else nodes
     node_status = status if node_status is None else node_status
@@ -59,7 +59,7 @@ def _state(
         )
         for node in nodes
     )
-    return TaskGraphState("graph", status, nodes, states, event_sequence)
+    return TaskGraphState("graph", status, nodes, states, event_seq)
 
 
 class _Repository:
@@ -175,11 +175,11 @@ async def test_wait_retains_raw_running_status_at_stable_input_boundary() -> Non
 
 @pytest.mark.asyncio
 async def test_wait_keeps_stop_read_when_graph_resumes_before_return() -> None:
-    stopped = _state(TaskStatus.RUNNING, node_status=TaskStatus.WAITING, event_sequence=11)
+    stopped = _state(TaskStatus.RUNNING, node_status=TaskStatus.WAITING, event_seq=11)
     resumed = _state(
         TaskStatus.RUNNING,
         nodes=(TaskNode("node"), TaskNode("expanded", dependencies=("node",))),
-        event_sequence=13,
+        event_seq=13,
     )
 
     class ResumingRepository(_Repository):
@@ -192,7 +192,7 @@ async def test_wait_keeps_stop_read_when_graph_resumes_before_return() -> None:
     observed = await service.wait("graph", principal=_PRINCIPAL, timeout_seconds=0.1)
 
     assert observed == stopped
-    assert observed.event_sequence == 11
+    assert observed.event_seq == 11
     assert tuple(node.node_id for node in observed.nodes) == ("node",)
     assert await service.state("graph", principal=_PRINCIPAL) == resumed
 
@@ -203,7 +203,7 @@ async def test_wait_includes_expanded_nodes_from_the_stopping_read() -> None:
     expanded = _state(
         TaskStatus.SUCCEEDED,
         nodes=(TaskNode("node"), TaskNode("expanded", dependencies=("node",))),
-        event_sequence=19,
+        event_seq=19,
     )
     waiter = _Waiter(repository, next_state=expanded)
 
@@ -223,7 +223,7 @@ async def test_wait_keeps_local_wait_ownership_and_deferred_input_semantics(
 ) -> None:
     node = TaskNode("node", task=TaskRef.deferred_input() if deferred_input else None)
     waiting = _state(TaskStatus.RUNNING, node_status=TaskStatus.WAITING, nodes=(node,))
-    succeeded = _state(TaskStatus.SUCCEEDED, nodes=(node,), event_sequence=9)
+    succeeded = _state(TaskStatus.SUCCEEDED, nodes=(node,), event_seq=9)
     repository = _Repository(waiting)
     waiter = _Waiter(repository, owned=owned, next_state=succeeded)
 

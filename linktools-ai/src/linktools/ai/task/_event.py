@@ -29,7 +29,7 @@ def _is_sha256(value: object) -> bool:
 class TaskEvent:
     version: int
     graph_id: str
-    sequence: int
+    event_seq: int
     event_type: TaskEventType
     occurred_at: datetime
     status: TaskStatus
@@ -56,11 +56,11 @@ class TaskEvent:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
             raise ValueError("task event graph id is required")
         if (
-            isinstance(self.sequence, bool)
-            or not isinstance(self.sequence, int)
-            or self.sequence < 1
+            isinstance(self.event_seq, bool)
+            or not isinstance(self.event_seq, int)
+            or self.event_seq < 1
         ):
-            raise ValueError("task event sequence must be positive")
+            raise ValueError("task event event_seq must be positive")
         if not isinstance(self.event_type, TaskEventType):
             raise TypeError("task event type is invalid")
         if self.source_node_id is not None and not isinstance(

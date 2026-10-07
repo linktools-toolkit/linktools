@@ -368,18 +368,18 @@ class TaskPreparedInputRecord:
 @dataclass(frozen=True, slots=True)
 class SessionTurnRef:
     session_id: str
-    sequence: int
+    turn_seq: int
     execution_id: str
 
     def __post_init__(self) -> None:
-        if not self.session_id or not self.execution_id or self.sequence < 1:
+        if not self.session_id or not self.execution_id or self.turn_seq < 1:
             raise ValueError("session turn reference is invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class SessionTurnCommitRef:
     session_id: str
-    sequence: int
+    turn_seq: int
     execution_id: str
     start_message_index: int
     end_message_index: int
@@ -388,7 +388,7 @@ class SessionTurnCommitRef:
         if (
             not self.session_id
             or not self.execution_id
-            or self.sequence < 1
+            or self.turn_seq < 1
             or self.start_message_index < 0
             or self.end_message_index <= self.start_message_index
         ):
@@ -538,7 +538,7 @@ class ModelInteractionRecord:
 
     agent_run_id: str
     step_index: int
-    request_sequence: int
+    model_request_seq: int
     purpose: str
     output_retry_index: int | None
     model: Mapping[str, str]
@@ -557,7 +557,7 @@ class ModelInteractionRecord:
         if (
             not self.agent_run_id
             or self.step_index < 0
-            or self.request_sequence < 1
+            or self.model_request_seq < 1
             or self.purpose not in {"agent", "compaction"}
             or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
             or self.duration_ns < 0
@@ -651,7 +651,7 @@ class SessionRecord:
     history_quality: str = "complete"
     history_id: str | None = None
     timeline_parent_session_id: str | None = None
-    timeline_parent_turn_sequence: int = 0
+    timeline_parent_turn_seq: int = 0
 
     def __post_init__(self) -> None:
         try:
@@ -677,12 +677,12 @@ class SessionRecord:
         if self.history_quality not in {"complete", "conservative"}:
             raise ValueError("session history quality summary is invalid")
         if self.timeline_parent_session_id is None:
-            if self.timeline_parent_turn_sequence != 0:
+            if self.timeline_parent_turn_seq != 0:
                 raise ValueError("root session timeline cannot have an ancestor cutoff")
         elif (
             not self.timeline_parent_session_id
             or self.timeline_parent_session_id == self.session_id
-            or self.timeline_parent_turn_sequence < 1
+            or self.timeline_parent_turn_seq < 1
         ):
             raise ValueError("session timeline ancestor is invalid")
 
@@ -699,8 +699,8 @@ class ExecutionRecord:
     lineage_kind: ExecutionLineageKind
     status: ExecutionStatus
     revision: int
-    event_sequence: int
-    agent_run_sequence: int
+    event_seq: int
+    agent_run_seq: int
     error_code: str | None
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
@@ -766,7 +766,7 @@ class ExecutionRecord:
                 or self.parent_execution_id is not None
                 or self.parent_invocation_id is not None
                 or self.lineage_kind is not ExecutionLineageKind.RUN
-                or self.agent_run_sequence != 0
+                or self.agent_run_seq != 0
             ):
                 raise ValueError("task execution carries agent-only state")
             if (
@@ -954,7 +954,7 @@ class ExecutionHistoryHeadRecord:
 class ExecutionStartClaim:
     execution_id: str
     expected_revision: int
-    expected_event_sequence: int
+    expected_event_seq: int
     scope: str
     idempotency_key_digest: str
     request_digest: str
@@ -965,7 +965,7 @@ class ExecutionStartClaim:
 class ExecutionStartUnknownCommit:
     execution_id: str
     expected_revision: int
-    expected_event_sequence: int
+    expected_event_seq: int
     scope: str
     idempotency_key_digest: str
     request_digest: str
@@ -976,7 +976,7 @@ class ExecutionStartUnknownCommit:
 class ExecutionCancelRequestCommit:
     execution_id: str
     expected_revision: int
-    expected_event_sequence: int
+    expected_event_seq: int
     operation_id: str
     requested_at: datetime
 
@@ -998,7 +998,7 @@ class ExecutionStartReservationResult:
 class AgentAttemptClaim:
     execution_id: str
     expected_execution_revision: int
-    expected_agent_run_sequence: int
+    expected_agent_run_seq: int
     expected_recovery_revision: int
     expected_recovery_state: RecoveryCheckpointState
 
@@ -1135,7 +1135,7 @@ class ArtifactRecord:
 @dataclass(frozen=True, slots=True)
 class ExecutionTerminalCommit:
     expected_revision: int
-    expected_event_sequence: int
+    expected_event_seq: int
     execution: ExecutionRecord
     result: ResultRecord
     terminal_event_type: ExecutionEventType
@@ -1533,16 +1533,16 @@ class SessionRepository(RuntimeRepository, Protocol):
         session_id: str,
         *,
         tenant_id: str,
-        start_sequence: int,
-        end_sequence: int,
+        start_turn_seq: int,
+        end_turn_seq: int,
     ) -> tuple[SessionTurnRef, ...]: ...
     async def list_timeline_commits(
         self,
         session_id: str,
         *,
         tenant_id: str,
-        start_sequence: int,
-        end_sequence: int,
+        start_turn_seq: int,
+        end_turn_seq: int,
     ) -> tuple[SessionTurnCommitRef, ...]: ...
     async def commit_timeline_turn_in_transaction(
         self,
@@ -1749,7 +1749,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_agent_run_sequence: int,
+        expected_agent_run_seq: int,
     ) -> ExecutionRecord: ...
     async def claim_next_agent_run_in_transaction(
         self,
@@ -1758,7 +1758,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_agent_run_sequence: int,
+        expected_agent_run_seq: int,
     ) -> ExecutionRecord: ...
     async def enter_deferred_wait_in_transaction(
         self,
@@ -1767,8 +1767,8 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_event_sequence: int,
-        expected_agent_run_sequence: int,
+        expected_event_seq: int,
+        expected_agent_run_seq: int,
         audit_events: Sequence[ExecutionEventAppend] = (),
         deferred_events: Sequence[ExecutionEventAppend],
         occurred_at: datetime,
@@ -1780,8 +1780,8 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_event_sequence: int,
-        expected_agent_run_sequence: int,
+        expected_event_seq: int,
+        expected_agent_run_seq: int,
     ) -> ExecutionRecord: ...
     async def transition_task_execution(
         self,
@@ -1789,7 +1789,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_revision: int,
-        expected_event_sequence: int,
+        expected_event_seq: int,
         expected_status: ExecutionStatus,
         next_status: ExecutionStatus,
         task_attempt: int,
@@ -1819,8 +1819,8 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         expected_status: ExecutionStatus | None = None,
         pending_events: Sequence[ExecutionEventAppend] = (),
     ) -> ExecutionRecord: ...
-    async def advance_event_sequence(
-        self, execution_id: str, *, tenant_id: str, expected_sequence: int
+    async def advance_event_seq(
+        self, execution_id: str, *, tenant_id: str, expected_event_seq: int
     ) -> ExecutionRecord: ...
     async def commit_terminal(
         self,
@@ -1914,7 +1914,7 @@ class EventRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         events: Sequence[ExecutionEventAppend],
-        expected_sequence: int | None = None,
+        expected_event_seq: int | None = None,
     ) -> tuple[ExecutionEventRecord, ...]: ...
 
     async def append_next(
@@ -1931,13 +1931,13 @@ class EventRepository(RuntimeRepository, Protocol):
         execution_id: str,
         *,
         tenant_id: str,
-        expected_sequence: int,
+        expected_event_seq: int,
         event_type: str,
         payload: JsonValue,
     ) -> ExecutionEventRecord: ...
 
     async def list(
-        self, execution_id: str, *, tenant_id: str, after_sequence: int, limit: int
+        self, execution_id: str, *, tenant_id: str, after_event_seq: int, limit: int
     ) -> Page[ExecutionEventRecord]: ...
 
 
@@ -1980,7 +1980,7 @@ class ToolOperationAdmission:
 @dataclass(frozen=True, slots=True)
 class ExecutionEventRecord:
     execution_id: str
-    sequence: int
+    event_seq: int
     event_type: str
     payload: JsonValue
 
@@ -2209,7 +2209,7 @@ class TaskRepository(RuntimeRepository, Protocol):
         tenant_id: str,
     ) -> TaskPreparedInputRecord: ...
     async def list_events(
-        self, graph_id: str, *, tenant_id: str, after_sequence: int, limit: int
+        self, graph_id: str, *, tenant_id: str, after_event_seq: int, limit: int
     ) -> Page[TaskEvent]: ...
     async def latest_event(
         self, graph_id: str, *, tenant_id: str

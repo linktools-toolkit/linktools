@@ -45,7 +45,7 @@ class _ExecutionEventStreamer(Protocol):
         execution_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]: ...
 
 
@@ -135,7 +135,7 @@ class ExecutionTreeStreamer:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences: Mapping[str, int] | None = None,
+        after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
@@ -144,7 +144,7 @@ class ExecutionTreeStreamer:
         return self._stream(
             execution_id,
             principal=principal,
-            after_sequences=_normalize_after_sequences(after_sequences),
+            after_event_seqs=_normalize_after_event_seqs(after_event_seqs),
             include_content=include_content,
             ready=ready,
         )
@@ -154,7 +154,7 @@ class ExecutionTreeStreamer:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences: Mapping[str, int],
+        after_event_seqs: Mapping[str, int],
         include_content: bool,
         ready: asyncio.Event | None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
@@ -175,7 +175,7 @@ class ExecutionTreeStreamer:
             stream = self._events.stream(
                 view.execution_id,
                 principal=principal,
-                after_sequence=after_sequences.get(view.execution_id, 0),
+                after_event_seq=after_event_seqs.get(view.execution_id, 0),
             )
             streams[view.execution_id] = stream
             pending[view.execution_id] = _next_event_task(stream, view.execution_id)
@@ -287,7 +287,7 @@ class ExecutionTreeStreamer:
         try:
             add_view(root, 0)
             await discover_persisted_children((execution_id,))
-            for member_id in after_sequences:
+            for member_id in after_event_seqs:
                 await validate_cursor_member(member_id)
 
             if preparation_failure is not None:
@@ -525,7 +525,7 @@ def _project_stream_event(
 ) -> ExecutionStreamEvent:
     return ExecutionStreamEvent(
         event.execution_id,
-        event.durable_sequence,
+        event.durable_seq,
         event.event_type,
         project_event_payload(
             event.event_type, event.payload, include_content=include_content
@@ -533,7 +533,7 @@ def _project_stream_event(
     )
 
 
-def _normalize_after_sequences(
+def _normalize_after_event_seqs(
     value: Mapping[str, int] | None,
 ) -> Mapping[str, int]:
     if value is None:

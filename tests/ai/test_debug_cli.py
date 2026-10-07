@@ -210,9 +210,9 @@ class _DetailHistory:
             (
                 ModelInteractionItem(
                     execution_id=execution_id,
-                    agent_run_sequence=1,
+                    agent_run_seq=1,
                     depth=0,
-                    request_sequence=1,
+                    model_request_seq=1,
                     purpose="agent",
                     step_index=0,
                     output_retry_index=None,
@@ -459,9 +459,9 @@ class _TraceHistory:
                             "kind": "MODEL_RESPONSE",
                             "status": "SUCCEEDED",
                             "step_index": 0,
-                            "agent_run_sequence": 1,
+                            "agent_run_seq": 1,
                             "scope": "root",
-                            "request_sequence": 1,
+                            "model_request_seq": 1,
                             "purpose": "agent",
                             "duration_ns": 2_000_000,
                             "token_usage": {

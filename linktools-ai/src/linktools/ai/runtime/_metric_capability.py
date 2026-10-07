@@ -144,7 +144,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         source_namespace: str,
         tenant_id: str,
         execution_id: str,
-        agent_run_sequence: int = 1,
+        agent_run_seq: int = 1,
         session_id: str | None,
         agent_run_id: str,
         agent_id: str,
@@ -157,7 +157,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         self._source_namespace = source_namespace
         self._tenant_id = tenant_id
         self._execution_id = execution_id
-        self._agent_run_sequence = agent_run_sequence
+        self._agent_run_seq = agent_run_seq
         self._session_id = session_id
         self._agent_run_id = agent_run_id
         self._agent_id = agent_id
@@ -202,7 +202,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             fact = self._journal.latest_for_step(ctx.run_step)
             if fact is None or fact.status is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if fact.request_sequence in self._prepared_models:
+            if fact.model_request_seq in self._prepared_models:
                 return
             self._stage_request(
                 fact,
@@ -214,7 +214,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 model_id=request_context.model_id,
                 prepared=True,
             )
-            self._prepared_models[fact.request_sequence] = model
+            self._prepared_models[fact.model_request_seq] = model
 
         request_context.model = _PreparedRequestModel(model, prepare)
         return request_context
@@ -233,7 +233,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             purpose="agent",
             output_retry_index=None if ctx.retry <= 0 else ctx.retry,
         )
-        request_sequence = fact.request_sequence
+        model_request_seq = fact.model_request_seq
         try:
             self._stage_request(fact, request_context)
             try:
@@ -342,8 +342,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 raise asyncio.CancelledError
             return response
         finally:
-            self._prepared_models.pop(request_sequence, None)
-            self._journal.consume(request_sequence)
+            self._prepared_models.pop(model_request_seq, None)
+            self._journal.consume(model_request_seq)
 
     async def after_model_request(
         self,
@@ -523,8 +523,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload: dict[str, JsonValue] = {
             "execution_id": self._execution_id,
-            "agent_run_sequence": self._agent_run_sequence,
-            "request_sequence": fact.request_sequence,
+            "agent_run_seq": self._agent_run_seq,
+            "model_request_seq": fact.model_request_seq,
             "step_index": fact.step_index,
             "purpose": fact.purpose,
             "output_retry_index": fact.output_retry_index,
@@ -559,8 +559,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         usage: object | None,
         phase: str,
     ) -> bool:
-        model = self._prepared_models.get(fact.request_sequence, model)
-        finished = self._journal.finish(fact.request_sequence, status=status)
+        model = self._prepared_models.get(fact.model_request_seq, model)
+        finished = self._journal.finish(fact.model_request_seq, status=status)
         self._finish_request(
             finished,
             model,
@@ -712,7 +712,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     execution_id=self._execution_id,
                     session_id=self._session_id,
                     agent_run_id=self._agent_run_id,
-                    request_sequence=fact.request_sequence,
+                    model_request_seq=fact.model_request_seq,
                     request_purpose=fact.purpose,
                     output_retry_index=fact.output_retry_index,
                 ),

@@ -85,7 +85,7 @@ class TaskGraphQueryService(Protocol):
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
         limit: int = 100,
     ) -> Page[TaskEvent]: ...
 
@@ -94,7 +94,7 @@ class TaskGraphQueryService(Protocol):
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ) -> AsyncIterator[TaskEvent]: ...
 
     async def wait(

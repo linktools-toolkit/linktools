@@ -65,7 +65,7 @@ class _ExecutionTreeWatcher(Protocol):
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences: "Mapping[str, int] | None" = None,
+        after_event_seqs: "Mapping[str, int] | None" = None,
         include_content: bool = False,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
@@ -286,10 +286,10 @@ class TaskGraphRun(Generic[AppT]):
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        expected_sequence: int | None = None
+        expected_event_seq: int | None = None
         last_node_id = ""
         if cursor is not None:
-            expected_sequence, last_node_id = decode_task_results_cursor(
+            expected_event_seq, last_node_id = decode_task_results_cursor(
                 self._runtime.namespace,
                 self._principal.tenant_id,
                 self.graph_id,
@@ -298,13 +298,13 @@ class TaskGraphRun(Generic[AppT]):
                 max_content_bytes=max_content_bytes,
             )
 
-        graph, graph_sequence = await self._graph.result_header(
+        graph, graph_event_seq = await self._graph.result_header(
             self.graph_id,
             principal=self._principal,
         )
         if (
-            expected_sequence is not None
-            and graph_sequence != expected_sequence
+            expected_event_seq is not None
+            and graph_event_seq != expected_event_seq
         ):
             raise AIError(ErrorCode.CURSOR_INVALID)
         if graph.graph_id != self.graph_id:
@@ -426,7 +426,7 @@ class TaskGraphRun(Generic[AppT]):
             self.graph_id,
             principal=self._principal,
         )
-        if final_header[1] != graph_sequence:
+        if final_header[1] != graph_event_seq:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         next_cursor = None
         if has_more and page_ids:
@@ -436,7 +436,7 @@ class TaskGraphRun(Generic[AppT]):
                 self.graph_id,
                 include_content=include_content,
                 max_content_bytes=max_content_bytes,
-                graph_sequence=graph_sequence,
+                graph_event_seq=graph_event_seq,
                 last_node_id=page_ids[-1],
             )
         return Page(tuple(items), next_cursor)
@@ -527,40 +527,40 @@ class TaskGraphRun(Generic[AppT]):
     ) -> AsyncIterator[TaskGraphRunEvent]:
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        graph_sequence, sequences = (0, {}) if cursor is None else decode_graph_watch_cursor(
+        graph_event_seq, sequences = (0, {}) if cursor is None else decode_graph_watch_cursor(
             self._runtime.namespace, self._principal.tenant_id, self.graph_id,
             cursor, include_content=include_content,
         )
         return self._watch(
-            after_graph_sequence=graph_sequence, after_execution_sequences=sequences,
+            after_graph_event_seq=graph_event_seq, after_execution_event_seqs=sequences,
             include_content=include_content, ready=ready,
         )
 
     async def _watch(
         self,
         *,
-        after_graph_sequence: int,
-        after_execution_sequences: Mapping[str, Mapping[str, int]],
+        after_graph_event_seq: int,
+        after_execution_event_seqs: Mapping[str, Mapping[str, int]],
         include_content: bool,
         ready: asyncio.Event | None = None,
     ) -> AsyncIterator[TaskGraphRunEvent]:
         graph_state = await self._state()
-        cursor_graph_sequence = after_graph_sequence
-        cursor_execution_sequences = {
+        cursor_graph_event_seq = after_graph_event_seq
+        cursor_execution_event_seqs = {
             node_id: dict(sequences)
-            for node_id, sequences in after_execution_sequences.items()
+            for node_id, sequences in after_execution_event_seqs.items()
         }
-        if after_graph_sequence > graph_state.event_sequence:
+        if after_graph_event_seq > graph_state.event_seq:
             raise AIError(ErrorCode.CURSOR_INVALID)
         states = {node_state.node_id: node_state for node_state in graph_state.node_states}
         nodes = {node.node_id: node for node in graph_state.nodes}
         if len(states) != len(graph_state.node_states):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if set(after_execution_sequences) - set(states):
+        if set(after_execution_event_seqs) - set(states):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        if after_graph_sequence > 0 or after_execution_sequences:
-            for node_id, sequences in after_execution_sequences.items():
+        if after_graph_event_seq > 0 or after_execution_event_seqs:
+            for node_id, sequences in after_execution_event_seqs.items():
                 if sequences and states[node_id].execution_id is None:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
@@ -610,7 +610,7 @@ class TaskGraphRun(Generic[AppT]):
                 and node.task.id == "linktools.ai.input"
                 and node.task.revision == 1
             ):
-                if after_execution_sequences.get(node_id):
+                if after_execution_event_seqs.get(node_id):
                     raise AIError(ErrorCode.CURSOR_INVALID)
                 return
             execution = await self._runtime.executions.inspect(
@@ -618,14 +618,14 @@ class TaskGraphRun(Generic[AppT]):
                 principal=self._principal,
             )
             if execution.binding_kind == "task":
-                if after_execution_sequences.get(node_id):
+                if after_execution_event_seqs.get(node_id):
                     raise AIError(ErrorCode.CURSOR_INVALID)
                 return
             tree_ready = asyncio.Event()
             stream = self._watch_tree(
                 execution_id,
                 principal=self._principal,
-                after_sequences=after_execution_sequences.get(node_id),
+                after_event_seqs=after_execution_event_seqs.get(node_id),
                 include_content=include_content, ready=tree_ready,
             )
             execution_streams[node_id] = stream
@@ -651,15 +651,15 @@ class TaskGraphRun(Generic[AppT]):
                 self._principal.tenant_id,
                 self.graph_id,
                 include_content=include_content,
-                graph_sequence=cursor_graph_sequence,
-                execution_sequences=cursor_execution_sequences,
+                graph_event_seq=cursor_graph_event_seq,
+                execution_event_seqs=cursor_execution_event_seqs,
             )
 
         try:
             graph_stream = self._graph.stream_events(
                 self.graph_id,
                 principal=self._principal,
-                after_sequence=after_graph_sequence,
+                after_event_seq=after_graph_event_seq,
             )
             graph_task = asyncio.create_task(
                 graph_stream.__anext__(),
@@ -707,7 +707,7 @@ class TaskGraphRun(Generic[AppT]):
                     except StopAsyncIteration:
                         pass
                     else:
-                        if event.sequence <= cursor_graph_sequence:
+                        if event.event_seq <= cursor_graph_event_seq:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         if event.execution_id is not None:
                             if event.node_id is None:
@@ -722,11 +722,11 @@ class TaskGraphRun(Generic[AppT]):
                                 self._principal.tenant_id,
                                 self.graph_id,
                                 include_content=include_content,
-                                graph_sequence=event.sequence,
-                                execution_sequences=cursor_execution_sequences,
+                                graph_event_seq=event.event_seq,
+                                execution_event_seqs=cursor_execution_event_seqs,
                             ),
                         )
-                        cursor_graph_sequence = event.sequence
+                        cursor_graph_event_seq = event.event_seq
                         yield projected_event
                         graph_task = asyncio.create_task(
                             graph_stream.__anext__(),
@@ -745,21 +745,21 @@ class TaskGraphRun(Generic[AppT]):
                     except StopAsyncIteration:
                         execution_streams.pop(node_id, None)
                         continue
-                    durable_sequence = event.event.durable_sequence
-                    next_execution_sequences = {
+                    durable_seq = event.event.durable_seq
+                    next_execution_event_seqs = {
                         name: dict(sequences)
-                        for name, sequences in cursor_execution_sequences.items()
+                        for name, sequences in cursor_execution_event_seqs.items()
                     }
-                    if durable_sequence is not None:
-                        node_sequences = next_execution_sequences.setdefault(
+                    if durable_seq is not None:
+                        node_sequences = next_execution_event_seqs.setdefault(
                             node_id,
                             {},
                         )
                         previous = node_sequences.get(event.execution_id, 0)
-                        if durable_sequence <= previous:
+                        if durable_seq <= previous:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        node_sequences[event.execution_id] = durable_sequence
-                    node_sequences = next_execution_sequences.get(node_id, {})
+                        node_sequences[event.execution_id] = durable_seq
+                    node_sequences = next_execution_event_seqs.get(node_id, {})
                     event_with_cursor = replace(
                         event,
                         cursor=encode_execution_watch_cursor(
@@ -767,7 +767,7 @@ class TaskGraphRun(Generic[AppT]):
                             self._principal.tenant_id,
                             execution_ids[node_id],
                             include_content=include_content,
-                            sequences=node_sequences,
+                            event_seqs=node_sequences,
                         ),
                     )
                     projected_event = TaskGraphRunEvent(
@@ -779,11 +779,11 @@ class TaskGraphRun(Generic[AppT]):
                             self._principal.tenant_id,
                             self.graph_id,
                             include_content=include_content,
-                            graph_sequence=cursor_graph_sequence,
-                            execution_sequences=next_execution_sequences,
+                            graph_event_seq=cursor_graph_event_seq,
+                            execution_event_seqs=next_execution_event_seqs,
                         ),
                     )
-                    cursor_execution_sequences = next_execution_sequences
+                    cursor_execution_event_seqs = next_execution_event_seqs
                     yield projected_event
                     stream = execution_streams[node_id]
                     execution_tasks[node_id] = asyncio.create_task(
@@ -896,7 +896,7 @@ class TaskGraphRun(Generic[AppT]):
             captured[root.execution_id] = (
                 node_state.node_id,
                 root,
-                root.event_sequence,
+                root.event_seq,
                 0,
             )
             pending = [(root, 0)]
@@ -915,7 +915,7 @@ class TaskGraphRun(Generic[AppT]):
         # Membership is finite before the per-stream high-water vector is read.
         for execution_id, (node_id, view, _, depth) in tuple(captured.items()):
             current = await self._runtime.executions.inspect(execution_id, principal=self._principal)
-            captured[execution_id] = (node_id, view, current.event_sequence, depth)
+            captured[execution_id] = (node_id, view, current.event_seq, depth)
         return captured
 
     async def _finite_events(
@@ -930,36 +930,36 @@ class TaskGraphRun(Generic[AppT]):
         include_content: bool = False,
         captured: dict[str, tuple[str, ExecutionView, int, int]] | None = None,
     ) -> AsyncIterator[TaskGraphRunEvent]:
-        graph_cutoff = graph_state.event_sequence
+        graph_cutoff = graph_state.event_seq
         if graph_cutoff < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if captured is None:
             captured = await self._capture_replay(graph_state)
-        after_sequence, prior = (0, {}) if cursor is None else decode_graph_watch_cursor(
+        after_event_seq, prior = (0, {}) if cursor is None else decode_graph_watch_cursor(
             self._runtime.namespace, self._principal.tenant_id, self.graph_id,
             cursor, include_content=include_content,
         )
-        if after_sequence > graph_cutoff:
+        if after_event_seq > graph_cutoff:
             raise AIError(ErrorCode.CURSOR_INVALID)
         for node_id, sequences in prior.items():
             for execution_id, sequence in sequences.items():
                 if (execution_id not in captured or captured[execution_id][0] != node_id
                         or sequence > captured[execution_id][2]):
                     raise AIError(ErrorCode.CURSOR_INVALID)
-        replay_execution_sequences = {node_id: dict(values) for node_id, values in prior.items()}
-        while after_sequence < graph_cutoff:
+        replay_execution_event_seqs = {node_id: dict(values) for node_id, values in prior.items()}
+        while after_event_seq < graph_cutoff:
             page = await self._graph.list_events(
                 self.graph_id,
                 principal=self._principal,
-                after_sequence=after_sequence,
-                limit=min(200, graph_cutoff - after_sequence),
+                after_event_seq=after_event_seq,
+                limit=min(200, graph_cutoff - after_event_seq),
             )
             if not page.items:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for event in page.items:
-                if event.sequence > graph_cutoff:
+                if event.event_seq > graph_cutoff:
                     break
-                after_sequence = event.sequence
+                after_event_seq = event.event_seq
                 yield TaskGraphRunEvent(
                     self.graph_id,
                     event.node_id,
@@ -969,8 +969,8 @@ class TaskGraphRun(Generic[AppT]):
                         self._principal.tenant_id,
                         self.graph_id,
                         include_content=include_content,
-                        graph_sequence=after_sequence,
-                        execution_sequences=replay_execution_sequences,
+                        graph_event_seq=after_event_seq,
+                        execution_event_seqs=replay_execution_event_seqs,
                     ),
                 )
 
@@ -986,27 +986,27 @@ class TaskGraphRun(Generic[AppT]):
             ),
         ):
             node_id, view, cutoff, depth = captured[execution_id]
-            sequence = replay_execution_sequences.get(node_id, {}).get(execution_id, 0)
+            sequence = replay_execution_event_seqs.get(node_id, {}).get(execution_id, 0)
             while sequence < cutoff:
                 page = await self._runtime.events.list(
                     execution_id,
                     principal=self._principal,
-                    after_sequence=sequence,
+                    after_event_seq=sequence,
                     limit=min(200, cutoff - sequence),
                 )
                 if not page.items:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 for event in page.items:
-                    if event.sequence > cutoff:
+                    if event.event_seq > cutoff:
                         break
                     stream = ExecutionStreamEvent(
                         execution_id,
-                        event.sequence,
+                        event.event_seq,
                         event.event_type,
                         project_event_payload(event.event_type, event.payload, include_content=include_content),
                     )
-                    sequence = event.sequence
-                    node_sequences = replay_execution_sequences.setdefault(
+                    sequence = event.event_seq
+                    node_sequences = replay_execution_event_seqs.setdefault(
                         node_id,
                         {},
                     )
@@ -1025,7 +1025,7 @@ class TaskGraphRun(Generic[AppT]):
                             self._principal.tenant_id,
                             next(state.execution_id for state in graph_state.node_states if state.node_id == node_id),
                             include_content=include_content,
-                            sequences=node_sequences,
+                            event_seqs=node_sequences,
                         ),
                     )
                     yield TaskGraphRunEvent(
@@ -1037,8 +1037,8 @@ class TaskGraphRun(Generic[AppT]):
                             self._principal.tenant_id,
                             self.graph_id,
                             include_content=include_content,
-                            graph_sequence=graph_cutoff,
-                            execution_sequences=replay_execution_sequences,
+                            graph_event_seq=graph_cutoff,
+                            execution_event_seqs=replay_execution_event_seqs,
                         ),
                     )
 

@@ -26,7 +26,7 @@ class _Repository:
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]:
         del tenant_id
@@ -34,7 +34,7 @@ class _Repository:
         selected = tuple(
             event
             for event in self.events
-            if event.graph_id == graph_id and event.sequence > after_sequence
+            if event.graph_id == graph_id and event.event_seq > after_event_seq
         )
         page = selected[:limit]
         return Page(page, "more" if len(selected) > limit else None)

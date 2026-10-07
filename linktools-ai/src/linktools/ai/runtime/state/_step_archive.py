@@ -469,14 +469,14 @@ class StagingAgentRunStore(AgentRunStore):
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
         values = self._interactions.setdefault(interaction.agent_run_id, [])
-        if not values or interaction.request_sequence == values[-1].request_sequence + 1:
+        if not values or interaction.model_request_seq == values[-1].model_request_seq + 1:
             values.append(interaction)
             return
-        index = interaction.request_sequence - values[0].request_sequence
+        index = interaction.model_request_seq - values[0].model_request_seq
         if (
             index < 0
             or index >= len(values)
-            or values[index].request_sequence != interaction.request_sequence
+            or values[index].model_request_seq != interaction.model_request_seq
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         previous = values[index]
@@ -485,7 +485,7 @@ class StagingAgentRunStore(AgentRunStore):
         stable_previous = (
             previous.agent_run_id,
             previous.step_index,
-            previous.request_sequence,
+            previous.model_request_seq,
             previous.purpose,
             previous.output_retry_index,
             previous.model,
@@ -497,7 +497,7 @@ class StagingAgentRunStore(AgentRunStore):
         stable_current = (
             interaction.agent_run_id,
             interaction.step_index,
-            interaction.request_sequence,
+            interaction.model_request_seq,
             interaction.purpose,
             interaction.output_retry_index,
             interaction.model,
@@ -520,10 +520,10 @@ class StagingAgentRunStore(AgentRunStore):
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
         values = self._interactions.get(interaction.agent_run_id, ())
-        key = (interaction.agent_run_id, interaction.request_sequence)
+        key = (interaction.agent_run_id, interaction.model_request_seq)
         if not values or key in self._prepared_interactions:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        index = interaction.request_sequence - values[0].request_sequence
+        index = interaction.model_request_seq - values[0].model_request_seq
         if index < 0 or index >= len(values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         previous = values[index]
@@ -543,20 +543,20 @@ class StagingAgentRunStore(AgentRunStore):
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int | None = None,
+        after_model_request_seq: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
         self._ensure_open()
-        _validate_interaction_page(after_request_sequence, limit)
+        _validate_interaction_page(after_model_request_seq, limit)
         values = self._interactions.get(agent_run_id, ())
         if not values:
             return []
         start = (
             0
-            if after_request_sequence is None
+            if after_model_request_seq is None
             else max(
                 0,
-                after_request_sequence - values[0].request_sequence + 1,
+                after_model_request_seq - values[0].model_request_seq + 1,
             )
         )
         end = None if limit is None else start + limit
@@ -576,7 +576,7 @@ class StagingAgentRunStore(AgentRunStore):
             terminal.append(value)
         if not terminal:
             return 0
-        sequences = tuple(value.request_sequence for value in terminal)
+        sequences = tuple(value.model_request_seq for value in terminal)
         if sequences != tuple(range(sequences[0], sequences[0] + len(sequences))):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return len(terminal)
@@ -1197,15 +1197,15 @@ class StateStepArchive(AgentRunStore):
             return ()
         if local_message_base < 0 or local_message_count < 0:
             raise ValueError("local interaction transcript range is invalid")
-        request_sequences: set[int] = set()
+        model_request_seqs: set[int] = set()
         external_refs: list[TranscriptMessageRef] = []
         for interaction in values:
             if (
                 interaction.agent_run_id != run.agent_run_id
-                or interaction.request_sequence in request_sequences
+                or interaction.model_request_seq in model_request_seqs
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            request_sequences.add(interaction.request_sequence)
+            model_request_seqs.add(interaction.model_request_seq)
             for projection in (
                 interaction.request_context,
                 *(
@@ -1267,7 +1267,7 @@ class StateStepArchive(AgentRunStore):
                 ModelInteractionRecord(
                     staged.agent_run_id,
                     staged.step_index,
-                    staged.request_sequence,
+                    staged.model_request_seq,
                     staged.purpose,
                     staged.output_retry_index,
                     staged.model,
@@ -2292,11 +2292,11 @@ class StateStepArchive(AgentRunStore):
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int | None = None,
+        after_model_request_seq: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
         require_no_run_history_lock("StateStepArchive.list_model_interactions")
-        _validate_interaction_page(after_request_sequence, limit)
+        _validate_interaction_page(after_model_request_seq, limit)
         values = await self._facts(agent_run_id, "interaction")
         result: list[object] = []
         for value in values:
@@ -2304,8 +2304,8 @@ class StateStepArchive(AgentRunStore):
             if not isinstance(interaction, ModelInteractionRecord):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if (
-                after_request_sequence is not None
-                and interaction.request_sequence <= after_request_sequence
+                after_model_request_seq is not None
+                and interaction.model_request_seq <= after_model_request_seq
             ):
                 continue
             result.append(interaction)
@@ -2326,7 +2326,7 @@ class StateStepArchive(AgentRunStore):
         interaction = _decode_step(fact.data)
         if (
             not isinstance(interaction, ModelInteractionRecord)
-            or fact.sequence != interaction.request_sequence
+            or fact.sequence != interaction.model_request_seq
             or fact.sequence < 1
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2710,13 +2710,13 @@ class StateStepArchive(AgentRunStore):
 
 
 def _validate_interaction_page(
-    after_request_sequence: int | None,
+    after_model_request_seq: int | None,
     limit: int | None,
 ) -> None:
-    if after_request_sequence is not None and (
-        isinstance(after_request_sequence, bool)
-        or not isinstance(after_request_sequence, int)
-        or after_request_sequence < 0
+    if after_model_request_seq is not None and (
+        isinstance(after_model_request_seq, bool)
+        or not isinstance(after_model_request_seq, int)
+        or after_model_request_seq < 0
     ):
         raise ValueError("interaction sequence must be non-negative")
     if limit is not None and (
@@ -2830,7 +2830,7 @@ def _step_subject(value: object) -> bytes | None:
             canonical_json_bytes(
                 {
                     "agent_run_id": value.agent_run_id,
-                    "request_sequence": value.request_sequence,
+                    "model_request_seq": value.model_request_seq,
                 }
             )
         ).digest()

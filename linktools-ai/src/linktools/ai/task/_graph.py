@@ -950,7 +950,7 @@ class TaskGraphInfo:
     status: TaskStatus
     nodes: tuple[TaskNodeInfo, ...]
     node_states: tuple[TaskNodeView, ...]
-    event_sequence: int = 0
+    event_seq: int = 0
 
     @property
     def wait_status(self) -> TaskStatus:
@@ -964,7 +964,7 @@ class TaskGraphInfo:
             state.status,
             tuple(TaskNodeInfo.from_node(node) for node in state.nodes),
             state.node_states,
-            state.event_sequence,
+            state.event_seq,
         )
 
 
@@ -974,7 +974,7 @@ class TaskGraphState:
     status: TaskStatus
     nodes: "tuple[TaskNode, ...]"
     node_states: "tuple[TaskNodeView, ...]"
-    event_sequence: int = 0
+    event_seq: int = 0
 
     @property
     def wait_status(self) -> TaskStatus:
@@ -987,9 +987,9 @@ class TaskGraphState:
         if not isinstance(self.status, TaskStatus):
             raise ValueError("task graph state status is invalid")
         if (
-            isinstance(self.event_sequence, bool)
-            or not isinstance(self.event_sequence, int)
-            or self.event_sequence < 0
+            isinstance(self.event_seq, bool)
+            or not isinstance(self.event_seq, int)
+            or self.event_seq < 0
         ):
             raise ValueError("task graph state event sequence is invalid")
         nodes = tuple(self.nodes)

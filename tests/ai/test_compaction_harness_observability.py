@@ -127,14 +127,14 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
     assert len(provider_context.messages) < len(messages)
     assert request_context.messages == original_messages
     assert ctx.messages == original_messages
-    compaction_sequence = observed[-1][1].request_sequence
+    compaction_sequence = observed[-1][1].model_request_seq
     with pytest.raises(RuntimeError, match="missing"):
         journal.current(compaction_sequence)
     agent = journal.begin(3, purpose="agent")
     assert compaction_sequence == 1
-    assert agent.request_sequence == 2
-    journal.finish(agent.request_sequence, status="SUCCEEDED")
-    journal.consume(agent.request_sequence)
+    assert agent.model_request_seq == 2
+    journal.finish(agent.model_request_seq, status="SUCCEEDED")
+    journal.consume(agent.model_request_seq)
 
 
 def test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> None:
@@ -147,14 +147,14 @@ def test_journal_keeps_agent_and_compaction_requests_distinct_on_same_step() -> 
     compaction = journal.begin(3, purpose="compaction")
     agent = journal.begin(3, purpose="agent")
 
-    assert compaction.request_sequence == 1
-    assert agent.request_sequence == 2
+    assert compaction.model_request_seq == 1
+    assert agent.model_request_seq == 2
     assert agent.observation_id != compaction.observation_id
-    journal.finish(compaction.request_sequence, status="SUCCEEDED")
-    assert journal.consume(compaction.request_sequence).purpose == "compaction"
-    assert journal.current(agent.request_sequence) == agent
-    journal.finish(agent.request_sequence, status="SUCCEEDED")
-    assert journal.consume(agent.request_sequence).purpose == "agent"
+    journal.finish(compaction.model_request_seq, status="SUCCEEDED")
+    assert journal.consume(compaction.model_request_seq).purpose == "compaction"
+    assert journal.current(agent.model_request_seq) == agent
+    journal.finish(agent.model_request_seq, status="SUCCEEDED")
+    assert journal.consume(agent.model_request_seq).purpose == "agent"
 
 
 def test_journal_rejects_double_finish() -> None:
@@ -165,12 +165,12 @@ def test_journal_rejects_double_finish() -> None:
         agent_run_id="run",
     )
     fact = journal.begin(1)
-    journal.finish(fact.request_sequence, status="SUCCEEDED")
+    journal.finish(fact.model_request_seq, status="SUCCEEDED")
 
     with pytest.raises(RuntimeError, match="already finished"):
-        journal.finish(fact.request_sequence, status="FAILED")
+        journal.finish(fact.model_request_seq, status="FAILED")
 
-    journal.consume(fact.request_sequence)
+    journal.consume(fact.model_request_seq)
 
 
 def _duplicate_file_history() -> list[ModelMessage]:

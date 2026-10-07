@@ -132,7 +132,7 @@ class _TaskRepository(Protocol):
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]: ...
 

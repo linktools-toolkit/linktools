@@ -52,7 +52,7 @@ def _contents(items: tuple[ExecutionHistoryItem, ...]) -> list[tuple[object, ...
 async def _assert_request_part_coordinates(
     read: Callable[..., Awaitable[Page[ExecutionHistoryItem]]],
 ) -> None:
-    selectors = {"agent_run_sequence": 1, "message_sequence": 1}
+    selectors = {"agent_run_seq": 1, "message_seq": 1}
     for include_content in (False, True):
         items = []
         cursor = None
@@ -66,7 +66,7 @@ async def _assert_request_part_coordinates(
         assert [(item.item_kind, item.part_index) for item in items] == [
             ("instructions", None), ("system", 0), ("user", 1),
         ]
-        assert all(item.request_sequence is None and item.step_index is None for item in items)
+        assert all(item.model_request_seq is None and item.step_index is None for item in items)
         for index, expected in enumerate(items[1:]):
             selected = await read(**selectors, part_index=index,
                                                include_content=include_content, limit=1)
@@ -137,18 +137,18 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
             if event.event_type == ExecutionEventType.ASSISTANT_PART_COMPLETED:
                 page = await runtime.executions.history(
                     tree_event.execution_id, principal=principal, include_content=True,
-                    agent_run_sequence=payload["agent_run_sequence"],
-                    message_sequence=payload["message_sequence"], part_index=payload["part_index"],
+                    agent_run_seq=payload["agent_run_seq"],
+                    message_seq=payload["message_seq"], part_index=payload["part_index"],
                 )
                 assert len(page.items) == 1
                 assert page.items[0].item_kind == "assistant"
                 assistant_reads.append(page.items[0].content)
                 if frozen_partial is None:
-                    assert page.items[0].request_sequence is None
+                    assert page.items[0].model_request_seq is None
                     frozen_partial = await execution.history(include_content=True, limit=1)
             if payload.get("call_id") != "quick-call":
                 return
-            selector = {"agent_run_sequence": payload["agent_run_sequence"], "tool_call_id": payload["call_id"]}
+            selector = {"agent_run_seq": payload["agent_run_seq"], "tool_call_id": payload["call_id"]}
             if event.event_type == ExecutionEventType.TOOL_CALL_STARTED:
                 page = await runtime.executions.history(
                     tree_event.execution_id, principal=principal, include_content=True, **selector,
@@ -168,8 +168,8 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
                 metadata = await runtime.executions.history(tree_event.execution_id, principal=principal, **selector)
                 assert len(metadata.items) == 2
                 assert all(item.content is None and item.content_included is False for item in metadata.items)
-                assert all(item.request_sequence == 1 and item.step_index is not None for item in metadata.items)
-                frozen_request = await execution.history(request_sequence=1, limit=1)
+                assert all(item.model_request_seq == 1 and item.step_index is not None for item in metadata.items)
+                frozen_request = await execution.history(model_request_seq=1, limit=1)
                 assert frozen_request.next_cursor is not None
                 await _assert_request_part_coordinates(execution.history)
                 assert exact.items[0].part_index == 1
@@ -220,18 +220,18 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
         ]
         assert [item.content for item in fresh.items if item.item_kind == "assistant"] == assistant_reads
         interactions = (await execution.model_interactions()).items
-        by_request = {item.request_sequence: item for item in interactions}
+        by_request = {item.model_request_seq: item for item in interactions}
         assert set(by_request) == {1, 2}
         for item in fresh.items:
             if item.item_kind in {"user", "system", "instructions"}:
-                assert item.request_sequence is None and item.step_index is None
+                assert item.model_request_seq is None and item.step_index is None
             else:
                 expected = 2 if item.content == "all finished" else 1
-                assert item.request_sequence == expected
+                assert item.model_request_seq == expected
                 assert item.step_index == by_request[expected].step_index
         for method in (execution.history, execution.trace):
-            assert (await method(request_sequence=99)).items == ()
-            selected = (await method(request_sequence=1, tool_call_id="quick-call")).items
+            assert (await method(model_request_seq=99)).items == ()
+            selected = (await method(model_request_seq=1, tool_call_id="quick-call")).items
             assert len(selected) == 2
             assert (await method(step_index=by_request[1].step_index)).items
         assert frozen_partial is not None
@@ -239,21 +239,21 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
         partial_response = [item for item in partial_tail.items if item.item_kind == "assistant"]
         assert len(partial_response) == 1
         assert partial_response[0].content == "before tools"
-        assert partial_response[0].request_sequence is None
+        assert partial_response[0].model_request_seq is None
         assert partial_response[0].step_index is None
         assert frozen_request is not None
         frozen_filtered = list(frozen_request.items)
         cursor = frozen_request.next_cursor
         while cursor is not None:
-            page = await execution.history(request_sequence=1, cursor=cursor, limit=1)
+            page = await execution.history(model_request_seq=1, cursor=cursor, limit=1)
             frozen_filtered.extend(page.items)
             cursor = page.next_cursor
         assert not any(item.item_kind == "tool_result" and item.tool_call_id == "slow-call" for item in frozen_filtered)
-        assert len((await execution.history(request_sequence=1)).items) == len(frozen_filtered) + 1
-        trace = (await execution.trace(request_sequence=2)).items
+        assert len((await execution.history(model_request_seq=1)).items) == len(frozen_filtered) + 1
+        trace = (await execution.trace(model_request_seq=2)).items
         response = next(item for item in trace if item.payload["kind"] == "MODEL_RESPONSE")
         final = next(item for item in fresh.items if item.content == "all finished")
-        assert response.payload["message_sequence"] == final.sequence
+        assert response.payload["message_seq"] == final.message_seq
 
 
 
@@ -297,7 +297,7 @@ async def test_child_event_locator_does_not_mix_same_call_id_in_parent_history()
             if event.event_type != ExecutionEventType.TOOL_CALL_FINISHED:
                 return
             selector = {
-                "agent_run_sequence": event.payload["agent_run_sequence"],
+                "agent_run_seq": event.payload["agent_run_seq"],
                 "tool_call_id": event.payload["call_id"],
             }
             child = await runtime.executions.history(
@@ -368,8 +368,8 @@ async def test_request_raw_part_coordinates_survive_readonly_archive_reopen(tmp_
         assert [(item.item_kind, item.part_index) for item in items] == [
             ("instructions", None), ("system", 0), ("user", 1),
         ]
-        response = await read_archived(agent_run_sequence=1, message_sequence=2, part_index=0)
+        response = await read_archived(agent_run_seq=1, message_seq=2, part_index=0)
         assert len(response.items) == 1
         assert response.items[0].item_kind == "assistant"
-        assert response.items[0].request_sequence == 1 and response.items[0].step_index is not None
+        assert response.items[0].model_request_seq == 1 and response.items[0].step_index is not None
         assert response.items[0].content is None and not response.items[0].content_included

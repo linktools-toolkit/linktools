@@ -200,7 +200,7 @@ async def test_empty_and_committed_session_history_use_continuation_only() -> No
             namespace="session-history",
             tenant_id="tenant",
             execution_id="execution",
-            agent_run_sequence=1,
+            agent_run_seq=1,
         )
         await _materialize(state, agent_run_id, ('  {"question":"你好\\nworld"}  ',))
         await _advance(state, None, ConversationCursor(agent_run_id))
@@ -210,7 +210,7 @@ async def test_empty_and_committed_session_history_use_continuation_only() -> No
             ("user", '  {"question":"你好\\nworld"}  '),
             ("assistant", 'answer:  {"question":"你好\\nworld"}  '),
         ]
-        assert [item.sequence for item in page.items] == [1, 2]
+        assert [item.message_seq for item in page.items] == [1, 2]
     finally:
         await state.close()
 
@@ -327,7 +327,7 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
         assert page.items[3].tool_call_id == "return-1"
         assert page.items[7].tool_name == "lookup"
         assert page.items[7].tool_call_id == "call-1"
-        assert [item.sequence for item in page.items] == [1, 1, 1, 1, 1, 2, 2, 2]
+        assert [item.message_seq for item in page.items] == [1, 1, 1, 1, 1, 2, 2, 2]
     finally:
         await state.close()
 

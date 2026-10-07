@@ -144,15 +144,15 @@ class DefaultExecutionHistoryService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
-        agent_run_sequence: int | None = None,
-        request_sequence: int | None = None,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
     ) -> Page[ExecutionTraceItem]:
         record = await self._authorize(execution_id, principal)
         filters = {
-            "agent_run_sequence": agent_run_sequence,
-            "request_sequence": request_sequence,
+            "agent_run_seq": agent_run_seq,
+            "model_request_seq": model_request_seq,
             "step_index": step_index,
             "tool_call_id": tool_call_id,
         }
@@ -170,8 +170,8 @@ class DefaultExecutionHistoryService:
             tenant_id=self._executions.tenant_id,
             cursor=inner_cursor,
             limit=limit,
-            agent_run_sequence=agent_run_sequence,
-            request_sequence=request_sequence,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
             step_index=step_index,
             tool_call_id=tool_call_id,
         )
@@ -216,7 +216,7 @@ class DefaultExecutionHistoryService:
             else tuple(
                 TranscriptItem(
                     item.execution_id,
-                    item.sequence,
+                    item.message_seq,
                     None,
                     False,
                 )
@@ -242,20 +242,20 @@ class DefaultExecutionHistoryService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
-        request_sequence: int | None = None,
+        model_request_seq: int | None = None,
         step_index: int | None = None,
-        agent_run_sequence: int | None = None,
+        agent_run_seq: int | None = None,
         tool_call_id: str | None = None,
-        message_sequence: int | None = None,
+        message_seq: int | None = None,
         part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
         record = await self._authorize(execution_id, principal)
         filters = {
-            "agent_run_sequence": agent_run_sequence,
-            "request_sequence": request_sequence,
+            "agent_run_seq": agent_run_seq,
+            "model_request_seq": model_request_seq,
             "step_index": step_index,
             "tool_call_id": tool_call_id,
-            "message_sequence": message_sequence,
+            "message_seq": message_seq,
             "part_index": part_index,
         }
         _validate_history_filters(filters)
@@ -272,11 +272,11 @@ class DefaultExecutionHistoryService:
             tenant_id=self._executions.tenant_id,
             cursor=inner_cursor,
             limit=limit,
-            agent_run_sequence=agent_run_sequence,
-            request_sequence=request_sequence,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
             step_index=step_index,
             tool_call_id=tool_call_id,
-            message_sequence=message_sequence,
+            message_seq=message_seq,
             part_index=part_index,
         )
         items = (
@@ -285,14 +285,14 @@ class DefaultExecutionHistoryService:
             else tuple(
                 ExecutionHistoryItem(
                     execution_id=item.execution_id,
-                    sequence=item.sequence,
+                    message_seq=item.message_seq,
                     item_kind=item.item_kind,
                     content=None,
                     tool_name=item.tool_name,
                     tool_call_id=item.tool_call_id,
                     content_included=False,
-                    agent_run_sequence=item.agent_run_sequence,
-                    request_sequence=item.request_sequence,
+                    agent_run_seq=item.agent_run_seq,
+                    model_request_seq=item.model_request_seq,
                     step_index=item.step_index,
                     tool_operation_id=item.tool_operation_id,
                     started_at=item.started_at,

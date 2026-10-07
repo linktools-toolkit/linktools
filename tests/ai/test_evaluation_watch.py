@@ -26,8 +26,8 @@ def intent(graph_id, *, confirmed=True, released=False):
 
 def event(graph_id, sequence, content=False):
     cursor = encode_graph_watch_cursor("eval-watch", "tenant", graph_id,
-                                      include_content=content, graph_sequence=sequence,
-                                      execution_sequences={})
+                                      include_content=content, graph_event_seq=sequence,
+                                      execution_event_seqs={})
     return TaskGraphRunEvent(graph_id, None, TaskEvent(
         1, graph_id, sequence, TaskEventType.GRAPH_CHANGED,
         datetime.now(timezone.utc), TaskStatus.RUNNING, TaskStatus.PENDING,
@@ -46,11 +46,11 @@ class Evaluations:
         self.record_error = None
         self.cleanup_error = None
         self.stream_release = asyncio.Event()
-        self.sequences = {}
+        self.event_seqs = {}
         self._graph = SimpleNamespace(state=self.graph_state)
 
     async def graph_state(self, graph_id, *, principal):
-        return SimpleNamespace(event_sequence=self.sequences.get(graph_id, 1))
+        return SimpleNamespace(event_seq=self.event_seqs.get(graph_id, 1))
 
     async def _record(self, experiment_id, principal):
         if self.record_error:
@@ -78,7 +78,7 @@ class Evaluations:
         if ready is not None:
             ready.set()
         try:
-            for number in range(sequence + 1, self.sequences.get(graph_id, 1) + 1):
+            for number in range(sequence + 1, self.event_seqs.get(graph_id, 1) + 1):
                 yield event(graph_id, number, content)
             await self.stream_release.wait()
         finally:
@@ -128,7 +128,7 @@ async def test_evaluation_observation_spans_empty_target_scorer_gap():
     assert second.graph_id == "score"
     owner.completion = "needs_attention"
     rest = [item async for item in stream]
-    assert [(item.graph_id, item.event.sequence) for item in rest] == [("score", 2), ("target", 2)]
+    assert [(item.graph_id, item.event.event_seq) for item in rest] == [("score", 2), ("target", 2)]
 
 
 @pytest.mark.asyncio
@@ -201,13 +201,13 @@ async def test_evaluation_reopens_a_known_graph_after_waiting_stage_resumes():
     owner = Evaluations([intent("human-score")])
     owner.stream_release.set()
     stream = run(owner).watch()
-    assert (await anext(stream)).event.sequence == 1
+    assert (await anext(stream)).event.event_seq == 1
     pending = asyncio.create_task(anext(stream))
     await asyncio.sleep(0.08)
     assert not pending.done()
     assert owner.streams == ["human-score"]
-    owner.sequences["human-score"] = 2
-    assert (await asyncio.wait_for(pending, 1)).event.sequence == 2
+    owner.event_seqs["human-score"] = 2
+    assert (await asyncio.wait_for(pending, 1)).event.event_seq == 2
     assert owner.streams == ["human-score", "human-score"]
     await stream.aclose()
 
@@ -243,7 +243,7 @@ async def test_evaluation_real_task_graphs_watch_and_wait_share_resumable_events
         assert outcome.observation_error is None
         remaining = [item async for item in handle.watch(cursor=outcome.cursor)]
         all_items = seen + remaining
-        identities = [(item.graph_id, item.event.sequence) for item in all_items]
+        identities = [(item.graph_id, item.event.event_seq) for item in all_items]
         assert len(identities) == len(set(identities))
         assert len({item.graph_id for item in all_items}) == 2
         assert [item async for item in handle.watch(cursor=all_items[-1].cursor)] == []

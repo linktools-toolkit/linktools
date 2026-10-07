@@ -41,7 +41,7 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
     capabilities = await compose_platform_capabilities(
         agent_id="agent",
         agent_run_id="run",
-        agent_run_sequence=1,
+        agent_run_seq=1,
         history_id=None,
         memory_scope=None,
         run_store=StagingAgentRunStore(),
