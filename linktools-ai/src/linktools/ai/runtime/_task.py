@@ -573,6 +573,7 @@ class TaskGraphRun(Generic[AppT]):
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
         graph_stream: "AsyncIterator[TaskEvent] | None" = None
+        final_events: "AsyncIterator[TaskGraphRunEvent] | None" = None
         graph_task: "asyncio.Task[TaskEvent] | None" = None
         execution_ids: dict[str, str] = {}
         execution_streams: dict[str, AsyncIterator[ExecutionTreeEvent]] = {}
@@ -879,8 +880,8 @@ class TaskGraphRun(Generic[AppT]):
                 }
                 cleanup_errors = await _drain_stream_tasks(tasks)
                 await models.close()
-                if graph_stream is not None:
-                    close = getattr(graph_stream, "aclose", None)
+                for stream in (final_events, graph_stream):
+                    close = getattr(stream, "aclose", None)
                     if close is not None:
                         try:
                             await close()

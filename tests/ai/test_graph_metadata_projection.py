@@ -478,3 +478,31 @@ async def test_terminal_graph_wait_acknowledges_delayed_initial_projection_befor
         assert acknowledged_initial
         assert projections[0].phase == "initial"
         assert projections[-1].phase == "final" and projections[-1].coverage is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint", [False, True])
+async def test_standalone_final_watch_close_releases_subscriptions(
+    tmp_path: Path, checkpoint: bool,
+) -> None:
+    async with _runtime(tmp_path) as runtime:
+        task = runtime.tasks.from_agent("metadata.close", runtime.agents.get())
+        run = await runtime.tasks.bind(task).start(TaskGraph("close-final-watch", (
+            TaskNode("agent", task=task, input=AgentTaskInput("done")),
+        )), idempotency_key="close-final")
+        await run.wait(timeout_seconds=5)
+        before = asyncio.all_tasks()
+        stream = run.watch()
+        try:
+            async for event in stream:
+                if (
+                    isinstance(event.event, TaskGraphProjection)
+                    and event.event.phase == "final"
+                    and (not checkpoint or event.event.coverage is not None)
+                ):
+                    break
+            else:
+                pytest.fail("Final projection was not delivered")
+        finally:
+            await stream.aclose()
+        assert not [task for task in asyncio.all_tasks() - before if not task.done()]
