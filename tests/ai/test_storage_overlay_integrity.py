@@ -107,22 +107,10 @@ async def test_batch_replay_refreshes_metadata_after_unobserved_commit() -> None
         await storage.close()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["list", "get"])
-async def test_missing_history_reports_storage_layer_failure(operation: str) -> None:
-    from linktools.ai.storage import StorageEntryRevision
+def test_overlay_does_not_expose_layer_ambiguous_numeric_history() -> None:
+    from linktools.ai.storage import VersionedStorage
 
     backend = InMemoryAssetBackend()
     storage = StorageOverlay(backend, writer=backend)
-    await storage.initialize()
-    try:
-        key = AssetKey("resource", "missing")
-        with pytest.raises(AIError) as raised:
-            if operation == "list":
-                await storage.list_versions(key)
-            else:
-                await storage.get_at_revision(key, StorageEntryRevision(1))
-
-        assert raised.value.code is ErrorCode.STORAGE_LAYER_UNKNOWN
-    finally:
-        await storage.close()
+    assert isinstance(backend, VersionedStorage)
+    assert not isinstance(storage, VersionedStorage)

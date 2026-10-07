@@ -13,6 +13,7 @@ from linktools.ai.asset import (
     AssetKey,
     AssetRoot,
     AssetStore,
+    AssetVersionRef,
     DirectoryAssetBackend,
     FilesystemAssetBackend,
     InMemoryAssetBackend,
@@ -22,11 +23,13 @@ from linktools.ai.storage import (
     InMemoryContentCache,
     StorageChange,
     StorageEntryStatus,
+    StorageEntryRevision,
     StorageLayer,
     StorageOperation,
     StorageOverlay,
     StorageLocatedInfo,
     StorageResetResult,
+    VersionedStorage,
 )
 
 
@@ -58,10 +61,11 @@ def test_in_memory_asset_store_cas_tombstone_and_history() -> None:
         await store.initialize()
         key = AssetKey("sample", "one")
         first = await store.put(key, b"first")
+        version = (await store.resolve_versions((key,)))[0]
         second = await store.put(key, b"second", expected_revision=first.revision)
         assert await store.get(key) == b"second"
-        assert await store.get_at_revision(key, first.revision) == b"first"
-        assert len(await store.list_versions(key)) == 2
+        assert await store.read_versions((version,)) == (b"first",)
+        assert len(await backend.list_versions(key)) == 2
         deleted = await store.delete(key, expected_revision=second.revision)
         assert deleted.deleted is True
         tombstone = await store.stat(key)
@@ -157,7 +161,7 @@ def test_filesystem_asset_store_recovers_history_after_restart(tmp_path: Path) -
         restarted_store, _ = make_store(restarted)
         await restarted_store.initialize()
         assert await restarted_store.get(key) == b"second"
-        assert len(await restarted_store.list_versions(key)) == 2
+        assert len(await restarted.list_versions(key)) == 2
 
     asyncio.run(run())
 
@@ -206,7 +210,11 @@ def test_asset_version_ref_pins_effective_layer() -> None:
 
         await store.put(key, b"primary")
         assert await store.get(key) == b"primary"
-        assert await store.read_versions((frozen,)) == (b"fallback",)
+        current = (await store.resolve_versions((key,)))[0]
+        assert current.layer_id == "primary"
+        assert current.revision == frozen.revision
+        assert await store.read_versions((current, frozen)) == (b"primary", b"fallback")
+        assert not isinstance(store, VersionedStorage)
 
     asyncio.run(run())
 
@@ -256,32 +264,30 @@ def test_asset_store_reset_clears_writer_overlay_and_reveals_layer() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["list", "get"])
-async def test_asset_history_keeps_domain_error_for_missing_layer(operation: str) -> None:
-    from linktools.ai.storage import StorageEntryRevision
+@pytest.mark.parametrize("layer_id", ("primary", "missing"))
+async def test_asset_version_read_distinguishes_missing_layer_and_version(layer_id: str) -> None:
+    import hashlib
 
     store, _storage = make_store(InMemoryAssetBackend())
     await store.initialize()
     try:
-        key = AssetKey("resource", "missing")
+        ref = AssetVersionRef(
+            AssetKey("resource", "missing"), layer_id, StorageEntryRevision(1),
+            hashlib.sha256(b"value").hexdigest(), 5,
+        )
         with pytest.raises(AIError) as raised:
-            if operation == "list":
-                await store.list_versions(key)
-            else:
-                await store.get_at_revision(key, StorageEntryRevision(1))
-
-        assert raised.value.code is ErrorCode.ASSET_VERSION_LAYER_UNKNOWN
-        assert isinstance(raised.value.__cause__, AIError)
-        assert raised.value.__cause__.code is ErrorCode.STORAGE_LAYER_UNKNOWN
+            await store.read_versions((ref,))
+        assert raised.value.code is (
+            ErrorCode.ASSET_VERSION_NOT_FOUND if layer_id == "primary"
+            else ErrorCode.ASSET_VERSION_LAYER_UNKNOWN
+        )
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("code", [ErrorCode.STORAGE_LAYER_UNKNOWN, ErrorCode.STORAGE_UNAVAILABLE])
-async def test_asset_history_maps_only_missing_layer_read_failures(code: ErrorCode) -> None:
-    from linktools.ai.storage import StorageEntryRevision
-
+async def test_asset_version_read_preserves_backend_failures(code: ErrorCode) -> None:
     cause = AIError(code, safe_details={"phase": "history_read"})
 
     class FailingHistoryBackend(InMemoryAssetBackend):
@@ -292,15 +298,11 @@ async def test_asset_history_maps_only_missing_layer_read_failures(code: ErrorCo
     await store.initialize()
     try:
         key = AssetKey("resource", "present")
-        written = await store.put(key, b"value")
+        await store.put(key, b"value")
+        refs = await store.resolve_versions((key,))
         with pytest.raises(AIError) as raised:
-            await store.get_at_revision(key, written.revision)
+            await store.read_versions(refs)
 
-        if code is ErrorCode.STORAGE_LAYER_UNKNOWN:
-            assert raised.value.code is ErrorCode.ASSET_VERSION_LAYER_UNKNOWN
-            assert raised.value.__cause__ is cause
-            assert raised.value.safe_details == {"phase": "history_read"}
-        else:
-            assert raised.value is cause
+        assert raised.value is cause
     finally:
         await store.close()
