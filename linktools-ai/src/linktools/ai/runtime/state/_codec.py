@@ -421,7 +421,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "evaluation_paired_dimension_summary": ('selection', 'planned_pairs', 'complete_pairs', 'baseline_missing', 'candidate_missing', 'both_missing', 'not_comparable', 'mean_difference', 'complete_cases', 'weight_sum', 'baseline_mean', 'candidate_mean', 'direction'),
         "evaluation_comparison_report": ('report_id', 'baseline', 'candidate', 'selections', 'compatibility', 'differences', 'dimensions', 'gate', 'gate_reasons', 'cutoff', 'created_at', 'pairs', 'gate_policy'),
         "evaluation_slot_disposition_view": ('kind', 'reason_code', 'terminal', 'retryable', 'created_at'),
-        "evaluation_trial_view": ('trial', 'case_ref', 'candidate_slot_id', 'repetition', 'graph_ref', 'subject', 'execution_status', 'disposition', 'evidence_ref', 'error_code'),
+        "evaluation_trial_view": ('trial', 'case_ref', 'candidate_slot_id', 'repetition', 'graph_ref', 'subject', 'execution_status', 'disposition', 'evidence_ref', 'error_code', 'graph_status'),
         "evaluation_score_attempt_view": ('scoring_experiment_id', 'score_attempt_id', 'trial', 'scorer_slot_id', 'scorer_task', 'status', 'score', 'scorer_execution', 'scorer_graph', 'scorer_node_id', 'evidence_ref', 'decision_id', 'reason'),
         "evaluation_execution_subject_ref": ('namespace', 'tenant_id', 'execution_id'),
         "evaluation_graph_subject_ref": ('namespace', 'tenant_id', 'graph_id'),

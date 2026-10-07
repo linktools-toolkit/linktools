@@ -38,7 +38,7 @@ from ..evaluation import (
     ModelUsage, PriceTable, estimate_model_budget,
     ScorerContract, ScoringInput, SlotDispositionView, StartEvaluationRequest,
     TargetTrialRef, TrialFilter, TrialPlan, TrialView, build_comparison_report,
-    build_evaluation_report, capture_mapping,
+    build_evaluation_report, capture_mapping, evaluation_completion,
 )
 from ..task import (
     Task, TaskGraph, TaskGraphService, TaskGraphState, TaskInputSupplyRequest,
@@ -89,27 +89,18 @@ def _score_slot(trial: TargetTrialRef, scorer: str) -> str:
     return f"score:{trial.trial_id}:{scorer}"
 
 
-def _terminal(trial: TrialView) -> bool:
-    return (trial.disposition is not None and trial.disposition.terminal or
-            trial.execution_status is not None and trial.execution_status.value in
-            {"SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED"})
-
-
 def _completion(
     record: EvaluationRecord, trials: tuple[TrialView, ...], scores: tuple[ScoreAttemptView, ...],
     *, blocked: bool = False,
 ) -> str:
-    complete = (all(_terminal(item) for item in trials) and
-                all(item.status in _RECORDED for item in scores) and
-                all(item.released for item in record.intents))
-    if complete:
-        budget_stopped = record.gate == "closed_budget" and any(
-            item.disposition.reason_code == "closed_budget" for item in record.dispositions)
-        return "cancelled" if record.gate == "closed_cancel" or budget_stopped else "complete"
-    if blocked or any(not item.disposition.terminal for item in record.dispositions) or any(
-            item.execution_status in {TaskStatus.RECOVERY_REQUIRED, ExecutionStatus.RECOVERY_REQUIRED} for item in trials):
-        return "needs_attention"
-    return "cancelling" if record.gate == "closed_cancel" else "running"
+    budget_stopped = record.gate == "closed_budget" and any(
+        item.disposition.reason_code == "closed_budget" for item in record.dispositions)
+    return evaluation_completion(
+        trials, scores,
+        pending_launches=any(not item.released for item in record.intents),
+        blocked=blocked or any(not item.disposition.terminal for item in record.dispositions),
+        cancellation_requested=record.gate == "closed_cancel", budget_stopped=budget_stopped,
+    )
 
 
 class RuntimeEvaluations:
@@ -515,10 +506,11 @@ class RuntimeEvaluations:
                             execution = await self._execution.inspect(subject.execution_id, principal=principal)
                             status = execution.status
                             revisions[f"execution:{subject.execution_id}"] = execution.event_sequence
-                        item = replace(item, graph_ref=graph_ref, subject=subject,
+                        item = replace(item, graph_ref=graph_ref, graph_status=state.status, subject=subject,
                                        execution_status=status or state.status, error_code=node.error_code)
                     else:
-                        item = replace(item, graph_ref=graph_ref, subject=graph_ref, execution_status=state.status)
+                        item = replace(item, graph_ref=graph_ref, graph_status=state.status,
+                                       subject=graph_ref, execution_status=state.status)
             result.append(item)
         return tuple(result), revisions
 
@@ -567,7 +559,8 @@ class RuntimeEvaluations:
                                  retryable=item.disposition.retryable)
                   for item in record.dispositions if not item.disposition.terminal]
         for trial in trials:
-            if trial.execution_status in {TaskStatus.RECOVERY_REQUIRED, ExecutionStatus.RECOVERY_REQUIRED}:
+            if (trial.graph_status is TaskStatus.RECOVERY_REQUIRED
+                    or trial.execution_status in {TaskStatus.RECOVERY_REQUIRED, ExecutionStatus.RECOVERY_REQUIRED}):
                 issues.append(EvaluationIssue("recovery_required", "native graph requires recovery", trial.trial, retryable=True))
         for intent in record.intents:
             if intent.scorer_slot_id is not None and not intent.released:
@@ -575,7 +568,7 @@ class RuntimeEvaluations:
                 if state is not None and state.status is TaskStatus.RECOVERY_REQUIRED:
                     issues.append(EvaluationIssue("recovery_required", "scorer graph requires recovery",
                                                  intent.trial, intent.scorer_slot_id, True))
-        terminal_trials = sum(_terminal(item) for item in trials)
+        terminal_trials = sum(item.terminal for item in trials)
         terminal_scores = sum(item.status in _RECORDED for item in scores)
         completion = _completion(record, trials, scores, blocked=bool(issues))
         return EvaluationView(experiment_id, record.manifest.kind, record.manifest.source_experiment_id,
@@ -748,7 +741,7 @@ class RuntimeEvaluations:
             values = tuple(item for item in report.trials if
                 (not filters.candidate_slot_ids or item.candidate_slot_id in filters.candidate_slot_ids) and
                 (not filters.case_refs or item.case_ref in filters.case_refs) and
-                (filters.terminal is None or _terminal(item) == filters.terminal))
+                (filters.terminal is None or item.terminal == filters.terminal))
         else:
             values = tuple(item for item in report.score_attempts if
                 (not filters.scorer_slot_ids or item.scorer_slot_id in filters.scorer_slot_ids) and

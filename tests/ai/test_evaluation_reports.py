@@ -415,3 +415,29 @@ def test_blocked_native_trial_is_terminal_failure_not_pending() -> None:
         right_values=(1.0,) * len(trials), policy=GatePolicy(maximum_failure_rate=0))
     assert comparison.gate == "fail"
     assert "pending_or_recovery_required" not in comparison.gate_reasons
+
+
+def test_recoverable_disposition_requires_attention_in_pure_report() -> None:
+    from linktools.ai.evaluation import SlotDispositionView
+
+    manifest = _manifest("recoverable")
+    trials = tuple(replace(trial, execution_status=None, disposition=SlotDispositionView(
+        "recoverable_blocked", "temporarily_unavailable", False, True, NOW,
+    )) for trial in _trials(manifest))
+    report = build_evaluation_report(manifest, CASES, trials,
+        _scores(manifest, (None,) * len(trials), status="pending"), cutoff=_cutoff(manifest),
+        report_id="recoverable-report", created_at=NOW)
+    assert report.completion == "needs_attention"
+
+
+def test_successful_trial_with_graph_recovery_blocks_reports_and_comparison() -> None:
+    left, right = _manifest("base"), _manifest("candidate")
+    trials = tuple(replace(trial, graph_status=TaskStatus.RECOVERY_REQUIRED) for trial in _trials(right))
+    report = build_evaluation_report(right, CASES, trials, _scores(right, (1,) * len(trials)),
+        cutoff=_cutoff(right), report_id="graph-recovery", created_at=NOW)
+    assert report.completion == "needs_attention"
+    assert report.candidates[0].succeeded == len(trials)
+    comparison = _compare(left=left, right=right, trials=_trials(left) + trials,
+        policy=GatePolicy(minimum_coverage=0.1))
+    assert comparison.gate == "inconclusive"
+    assert "pending_or_recovery_required" in comparison.gate_reasons

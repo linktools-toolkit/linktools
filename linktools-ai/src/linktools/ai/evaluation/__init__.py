@@ -62,6 +62,7 @@ from ._views import (
     SlotDispositionView,
     TrialFilter,
     TrialView,
+    evaluation_completion,
 )
 from ._reports import (
     CandidateSlotRef,
@@ -154,6 +155,7 @@ __all__ = [
     "TrialFilter",
     "TrialPlan",
     "TrialView",
+    "evaluation_completion",
     "build_comparison_report",
     "build_evaluation_report",
     "capture_mapping",
