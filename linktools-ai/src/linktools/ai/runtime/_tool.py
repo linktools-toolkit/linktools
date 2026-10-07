@@ -48,6 +48,7 @@ from .state._contracts import (
 )
 
 _logger = environ.get_logger("ai.runtime.tool")
+TOOL_OPERATION_LEASE_SECONDS = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,7 +297,6 @@ class RuntimeToolOperationBridge:
         self._terminal_commands = terminal_commands
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
         self._decision_fingerprints: dict[tuple[str, str], tuple[str, str]] = {}
-        self._lease_seconds = 60
 
     async def begin(
         self,
@@ -353,7 +353,7 @@ class RuntimeToolOperationBridge:
             binding_digest=self._binding_digest,
             replay_safe=replay_safe,
             owner=self._owner,
-            lease_seconds=self._lease_seconds,
+            lease_seconds=TOOL_OPERATION_LEASE_SECONDS,
             arguments_payload=arguments_payload,
         )
         if self._terminal_commands is not None:
@@ -435,7 +435,7 @@ class RuntimeToolOperationBridge:
                 tenant_id=self._tenant_id,
                 owner=self._owner,
                 fence=decision.fence,
-                lease_seconds=self._lease_seconds,
+                lease_seconds=TOOL_OPERATION_LEASE_SECONDS,
             )
         except AIError as error:
             _logger.warning(
@@ -988,6 +988,7 @@ def _decision_type(
 
 
 __all__ = [
+    "TOOL_OPERATION_LEASE_SECONDS",
     "RuntimeToolOperationBridge",
     "ToolOperationBridge",
     "ToolOperationAdmission",

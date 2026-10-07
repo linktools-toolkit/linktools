@@ -35,7 +35,7 @@ from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..workspace import SandboxSession, ToolPermissionPolicy
 from ._attachment import bind_tool_return_attachments
-from ._tool import ToolOperationBridge
+from ._tool import TOOL_OPERATION_LEASE_SECONDS, ToolOperationBridge
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
     _ToolMetricContext,
@@ -311,17 +311,50 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         async def invoke(args: dict[str, Any]) -> Any:
             return await raw_toolset.call_tool(name, args, ctx, raw_tool)
 
+        cancelled_after_leaf = False
+
+        async def invoke_with_lease() -> Any:
+            nonlocal cancelled_after_leaf
+            caller = asyncio.current_task()
+            if caller is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            stopping = False
+
+            async def renew() -> None:
+                nonlocal decision
+                try:
+                    while not stopping:
+                        await asyncio.sleep(TOOL_OPERATION_LEASE_SECONDS / 3)
+                        decision = await bridge.renew(decision)
+                except BaseException:
+                    if not stopping:
+                        caller.cancel()
+                    raise
+
+            heartbeat = asyncio.create_task(
+                renew(), name=f"tool-heartbeat-{decision.operation_id}"
+            )
+            try:
+                return await self._invoke(call, tool.tool_def, final_args, invoke)
+            finally:
+                stopping = True
+                heartbeat.cancel()
+                cleanup = asyncio.gather(heartbeat, return_exceptions=True)
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        cancelled_after_leaf = True
+                # A leaf may suppress cancellation; it still cannot commit a lost claim.
+                if not heartbeat.cancelled():
+                    heartbeat.result()
+
         async def unknown_after_leaf(error: BaseException) -> None:
             await bridge.unknown(decision, error)
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
 
         try:
-            result = await self._invoke(
-                call,
-                tool.tool_def,
-                final_args,
-                invoke,
-            )
+            result = await invoke_with_lease()
         except (
             ApprovalRequired,
             CallDeferred,
@@ -329,19 +362,19 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             if not replay_safe:
                 await unknown_after_leaf(error)
             cancelled = await bridge.defer(decision)
-            if cancelled:
+            if cancelled or cancelled_after_leaf:
                 raise asyncio.CancelledError
             raise
         except (ToolCallRetry, ToolCallFailed) as error:
             cancelled = await bridge.fail(decision, error)
-            if cancelled:
+            if cancelled or cancelled_after_leaf:
                 raise asyncio.CancelledError
             raise
         except SkipToolExecution as error:
             if not replay_safe:
                 await unknown_after_leaf(error)
             cancelled = await bridge.complete(decision, error.result)
-            if cancelled:
+            if cancelled or cancelled_after_leaf:
                 raise asyncio.CancelledError
             raise
         except asyncio.CancelledError as error:
@@ -351,7 +384,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             await unknown_after_leaf(error)
             raise AssertionError("unreachable")
         cancelled = await bridge.complete(decision, result)
-        if cancelled:
+        if cancelled or cancelled_after_leaf:
             raise asyncio.CancelledError
         return result
 
