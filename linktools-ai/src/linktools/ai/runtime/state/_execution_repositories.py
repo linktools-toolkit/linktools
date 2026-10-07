@@ -9,6 +9,7 @@ from linktools.core import environ
 from ...core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, JsonValue, Page, ResourceKind
 from ...errors import AIError, ErrorCode
 from ...task import TaskBindingContract
+from ._budget import BudgetRepositoryImpl
 from ._contracts import ExecutionCandidate, ExecutionCandidatePage, ExecutionCancelRequestCommit, ExecutionEventAppend, ExecutionEventRecord, ExecutionHistoryHeadRecord, ExecutionHistorySealRecord, ExecutionHistoryState, ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation, ExecutionStartReservationResult, ExecutionStartUnknownCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord
 from ._plan import RuntimeDomain
 from ._store import FactQuery, RecordQuery, RecordReplacement, StateStore, StateTransaction, StoredFact, StoredRecord, operation_key, stream_digest
@@ -142,6 +143,9 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             kind="execution",
             resource_kind=ResourceKind.EXECUTION,
             value_type=ExecutionRecord,
+        )
+        self._budgets = BudgetRepositoryImpl(
+            store, namespace=namespace, tenant_id=tenant_id,
         )
         self._idempotency = IdempotencyRepositoryImpl(
             store,
@@ -377,6 +381,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
         self._idempotency._require_resource_kind(reservation.idempotency)
+        if reservation.budget is not None and (
+            reservation.execution.budget_scope_id != "execution:" + reservation.execution.execution_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def mutate(
             transaction: StateTransaction,
@@ -433,6 +441,14 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 )
             if execution_key in records or head_key in records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            scope_id = reservation.execution.budget_scope_id
+            if scope_id is not None:
+                if reservation.budget is None:
+                    await self._budgets.read_in_transaction(transaction, scope_id)
+                else:
+                    await self._budgets.ensure_in_transaction(
+                        transaction, scope_id, reservation.budget,
+                    )
             head = ExecutionHistoryHeadRecord(
                 reservation.execution.execution_id,
                 ExecutionHistoryState.OPEN,

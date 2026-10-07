@@ -155,21 +155,6 @@ class BudgetRepositoryImpl(RepositoryBase):
                               row.storage_version)
 
     async def ensure(self, scope_id: str, limits: RunBudget) -> BudgetUsage:
-        initial = BudgetUsage(scope_id, limits)
-
-        async def write(transaction: StateTransaction) -> BudgetUsage:
-            row = await transaction.get_record(self._key("budget_scope", scope_id))
-            if row is not None:
-                value = await self._decode(row, BudgetUsage)
-                if value.scope_id != scope_id:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if value.limits != limits:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT,
-                                  safe_details={"reason": "budget_limits_changed"})
-                return value
-            await transaction.insert_record(self._stored("budget_scope", scope_id, initial))
-            return initial
-
         async def readback() -> BudgetUsage | None:
             row = await self._record(self._key("budget_scope", scope_id))
             if row is None:
@@ -177,13 +162,39 @@ class BudgetRepositoryImpl(RepositoryBase):
             value = await self._decode(row, BudgetUsage)
             return value if value.limits == limits else None
 
-        return await self._commit(lambda: self._mutate(write), readback)
+        return await self._commit(
+            lambda: self._mutate(
+                lambda transaction: self.ensure_in_transaction(transaction, scope_id, limits)
+            ),
+            readback,
+        )
+
+    async def ensure_in_transaction(
+        self, transaction: StateTransaction, scope_id: str, limits: RunBudget,
+    ) -> BudgetUsage:
+        row = await transaction.get_record(self._key("budget_scope", scope_id))
+        if row is not None:
+            value = await self._decode(row, BudgetUsage)
+            if value.scope_id != scope_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if value.limits != limits:
+                raise AIError(ErrorCode.STORAGE_CONFLICT,
+                              safe_details={"reason": "budget_limits_changed"})
+            return value
+        initial = BudgetUsage(scope_id, limits)
+        await transaction.insert_record(self._stored("budget_scope", scope_id, initial))
+        return initial
 
     async def read(self, scope_id: str) -> BudgetUsage:
         self._require_open()
-        async def read(transaction: StateTransaction) -> BudgetUsage:
-            return (await self._scope_record(transaction, scope_id))[1]
-        return await self._store.read(read)
+        return await self._store.read(
+            lambda transaction: self.read_in_transaction(transaction, scope_id)
+        )
+
+    async def read_in_transaction(
+        self, transaction: StateTransaction, scope_id: str,
+    ) -> BudgetUsage:
+        return (await self._scope_record(transaction, scope_id))[1]
 
     async def check(self, scope_id: str) -> BudgetUsage:
         """Gate uncounted graph work without reserving a model or tool call."""

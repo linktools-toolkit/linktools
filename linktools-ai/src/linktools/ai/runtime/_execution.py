@@ -2218,6 +2218,7 @@ class DefaultExecutionService:
                     created_at=now,
                     updated_at=now,
                 ),
+                budget=request.budget,
             )
         )
         if not reservation.created:
@@ -2339,10 +2340,7 @@ class DefaultExecutionService:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if execution.budget_scope_id is not None:
-            if execution.budget_scope_id == "execution:" + execution.execution_id and request.budget is not None:
-                await self._state.budgets.ensure(execution.budget_scope_id, request.budget)
-            else:
-                await self._state.budgets.read(execution.budget_scope_id)
+            await self._state.budgets.read(execution.budget_scope_id)
         identity = ExecutionStartIdentity(scope, idempotency_key_digest, request_digest)
         try:
             started = await self._backend.prepare_start(
