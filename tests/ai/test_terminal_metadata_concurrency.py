@@ -153,7 +153,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
             handle = await agent.session("session").start("hello", principal=PRINCIPAL)
         else:
             handle = await agent.start("hello", principal=PRINCIPAL)
-        result = await handle.wait(timeout_seconds=20)
+        result = (await handle.wait(timeout_seconds=20)).result
         assert changed
         assert result.status is ExecutionStatus.SUCCEEDED
         observed = await state.execution.executions.get(

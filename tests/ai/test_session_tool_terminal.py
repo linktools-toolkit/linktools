@@ -183,7 +183,7 @@ async def test_session_tool_turn_commits_terminal_and_history(
                 async for item in execution.watch(include_content=True)
                 if item.depth == 0
             ]
-            result = await execution.wait(timeout_seconds=10)
+            result = (await execution.wait(timeout_seconds=10)).result
 
             assert result.status is ExecutionStatus.SUCCEEDED
             assert calls == ["lookup"]
@@ -256,16 +256,16 @@ async def test_session_tool_turn_commits_terminal_and_history(
                 "inspect",
                 idempotency_key="turn-1",
             )
-            retried_result = await retried.wait(timeout_seconds=10)
+            retried_result = (await retried.wait(timeout_seconds=10)).result
             assert retried.execution_id == execution.execution_id
             assert retried_result.status is ExecutionStatus.SUCCEEDED
             assert calls == ["lookup"]
 
-            second = await session.run(
+            second = (await session.run(
                 "continue",
                 idempotency_key="turn-2",
                 timeout_seconds=10,
-            )
+            )).result
             assert second.status is ExecutionStatus.SUCCEEDED
             assert calls == ["lookup"]
             accumulated = await session.history()
@@ -441,7 +441,7 @@ async def test_rejected_session_start_cleans_only_its_admission(
 
                 release_tool.set()
                 if owner is not None:
-                    result = await owner.wait(timeout_seconds=15)
+                    result = (await owner.wait(timeout_seconds=15)).result
                     assert result.status is ExecutionStatus.SUCCEEDED
             finally:
                 release_tool.set()
@@ -1285,7 +1285,7 @@ async def test_public_recovery_converges_after_tool_effect_resolution(
 
             recovered = await execution.recover()
             assert recovered.execution_id == execution_id
-            result = await execution.wait(timeout_seconds=15)
+            result = (await execution.wait(timeout_seconds=15)).result
             expected_execution_status = (
                 ExecutionStatus.CANCELLED
                 if with_cancel
@@ -1425,7 +1425,7 @@ async def test_no_worker_cancel_intent_survives_replay_and_recovery(
             assert resolution.status is ToolOperationStatus.COMPLETED
 
             await execution.recover()
-            result = await execution.wait(timeout_seconds=10)
+            result = (await execution.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.CANCELLED
             assert calls == ["lookup"]
             assert effect_log.read_text().splitlines() == [execution.execution_id]
@@ -1745,7 +1745,7 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
                 async for item in execution.watch(include_content=True)
                 if item.depth == 0
             ]
-            result = await execution.wait(timeout_seconds=10)
+            result = (await execution.wait(timeout_seconds=10)).result
 
             assert result.status is ExecutionStatus.SUCCEEDED
             assert calls == ["lookup"]
@@ -1822,7 +1822,7 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
             async for item in execution.watch(include_content=True)
             if item.depth == 0
         ]
-        result = await execution.wait(timeout_seconds=10)
+        result = (await execution.wait(timeout_seconds=10)).result
 
         assert injected
         assert result.status is ExecutionStatus.FAILED
@@ -1835,16 +1835,16 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
             "inspect",
             idempotency_key="turn-1",
         )
-        same_result = await same.wait(timeout_seconds=10)
+        same_result = (await same.wait(timeout_seconds=10)).result
         assert same.execution_id == execution.execution_id
         assert same_result.status is ExecutionStatus.FAILED
         assert calls == ["lookup"]
 
-        retry = await session.run(
+        retry = (await session.run(
             "retry",
             idempotency_key="turn-2",
             timeout_seconds=10,
-        )
+        )).result
         assert retry.status is ExecutionStatus.SUCCEEDED
         assert calls == ["lookup", "lookup"]
 
@@ -2116,7 +2116,7 @@ async def test_split_storage_handoff_reconciles_prepared_checkpoint_after_restar
         ) as runtime:
             session = runtime.agents.get("default").session("session")
             execution = await session.start("inspect", idempotency_key="turn-1")
-            result = await execution.wait(timeout_seconds=15)
+            result = (await execution.wait(timeout_seconds=15)).result
             assert execution.execution_id == execution_id
             assert result.status is ExecutionStatus.SUCCEEDED
             assert calls == []
@@ -2214,7 +2214,7 @@ async def test_split_storage_success_handoff_wins_cancel_race(
             assert replayed_cancel.cancelled is False
 
             release_handoff.set()
-            result = await execution.wait(timeout_seconds=15)
+            result = (await execution.wait(timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED
             final_execution = await state.execution.executions.get(
                 execution.execution_id,
@@ -2517,7 +2517,7 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
             assert calls == []
         else:
             same = await session.start("inspect", idempotency_key="turn-1")
-            result = await same.wait(timeout_seconds=10)
+            result = (await same.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
             assert calls == (["lookup"] if phase in {"activated", "request_checkpoint"} else [])
             history = await session.history()
@@ -2611,7 +2611,7 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
             await runtime.agents.get("default").create_session("session")
             session = runtime.agents.get("default").session("session")
             execution = await session.start("inspect", idempotency_key="turn-1")
-            result = await execution.wait(timeout_seconds=10)
+            result = (await execution.wait(timeout_seconds=10)).result
             assert injected
             assert result.status is ExecutionStatus.FAILED
             assert result.error_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
@@ -2622,12 +2622,12 @@ async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
             replay = await session.start("inspect", idempotency_key="turn-1")
             assert replay.execution_id == execution.execution_id
             assert (
-                await replay.wait(timeout_seconds=10)
+                (await replay.wait(timeout_seconds=10)).result
             ).status is ExecutionStatus.FAILED
             assert calls == ["lookup"]
-            following = await session.run(
+            following = (await session.run(
                 "next", idempotency_key="turn-2", timeout_seconds=10
-            )
+            )).result
             assert following.status is ExecutionStatus.SUCCEEDED
             assert calls == ["lookup", "lookup"]
     finally:

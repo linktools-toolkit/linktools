@@ -73,9 +73,9 @@ async def main() -> None:
             "evaluate-echo-cases-v1",
         )
         run = await runtime.evaluations.start(request, engine=engine)
-        view = await run.wait(timeout_seconds=10)
+        view = (await run.wait(timeout_seconds=10)).result
         assert view.completion == "complete", view.needs_attention
-        report = await run.report()
+        report = await run.create_report()
         assert report.scores[0].valid == report.scores[0].planned == 2
         assert report.scores[0].mean == report.scores[0].coverage == 1.0
         print(export_report(report, format="markdown"))
@@ -353,7 +353,7 @@ rescored = await run.rescore(
     RescoreRequest((revised_scorer,), "rescore-v2"),
     engine=runtime.tasks.bind(revised_judge),
 )
-view = await rescored.wait(timeout_seconds=10)
+view = (await rescored.wait(timeout_seconds=10)).result
 assert view.kind == "score_only"
 assert view.source_experiment_id == run.experiment_id
 ```
@@ -379,7 +379,7 @@ selection = ScoreComparisonSelection(
     ScoreSelection("exact", "exact_match"),
     ScoreSelection("exact", "exact_match"),
 )
-comparison = await runtime.evaluations.compare(
+comparison = await runtime.evaluations.create_comparison_report(
     ComparisonSpec(
         CandidateSlotRef(run.experiment_id, "baseline"),
         CandidateSlotRef(run.experiment_id, "candidate"),

@@ -4,9 +4,10 @@
 
 import asyncio
 import json
+import sys
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, TypeVar
@@ -24,7 +25,7 @@ from ..core import (
     idempotency_key_digest, normalize_json_value, principal_identity_payload, validate_idempotency_key,
     validate_page_limit,
 )
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ObservationError
 from ..evaluation import (
     EvaluationPurgeResult,
     CaseContract, CaseRef, CaseSpec, ComparisonReadCutoff,
@@ -49,7 +50,15 @@ from ._evaluation_retention import EvaluationRetention, require_evaluation_conte
 from ._input import input_intent
 from ._input_capture import CaptureInputRequest
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from .service_api import ExecutionService, UsageSummary
+from .service_api import ExecutionService, UsageSummary, TaskGraphRunEvent
+from ._wait import WaitResult
+from ._observation import (
+    _ObservationSession, _wait, _validate_wait, _await_stream_cleanup,
+    _cancel_stream_task, _is_observation_cleanup, _report_observation_error,
+)
+from ._watch_cursor import (
+    decode_evaluation_watch_cursor, encode_evaluation_watch_cursor, decode_graph_watch_cursor,
+)
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage, SnapshotExclusiveGuard
 from .state._contracts import IdempotencyRecord
 from .state._evaluation_records import (
@@ -131,6 +140,18 @@ class RuntimeEvaluations:
         self._watchers: dict[str, asyncio.Task[None]] = {}
         self._closed = False
         self._recorder = Task("evaluation.record.v1", self._record_score, effect_policy="replay_safe")
+
+    def _bind_observation(
+        self,
+        watch_graph: Callable[[str, Principal, str | None, bool, asyncio.Event | None], AsyncIterator[TaskGraphRunEvent]],
+        replay_graph: Callable[[str, Principal, str | None, bool], Awaitable[AsyncIterator[TaskGraphRunEvent]]],
+        register: Callable[[_ObservationSession], None],
+        release: Callable[[_ObservationSession], None],
+    ) -> None:
+        self._watch_graph = watch_graph
+        self._replay_graph = replay_graph
+        self._register_observation = register
+        self._release_observation = release
 
     async def purge_expired(
         self, *, principal: Principal, now: datetime,
@@ -629,7 +650,7 @@ class RuntimeEvaluations:
             await self._require_content(source, principal)
         return report
 
-    async def compare(self, spec: ComparisonSpec, *, principal: Principal) -> ComparisonReport:
+    async def create_comparison_report(self, spec: ComparisonSpec, *, principal: Principal) -> ComparisonReport:
         await self._record(spec.baseline.experiment_id, principal, AuthorizationAction.EVALUATION_COMPARE)
         await self._record(spec.candidate.experiment_id, principal, AuthorizationAction.EVALUATION_COMPARE)
         ids = tuple(dict.fromkeys((spec.baseline.experiment_id, spec.candidate.experiment_id, *(
@@ -1339,16 +1360,216 @@ class EvaluationRun:
     async def inspect(self) -> EvaluationView:
         return await self._evaluations._inspect(self.experiment_id, self._principal)
 
-    async def wait(self, *, timeout_seconds: float | None = None) -> EvaluationView:
-        if timeout_seconds is not None and timeout_seconds < 0:
-            raise ValueError("timeout_seconds must be nonnegative")
-        async def wait_for_completion() -> EvaluationView:
+    async def wait(
+        self, *, on_event: Callable[[TaskGraphRunEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+    ) -> WaitResult[EvaluationView]:
+        _validate_wait(on_event, cursor, include_content, timeout_seconds, close_timeout_seconds)
+
+        async def authoritative() -> EvaluationView:
             while True:
                 view = await self.inspect()
                 if view.completion in {"complete", "cancelled", "needs_attention"}:
                     return view
                 await asyncio.sleep(0.05)
-        return await asyncio.wait_for(wait_for_completion(), timeout_seconds)
+
+        return await _wait(
+            scope="evaluation", resource_id=self.experiment_id, waiter=authoritative,
+            watch=lambda ready: self._watch_prepared(cursor, include_content, ready),
+            on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
+            close_timeout_seconds=close_timeout_seconds,
+            register=self._evaluations._register_observation,
+            release=self._evaluations._release_observation,
+        )
+
+    def watch(
+        self, *, cursor: str | None = None, include_content: bool = False,
+    ) -> AsyncIterator[TaskGraphRunEvent]:
+        return self._watch_prepared(cursor, include_content, None)
+
+    def _watch_prepared(
+        self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,
+    ) -> AsyncIterator[TaskGraphRunEvent]:
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        cursors = {} if cursor is None else decode_evaluation_watch_cursor(
+            self._evaluations._namespace, self._principal.tenant_id, self.experiment_id,
+            cursor, include_content=include_content,
+        )
+        return self._watch(cursors, include_content, ready, cursor)
+
+    async def _watch(
+        self, cursors: dict[str, str], include_content: bool,
+        ready: asyncio.Event | None, initial_cursor: str | None,
+    ) -> AsyncIterator[TaskGraphRunEvent]:
+        owner = self._evaluations
+        streams: dict[str, AsyncIterator[TaskGraphRunEvent]] = {}
+        tasks: dict[str, asyncio.Task[TaskGraphRunEvent]] = {}
+        known: set[str] = set()
+        inactive_sequences: dict[str, int] = {}
+        last_cursor = initial_cursor
+        finite = False
+
+        def scoped_error(error: BaseException) -> BaseException:
+            if not isinstance(error, ObservationError):
+                return error
+            scoped = ObservationError(
+                error.origin, cursor=last_cursor, cause_code=error.cause_code,
+                safe_details=error.safe_details, diagnostics=error.diagnostics,
+            )
+            scoped.__cause__ = error.__cause__
+            return scoped
+
+        async def close_streams() -> None:
+            errors: list[BaseException] = []
+            for task in tasks.values():
+                if not task.done():
+                    _cancel_stream_task(task)
+            pending = set(tasks.values())
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        task.result()
+                    except StopAsyncIteration:
+                        pass
+                    except BaseException as error:
+                        if not _is_observation_cleanup(error):
+                            error = scoped_error(error)
+                            errors.append(error)
+                            _report_observation_error(error)
+            for stream in streams.values():
+                try:
+                    await stream.aclose()
+                except BaseException as error:
+                    if not _is_observation_cleanup(error):
+                        error = scoped_error(error)
+                        errors.append(error)
+                        _report_observation_error(error)
+            tasks.clear()
+            streams.clear()
+            if errors:
+                fatal = next((error for error in errors if not isinstance(error, ObservationError)), errors[0])
+                raise fatal
+
+        async def start(graph_id: str, stream: AsyncIterator[TaskGraphRunEvent], prepared: asyncio.Event | None) -> None:
+            streams[graph_id] = stream
+            task = asyncio.create_task(stream.__anext__(), name=f"evaluation-graph-{graph_id}")
+            tasks[graph_id] = task
+            if prepared is None:
+                # A finite reader validates its starting watermark before its first item/EOF.
+                try:
+                    await asyncio.shield(task)
+                except StopAsyncIteration:
+                    pass
+                return
+            waiting = asyncio.create_task(prepared.wait())
+            try:
+                await asyncio.wait({waiting, task}, return_when=asyncio.FIRST_COMPLETED)
+                if task.done():
+                    try:
+                        task.result()
+                    except StopAsyncIteration:
+                        pass
+            finally:
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
+
+        try:
+            while True:
+                if not finite:
+                    record = await owner._record(self.experiment_id, self._principal)
+                    members = {intent.submission.graph.graph_id for intent in record.intents if intent.confirmed}
+                    if set(cursors) - members:
+                        raise AIError(ErrorCode.CURSOR_INVALID)
+                    view = await self.inspect()
+                    finite = view.completion in {"complete", "cancelled", "needs_attention"}
+                    if finite:
+                        record = await owner._record(self.experiment_id, self._principal)
+                        members = {intent.submission.graph.graph_id for intent in record.intents if intent.confirmed}
+                        # Freeze every graph's durable vector before delivering the final drain.
+                        snapshots = {
+                            graph_id: await owner._replay_graph(
+                                graph_id, self._principal, cursors.get(graph_id), include_content,
+                            ) for graph_id in sorted(members)
+                        }
+                        await close_streams()
+                        for graph_id, stream in snapshots.items():
+                            await start(graph_id, stream, None)
+                    else:
+                        pending_members = members - known
+                        for graph_id, sequence in tuple(inactive_sequences.items()):
+                            state = await owner._graph.state(graph_id, principal=self._principal)
+                            if state.event_sequence > sequence:
+                                pending_members.add(graph_id)
+                                inactive_sequences.pop(graph_id)
+                        for graph_id in sorted(pending_members):
+                            prepared = asyncio.Event()
+                            stream = owner._watch_graph(
+                                graph_id, self._principal, cursors.get(graph_id), include_content, prepared,
+                            )
+                            await start(graph_id, stream, prepared)
+                    known.update(members)
+                    if ready is not None:
+                        ready.set()
+                if not tasks:
+                    if finite:
+                        return
+                    await asyncio.sleep(0.05)
+                    continue
+                done, _ = await asyncio.wait(
+                    set(tasks.values()), timeout=None if finite else 0.05,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    if task.cancelled():
+                        task.result()
+                    error = task.exception()
+                    if error is not None and not isinstance(error, (StopAsyncIteration, ObservationError)):
+                        raise error
+                for graph_id in sorted(tuple(tasks)):
+                    task = tasks[graph_id]
+                    if task not in done:
+                        continue
+                    try:
+                        item = task.result()
+                    except StopAsyncIteration:
+                        tasks.pop(graph_id)
+                        await streams.pop(graph_id).aclose()
+                        if not finite:
+                            graph_cursor = cursors.get(graph_id)
+                            inactive_sequences[graph_id] = 0 if graph_cursor is None else decode_graph_watch_cursor(
+                                owner._namespace, self._principal.tenant_id, graph_id,
+                                graph_cursor, include_content=include_content,
+                            )[0]
+                        continue
+                    if item.cursor is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    next_cursors = {**cursors, graph_id: item.cursor}
+                    next_cursor = encode_evaluation_watch_cursor(
+                        owner._namespace, self._principal.tenant_id, self.experiment_id,
+                        include_content=include_content, graph_cursors=next_cursors,
+                    )
+                    cursors = next_cursors
+                    last_cursor = next_cursor
+                    yield replace(item, cursor=next_cursor)
+                    tasks[graph_id] = asyncio.create_task(streams[graph_id].__anext__())
+        except ObservationError as error:
+            scoped = ObservationError(
+                error.origin, cursor=last_cursor, cause_code=error.cause_code,
+                safe_details=error.safe_details, diagnostics=error.diagnostics,
+            )
+            raise scoped from error.__cause__
+        finally:
+            active_error = sys.exc_info()[1]
+            try:
+                await _await_stream_cleanup(close_streams(), active_error)
+            except BaseException as error:
+                if (isinstance(error, asyncio.CancelledError) or active_error is None
+                        or isinstance(active_error, GeneratorExit) or _is_observation_cleanup(active_error)
+                        or isinstance(active_error, ObservationError) and active_error.origin == "stream"):
+                    raise scoped_error(error)
 
     async def trials(
         self, *, filters: TrialFilter | None = None, cursor: str | None = None, limit: int = 100,
@@ -1360,7 +1581,7 @@ class EvaluationRun:
     ) -> Page[ScoreAttemptView]:
         return await self._evaluations._page(self.experiment_id, self._principal, filters or ScoreFilter(), cursor, limit)
 
-    async def report(self) -> EvaluationReport:
+    async def create_report(self) -> EvaluationReport:
         return (await self._evaluations._snapshot(self.experiment_id, self._principal))[1]
 
     async def cancel(self, *, idempotency_key: str) -> EvaluationView:

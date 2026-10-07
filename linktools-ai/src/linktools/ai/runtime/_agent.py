@@ -5,11 +5,15 @@
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 import secrets
+import asyncio
+import sys
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 from ..core import JsonValue, Page, Principal, ThinkingValue
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ObservationError
+from ._wait import WaitResult
+from ._observation import _wait, _validate_wait, _await_stream_cleanup, _is_observation_cleanup
 from ._execution_context import ExecutionInputContext
 from ._input_contract import UserPromptInput, validate_user_input
 from ._watch_cursor import (
@@ -54,6 +58,7 @@ class _ExecutionTreeWatcher(Protocol):
         principal: Principal,
         after_sequences: "Mapping[str, int] | None" = None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -68,54 +73,50 @@ class Execution(Generic[AppT]):
         [str | None, bool], Awaitable[CancelExecutionResult]
     ] | None = None
 
-    async def wait(self, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
-        if self._task_wait is not None:
-            return await self._task_wait(timeout_seconds)
-        return await self._runtime.executions.wait(
-            self.execution_id,
-            principal=self._principal,
-            timeout_seconds=timeout_seconds,
+    async def wait(
+        self, *, on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+    ) -> WaitResult[ExecutionResult]:
+        _validate_wait(on_event, cursor, include_content, timeout_seconds, close_timeout_seconds)
+        return await _wait(
+            scope="execution", resource_id=self.execution_id,
+            waiter=(lambda: self._task_wait(None)) if self._task_wait is not None else
+                lambda: self._runtime._execution_service.wait(
+                    self.execution_id, principal=self._principal),
+            watch=lambda ready: self._watch_prepared(cursor, include_content, ready),
+            on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
+            close_timeout_seconds=close_timeout_seconds,
+            register=self._runtime._register_observation, release=self._runtime._release_observation,
         )
 
     def watch(
-        self,
-        *,
-        cursor: "str | None" = None,
-        include_content: bool = False,
-        after_sequences: "Mapping[str, int] | None" = None,
+        self, *, cursor: str | None = None, include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        return self._watch_prepared(cursor, include_content, None)
+
+    def _watch_prepared(
+        self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if cursor is not None:
-            if after_sequences is not None:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            after_sequences = decode_execution_watch_cursor(
-                self._runtime.namespace,
-                self._principal.tenant_id,
-                self.execution_id,
-                cursor,
-                include_content=include_content,
-            )
+        sequences = None if cursor is None else decode_execution_watch_cursor(
+            self._runtime.namespace, self._principal.tenant_id, self.execution_id,
+            cursor, include_content=include_content,
+        )
         stream = self._watch_tree(
-            self.execution_id,
-            principal=self._principal,
-            after_sequences=after_sequences,
-            include_content=include_content,
+            self.execution_id, principal=self._principal, after_sequences=sequences,
+            include_content=include_content, ready=ready,
         )
-        return self._watch_with_cursor(
-            stream,
-            after_sequences=after_sequences,
-            include_content=include_content,
-        )
+        return self._watch_with_cursor(stream, sequences, include_content, cursor)
 
     async def _watch_with_cursor(
-        self,
-        stream: AsyncIterator[ExecutionTreeEvent],
-        *,
-        after_sequences: "Mapping[str, int] | None",
-        include_content: bool,
+        self, stream: AsyncIterator[ExecutionTreeEvent],
+        after_sequences: Mapping[str, int] | None, include_content: bool,
+        cursor: str | None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         sequences = dict(after_sequences or {})
+        last_cursor = cursor
         try:
             async for event in stream:
                 durable_sequence = event.event.durable_sequence
@@ -124,18 +125,37 @@ class Execution(Generic[AppT]):
                     if durable_sequence <= previous:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     sequences[event.execution_id] = durable_sequence
-                yield replace(
-                    event,
-                    cursor=encode_execution_watch_cursor(
-                        self._runtime.namespace,
-                        self._principal.tenant_id,
-                        self.execution_id,
-                        include_content=include_content,
-                        sequences=sequences,
-                    ),
+                last_cursor = encode_execution_watch_cursor(
+                    self._runtime.namespace, self._principal.tenant_id, self.execution_id,
+                    include_content=include_content, sequences=sequences,
                 )
+                yield replace(event, cursor=last_cursor)
         except _ExecutionStreamFailure as failure:
-            raise failure.cause from failure
+            cause = failure.cause
+            raise ObservationError(
+                "stream", cursor=last_cursor,
+                cause_code=cause.code.value if isinstance(cause, AIError) else None,
+                safe_details=cause.safe_details if isinstance(cause, AIError) else None,
+                diagnostics=cause.diagnostics if isinstance(cause, AIError) else None,
+            ) from cause
+        finally:
+            active_error = sys.exc_info()[1]
+            try:
+                await _await_stream_cleanup(stream.aclose(), active_error)
+            except _ExecutionStreamFailure as failure:
+                if active_error is None or isinstance(active_error, GeneratorExit) or _is_observation_cleanup(active_error):
+                    cause = failure.cause
+                    raise ObservationError(
+                        "stream", cursor=last_cursor,
+                        cause_code=cause.code.value if isinstance(cause, AIError) else None,
+                        safe_details={"phase": "cleanup"},
+                        diagnostics=cause.diagnostics if isinstance(cause, AIError) else None,
+                    ) from cause
+            except BaseException as error:
+                if (isinstance(error, asyncio.CancelledError) or active_error is None
+                        or isinstance(active_error, GeneratorExit) or _is_observation_cleanup(active_error)
+                        or isinstance(active_error, ObservationError) and active_error.origin == "stream"):
+                    raise
 
     async def cancel(
         self,
@@ -230,7 +250,7 @@ class Execution(Generic[AppT]):
         history = self._runtime.history
         if history is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return await history.list_events(
+        return await history.list_execution_events(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
@@ -366,7 +386,11 @@ class Session(Generic[AppT]):
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
-    ) -> ExecutionResult:
+        on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
+        include_content: bool = False,
+        close_timeout_seconds: float = 5.0,
+    ) -> WaitResult[ExecutionResult]:
+        _validate_wait(on_event, None, include_content, timeout_seconds, close_timeout_seconds)
         execution = await self.start(
             user_prompt,
             files=files,
@@ -378,7 +402,10 @@ class Session(Generic[AppT]):
             thinking=thinking,
             correlation=correlation,
         )
-        return await execution.wait(timeout_seconds=timeout_seconds)
+        return await execution.wait(
+            timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+            close_timeout_seconds=close_timeout_seconds,
+        )
 
     async def plan(
         self,
@@ -392,7 +419,11 @@ class Session(Generic[AppT]):
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
-    ) -> ExecutionResult:
+        on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
+        include_content: bool = False,
+        close_timeout_seconds: float = 5.0,
+    ) -> WaitResult[ExecutionResult]:
+        _validate_wait(on_event, None, include_content, timeout_seconds, close_timeout_seconds)
         if self._agent_revision is None:
             return await self._runtime.agents.get(self.agent_id).plan(
                 user_prompt,
@@ -404,7 +435,8 @@ class Session(Generic[AppT]):
                 memory_scope=memory_scope,
                 thinking=thinking,
                 correlation=correlation,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+                close_timeout_seconds=close_timeout_seconds,
             )
         execution = await self._runtime._start_for_agent(
             self.agent_id,
@@ -422,7 +454,10 @@ class Session(Generic[AppT]):
             correlation=correlation,
             compiled_agent=self._compiled_agent,
         )
-        return await execution.wait(timeout_seconds=timeout_seconds)
+        return await execution.wait(
+            timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+            close_timeout_seconds=close_timeout_seconds,
+        )
 
     async def history(
         self,
@@ -605,7 +640,11 @@ class Agent(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
         input_context: ExecutionInputContext | None = None,
-    ) -> ExecutionResult:
+        on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
+        include_content: bool = False,
+        close_timeout_seconds: float = 5.0,
+    ) -> WaitResult[ExecutionResult]:
+        _validate_wait(on_event, None, include_content, timeout_seconds, close_timeout_seconds)
         execution = await self.start(
             user_prompt,
             files=files,
@@ -619,7 +658,10 @@ class Agent(Generic[AppT]):
             correlation=correlation,
             input_context=input_context,
         )
-        return await execution.wait(timeout_seconds=timeout_seconds)
+        return await execution.wait(
+            timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+            close_timeout_seconds=close_timeout_seconds,
+        )
 
     async def plan(
         self,
@@ -634,7 +676,11 @@ class Agent(Generic[AppT]):
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
-    ) -> ExecutionResult:
+        on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
+        include_content: bool = False,
+        close_timeout_seconds: float = 5.0,
+    ) -> WaitResult[ExecutionResult]:
+        _validate_wait(on_event, None, include_content, timeout_seconds, close_timeout_seconds)
         execution = await self._runtime._start_for_agent(
             self.id,
             self._agent_revision,
@@ -651,7 +697,10 @@ class Agent(Generic[AppT]):
             correlation=correlation,
             compiled_agent=self._compiled_agent,
         )
-        return await execution.wait(timeout_seconds=timeout_seconds)
+        return await execution.wait(
+            timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+            close_timeout_seconds=close_timeout_seconds,
+        )
 
     def session(
         self,

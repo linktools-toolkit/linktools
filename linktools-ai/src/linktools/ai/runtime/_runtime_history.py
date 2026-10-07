@@ -468,7 +468,7 @@ class RuntimeHistory:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return TaskGraphInfo.from_state(state)
 
-    async def task_events(
+    async def list_task_events(
         self,
         graph_id: str,
         *,
@@ -505,7 +505,7 @@ class RuntimeHistory:
             limit=limit,
         )
 
-    async def list_events(
+    async def list_execution_events(
         self,
         execution_id: str,
         *,

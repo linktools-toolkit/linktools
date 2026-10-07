@@ -274,7 +274,7 @@ async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
         ),
     )
 
-    first = await history.list_events(
+    first = await history.list_execution_events(
         "execution",
         principal=principal,
         limit=1,
@@ -284,7 +284,7 @@ async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
     assert first.next_cursor is not None
 
     with pytest.raises(AIError) as raised:
-        await history.list_events(
+        await history.list_execution_events(
             "execution",
             principal=principal,
             cursor=first.next_cursor,
@@ -293,7 +293,7 @@ async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
         )
     assert raised.value.code is ErrorCode.CURSOR_INVALID
 
-    second = await history.list_events(
+    second = await history.list_execution_events(
         "execution",
         principal=principal,
         cursor=first.next_cursor,

@@ -162,11 +162,12 @@ class ErrorCode(str, Enum):
     TASK_NOT_READY = "TASK_NOT_READY"
     TASK_NODE_FAILED = "TASK_NODE_FAILED"
     TASK_DEPENDENCY_FAILED = "TASK_DEPENDENCY_FAILED"
-    TASK_OBSERVER_FAILED = "TASK_OBSERVER_FAILED"
-    TASK_OBSERVATION_FAILED = "TASK_OBSERVATION_FAILED"
+    OBSERVER_FAILED = "OBSERVER_FAILED"
+    OBSERVATION_FAILED = "OBSERVATION_FAILED"
     INPUT_CAPTURE_UNAVAILABLE = "INPUT_CAPTURE_UNAVAILABLE"
     INPUT_CONTEXT_UNAVAILABLE = "INPUT_CONTEXT_UNAVAILABLE"
     TASK_INPUT_PROJECTION_FAILED = "TASK_INPUT_PROJECTION_FAILED"
+    WAIT_TIMEOUT = "WAIT_TIMEOUT"
     TASK_WAIT_TIMEOUT = "TASK_WAIT_TIMEOUT"
     HTTP_ROUTE_NOT_FOUND = "HTTP_ROUTE_NOT_FOUND"
     MODEL_REGISTRY_CONFLICT = "MODEL_REGISTRY_CONFLICT"
@@ -357,8 +358,8 @@ class AssetError(AIError):
         super().__init__(code, message)
 
 
-class TaskObservationError(AIError):
-    """An observer or optional presentation stream failed without changing Task state.
+class ObservationError(AIError):
+    """An observer or optional presentation stream failed without changing durable state.
 
     Callback failures preserve the original cause and last acknowledged cursor.
     Stream failures exclude authoritative reads, durable decoding and protocol
@@ -377,15 +378,15 @@ class TaskObservationError(AIError):
         diagnostics: "ErrorDiagnostics | None" = None,
     ) -> None:
         if origin not in {"callback", "stream"}:
-            raise ValueError("task observation origin is invalid")
+            raise ValueError("observation origin is invalid")
         if cursor is not None and not isinstance(cursor, str):
-            raise TypeError("task observation cursor is invalid")
+            raise TypeError("observation cursor is invalid")
         if cause_code is not None and (not isinstance(cause_code, str) or not cause_code):
-            raise ValueError("task observation cause code is invalid")
+            raise ValueError("observation cause code is invalid")
         code = (
-            ErrorCode.TASK_OBSERVER_FAILED
+            ErrorCode.OBSERVER_FAILED
             if origin == "callback"
-            else ErrorCode.TASK_OBSERVATION_FAILED
+            else ErrorCode.OBSERVATION_FAILED
         )
         super().__init__(
             code,
@@ -405,5 +406,5 @@ __all__ = [
     "InvalidStoragePathError",
     "SafeError",
     "StorageError",
-    "TaskObservationError",
+    "ObservationError",
 ]

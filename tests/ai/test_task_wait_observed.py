@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.core import Principal, TaskStatus
-from linktools.ai.errors import AIError, ErrorCode, TaskObservationError
-from linktools.ai.runtime import Runtime, RuntimeContext, TaskGraphRun, TaskGraphWaitResult
+from linktools.ai.errors import AIError, ErrorCode, ObservationError
+from linktools.ai.runtime import Runtime, RuntimeContext, TaskGraphRun, WaitResult
 from linktools.ai.runtime.service_api import _ExecutionStreamFailure
 from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphInfo, TaskGraphState
 
@@ -53,11 +53,14 @@ class Graph:
 
 
 def make_run(graph, close_callback=None):
-    stub = object()
+    from types import SimpleNamespace
+    stub = SimpleNamespace(_bind_observation=lambda *args: None)
     runtime = Runtime(stub, stub, stub, stub, graph, stub, stub, stub, stub, stub,
                       None, namespace="observed-test", context=RuntimeContext(None, tenant_id="tenant"),
                       close_callback=close_callback)
     async def tree(*args, **kwargs):
+        if kwargs.get("ready") is not None:
+            kwargs["ready"].set()
         if False:
             yield None
     return runtime, TaskGraphRun(runtime, graph, "graph", Principal("owner", "tenant"), tree)
@@ -74,13 +77,13 @@ async def ignore(event):
 async def test_wait_observed_returns_authoritative_same_read(status, include_content):
     graph = Graph(status)
     runtime, run = make_run(graph)
-    outcome = await run.wait_observed(ignore, include_content=include_content)
-    assert isinstance(outcome, TaskGraphWaitResult)
-    assert outcome.status is status
-    assert outcome.graph.event_sequence == 1
-    assert isinstance(outcome.graph, TaskGraphState if include_content else TaskGraphInfo)
+    outcome = await run.wait(on_event=ignore, include_content=include_content)
+    assert isinstance(outcome, WaitResult)
+    assert outcome.result.wait_status is status
+    assert outcome.result.event_sequence == 1
+    assert isinstance(outcome.result, TaskGraphState if include_content else TaskGraphInfo)
     if include_content:
-        assert outcome.graph is graph.value
+        assert outcome.result is graph.value
     assert not runtime._observation_sessions
     await runtime.close()
 
@@ -91,12 +94,12 @@ async def test_wait_observed_eof_still_waits_for_authority():
     graph.eof = True
     graph.release.clear()
     runtime, run = make_run(graph)
-    task = asyncio.create_task(run.wait_observed(ignore))
+    task = asyncio.create_task(run.wait(on_event=ignore))
     await graph.read.wait()
     await asyncio.sleep(0)
     assert not task.done()
     graph.release.set()
-    assert (await task).status is TaskStatus.SUCCEEDED
+    assert (await task).result.wait_status is TaskStatus.SUCCEEDED
     await runtime.close()
 
 
@@ -108,7 +111,7 @@ async def test_wait_observed_preserves_authoritative_stream_errors(error):
     graph.release.clear()
     runtime, run = make_run(graph)
     with pytest.raises(type(error)) as raised:
-        await run.wait_observed(ignore)
+        await run.wait(on_event=ignore)
     assert raised.value is error
     await runtime.close()
 
@@ -119,8 +122,8 @@ async def test_wait_observed_only_downgrades_optional_stream_failure():
     graph.stream_error = _ExecutionStreamFailure(RuntimeError("broker"))
     graph.release.clear()
     runtime, run = make_run(graph)
-    outcome = await run.wait_observed(ignore)
-    assert outcome.status is TaskStatus.SUCCEEDED
+    outcome = await run.wait(on_event=ignore)
+    assert outcome.result.wait_status is TaskStatus.SUCCEEDED
     assert outcome.observation_error.origin == "stream"
     assert isinstance(outcome.observation_error.__cause__, RuntimeError)
     await runtime.close()
@@ -139,8 +142,8 @@ async def test_wait_observed_callback_cause_and_ack_survive_simultaneous_success
             graph.release.set()
             raise cause
         cursors.append(event.cursor)
-    with pytest.raises(TaskObservationError) as raised:
-        await run.wait_observed(callback)
+    with pytest.raises(ObservationError) as raised:
+        await run.wait(on_event=callback)
     assert raised.value.origin == "callback"
     assert raised.value.__cause__ is cause
     assert raised.value.cursor == cursors[0]
@@ -158,7 +161,7 @@ async def test_wait_observed_authority_failure_wins_callback_failure():
         graph.release.set()
         raise ValueError("callback")
     with pytest.raises(AIError) as raised:
-        await run.wait_observed(callback)
+        await run.wait(on_event=callback)
     assert raised.value is graph.error
     await runtime.close()
 
@@ -173,7 +176,7 @@ async def test_wait_observed_callback_cancelled_error_is_not_success():
         graph.release.set()
         raise asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
-        await run.wait_observed(callback)
+        await run.wait(on_event=callback)
     await runtime.close()
 
 
@@ -186,7 +189,7 @@ async def test_wait_observed_invalid_arguments_start_nothing(field, value):
     graph = Graph()
     runtime, run = make_run(graph)
     with pytest.raises(AIError):
-        await run.wait_observed(ignore, **{field: value})
+        await run.wait(on_event=ignore, **{field: value})
     assert graph.wait_calls == 0
     assert not runtime._observation_sessions
     await runtime.close()
@@ -211,16 +214,16 @@ async def test_wait_observed_timeout_keeps_noncooperative_wait_owned_until_close
     runtime, run = make_run(graph, close_storage)
     start = asyncio.get_running_loop().time()
     with pytest.raises(AIError) as raised:
-        await run.wait_observed(ignore, timeout_seconds=0.01, close_timeout_seconds=0.02)
-    assert raised.value.code is ErrorCode.TASK_WAIT_TIMEOUT
+        await run.wait(on_event=ignore, timeout_seconds=0.01, close_timeout_seconds=0.02)
+    assert raised.value.code is ErrorCode.WAIT_TIMEOUT
     assert asyncio.get_running_loop().time() - start < 1
     assert cancelled.is_set()
-    with pytest.raises(TaskObservationError) as raised:
+    with pytest.raises(ObservationError) as raised:
         await runtime.close()
     assert raised.value.safe_details["cleanup_pending"] is True
     assert not closed
     with pytest.raises(AIError) as raised:
-        await run.wait_observed(ignore)
+        await run.wait(on_event=ignore)
     assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
     release.set()
     await runtime.close()
@@ -245,8 +248,8 @@ async def test_wait_observed_cleanup_failure_does_not_report_success_or_deliver_
         except asyncio.CancelledError:
             await release.wait()
     runtime, run = make_run(graph)
-    with pytest.raises(TaskObservationError) as raised:
-        await run.wait_observed(callback, close_timeout_seconds=0.01)
+    with pytest.raises(ObservationError) as raised:
+        await run.wait(on_event=callback, close_timeout_seconds=0.01)
     assert raised.value.safe_details["phase"] == "cleanup"
     assert entered.is_set()
     release.set()
@@ -259,7 +262,7 @@ async def test_wait_observed_caller_cancel_does_not_control_graph():
     graph = Graph()
     graph.release.clear()
     runtime, run = make_run(graph)
-    task = asyncio.create_task(run.wait_observed(ignore))
+    task = asyncio.create_task(run.wait(on_event=ignore))
     await graph.read.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -278,14 +281,14 @@ async def test_wait_observed_raw_waiting_projection_keeps_dynamic_nodes_and_inpu
                    for node, status in zip(nodes, (TaskStatus.SUCCEEDED, TaskStatus.WAITING)))
     graph.value = TaskGraphState("graph", TaskStatus.RUNNING, nodes, states, 7)
     runtime, run = make_run(graph)
-    hidden = await run.wait_observed(ignore)
-    full = await run.wait_observed(ignore, include_content=True)
-    assert hidden.status is full.status is TaskStatus.WAITING
-    assert hidden.graph.status is full.graph.status is TaskStatus.RUNNING
-    assert [node.node_id for node in hidden.graph.nodes] == ["original", "expanded"]
-    assert full.graph is graph.value
-    assert full.graph.nodes[1].input == {"secret": "input"}
-    assert (await run.wait()).status is TaskStatus.WAITING
+    hidden = await run.wait(on_event=ignore)
+    full = await run.wait(on_event=ignore, include_content=True)
+    assert hidden.result.wait_status is full.result.wait_status is TaskStatus.WAITING
+    assert hidden.result.status is full.result.status is TaskStatus.RUNNING
+    assert [node.node_id for node in hidden.result.nodes] == ["original", "expanded"]
+    assert full.result is graph.value
+    assert full.result.nodes[1].input == {"secret": "input"}
+    assert (await run.wait()).result.wait_status is TaskStatus.WAITING
     await runtime.close()
 
 
@@ -297,7 +300,7 @@ async def test_runtime_close_reclaims_simultaneous_observers_before_storage():
     async def close_storage():
         callbacks.append("storage")
     runtime, run = make_run(graph, close_storage)
-    calls = [asyncio.create_task(run.wait_observed(ignore)) for _ in range(3)]
+    calls = [asyncio.create_task(run.wait(on_event=ignore)) for _ in range(3)]
     await graph.read.wait()
     await runtime.close()
     outcomes = await asyncio.gather(*calls, return_exceptions=True)
@@ -322,10 +325,10 @@ async def test_wait_observed_owns_nested_noncooperative_stream_cleanup():
             yield None
     graph.stream_events = stream_events
     runtime, run = make_run(graph)
-    task = asyncio.create_task(run.wait_observed(ignore, close_timeout_seconds=0.01))
+    task = asyncio.create_task(run.wait(on_event=ignore, close_timeout_seconds=0.01))
     await started.wait()
     graph.release.set()
-    with pytest.raises(TaskObservationError) as raised:
+    with pytest.raises(ObservationError) as raised:
         await task
     assert raised.value.safe_details["cleanup_pending"]
     assert runtime._observation_sessions
@@ -349,7 +352,7 @@ async def test_wait_observed_authoritative_nested_cleanup_overrides_wait_success
     graph.stream_events = stream_events
     runtime, run = make_run(graph)
     with pytest.raises(ValueError) as raised:
-        await run.wait_observed(ignore)
+        await run.wait(on_event=ignore)
     assert raised.value is cause
     await runtime.close()
 
@@ -374,7 +377,7 @@ async def test_wait_observed_callback_cleanup_keeps_authority_and_caller_cancel_
         entered.set()
         await asyncio.Event().wait()
     runtime, run = make_run(graph)
-    task = asyncio.create_task(run.wait_observed(callback))
+    task = asyncio.create_task(run.wait(on_event=callback))
     await entered.wait()
     if caller_cancel:
         task.cancel()
@@ -400,8 +403,8 @@ async def test_wait_observed_timeout_precedes_optional_cleanup_failure():
     graph.stream_events = stream_events
     runtime, run = make_run(graph)
     with pytest.raises(AIError) as raised:
-        await run.wait_observed(ignore, timeout_seconds=0.01)
-    assert raised.value.code is ErrorCode.TASK_WAIT_TIMEOUT
+        await run.wait(on_event=ignore, timeout_seconds=0.01)
+    assert raised.value.code is ErrorCode.WAIT_TIMEOUT
     await runtime.close()
 
 
@@ -426,9 +429,9 @@ def test_wait_observed_synchronous_callback_requires_schedulable_loop():
                 elapsed.append(time.monotonic() - start)
             start = time.monotonic()
             try:
-                await run.wait_observed(callback, timeout_seconds=0.001)
+                await run.wait(on_event=callback, timeout_seconds=0.001)
             except AIError as error:
-                assert error.code is ErrorCode.TASK_WAIT_TIMEOUT
+                assert error.code is ErrorCode.WAIT_TIMEOUT
             else:
                 raise AssertionError("wait should time out")
             assert elapsed and time.monotonic() - start >= 0.05
@@ -471,7 +474,7 @@ async def test_runtime_close_cancels_all_sessions_before_draining_resistant_call
                 raise
             await gates[label].wait()
         effects.add(label)
-    calls = [asyncio.create_task(run.wait_observed(
+    calls = [asyncio.create_task(run.wait(on_event=
         lambda event, label=label: callback(label, event), close_timeout_seconds=0.02,
     )) for label in range(2)]
     while len(entered) < 2:
@@ -481,7 +484,7 @@ async def test_runtime_close_cancels_all_sessions_before_draining_resistant_call
     resistant = next(label for label, task in entered.items() if task in first.tasks)
     cooperative = 1 - resistant
     try:
-        with pytest.raises(TaskObservationError) as raised:
+        with pytest.raises(ObservationError) as raised:
             await runtime.close()
         assert raised.value.safe_details["cleanup_pending"]
         assert not storage_closed
@@ -534,7 +537,7 @@ async def test_observer_failure_starts_bounded_cleanup_before_stream_closes(auth
         raise cause
     async def outcome():
         try:
-            return await run.wait_observed(
+            return await run.wait(on_event=
                 callback, timeout_seconds=0.01 if authority == "timeout" else None,
                 close_timeout_seconds=0.01,
             )
@@ -546,7 +549,7 @@ async def test_observer_failure_starts_bounded_cleanup_before_stream_closes(auth
         await close_started.wait()
         done, _ = await asyncio.wait({task}, timeout=0.15)
         assert done, "observer failure must start the cleanup budget before aclose finishes"
-        expected = asyncio.CancelledError if cancel_callback else (AIError if authority == "failure" else TaskObservationError)
+        expected = asyncio.CancelledError if cancel_callback else (AIError if authority == "failure" else ObservationError)
         error = task.result()
         assert isinstance(error, expected)
         if cancel_callback:
@@ -558,7 +561,7 @@ async def test_observer_failure_starts_bounded_cleanup_before_stream_closes(auth
             assert error.__cause__ is cause
             assert error.cursor == acknowledged[0]
         assert runtime._observation_sessions
-        with pytest.raises(TaskObservationError):
+        with pytest.raises(ObservationError):
             await runtime.close()
         assert not runtime._closed
     finally:
@@ -577,6 +580,7 @@ async def test_callback_background_observation_does_not_report_to_parent_session
     outer.release.clear()
     inner = Graph()
     inner.emit = True
+    inner.release.clear()
     outer_runtime, outer_run = make_run(outer)
     inner_runtime, inner_run = make_run(inner)
     release_child = asyncio.Event()
@@ -588,13 +592,13 @@ async def test_callback_background_observation_does_not_report_to_parent_session
         raise cause
     async def parent_callback(event):
         if not spawned:
-            spawned.append(asyncio.create_task(inner_run.observe(child_callback)))
+            spawned.append(asyncio.create_task(inner_run.wait(on_event=child_callback)))
             callback_returned.set()
-    task = asyncio.create_task(outer_run.wait_observed(parent_callback))
+    task = asyncio.create_task(outer_run.wait(on_event=parent_callback))
     try:
         await callback_returned.wait()
         release_child.set()
-        with pytest.raises(TaskObservationError) as raised:
+        with pytest.raises(ObservationError) as raised:
             await spawned[0]
         assert raised.value.__cause__ is cause
         assert not task.done()
@@ -620,12 +624,12 @@ async def test_nested_observed_wait_keeps_its_error_in_its_own_session():
     async def inner_callback(event):
         raise cause
     async def outer_callback(event):
-        with pytest.raises(TaskObservationError) as raised:
-            await inner_run.wait_observed(inner_callback)
+        with pytest.raises(ObservationError) as raised:
+            await inner_run.wait(on_event=inner_callback)
         assert raised.value.__cause__ is cause
         outer.release.set()
     try:
-        assert (await outer_run.wait_observed(outer_callback)).observation_error is None
+        assert (await outer_run.wait(on_event=outer_callback)).observation_error is None
     finally:
         await inner_runtime.close()
         await outer_runtime.close()
@@ -642,14 +646,14 @@ async def test_parallel_observed_wait_failure_does_not_interrupt_other_session()
     good_runtime, good_run = make_run(healthy)
     async def callback(event):
         raise ValueError("one observer")
-    bad = asyncio.create_task(bad_run.wait_observed(callback))
-    good = asyncio.create_task(good_run.wait_observed(ignore))
+    bad = asyncio.create_task(bad_run.wait(on_event=callback))
+    good = asyncio.create_task(good_run.wait(on_event=ignore))
     try:
-        with pytest.raises(TaskObservationError):
+        with pytest.raises(ObservationError):
             await bad
         assert not good.done()
         healthy.release.set()
-        assert (await good).status is TaskStatus.SUCCEEDED
+        assert (await good).result.wait_status is TaskStatus.SUCCEEDED
     finally:
         await bad_runtime.close()
         await good_runtime.close()
@@ -679,17 +683,20 @@ async def test_nested_stream_failure_is_reported_before_sibling_cleanup_finishes
             close_started.set()
             await close_release.wait()
     async def tree(*args, **kwargs):
+        if kwargs.get("ready") is not None:
+            kwargs["ready"].set()
         await stream_started.wait()
         raise cause
         yield
     graph.stream_events = events
-    stub = object()
+    from types import SimpleNamespace
+    stub = SimpleNamespace(_bind_observation=lambda *args: None)
     runtime = Runtime(stub, stub, _ExecutionService(), stub, graph, stub, stub, stub, stub, stub,
                       None, namespace="nested-errors", context=RuntimeContext(None, tenant_id="tenant"))
     run = TaskGraphRun(runtime, graph, "graph", Principal("owner", "tenant"), tree)
     async def outcome():
         try:
-            return await run.wait_observed(ignore, close_timeout_seconds=0.01)
+            return await run.wait(on_event=ignore, close_timeout_seconds=0.01)
         except BaseException as error:
             return error
     task = asyncio.create_task(outcome())
@@ -758,12 +765,16 @@ async def test_completed_stream_cleanup_error_does_not_wait_for_resistant_siblin
         async def aclose(self):
             await release.wait()
     graph.stream_events = lambda *args, **kwargs: GraphStream()
-    stub = object()
+    from types import SimpleNamespace
+    stub = SimpleNamespace(_bind_observation=lambda *args: None)
     runtime = Runtime(stub, stub, _ExecutionService(), stub, graph, stub, stub, stub, stub, stub,
                       None, namespace="cleanup-errors", context=RuntimeContext(None, tenant_id="tenant"))
-    run = TaskGraphRun(runtime, graph, "graph", Principal("owner", "tenant"),
-                       lambda *args, **kwargs: ExecutionStream())
-    task = asyncio.create_task(run.wait_observed(ignore, close_timeout_seconds=0.01))
+    def tree(*args, **kwargs):
+        if kwargs.get("ready") is not None:
+            kwargs["ready"].set()
+        return ExecutionStream()
+    run = TaskGraphRun(runtime, graph, "graph", Principal("owner", "tenant"), tree)
+    task = asyncio.create_task(run.wait(on_event=ignore, close_timeout_seconds=0.01))
     try:
         await execution_started.wait()
         await graph_started.wait()

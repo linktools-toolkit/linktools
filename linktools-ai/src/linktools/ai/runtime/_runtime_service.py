@@ -79,7 +79,7 @@ from ..task import (
 from ._agent import Agent, Execution, Session
 from ._agent_binding_resolver import _AgentBindingResolver
 from ._task import TaskGraphRun
-from ._task_observation import _ObservationSession
+from ._observation import _ObservationSession
 from ._tasks import RuntimeTasks, TaskEngine
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
 from ._agent_task import RuntimeAgentTaskRunner
@@ -241,6 +241,7 @@ class _ExecutionTreeStreamer(Protocol):
         principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -342,6 +343,16 @@ class Runtime(Generic[AppT]):
         self._observation_sessions: set[_ObservationSession] = set()
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
+        if evaluation is not None:
+            evaluation._bind_observation(
+                lambda graph_id, principal, cursor, content, ready: TaskGraphRun(
+                    self, graph, graph_id, principal, self._watch_execution_tree,
+                )._watch_prepared(cursor, content, ready),
+                lambda graph_id, principal, cursor, content: TaskGraphRun(
+                    self, graph, graph_id, principal, self._watch_execution_tree,
+                )._finite_events(cursor, content),
+                self._register_observation, self._release_observation,
+            )
 
     @classmethod
     @overload
@@ -417,6 +428,7 @@ class Runtime(Generic[AppT]):
         principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         if self._tree_streamer is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -424,7 +436,7 @@ class Runtime(Generic[AppT]):
             execution_id,
             principal=principal,
             after_sequences=after_sequences,
-            include_content=include_content,
+            include_content=include_content, ready=ready,
         )
 
     @property

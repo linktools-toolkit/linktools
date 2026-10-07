@@ -32,7 +32,7 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
     async with Runtime.open("retry-context", models=_NoToolsModels(), storage=storage, capabilities=(group,)) as runtime:
         principal = Principal("owner", runtime.tenant_id)
         source = await runtime.agents.get().start("superseded prompt", principal=principal, input_context=context)
-        assert (await source.wait()).status is ExecutionStatus.SUCCEEDED
+        assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
         assert record.input_context.payload.kind == ("inline" if metadata_size == 16 else "object")
         retry = await source.retry("replacement prompt")
@@ -87,7 +87,7 @@ async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -
             await agent.start("question", principal=principal, input_context=context, memory_scope="production")
         assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
         source = await agent.start("question", principal=principal, input_context=context)
-        assert (await source.wait()).status is ExecutionStatus.SUCCEEDED
+        assert ((await source.wait()).result).status is ExecutionStatus.SUCCEEDED
         source_record = await storage.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
         source_memory = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=source.execution_id, memory_scope=source_record.memory_scope)

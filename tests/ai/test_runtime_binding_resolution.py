@@ -378,7 +378,7 @@ async def test_runtime_start_admits_resolved_binding() -> None:
             execution,  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
+            SimpleNamespace(_bind_observation=lambda *args: None),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]

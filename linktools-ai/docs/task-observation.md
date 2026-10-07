@@ -1,8 +1,8 @@
-# Observing and waiting for TaskGraphs
+# Watching and waiting for Runtime operations
 
-`TaskGraphRun.wait_observed()` owns the local observation/wait lifecycle. It
-returns one authoritative graph read and observation diagnostics; it does not
-cancel, resume, recover, or retry the graph.
+`Execution`, `TaskGraphRun`, and `EvaluationRun` expose `watch()` and `wait()`.
+Watch is an async iterator. Wait optionally delivers events to `on_event` while
+waiting for authoritative state, and always returns `WaitResult`:
 
 ```python
 from linktools.ai.runtime import TaskGraphRunEvent
@@ -10,157 +10,205 @@ from linktools.ai.runtime import TaskGraphRunEvent
 async def publish(event: TaskGraphRunEvent) -> None:
     await projection.apply_idempotently(event)
 
-outcome = await run.wait_observed(
-    publish,
+outcome = await run.wait(
+    on_event=publish,
     cursor=saved_cursor,
     include_content=False,
     timeout_seconds=120.0,
     close_timeout_seconds=5.0,
 )
-await projection.refresh_graph(outcome.graph, status=outcome.status)
+await projection.refresh_graph(outcome.result, status=outcome.result.wait_status)
 await projection.save_cursor(outcome.cursor)
 if outcome.observation_error is not None:
     await projection.show_observation_gap()
+
+# No callback: the result container is unchanged, and no stream is started.
+outcome = await execution.wait()
+output = outcome.result.output
+
+# Observation only: save each cursor after successful consumption.
+async for item in run.watch(cursor=saved_cursor, include_content=False):
+    await publish(item)
+    saved_cursor = item.cursor
 ```
 
-The projection methods above are application-owned integration points, not
-library APIs. This repository does not contain `RuntimeTaskGraphExecutor` or its
-UI/storage implementation; downstream integration and end-to-end acceptance
-remain separate work.
+The projection methods above belong to the application. RuntimeTaskGraphExecutor
+and its UI/storage implementation are outside this repository.
 
-## State and delivery
+## Results and stopping states
 
-- `outcome.graph` is the exact stopping read from the TaskGraph service, projected
-  as `TaskGraphInfo` by default. `include_content=True` returns `TaskGraphState`
-  with node inputs and also enables observation content. It does not load every
-  node output
-- `outcome.status` applies the same public status projection as `run.wait()`.
-  Raw `graph.status` can be `RUNNING` while public status is `WAITING` when no
-  runnable node remains and an unfinished node is waiting
-- Terminal statuses (`SUCCEEDED`, `FAILED`, `CANCELLED`, `BLOCKED`), stable
-  `WAITING`, and `RECOVERY_REQUIRED` stop the wait. Returning does not imply
-  business success. Other callers can change the graph after the returned read
-- Dynamic nodes and their states come from that same complete read. The graph
-  sequence does not replace the observation cursor and does not define an atomic
-  snapshot across graph and execution-history stores
-- Callbacks are serial. Only successful callback return acknowledges its cursor;
-  interrupted delivery may replay. Coordinate saved cursors with an idempotent
-  projection. External effects are not exactly-once
-- Stream EOF does not complete the wait. Conversely, authoritative completion
-  can stop observation before every event has been delivered. Refresh final UI
-  from the returned graph and paged results; use the returned cursor to replay
-  remaining observations if needed
+`WaitResult[T]` contains only `result`, `cursor`, and `observation_error`.
+The result never changes shape based on whether `on_event` is supplied:
 
-Live execution trees cover the root and direct child agents only. Recursive
-history is a separate capability. Model request identity remains execution ID,
-agent run sequence, and request sequence. Output-repair retry indexes are not
-HTTP/SDK transport attempts; no transport-attempt ledger is added here.
+- Execution and RuntimeExecutions.wait return `WaitResult[ExecutionResult]`
+- Agent.run/plan and Session.run/plan forward the same observation options and
+  return `WaitResult[ExecutionResult]`, preserving diagnostics and cursors
+- TaskGraphRun.wait returns `WaitResult[TaskGraphInfo]` by default, or
+  `WaitResult[TaskGraphState]` with `include_content=True`. Both come from the
+  same stopping service read. No second state read reconstructs the result
+- EvaluationRun.wait returns `WaitResult[EvaluationView]`
 
-## Errors and cleanup
+Execution stops at SUCCEEDED, FAILED, or CANCELLED, and preserves local terminal
+worker cleanup/failure checking. WAITING_DEFERRED continues waiting;
+RECOVERY_REQUIRED raises its recovery error. Failed and cancelled results may
+return normally without output.
 
-Only proven optional presentation/broker failures become a returned
-`observation_error`. State/history reads, authorization, durable decoding,
-integrity, lineage and cursor failures propagate unchanged. Callback failure
-raises `TaskObservationError(origin="callback")` with its original cause and
-last acknowledged cursor. Callback and authoritative observer failures start
-bounded cleanup before the stream finishes closing; a stalled close cannot hide
-an already-raised primary error. `CancelledError` propagates unchanged.
+Graph terminal states, RECOVERY_REQUIRED, and stable WAITING stop the wait.
+`result.status` is the durable raw status. `result.wait_status` also projects raw
+RUNNING to WAITING when unfinished nodes cannot run and at least one is waiting.
+This is a computed property, not persisted state. `result.node_states` replaces
+old wait payloads' `node_results`; node output content remains in
+`results()`, `result()`, and `result_ref()`.
 
-Errors visible in the same completion/cleanup window have stable priority:
-caller or callback cancellation, authoritative failure, callback failure,
-wait timeout, then cleanup failure. A successful wait cannot hide an already
-completed authoritative or callback failure.
+Evaluation stops at complete, cancelled, or needs_attention. A return is not
+necessarily business success. Ordinary human scoring may remain running while a
+graph is WAITING, until a score is supplied or the wait times out.
 
-Time budgets must be finite nonnegative numbers (`close_timeout_seconds` must
-be positive). Booleans, NaN and infinity are invalid. The composite owns its
-monotonic wait deadline and uses a separate finite cleanup budget. Timeout raises
-`AIError(TASK_WAIT_TIMEOUT)` with the graph ID and never implicitly cancels the
-graph.
+Without a callback, cursor must be None. With a callback, cursor and
+include_content identify the same observation scope as watch. New Agent/Session
+run/plan calls do not accept a cursor: resume observation on the existing handle.
 
-Cleanup first closes callback delivery, then requests local cancellation once.
-The Runtime retains unfinished observation/wait tasks, including their nested
-stream cleanup. A cleanup budget expiry is not successful completion: without a
-higher-priority error it raises `TaskObservationError` with `phase="cleanup"`
-and `cleanup_pending=True`. An already-entered cancellation-resistant callback
-may continue; no new callbacks start. Late task errors are consumed by their
-owner. `Runtime.close()` stops these sessions before closing storage, fails
-without claiming closure if they remain, and can be retried after they finish.
-New observed waits are rejected once Runtime closing starts.
+## Delivery, preparation, and cleanup
 
-These bounds require a schedulable event loop. Python cannot safely interrupt a
-synchronous blocking callback or forcibly terminate a coroutine that ignores
-cancellation. Do not put blocking work in callbacks; no thread or process is
-created automatically.
+Callbacks run serially. A successful callback return acknowledges its item
+cursor. Failure, cancellation, or unfinished delivery keeps the previous ACK;
+if no item succeeds, the input cursor is preserved. Durable sequence watermarks
+advance only for durable events. Live deltas do not advance durable sequences.
+External side effects require an idempotent consumer; delivery is at least once.
 
-## Explicit cancellation and unknown outcomes
+Cursors are opaque and bind namespace, tenant, operation identity, observation
+kind, and content mode. Graph, execution, and evaluation cursors are not
+interchangeable. Owner and known resumed-member validation completes before an
+already-finished authoritative waiter may short-circuit observation. Dynamic
+members are validated when discovered.
 
-Cancellation is application policy. Store one stable idempotency key for one
-business cancellation intent and reuse it for every retry:
+Authoritative completion may close the observation before all final events, or
+any events, have been delivered. Wait does not promise final drain. Refresh the
+UI from the authoritative result and resume watch from the returned cursor to
+read remaining durable events. Stream EOF alone does not finish a wait.
+
+Timeout must be a finite nonnegative number or None; close_timeout_seconds must
+be finite and positive. Booleans, NaN, infinity, non-callable on_event, invalid
+content mode, and cursor without a callback are rejected before tasks start.
+Agent/Session convenience methods validate these options before admission.
+
+SDK deadlines include observation preparation and raise `AIError(WAIT_TIMEOUT)`
+with scope, resource_id, and last ACK cursor. The deadline begins at the bound
+handle wait; Agent/Session start and facade get are outside it. Raw services keep
+their own timeout contracts and do not receive user callbacks.
+
+Only explicitly identified optional presentation transport failures degrade to
+`observation_error`. Authorization, cursor, lineage, durable read, codec and
+integrity failures propagate. A callback's ordinary exception, including AIError
+or TimeoutError, becomes `ObservationError(origin="callback")` with its cause
+and previous ACK. Cancellation is not translated.
+
+Simultaneous failure priority is cancellation, authoritative waiter failure,
+watch contract failure, callback failure, SDK deadline, then cleanup failure.
+Local cleanup has its own close budget. Runtime retains unfinished tasks and
+rejects new waits while closing; Runtime.close cancels all sessions before
+waiting for any one to drain, and can be retried if noncooperative tasks remain.
+A cleanup timeout is not successful completion. It reports phase="cleanup" and
+cleanup_pending=True unless a higher-priority error already wins.
+
+Timeout plus cleanup may take both budgets. Blocking synchronous code and
+cancellation-resistant coroutines cannot be forcibly stopped by Python; the
+bounds require a schedulable event loop. No automatic thread/process is created.
+Waiting, watching, timeout and caller cancellation do not cancel durable work.
+
+## Recursive execution trees and evaluation graphs
+
+Execution.watch observes the selected execution and arbitrarily deep descendants.
+A SUBAGENT may itself be selected as the observation root. Depth is relative to
+that selected root; real parent/root/lineage metadata is preserved. Graph.watch
+uses the same tree observation for its agent node bindings, including dynamic
+and recovered nodes. Order is guaranteed per execution, not globally across
+independent streams. N discovered executions require O(N) streams and cursor
+entries; cross-process discovery polls durable child records.
+
+After all current streams reach EOF, one final discovery pass drains members
+found then. Membership established after that pass belongs to a later watch.
+EOF is an observation-phase boundary, not proof that admission permanently
+closed the execution subtree. Live deltas are not persisted and cannot be
+recovered across a disconnect; durable facts and existing content APIs remain
+available.
+
+Evaluation.watch yields existing TaskGraphRunEvent objects from confirmed
+intents, including released graphs for history. Unconfirmed intents remain
+invisible until confirmation; watching never admits, ticks, or reconciles them.
+Target-to-scorer gaps do not end evaluation observation. A known graph that
+resumes after a WAITING EOF is reopened from its delivered cursor when its
+durable graph watermark advances.
+
+An evaluation cursor wraps a graph-id-to-graph-cursor map. Even child cleanup
+errors report the evaluation cursor. Complete/cancelled/needs_attention capture
+final confirmed members and finite per-stream durable cutoffs, then drain from
+the delivered watermarks without waiting for RUNNING/WAITING child streams to
+end. These vector cutoffs are not a cross-stream atomic snapshot. A later
+reconcile can be observed with another watch; rescore has a separate identity.
+Evaluation wait may stop before this standalone-watch drain finishes.
+
+TaskGraphRun.replay remains a finite historical replay plus result read, not an
+alias for watch. Content/history pagination remains a separate capability:
+ordinary history/trace/transcript preserve their existing scope; recursive tree
+watch does not silently change their ordering or paging contracts.
+
+## Cancellation and results paging
+
+Use a stable idempotency key for one explicit cancellation intent:
 
 ```python
 await run.cancel(idempotency_key=saved_cancel_key, force=False)
 ```
 
-The control operation can commit after its caller times out or is cancelled.
-A bounded `run.state()` readback must establish the actual outcome:
+Control may commit after its caller times out or is cancelled. Read state back:
+CANCELLED confirms cancellation; another terminal state confirms that outcome;
+nonterminal state requires reconciliation with the same key; a failed readback
+means outcome unknown. Never infer non-commit or silently enable force.
 
-- `CANCELLED`: cancellation confirmed
-- `SUCCEEDED`, `FAILED`, or `BLOCKED`: that terminal outcome is confirmed;
-  do not rename it cancellation success
-- Other status: cancellation is not yet reconciled; retain the key and retry
-  the same intent according to application policy
-- Readback timeout/failure: outcome unknown; retain graph ID, key and cursor
+Graph results pages bind a graph sequence. A within-page change raises
+STORAGE_CONFLICT; a between-page sequence change raises CURSOR_INVALID. Discard
+unpublished partial pages and restart, with a bounded application retry budget.
+Publish only after next_cursor is None. Respect content_included and byte limits;
+a result page and the earlier wait result are not a cross-store transaction.
 
-An application that stops waiting for a pending cancel/readback task must retain
-it in its existing task owner and consume its eventual result. Do not discard a
-bare `create_task`, infer non-commit from timeout, or automatically enable force.
+## Unreleased source and wire migration
 
-## Results and paging
+This is a breaking pre-release change with no compatibility aliases:
 
-`run.results()` remains the output API. Pages bind a graph sequence. A change
-within a page reports `STORAGE_CONFLICT`; a changed sequence between pages
-reports `CURSOR_INVALID`. Discard the entire unpublished batch and restart from
-page one on either conflict, within an application-owned finite retry budget.
-Never splice old and new pages. Large batches should use application-owned
-bounded staging or a paged cache rather than unlimited memory.
+- Replace observe callbacks with async iteration over watch, and wait_observed
+  with wait(on_event=...). Replace TaskGraphWaitResult with WaitResult
+- Old result.output/status access on SDK wait/run/plan becomes
+  outcome.result.output/status. Graph display status is result.wait_status
+- RuntimeHistory.task_events/list_events become
+  list_task_events/list_execution_events
+- CapabilityLoadContext.verify becomes verify_source_revision;
+  AssetStore.get_at_revision uses the entry_revision keyword
+- EvaluationRun.report becomes create_report; RuntimeEvaluations.compare becomes
+  create_comparison_report. These methods create and persist reports
+- Skill/Subagent instructions aliases are removed; use get_instructions.
+  EventRepository.append is removed; use append_expected
+- ObservationError, OBSERVER_FAILED and OBSERVATION_FAILED replace the old
+  task-prefixed observation names. Public watch uses opaque cursors only
+- StepEvent.kind/EventKind become event_type/StepEventType with uppercase values:
+  AGENT_RUN_STARTED/SUCCEEDED/INTERRUPTED/FAILED,
+  MODEL_REQUEST_STARTED/SUCCEEDED/FAILED/CANCELLED, and
+  TOOL_CALL_STARTED/SUCCEEDED/FAILED
+- LiveDelta/DurableBoundary and ExecutionDelta use event_type. Tool payloads use
+  error_code. MODEL_REQUEST_FINISHED and TOOL_CALL_FINISHED keep their distinct
+  status-bearing boundary meaning, including failure/cancellation
+- Cancellation history uses the explicit current cancellation fact, with no
+  legacy failed-plus-cancel-code reinterpretation
 
-Publish a complete staged batch only after `next_cursor is None`. The result
-batch and an earlier observed-wait graph are not a cross-store transaction.
-Use `content_included` to distinguish an omitted output from valid JSON null;
-respect `max_content_bytes` and fetch large content through `result_ref` as needed.
+StepEvent fields, marker values, archive entries and idempotency projections
+change durable wire bytes. Existing development databases, archives, snapshots
+and files using the former wire may no longer load. Current writers/readers and
+owned test fixtures are updated together without a format/schema version bump.
+No startup conversion, dual read, data deletion or real-data migration is run.
+Preserve existing data; an offline conversion or deliberate rebuild requires an
+explicit separately authorized operation before using it with the new code.
 
-## Source migration for the unreleased API
-
-There is one TaskGraph service wait operation: `TaskGraphQueryService.wait()`
-now returns `TaskGraphState` from its stopping read. Custom implementations and
-fakes must do the same. Do not implement it as `wait()` followed by a second
-`state()` read. There is no additional `wait_state()` alias. Service `run()` and
-Runtime `run.wait()` still expose their own `TaskGraphResult` boundary projection.
-Direct service consumers replace `result.node_results` with `state.node_states`.
-
-Other source migrations in this change:
-
-- `storage.atomic_write_bytes/json` are removed. Use `write_bytes_atomic(Path,
-  bytes, fsync=False)` / `write_json_atomic(Path, dict, fsync=False)`. Canonical
-  JSON sorting, value validation and bytes are unchanged. Former callers needing
-  a non-object JSON root or insertion-order bytes must explicitly serialize their
-  required bytes and use the byte writer
-- Replace `get_at_version(key, integer)` with `get_at_revision(key,
-  StorageEntryRevision(integer))`; prefer reusing the returned `entry_revision`.
-  Revisions retain their integer representation and overlays keep their existing
-  ordered layer-selection semantics. Asset versions and `list_versions` retain
-  their separate resource-version meaning
-- `EvaluationRecord.experiment_id` replaces its derived `evaluation_id` property.
-  Tombstone and cleanup wire fields named `evaluation_id` are unchanged
-- The concrete ledger implementation is `OperationLedgerRepositoryImpl`; the
-  public role Protocol remains `OperationLedgerRepository`
-- Runtime key construction is Runtime-owned. It is no longer exported by generic
-  storage; physical `v1/runtime/...` bytes are unchanged
-- Generic overlay unknown-layer failure is `STORAGE_LAYER_UNKNOWN`; the Asset
-  facade retains `ASSET_VERSION_LAYER_UNKNOWN`
-- Provider classification belongs to `model.model_binding_error`. Runtime keeps
-  execution/timeout/output semantics; callers must not equate provider retry
-  hints with automatic execution retry
-
-No database schema, durable format version, named behavior revision, or key-byte
-migration is introduced.
+Earlier source cleanup in this branch also removed get_at_version and atomic
+writer aliases, renamed EvaluationRecord.experiment_id and
+OperationLedgerRepositoryImpl, and centralized model_binding_error. Storage
+key ownership changes themselves retain their prior key bytes.

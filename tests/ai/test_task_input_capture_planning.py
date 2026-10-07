@@ -29,7 +29,7 @@ async def _source_capture(runtime: Runtime) -> TaskInvocationInputRef:
         TaskNode("value", task=producer),
         TaskNode("read", ("value",), task=consumer, input={"question": "accepted input"}),
     )), principal=PRINCIPAL, idempotency_key="source")
-    assert (await run.wait(timeout_seconds=15)).status is TaskStatus.SUCCEEDED
+    assert ((await run.wait(timeout_seconds=15)).result).status is TaskStatus.SUCCEEDED
     execution = await run.execution("read")
     capture = await runtime.executions.capture_input(execution.execution_id,
         CaptureInputRequest(PRINCIPAL, "capture", context_policy="clean"))

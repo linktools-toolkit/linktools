@@ -23,7 +23,7 @@ from ..core import (
     Principal,
 )
 from ..errors import AIError, ErrorCode
-from ._task_observation import _is_observation_cleanup, _await_stream_cleanup
+from ._observation import _is_observation_cleanup, _await_stream_cleanup
 from .service_api import (
     ExecutionEvent,
     ExecutionStreamEvent,

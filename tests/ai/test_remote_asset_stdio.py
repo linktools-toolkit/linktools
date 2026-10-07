@@ -341,7 +341,7 @@ async def test_plain_filename_uses_pinned_asset_package_and_preserves_history(
         ) as runtime:
             await store.put(AssetKey("mcp", "probe/data/value.txt"), b"new-head-data")
             await store.put(AssetKey("mcp", "probe/sibling.py"), b'IMPORTED = "new-head-module"\n')
-            result = await runtime.agents.get("default").run("probe", timeout_seconds=15)
+            result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
             observation = _assert_observation(result.output)
             assert Path(observation["cwd"]).is_relative_to(temporary_root)
@@ -380,7 +380,7 @@ async def test_resource_arguments_use_the_package_working_directory(
             "asset-resource-argument", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
             capabilities=(_group(store, sandbox),),
         ) as runtime:
-            result = await runtime.agents.get("default").run("probe", timeout_seconds=15)
+            result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
             _assert_observation(result.output)
     assert not tuple(temporary_root.iterdir())
@@ -424,12 +424,12 @@ async def test_concurrent_runs_own_independent_trees_until_their_processes_close
                 assert Path(one["cwd"]).is_dir()
                 assert Path(two["cwd"]).is_dir()
                 releases[one["pid"]].set()
-                assert (await first).status is ExecutionStatus.SUCCEEDED
+                assert (await first).result.status is ExecutionStatus.SUCCEEDED
                 assert not Path(one["cwd"]).exists()
                 assert Path(two["cwd"]).is_dir()
                 os.kill(two["pid"], 0)
                 releases[two["pid"]].set()
-                assert (await second).status is ExecutionStatus.SUCCEEDED
+                assert (await second).result.status is ExecutionStatus.SUCCEEDED
             finally:
                 for event in releases.values():
                     event.set()
@@ -476,7 +476,7 @@ async def test_startup_outcomes_keep_process_and_resource_lifetimes_ordered(
                 value = await _wait_started(log)
                 assert Path(value["cwd"]).is_dir()
                 await asyncio.wait_for(execution.cancel(), timeout=15)
-            result = await execution.wait(timeout_seconds=15)
+            result = (await execution.wait(timeout_seconds=15)).result
             if mode == "fail-init":
                 assert result.status is ExecutionStatus.FAILED
                 expected = (
@@ -513,7 +513,7 @@ async def test_native_directory_package_keeps_original_files(
             "native-asset-stdio", models=_ProbeModels(), storage=RuntimeStorage.in_memory(),
             capabilities=(_group(store, sandbox),),
         ) as runtime:
-            result = await runtime.agents.get("default").run("probe", timeout_seconds=15)
+            result = (await runtime.agents.get("default").run("probe", timeout_seconds=15)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
             observation = _assert_observation(result.output)
             assert Path(observation["cwd"]) == package

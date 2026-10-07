@@ -204,7 +204,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
-        result = await runtime.agents.get("default").run(secret, timeout_seconds=10)
+        result = (await runtime.agents.get("default").run(secret, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 
     end = datetime.now(timezone.utc) + timedelta(seconds=1)
@@ -252,7 +252,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
-        result = await runtime.agents.get("default").run("hello", timeout_seconds=10)
+        result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 
 
@@ -297,7 +297,7 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
             graph,
             idempotency_key="isolated-task-failure-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
         state = await run.state()
 
         async def observe(event: object) -> None:
@@ -312,7 +312,7 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
     assert result.status is TaskStatus.SUCCEEDED
     assert replayed.status is TaskStatus.SUCCEEDED
     assert state.status is TaskStatus.SUCCEEDED
-    result_statuses = {node.node_id: node.status for node in result.node_results}
+    result_statuses = {node.node_id: node.status for node in result.node_states}
     assert result_statuses == {
         "failed": TaskStatus.FAILED,
         "succeeded": TaskStatus.SUCCEEDED,

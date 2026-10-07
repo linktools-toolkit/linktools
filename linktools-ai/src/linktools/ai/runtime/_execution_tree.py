@@ -10,7 +10,7 @@ from typing import Protocol
 
 from ..core import ExecutionEventType, ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
-from ._task_observation import _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup, _report_observation_error
+from ._observation import _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup, _report_observation_error
 from .service_api import (
     ExecutionStreamEvent,
     ExecutionTreeEvent,

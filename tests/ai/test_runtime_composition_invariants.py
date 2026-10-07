@@ -216,10 +216,10 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
         storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
-        result = await runtime.agents.get("default").run(
+        result = (await runtime.agents.get("default").run(
             "hello",
             timeout_seconds=10,
-        )
+        )).result
         assert result.status is ExecutionStatus.SUCCEEDED
 
         history = await runtime.executions.history(

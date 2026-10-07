@@ -3,7 +3,7 @@
 """Public runtime contracts and composition entry point."""
 
 from ..core import PromptLimits
-from ..errors import TaskObservationError
+from ..errors import ObservationError
 from ..task import (
     CancelGraphRequest,
     TaskEvent,
@@ -27,7 +27,8 @@ from ._snapshot import (
 )
 from ._runtime_service import Runtime
 from ._tasks import RuntimeTasks, TaskEngine
-from ._task import TaskGraphRun, TaskGraphWaitResult
+from ._task import TaskGraphRun
+from ._wait import WaitResult
 from ._agent_task_input import AgentTaskInput, AgentTaskInputContext
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
 from .recovery import (
@@ -121,7 +122,7 @@ __all__ = [
     "RuntimeExecutions",
     "RuntimeSessions",
     "RuntimeMetrics",
-    "TaskObservationError",
+    "ObservationError",
     "ApprovalDecisionRequest",
     "AttachmentFact",
     "ApprovalDecisionResult",
@@ -192,7 +193,7 @@ __all__ = [
     "TaskEventType",
     "TaskGraphInfo",
     "TaskGraphRun",
-    "TaskGraphWaitResult",
+    "WaitResult",
     "TaskGraphRunEvent",
     "TaskGraphService",
     "ToolEffectApplied",

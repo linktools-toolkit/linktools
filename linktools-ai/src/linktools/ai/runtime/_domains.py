@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from ..core import Principal
+from ._wait import WaitResult
 from ._input_capture import CaptureInputRequest, ExecutionInputCaptureRef, RuntimeInputCaptures
 from .recovery import (
     ExecutionRecoveryEffect,
@@ -104,8 +105,17 @@ class RuntimeExecutions(Generic[AppT]):
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         return await self._service.result(execution_id, principal=principal)
 
-    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: float | None = None) -> ExecutionResult:
-        return await self._service.wait(execution_id, principal=principal, timeout_seconds=timeout_seconds)
+    async def wait(
+        self, execution_id: str, *, principal: Principal,
+        on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+    ) -> WaitResult[ExecutionResult]:
+        execution = await self.get(execution_id, principal=principal)
+        return await execution.wait(
+            on_event=on_event, cursor=cursor, include_content=include_content,
+            timeout_seconds=timeout_seconds, close_timeout_seconds=close_timeout_seconds,
+        )
 
     async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
         return await self._service.retry(execution_id, request)

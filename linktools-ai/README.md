@@ -68,11 +68,11 @@ async with Runtime.open(
     storage=storage,
     capabilities=(CapabilityGroup("workspace", workspace=workspace),),
 ) as runtime:
-    result = await runtime.agents.get("default").run(
+    result = (await runtime.agents.get("default").run(
         "review this change",
         memory_scope="default",
         planning=True,
-    )
+    )).result
 ```
 
 `Runtime.open()` is the public composition root. The Runtime composition is immutable for the lifetime of the context; registrations are completed before it opens.
@@ -120,7 +120,7 @@ async with Runtime.open(
     storage=storage,
     capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
 ) as runtime:
-    result = await runtime.agents.get("audit").run("inspect ticket SEC-123")
+    result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
 ```
 
 Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `CapabilityGroup.tool()` and `CapabilityGroup.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
@@ -550,10 +550,10 @@ class Finding(BaseModel):
     severity: str
 
 agent = runtime.agents.get("audit")
-result = await agent.run(
+result = (await agent.run(
     "inspect the patch",
     output=Finding,
-)
+)).result
 ```
 
 The exact durable binding stores:
@@ -574,12 +574,12 @@ The binding contract does not persist Python output import paths or duplicate id
 agent = runtime.agents.get("audit")
 session = await agent.create_session("chat-1")
 
-first = await session.run("inspect the first change")
-second = await session.run(
+first = (await session.run("inspect the first change")).result
+second = (await session.run(
     "return a structured summary",
     output=Finding,
     planning=True,
-)
+)).result
 
 history = await session.history()
 ```
@@ -605,10 +605,10 @@ LinkTools does not infer image support from model names, endpoints, or probes.
 Execution file input uses the same durable boundary:
 
 ```python
-result = await agent.run(
+result = (await agent.run(
     "分析这些截图",
     files=("screenshots/overview.png", "screenshots/details.png"),
-)
+)).result
 ```
 
 When a file must be captured as part of the accepted prompt, use the pure
@@ -618,13 +618,13 @@ preserves its order and optional opaque identifier:
 ```python
 from linktools.ai.core import WorkspaceFileInput
 
-result = await agent.run(
+result = (await agent.run(
     ("Review this evidence:", WorkspaceFileInput(
         "evidence/report.txt",
         media_type="text/plain",
         identifier="report-1",
     )),
-)
+)).result
 ```
 
 The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime storage rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
@@ -732,7 +732,7 @@ wins before the business graph reaches a terminal state, the graph converges to
 terminal outcome; `RECOVERY_REQUIRED` still takes precedence. Task cancel
 callbacks and `TaskNodeRunner.cancel()` are replay-safe control cleanup hooks:
 a `RUNNING` or `EFFECT_UNKNOWN` cancel may invoke them again after process
-loss. Observer callback failures are reported as `TASK_OBSERVER_FAILED` and do
+loss. Observer callback failures are reported as `OBSERVER_FAILED` and do
 not fail the graph or retry nodes.
 
 Execution and TaskGraph observation streams also expose
@@ -816,7 +816,7 @@ Asset-version-pinned Skill resources. A separate `Runtime.restore()` migration s
 `execution-error-diagnostics-v1` extends failed execution results with durable diagnostic context while keeping the existing safe error contract unchanged:
 
 ```python
-result = await execution.wait()
+result = (await execution.wait()).result
 
 result.error_code
 result.safe_error_details
@@ -863,10 +863,12 @@ optional stdio sandbox protocols. `ErrorDiagnostics` is available from
 
 Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.
 
-### Observe a TaskGraph while waiting
+### Watch and wait for operations
 
-Use `TaskGraphRun.wait_observed(observer, ...)` for a single managed observation
-and authoritative wait. It returns `TaskGraphWaitResult` with the same-read graph,
-public status, acknowledged cursor, and optional observation diagnostics.
-See [TaskGraph observation and source migration](docs/task-observation.md) for
-error, cancellation, cleanup, paging, and downstream integration contracts.
+Execution, TaskGraphRun and EvaluationRun expose `watch()` and
+`wait(on_event=...)`. All SDK waits and Agent/Session run/plan return
+`WaitResult` with `result`, the acknowledged `cursor`, and optional
+`observation_error`. See [operation observation and migration](docs/task-observation.md)
+for recursive execution trees, evaluation graphs, cleanup guarantees, and the
+breaking SDK and StepEvent durable-wire changes. Existing development data is
+not automatically migrated or deleted.

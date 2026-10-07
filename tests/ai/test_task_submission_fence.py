@@ -337,7 +337,7 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
         assert calls == []
         if phase == "admitted":
             await engine.start_prepared(submission)
-            assert (await (await engine.get("trial")).wait()).status is TaskStatus.SUCCEEDED
+            assert (await (await engine.get("trial")).wait()).result.wait_status is TaskStatus.SUCCEEDED
         elif phase == "cancelled":
             await engine.cancel_submission(submission.ref, idempotency_key="cancel")
 
@@ -359,7 +359,7 @@ async def test_submission_identity_and_fence_survive_snapshot_restore(
         result = await engine.start_prepared(submission)
         assert result.admitted is (phase != "cancelled")
         if result.admitted:
-            assert (await (await engine.get("trial")).wait()).status is TaskStatus.SUCCEEDED
+            assert (await (await engine.get("trial")).wait()).result.wait_status is TaskStatus.SUCCEEDED
         else:
             assert result.result.status is TaskStatus.CANCELLED
         assert len(calls) == (0 if phase == "cancelled" else 1)

@@ -314,3 +314,34 @@ __all__ = [
     "encode_execution_watch_cursor",
     "encode_graph_watch_cursor",
 ]
+
+
+def encode_evaluation_watch_cursor(
+    namespace: str, tenant_id: str, experiment_id: str, *,
+    include_content: bool, graph_cursors: Mapping[str, str],
+) -> str:
+    return encode_runtime_cursor(
+        _signer(namespace, "evaluation-watch"), tenant_id=tenant_id,
+        resource_kind="EVALUATION_WATCH",
+        filter_digest=_filter_digest(experiment_id, include_content=include_content, kind="evaluation"),
+        position=json.dumps(dict(graph_cursors), sort_keys=True, separators=(",", ":")),
+    )
+
+
+def decode_evaluation_watch_cursor(
+    namespace: str, tenant_id: str, experiment_id: str, cursor: str, *, include_content: bool,
+) -> dict[str, str]:
+    payload = decode_runtime_cursor(
+        cursor, _signer(namespace, "evaluation-watch"), tenant_id=tenant_id,
+        resource_kind="EVALUATION_WATCH",
+        filter_digest=_filter_digest(experiment_id, include_content=include_content, kind="evaluation"),
+    )
+    try:
+        values = json.loads(payload.position)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if (payload.revision != 0 or not isinstance(values, dict)
+            or any(not isinstance(key, str) or not key or not isinstance(value, str) or not value
+                   for key, value in values.items())):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return values

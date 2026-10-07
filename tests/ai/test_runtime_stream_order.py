@@ -317,8 +317,11 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
         principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         del after_sequences, include_content
+        if ready is not None:
+            ready.set()
         async for event in execution_service.stream(execution_id, principal=principal):
             yield ExecutionTreeEvent(
                 execution_id,
@@ -350,6 +353,8 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
         namespace="watch-test",
         graph=GraphService(),
         executions=ExecutionService(),
+        _register_observation=lambda session: None,
+        _release_observation=lambda session: None,
     )
     run = TaskGraphRun(
         runtime,
@@ -382,7 +387,14 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
         {},
         durable_sequence=None,
     )
-    observing = asyncio.create_task(run.observe(observer))
+    async def observe():
+        events = run.watch()
+        try:
+            async for item in events:
+                await observer(item)
+        finally:
+            await events.aclose()
+    observing = asyncio.create_task(observe())
     await asyncio.wait_for(observed_live.wait(), 1)
 
     executions.execution = _execution(
@@ -393,7 +405,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
         ExecutionEvent("execution", 2, "EXECUTION_SUCCEEDED", {}),
     )
     waiter_release.set()
-    result = await asyncio.wait_for(run.wait(), 1)
+    result = (await asyncio.wait_for(run.wait(), 1)).result
 
     assert result.status is TaskStatus.SUCCEEDED
     assert not observed_terminal.is_set()

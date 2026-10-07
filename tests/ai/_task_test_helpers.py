@@ -151,7 +151,7 @@ async def start_task_graph(runtime: Runtime[object], graph: TaskGraph, **kwargs:
 async def run_task_graph(runtime: Runtime[object], graph: TaskGraph, **kwargs: object):
     timeout = kwargs.pop("timeout_seconds", None)
     run = await start_task_graph(runtime, graph, **kwargs)
-    return await run.wait(timeout_seconds=timeout)
+    return (await run.wait(timeout_seconds=timeout)).result
 
 
 async def get_task_graph_run(runtime: Runtime[object], graph_id: str):
@@ -210,7 +210,7 @@ async def task_graph_state(runtime: Runtime[object], graph_id: str, **kwargs: ob
 async def task_graph_wait(runtime: Runtime[object], graph_id: str, **kwargs: object):
     timeout = kwargs.get("timeout_seconds")
     run = await get_task_graph_run(runtime, graph_id)
-    return await run.wait(timeout_seconds=timeout)  # type: ignore[arg-type]
+    return (await run.wait(timeout_seconds=timeout)).result  # type: ignore[arg-type]
 
 
 async def task_graph_resume(

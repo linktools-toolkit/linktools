@@ -491,8 +491,11 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
             principal: Principal,
             after_sequences: dict[str, int] | None = None,
             include_content: bool = False,
+            ready: asyncio.Event | None = None,
         ) -> AsyncIterator[ExecutionTreeEvent]:
             del include_content
+            if ready is not None:
+                ready.set()
             assert principal == principal_arg
             after = dict(after_sequences or {})
             stream_requests.append((execution_id, after))
@@ -550,7 +553,7 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
             await watch.aclose()
 
         assert expansion_started.is_set()
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
         assert result.status is TaskStatus.FAILED
         final_state = await run.state(include_content=True)
         statuses = {node.node_id: node.status for node in final_state.node_states}
@@ -641,10 +644,10 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
                 idempotency_key=f"submit:serial:{index}",
                 limits=TaskGraphLimits(max_concurrency=1),
             )
-            result = await run.wait(timeout_seconds=10)
+            result = (await run.wait(timeout_seconds=10)).result
             assert result.status is TaskStatus.SUCCEEDED
             assert all(
-                node.status is TaskStatus.SUCCEEDED for node in result.node_results
+                node.status is TaskStatus.SUCCEEDED for node in result.node_states
             )
 
         for index in range(repetitions):
@@ -667,10 +670,10 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
                 idempotency_key=f"submit:parallel:{index}",
                 limits=TaskGraphLimits(max_concurrency=3),
             )
-            result = await run.wait(timeout_seconds=10)
+            result = (await run.wait(timeout_seconds=10)).result
             assert result.status is TaskStatus.SUCCEEDED
             assert all(
-                node.status is TaskStatus.SUCCEEDED for node in result.node_results
+                node.status is TaskStatus.SUCCEEDED for node in result.node_states
             )
 
 
@@ -726,10 +729,10 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
             idempotency_key="submit:failure",
             limits=TaskGraphLimits(max_concurrency=1),
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
 
-    statuses = {node.node_id: node.status for node in result.node_results}
-    errors = {node.node_id: node.error_code for node in result.node_results}
+    statuses = {node.node_id: node.status for node in result.node_states}
+    errors = {node.node_id: node.error_code for node in result.node_states}
     assert result.status is TaskStatus.FAILED
     assert statuses == {
         "fail": TaskStatus.FAILED,
@@ -786,7 +789,7 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         )
         with pytest.raises(AIError) as raised:
             await run.wait(timeout_seconds=0.05)
-        assert raised.value.code is ErrorCode.TASK_WAIT_TIMEOUT
+        assert raised.value.code is ErrorCode.WAIT_TIMEOUT
         await asyncio.wait_for(started.wait(), timeout=1)
         view = await run.cancel(idempotency_key="cancel:timeout")
         assert view.status is TaskStatus.RECOVERY_REQUIRED

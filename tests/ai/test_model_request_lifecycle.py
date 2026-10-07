@@ -1208,7 +1208,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             assert running.request_sequence == event.payload["request_sequence"]
 
             models.release.set()
-            result = await wait_task
+            result = (await wait_task).result
             assert result.status.value == "SUCCEEDED"
             finished_page = await execution.model_interactions(include_content=True)
             finished = finished_page.items[0]
@@ -1312,7 +1312,7 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                 assert archive_snapshot == []
 
                 models.release.set()
-                result = await wait_task
+                result = (await wait_task).result
                 assert result.status.value == "SUCCEEDED"
                 await storage.retention.release_execution_handoff(
                     execution.execution_id,
@@ -1375,7 +1375,7 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
                 assert dict(reread_live.items[0].request) == expected_request
 
                 models.release.set()
-                result = await wait_task
+                result = (await wait_task).result
                 assert result.status.value == "SUCCEEDED"
                 terminal = await execution.model_interactions(include_content=True)
                 expected_request = deepcopy(dict(terminal.items[0].request))
@@ -1478,7 +1478,7 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
                 assert running_page.items[1].finished_at is None
 
                 models.release.set()
-                result = await wait_task
+                result = (await wait_task).result
                 assert result.status.value == "SUCCEEDED"
                 await runtime.metrics.flush()
                 metric_end = datetime.now(timezone.utc) + timedelta(seconds=1)

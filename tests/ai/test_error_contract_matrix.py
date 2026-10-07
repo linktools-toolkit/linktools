@@ -141,7 +141,7 @@ def test_tool_retry_event_uses_stable_retry_code() -> None:
         )
     )
     assert isinstance(emission, DurableBoundary)
-    assert emission.payload["safe_error_code"] == ErrorCode.TOOL_RETRY_REQUIRED.value
+    assert emission.payload["error_code"] == ErrorCode.TOOL_RETRY_REQUIRED.value
 
 
 def test_local_task_child_error_contract_is_preserved() -> None:

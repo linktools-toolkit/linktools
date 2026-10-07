@@ -600,7 +600,7 @@ async def test_remote_only_runtime_uses_host_network_without_opening_sandbox(
             storage=RuntimeStorage.in_memory(),
             capabilities=(_group(_spec(remote), sandbox=sandbox),),
         ) as runtime:
-            result = await runtime.agents.get("default").run("echo", timeout_seconds=10)
+            result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
         assert remote.effects == ["committed"]
         await _wait_closed(remote)
@@ -618,7 +618,7 @@ async def test_unselected_offline_remote_does_not_connect() -> None:
             storage=RuntimeStorage.in_memory(),
             capabilities=(_group(_spec(remote), offline),),
         ) as runtime:
-            result = await runtime.agents.get("default").run("echo", timeout_seconds=10)
+            result = (await runtime.agents.get("default").run("echo", timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED
         assert remote.effects == ["committed"]
 
@@ -668,7 +668,7 @@ async def test_lost_remote_result_requires_confirmation_and_recovery_does_not_re
                 )
                 assert resolution.status is ToolOperationStatus.COMPLETED
                 await execution.recover()
-                result = await execution.wait(timeout_seconds=10)
+                result = (await execution.wait(timeout_seconds=10)).result
                 assert result.status is ExecutionStatus.SUCCEEDED
                 assert remote.effects == ["committed"]
         finally:
@@ -759,9 +759,9 @@ async def test_parallel_runtimes_do_not_share_service_credentials() -> None:
                     _group(_spec(remote, headers={"Authorization": f"Bearer {label}"})),
                 ),
             ) as runtime:
-                result = await runtime.agents.get("default").run(
+                result = (await runtime.agents.get("default").run(
                     "echo", timeout_seconds=10
-                )
+                )).result
                 assert result.status is ExecutionStatus.SUCCEEDED
 
         await asyncio.gather(run("first"), run("second"))
@@ -896,9 +896,9 @@ async def test_mixed_stdio_and_http_keep_separate_process_and_network_boundaries
             storage=RuntimeStorage.in_memory(),
             capabilities=(group,),
         ) as runtime:
-            result = await runtime.agents.get("default").run(
+            result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=15
-            )
+            )).result
             assert result.status is ExecutionStatus.SUCCEEDED
         if isinstance(sandbox, _RecordingLocalSandbox):
             assert sandbox.roots == [tmp_path]
@@ -991,7 +991,7 @@ async def test_cleanup_failure_preserves_confirmed_tool_result_and_idempotent_re
                 "echo",
                 idempotency_key="confirmed-before-close",
             )
-            result = await execution.wait(timeout_seconds=10)
+            result = (await execution.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.FAILED
             assert result.error_code == ErrorCode.MCP_CLEANUP_FAILED.value
             assert "private-cleanup-response" not in str(result)
@@ -1081,9 +1081,9 @@ async def test_mixed_runtime_does_not_bypass_failed_local_sandbox() -> None:
             storage=RuntimeStorage.in_memory(),
             capabilities=(group,),
         ) as runtime:
-            result = await runtime.agents.get("default").run(
+            result = (await runtime.agents.get("default").run(
                 "call both", timeout_seconds=10
-            )
+            )).result
             assert result.status is ExecutionStatus.FAILED
             assert result.error_code == ErrorCode.SANDBOX_UNAVAILABLE.value
         assert remote.effects == []

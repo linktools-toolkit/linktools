@@ -81,7 +81,7 @@ async def test_graph_cancel_quiesces_active_agent_sibling_when_an_effect_is_unkn
                 idempotency_key="start",
             )
             await asyncio.wait_for(started.wait(), timeout=10)
-            initial = await run.wait(timeout_seconds=10)
+            initial = (await run.wait(timeout_seconds=10)).result
             assert initial.status is TaskStatus.RECOVERY_REQUIRED
             slow_execution = await run.execution("slow")
             before = await runtime.executions.inspect(

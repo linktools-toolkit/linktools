@@ -812,6 +812,10 @@ class TaskGraphResult:
     status: TaskStatus
     node_results: "tuple[TaskNodeResult, ...]" = ()
 
+    @property
+    def wait_status(self) -> TaskStatus:
+        return _wait_status(self.status, self.node_results)
+
 
 @dataclass(frozen=True, slots=True)
 class TaskNodeResult:
@@ -948,6 +952,11 @@ class TaskGraphInfo:
     node_states: tuple[TaskNodeView, ...]
     event_sequence: int = 0
 
+    @property
+    def wait_status(self) -> TaskStatus:
+        return _wait_status(self.status, self.node_states)
+
+
     @classmethod
     def from_state(cls, state: "TaskGraphState") -> "TaskGraphInfo":
         return cls(
@@ -966,6 +975,11 @@ class TaskGraphState:
     nodes: "tuple[TaskNode, ...]"
     node_states: "tuple[TaskNodeView, ...]"
     event_sequence: int = 0
+
+    @property
+    def wait_status(self) -> TaskStatus:
+        return _wait_status(self.status, self.node_states)
+
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -1055,3 +1069,32 @@ __all__ = [
     "TaskStatus",
     "TaskTerminalRecord",
 ]
+
+
+def _wait_status(
+    status: TaskStatus,
+    states: tuple[TaskNodeView | TaskNodeResult, ...] = (),
+) -> TaskStatus:
+    if status is not TaskStatus.RUNNING:
+        return status
+    unfinished = tuple(
+        state
+        for state in states
+        if state.status
+        not in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }
+    )
+    if unfinished and any(
+        state.status is TaskStatus.WAITING
+        for state in unfinished
+    ) and all(
+        state.status
+        not in {TaskStatus.READY, TaskStatus.RUNNING}
+        for state in unfinished
+    ):
+        return TaskStatus.WAITING
+    return status
