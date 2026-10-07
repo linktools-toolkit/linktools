@@ -3,9 +3,8 @@
 """Canonical relative paths inside Capability-owned resource packages."""
 
 from collections.abc import Iterable
-from pathlib import PurePosixPath
 
-from ..asset import AssetKey
+from ..asset import AssetKey, validate_materialized_path
 from ..errors import AIError, ErrorCode
 
 SKILL_DECLARATION_FILES = ("SKILL.md", "skill.md")
@@ -14,27 +13,8 @@ _MCP_DECLARATION_FILES = frozenset({"mcp.json", "mcp.yaml"})
 
 def require_resource_path(path: str) -> str:
     """Return one canonical package-relative POSIX resource path."""
-    if not isinstance(path, str) or not path or "\x00" in path or "\\" in path:
-        raise ValueError("resource path is invalid")
-    if path.startswith("virtual:") or path.startswith("file:"):
-        raise ValueError("resource path is invalid")
-    pure = PurePosixPath(path)
-    if (
-        pure.is_absolute()
-        or path.startswith("./")
-        or path.endswith("/")
-        or "//" in path
-    ):
-        raise ValueError("resource path is invalid")
-    parts = pure.parts
-    if not parts or any(part in {"", ".", ".."} for part in parts):
-        raise ValueError("resource path is invalid")
-    if len(parts[0]) == 2 and parts[0][1] == ":":
-        raise ValueError("resource path is invalid")
-    normalized = "/".join(parts)
-    if normalized != path:
-        raise ValueError("resource path is invalid")
-    return normalized
+    validate_materialized_path(path)
+    return path
 
 
 def validate_resource_path(path: str) -> None:
