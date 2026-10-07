@@ -485,6 +485,13 @@ async def test_model_retry_records_each_request_usage() -> None:
     result = await agent.run("hello")
     values = await _completed_usage(store, "retry-run")
 
+    events = await store.list_events(agent_run_id="retry-run")
+    completed = [event for event in events if event.event_type == "MODEL_REQUEST_SUCCEEDED"]
+    assert [event.metadata["linktools.ai.message_sequence"] for event in completed] == ["2", "4"]
+    assert [event.metadata["linktools.ai.request_sequence"] for event in completed] == ["1", "2"]
+    transcript = store.staged_transcript("retry-run")
+    assert transcript is not None
+    assert len(transcript.messages) == 4
     assert attempts == 2
     assert len(values) == result.usage.requests == 2
     _assert_token_sum(values, result.usage)

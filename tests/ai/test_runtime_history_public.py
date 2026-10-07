@@ -24,11 +24,13 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     ArtifactView,
+    Execution,
     ExecutionEvent,
     ExecutionHistoryItem,
     ExecutionTraceItem,
     Page,
     TranscriptItem,
+    RuntimeExecutions,
     RuntimeStorage,
     TaskGraphRun,
     UsageSummary,
@@ -81,6 +83,8 @@ class _Reader:
         cursor: str | None,
         limit: int,
         agent_run_sequence: int | None = None,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
         tool_call_id: str | None = None,
         message_sequence: int | None = None,
         part_index: int | None = None,
@@ -88,7 +92,25 @@ class _Reader:
         assert tenant_id == "tenant"
         assert cursor is None
         assert limit == 100
-        return Page((ExecutionHistoryItem(execution_id, 0, "user", "hello"),))
+        self.history_filters = {
+            "agent_run_sequence": agent_run_sequence,
+            "request_sequence": request_sequence,
+            "step_index": step_index,
+            "tool_call_id": tool_call_id,
+            "message_sequence": message_sequence,
+            "part_index": part_index,
+        }
+        return Page((ExecutionHistoryItem(
+            execution_id,
+            0 if message_sequence is None else message_sequence,
+            "user",
+            "hello",
+            agent_run_sequence=agent_run_sequence,
+            request_sequence=request_sequence,
+            step_index=step_index,
+            tool_call_id=tool_call_id,
+            part_index=part_index,
+        ),))
 
     async def trace(
         self,
@@ -97,8 +119,18 @@ class _Reader:
         tenant_id: str,
         cursor: str | None,
         limit: int,
+        agent_run_sequence: int | None = None,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
     ) -> Page[ExecutionTraceItem]:
         assert tenant_id == "tenant"
+        self.trace_filters = {
+            "agent_run_sequence": agent_run_sequence,
+            "request_sequence": request_sequence,
+            "step_index": step_index,
+            "tool_call_id": tool_call_id,
+        }
         return Page((ExecutionTraceItem(execution_id, 0, {"kind": "TEST"}),))
 
     async def transcript(
@@ -164,6 +196,8 @@ class _PagingReader(_Reader):
         cursor: str | None,
         limit: int,
         agent_run_sequence: int | None = None,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
         tool_call_id: str | None = None,
         message_sequence: int | None = None,
         part_index: int | None = None,
@@ -178,6 +212,25 @@ class _PagingReader(_Reader):
         return Page(
             (ExecutionHistoryItem(execution_id, 1, "assistant", "world"),),
             None,
+        )
+
+    async def trace(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+        agent_run_sequence: int | None = None,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
+    ) -> Page[ExecutionTraceItem]:
+        assert tenant_id == "tenant"
+        assert cursor in (None, "inner-next")
+        return Page(
+            (ExecutionTraceItem(execution_id, 0 if cursor is None else 1, {"kind": "TEST"}),),
+            "inner-next" if cursor is None else None,
         )
 
 
@@ -875,27 +928,132 @@ async def test_history_task_result_authorizes_before_reading_records(reference: 
 
 
 @pytest.mark.asyncio
-async def test_history_cursor_binds_exact_selector() -> None:
+@pytest.mark.parametrize("query", ("history", "trace"))
+async def test_execution_query_cursor_binds_exact_selector(query: str) -> None:
     service = DefaultExecutionHistoryService(
         _Executions(), TenantAuthorizationPolicy("tenant"), _PagingReader(),
         HmacCursorSigner("public-history", b"public-history-key"),
     )
     principal = Principal("caller", "tenant", "service")
-    page = await service.history("execution", principal=principal, agent_run_sequence=1, tool_call_id="call")
-    for changed in (
-        {"agent_run_sequence": 2, "tool_call_id": "call"},
-        {"agent_run_sequence": 1, "tool_call_id": "other"},
-        {"agent_run_sequence": 1, "message_sequence": 1, "part_index": 0},
-        {},
-    ):
+    read = getattr(service, query)
+    filters = {
+        "agent_run_sequence": 1,
+        "request_sequence": 2,
+        "step_index": 0,
+        "tool_call_id": "call",
+    }
+    if query == "history":
+        filters.update(message_sequence=3, part_index=0)
+    page = await read("execution", principal=principal, **filters)
+    assert page.next_cursor is not None
+    for name, value in filters.items():
+        for replacement in (None, "other" if isinstance(value, str) else value + 1):
+            changed = {**filters, name: replacement}
+            with pytest.raises(AIError) as error:
+                await read(
+                    "execution", principal=principal, cursor=page.next_cursor, **changed,
+                )
+            assert error.value.code is ErrorCode.CURSOR_INVALID
+    with pytest.raises(AIError) as error:
+        await read(
+            "execution", principal=principal, cursor=page.next_cursor,
+            include_content=True, **filters,
+        )
+    assert error.value.code is ErrorCode.CURSOR_INVALID
+    second = await read("execution", principal=principal, cursor=page.next_cursor, **filters)
+    assert second.items[0].sequence == 1
+    assert second.next_cursor is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ("service", "history", "executions", "execution"))
+@pytest.mark.parametrize("include_content", (False, True))
+async def test_execution_history_and_trace_forward_filters(
+    entrypoint: str, include_content: bool,
+) -> None:
+    reader = _Reader()
+    service = DefaultExecutionHistoryService(
+        _Executions(), TenantAuthorizationPolicy("tenant"), reader,
+    )
+    principal = Principal("caller", "tenant", "service")
+    executions = RuntimeExecutions(service, None)
+    execution = Execution(SimpleNamespace(executions=executions), "execution", principal, None)
+    target = {
+        "service": service,
+        "history": RuntimeHistory(service, tenant_id="tenant"),
+        "executions": executions,
+        "execution": execution,
+    }[entrypoint]
+    args = () if entrypoint == "execution" else ("execution",)
+    kwargs = {} if entrypoint == "execution" else {"principal": principal}
+    trace_filters = {
+        "agent_run_sequence": 2,
+        "request_sequence": 3,
+        "step_index": 0,
+        "tool_call_id": "call",
+    }
+    history_filters = {**trace_filters, "message_sequence": 4, "part_index": 0}
+    history = await target.history(
+        *args, include_content=include_content, **kwargs, **history_filters,
+    )
+    trace = await target.trace(
+        *args, include_content=include_content, **kwargs, **trace_filters,
+    )
+    assert reader.history_filters == history_filters
+    assert reader.trace_filters == trace_filters
+    item = history.items[0]
+    assert (
+        item.execution_id, item.agent_run_sequence, item.request_sequence,
+        item.step_index, item.sequence, item.part_index, item.tool_call_id,
+    ) == ("execution", 2, 3, 0, 4, 0, "call")
+    assert item.content_included is include_content
+    assert item.content == ("hello" if include_content else None)
+    assert trace.items[0].payload == {"kind": "TEST"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ("history", "trace"))
+async def test_execution_query_accepts_independent_filters(query: str) -> None:
+    reader = _Reader()
+    service = DefaultExecutionHistoryService(
+        _Executions(), TenantAuthorizationPolicy("tenant"), reader,
+    )
+    principal = Principal("caller", "tenant", "service")
+    read = getattr(service, query)
+    filters = {
+        "agent_run_sequence": 2,
+        "request_sequence": 3,
+        "step_index": 0,
+        "tool_call_id": "call",
+    }
+    if query == "history":
+        filters.update(message_sequence=4, part_index=0)
+    for name, value in filters.items():
+        page = await read("execution", principal=principal, **{name: value})
+        assert len(page.items) == 1
+        received = reader.history_filters if query == "history" else reader.trace_filters
+        assert received == {field: value if field == name else None for field in filters}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ("history", "trace"))
+async def test_execution_query_rejects_invalid_filter_values(query: str) -> None:
+    service = DefaultExecutionHistoryService(
+        _Executions(), TenantAuthorizationPolicy("tenant"), _Reader(),
+    )
+    principal = Principal("caller", "tenant", "service")
+    read = getattr(service, query)
+    integer_filters = {"agent_run_sequence": 1, "request_sequence": 1, "step_index": 0}
+    if query == "history":
+        integer_filters.update(message_sequence=1, part_index=0)
+    invalid = [
+        (name, value)
+        for name, minimum in integer_filters.items()
+        for value in (True, 1.5, "1", minimum - 1)
+    ]
+    invalid.extend((("tool_call_id", ""), ("tool_call_id", 1)))
+    for name, value in invalid:
         with pytest.raises(AIError) as error:
-            await service.history("execution", principal=principal, cursor=page.next_cursor, **changed)
-        assert error.value.code is ErrorCode.CURSOR_INVALID
-    for invalid in (
-        {"tool_call_id": "call"}, {"message_sequence": 1}, {"part_index": 0},
-        {"agent_run_sequence": True}, {"agent_run_sequence": 0},
-        {"agent_run_sequence": 1, "tool_call_id": ""},
-    ):
-        with pytest.raises(AIError) as error:
-            await service.history("execution", principal=principal, **invalid)
+            await read("execution", principal=principal, **{name: value})
         assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        assert error.value.safe_details == {"field": name}

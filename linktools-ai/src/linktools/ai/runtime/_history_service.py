@@ -144,20 +144,36 @@ class DefaultExecutionHistoryService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_sequence: int | None = None,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
     ) -> Page[ExecutionTraceItem]:
         record = await self._authorize(execution_id, principal)
+        filters = {
+            "agent_run_sequence": agent_run_sequence,
+            "request_sequence": request_sequence,
+            "step_index": step_index,
+            "tool_call_id": tool_call_id,
+        }
+        _validate_history_filters(filters)
         inner_cursor = self._decode_content_cursor(
             cursor,
             execution_id=execution_id,
             tenant_id=self._executions.tenant_id,
             query_kind="trace",
             include_content=include_content,
+            filters=filters,
         )
         page = await self._reader.trace(
             execution_id,
             tenant_id=self._executions.tenant_id,
             cursor=inner_cursor,
             limit=limit,
+            agent_run_sequence=agent_run_sequence,
+            request_sequence=request_sequence,
+            step_index=step_index,
+            tool_call_id=tool_call_id,
         )
         return Page(
             page.items,
@@ -167,6 +183,7 @@ class DefaultExecutionHistoryService:
                 tenant_id=self._executions.tenant_id,
                 query_kind="trace",
                 include_content=include_content,
+                filters=filters,
             ),
         )
 
@@ -225,40 +242,23 @@ class DefaultExecutionHistoryService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
         agent_run_sequence: int | None = None,
         tool_call_id: str | None = None,
         message_sequence: int | None = None,
         part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
         record = await self._authorize(execution_id, principal)
-        for name, value, minimum in (
-            ("agent_run_sequence", agent_run_sequence, 1),
-            ("message_sequence", message_sequence, 1),
-            ("part_index", part_index, 0),
-        ):
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < minimum
-            ):
-                raise AIError(
-                    ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name}
-                )
-        if tool_call_id is not None and (
-            not isinstance(tool_call_id, str) or not tool_call_id
-        ):
-            raise AIError(
-                ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "tool_call_id"}
-            )
-        if (
-            (tool_call_id is not None or message_sequence is not None)
-            and agent_run_sequence is None
-        ) or (part_index is not None and message_sequence is None):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         filters = {
             "agent_run_sequence": agent_run_sequence,
+            "request_sequence": request_sequence,
+            "step_index": step_index,
             "tool_call_id": tool_call_id,
             "message_sequence": message_sequence,
             "part_index": part_index,
         }
+        _validate_history_filters(filters)
         inner_cursor = self._decode_content_cursor(
             cursor,
             execution_id=execution_id,
@@ -273,6 +273,8 @@ class DefaultExecutionHistoryService:
             cursor=inner_cursor,
             limit=limit,
             agent_run_sequence=agent_run_sequence,
+            request_sequence=request_sequence,
+            step_index=step_index,
             tool_call_id=tool_call_id,
             message_sequence=message_sequence,
             part_index=part_index,
@@ -291,6 +293,7 @@ class DefaultExecutionHistoryService:
                     content_included=False,
                     agent_run_sequence=item.agent_run_sequence,
                     request_sequence=item.request_sequence,
+                    step_index=item.step_index,
                     tool_operation_id=item.tool_operation_id,
                     started_at=item.started_at,
                     finished_at=item.finished_at,
@@ -487,6 +490,19 @@ class DefaultExecutionHistoryService:
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
+
+
+def _validate_history_filters(filters: Mapping[str, JsonValue]) -> None:
+    for name, value in filters.items():
+        if value is None:
+            continue
+        if name == "tool_call_id":
+            valid = isinstance(value, str) and bool(value)
+        else:
+            minimum = 0 if name in {"step_index", "part_index"} else 1
+            valid = isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+        if not valid:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name})
 
 
 def _execution_filter_digest(request: ListExecutionRequest) -> str:

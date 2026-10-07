@@ -27,6 +27,7 @@ from ._transcript_staging import StagedTranscript
 from ._journal import (
     DURATION_NS_METADATA_KEY,
     REQUEST_SEQUENCE_METADATA_KEY,
+    MESSAGE_SEQUENCE_METADATA_KEY,
     MODEL_USAGE_CACHE_READ_METADATA_KEY,
     MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     MODEL_USAGE_INPUT_METADATA_KEY,
@@ -160,6 +161,29 @@ class AgentRunRecorder:
             self._transcript_messages = list(freeze_model_messages(previous.messages))
         events = await self._store.list_events(agent_run_id=record.agent_run_id)
         for event in events:
+            message_sequence = event.metadata.get(MESSAGE_SEQUENCE_METADATA_KEY)
+            if event.event_type == "MODEL_REQUEST_SUCCEEDED" and message_sequence is not None:
+                request_sequence = event.metadata.get(REQUEST_SEQUENCE_METADATA_KEY)
+                if (
+                    not message_sequence.isdigit()
+                    or int(message_sequence) < 1
+                    or request_sequence is None
+                    or not request_sequence.isdigit()
+                    or int(request_sequence) < 1
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                message_index = int(message_sequence) - 1
+                if message_index >= len(self._transcript_messages):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                response = self._transcript_messages[message_index]
+                if not isinstance(response, ModelResponse):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for part in response.parts:
+                    if isinstance(part, ToolCallPart):
+                        previous_request = self._request_sequence_by_tool_call.get(part.tool_call_id)
+                        if previous_request is not None and previous_request != int(request_sequence):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        self._request_sequence_by_tool_call[part.tool_call_id] = int(request_sequence)
             if event.tool_call_id is not None and event.event_type.startswith(
                 "TOOL_CALL_"
             ):
@@ -596,6 +620,9 @@ class AgentRunRecorder:
         metadata = fact.metadata(
             include_observation=include_observation and fact.duration_ns is not None
         )
+        if fact.purpose == "agent" and phase == "completed" and response is not None:
+            self.append_transcript_message(response)
+            metadata[MESSAGE_SEQUENCE_METADATA_KEY] = str(len(self._transcript_messages))
         if not include_observation:
             metadata.pop(DURATION_NS_METADATA_KEY, None)
         if response is not None:

@@ -177,8 +177,8 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             elif ctx.messages and isinstance(ctx.messages[-1], ModelResponse):
                 response = ctx.messages[-1]
             if response is not None:
-                self.recorder.append_transcript_message(response)
-                # The exact response must be recoverable before any tool effect.
+                # The recorder captured this response with its request identity.
+                # It must be recoverable before any tool effect.
                 await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
         if isinstance(node, CallToolsNode):
             pending = result.request if isinstance(result, ModelRequestNode) else None

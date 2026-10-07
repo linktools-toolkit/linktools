@@ -42,6 +42,7 @@ from ._journal import (
     OUTPUT_RETRY_INDEX_METADATA_KEY,
     REQUEST_PURPOSE_METADATA_KEY,
     REQUEST_SEQUENCE_METADATA_KEY,
+    MESSAGE_SEQUENCE_METADATA_KEY,
 )
 from ._model_interaction import StagedModelInteraction, project_public_messages
 from ._transcript_staging import StagedTranscript
@@ -259,8 +260,19 @@ class StepExecutionHistoryReader:
         self._staging_store = staging_store
 
     async def trace(
-        self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int
+        self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int,
+        agent_run_sequence: int | None = None,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
     ) -> "Page[ExecutionTraceItem]":
+        filters = {
+            "agent_run_sequence": agent_run_sequence,
+            "request_sequence": request_sequence,
+            "step_index": step_index,
+            "tool_call_id": tool_call_id,
+        }
+        selected_run_sequence = agent_run_sequence
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -268,7 +280,11 @@ class StepExecutionHistoryReader:
         entries = await self._history_tree(record, tenant_id)
         current: dict[tuple[str, int], tuple[ExecutionRecord, int, list[StepEvent]]] = {}
         for item, depth in entries:
+            if selected_run_sequence is not None and item.execution_id != execution_id:
+                continue
             for agent_run_sequence, events in await self._agent_run_events(item, tenant_id):
+                if selected_run_sequence is not None and agent_run_sequence != selected_run_sequence:
+                    continue
                 identity = (item.execution_id, agent_run_sequence)
                 if identity in current:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -279,6 +295,7 @@ class StepExecutionHistoryReader:
             tenant_id=tenant_id,
             execution_id=execution_id,
             signer=self._cursor_signer,
+            filters=filters,
         )
         if cursor_state is None:
             cursor_coordinate = None
@@ -309,7 +326,10 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             for ordinal, event in enumerate(events[:event_count]):
                 mapped = _trace_item(item, agent_run_sequence, depth, ordinal, event)
-                if mapped is not None:
+                if mapped is not None and all(
+                    value is None or mapped.payload.get(name) == value
+                    for name, value in filters.items()
+                ):
                     occurrences.append(
                         _TraceOccurrence(
                             mapped,
@@ -341,6 +361,7 @@ class StepExecutionHistoryReader:
                 page[limit],
                 fixed_cutoffs,
                 self._cursor_signer,
+                filters=filters,
             )
         _logger.debug(
             "execution trace projected page: execution=%s source_index=%s items=%s",
@@ -357,11 +378,21 @@ class StepExecutionHistoryReader:
         tenant_id: str,
         cursor: str | None,
         limit: int,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
         agent_run_sequence: int | None = None,
         tool_call_id: str | None = None,
         message_sequence: int | None = None,
         part_index: int | None = None,
     ) -> "Page[ExecutionHistoryItem]":
+        filters = {
+            "agent_run_sequence": agent_run_sequence,
+            "request_sequence": request_sequence,
+            "step_index": step_index,
+            "tool_call_id": tool_call_id,
+            "message_sequence": message_sequence,
+            "part_index": part_index,
+        }
         limit = validate_page_limit(limit)
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
@@ -404,6 +435,7 @@ class StepExecutionHistoryReader:
             tenant_id=tenant_id,
             execution_id=execution_id,
             signer=self._cursor_signer,
+            filters=filters,
         )
         if cursor_state is None:
             cursor_coordinate = None
@@ -457,6 +489,8 @@ class StepExecutionHistoryReader:
             tenant_id=tenant_id,
             limit=limit,
             tool_call_id=tool_call_id,
+            request_sequence=request_sequence,
+            step_index=step_index,
             message_sequence=message_sequence,
             part_index=part_index,
         )
@@ -469,6 +503,7 @@ class StepExecutionHistoryReader:
                 page[limit],
                 fixed_cutoffs,
                 self._cursor_signer,
+                filters=filters,
             )
         _logger.debug(
             "execution history projected page: execution=%s items=%s",
@@ -1096,7 +1131,7 @@ class StepExecutionHistoryReader:
         *,
         execution_id: str,
         tenant_id: str,
-        event_high_water: int,
+        events: Sequence[StepEvent],
     ) -> dict[
         str,
         tuple[
@@ -1108,11 +1143,8 @@ class StepExecutionHistoryReader:
             str | None,
         ],
     ]:
-        events = await self._history_events(agent_run_id)
-        if event_high_water < 0 or event_high_water > len(events):
-            raise AIError(ErrorCode.CURSOR_INVALID)
         values: dict[str, list[object | None]] = {}
-        for event in events[:event_high_water]:
+        for event in events:
             if event.event_type not in {
                 "TOOL_CALL_STARTED",
                 "TOOL_CALL_SUCCEEDED",
@@ -1185,6 +1217,8 @@ class StepExecutionHistoryReader:
         high_waters: Mapping[tuple[str, int], tuple[int, int, tuple[str, ...]]],
         tenant_id: str,
         limit: int,
+        request_sequence: int | None,
+        step_index: int | None,
         tool_call_id: str | None,
         message_sequence: int | None,
         part_index: int | None,
@@ -1236,6 +1270,8 @@ class StepExecutionHistoryReader:
                     from_cursor=source is cursor_source,
                     tail_keys=tail_keys,
                     tool_call_id=tool_call_id,
+                    request_sequence=request_sequence,
+                    step_index=step_index,
                     message_sequence=message_sequence,
                     part_index=part_index,
                 )
@@ -1277,6 +1313,8 @@ class StepExecutionHistoryReader:
         start_item_offset: int,
         from_cursor: bool,
         tail_keys: tuple[str, ...],
+        request_sequence: int | None,
+        step_index: int | None,
         tool_call_id: str | None,
         message_sequence: int | None,
         part_index: int | None,
@@ -1294,11 +1332,16 @@ class StepExecutionHistoryReader:
             from_cursor=from_cursor,
             staged=source.staged,
         )
+        events = await self._history_events(agent_run_id)
+        if event_high_water > len(events):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        events = events[:event_high_water]
+        responses, request_steps = _request_associations(events)
         tool_metadata = await self._tool_call_metadata(
             agent_run_id,
             execution_id=source.record.execution_id,
             tenant_id=tenant_id,
-            event_high_water=event_high_water,
+            events=events,
         )
         first = True
         message_index = start_message_index
@@ -1337,6 +1380,21 @@ class StepExecutionHistoryReader:
                     if value.tool_call_id is None
                     else tool_metadata.get(value.tool_call_id)
                 )
+                origin_request = (
+                    responses.get(message_index + 1)
+                    if isinstance(message, ModelResponse)
+                    else None
+                )
+                tool_request = None if metadata is None else metadata[4]
+                if origin_request is not None and tool_request is not None and origin_request != tool_request:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if origin_request is None:
+                    origin_request = tool_request
+                origin_step = None if origin_request is None else request_steps.get(origin_request)
+                if request_sequence is not None and origin_request != request_sequence:
+                    continue
+                if step_index is not None and origin_step != step_index:
+                    continue
                 status = None if metadata is None else metadata[3]
                 if status == "STARTED" and source.record.status in {
                     ExecutionStatus.FAILED,
@@ -1354,7 +1412,8 @@ class StepExecutionHistoryReader:
                         content_included=True,
                         part_index=value.part_index,
                         agent_run_sequence=source.agent_run_sequence,
-                        request_sequence=None if metadata is None else metadata[4],
+                        request_sequence=origin_request,
+                        step_index=origin_step,
                         tool_operation_id=None if metadata is None else metadata[5],
                         started_at=None if metadata is None else metadata[0],
                         finished_at=None if metadata is None else metadata[1],
@@ -1958,6 +2017,11 @@ def _trace_item(
         if not duration_ns.isdigit():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["duration_ns"] = int(duration_ns)
+    message_sequence = event.metadata.get(MESSAGE_SEQUENCE_METADATA_KEY)
+    if message_sequence is not None:
+        if event.event_type != "MODEL_REQUEST_SUCCEEDED" or not message_sequence.isdigit() or int(message_sequence) < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["message_sequence"] = int(message_sequence)
     request_sequence = _event_request_sequence(event)
     request_purpose = event.metadata.get(REQUEST_PURPOSE_METADATA_KEY)
     if request_purpose is not None:
@@ -1982,6 +2046,30 @@ def _trace_item(
     if depth > 0:
         payload["child_execution_id"] = record.execution_id
     return ExecutionTraceItem(record.execution_id, ordinal + 1, payload)
+
+
+def _request_associations(events: Sequence[StepEvent]) -> tuple[dict[int, int], dict[int, int]]:
+    responses: dict[int, int] = {}
+    steps: dict[int, int] = {}
+    for event in events:
+        if not event.event_type.startswith("MODEL_REQUEST_"):
+            continue
+        request = _event_request_sequence(event)
+        if request is None:
+            continue
+        if request in steps and steps[request] != event.step_index:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        steps[request] = event.step_index
+        raw = event.metadata.get(MESSAGE_SEQUENCE_METADATA_KEY)
+        if raw is None:
+            continue
+        if event.event_type != "MODEL_REQUEST_SUCCEEDED" or not raw.isdigit() or int(raw) < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        message = int(raw)
+        if message in responses and responses[message] != request:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        responses[message] = request
+    return responses, steps
 
 
 def _event_request_sequence(event: StepEvent) -> "int | None":
@@ -2036,13 +2124,16 @@ def _event_timestamp(event: StepEvent) -> datetime:
     return event.timestamp.astimezone(timezone.utc)
 
 
-def _execution_filter_digest(execution_id: str, projection_version: int) -> str:
-    return canonical_sha256(
-        {
-            "execution_id": execution_id,
-            "projection_version": projection_version,
-        }
-    )
+def _execution_filter_digest(
+    execution_id: str, projection_version: int, filters: Mapping[str, JsonValue] | None = None
+) -> str:
+    payload: dict[str, JsonValue] = {
+        "execution_id": execution_id,
+        "projection_version": projection_version,
+    }
+    if filters is not None:
+        payload["filters"] = dict(filters)
+    return canonical_sha256(payload)
 
 
 def _attachment_fact_filter_digest(execution_id: str) -> str:
@@ -2317,6 +2408,7 @@ def _decode_history_cursor(
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
+    filters: Mapping[str, JsonValue] | None = None,
 ) -> "tuple[tuple[str, int, int, int], tuple[tuple[str, int, int, int, tuple[str, ...]], ...]] | None":
     if cursor is None:
         return None
@@ -2326,7 +2418,7 @@ def _decode_history_cursor(
         tenant_id=tenant_id,
         resource_kind="execution_history",
         filter_digest=_execution_filter_digest(
-            execution_id, _EXECUTION_HISTORY_PROJECTION_VERSION
+            execution_id, _EXECUTION_HISTORY_PROJECTION_VERSION, filters
         ),
     )
     try:
@@ -2395,6 +2487,7 @@ def _history_cursor(
     occurrence: _HistoryOccurrence,
     cutoffs: tuple[tuple[str, int, int, int, tuple[str, ...]], ...],
     signer: CursorSigner,
+    filters: Mapping[str, JsonValue] | None = None,
 ) -> str:
     normalized = tuple(sorted(cutoffs, key=lambda item: (item[0], item[1])))
     if len({(item[0], item[1]) for item in normalized}) != len(normalized):
@@ -2404,7 +2497,7 @@ def _history_cursor(
         tenant_id=tenant_id,
         resource_kind="execution_history",
         filter_digest=_execution_filter_digest(
-            execution_id, _EXECUTION_HISTORY_PROJECTION_VERSION
+            execution_id, _EXECUTION_HISTORY_PROJECTION_VERSION, filters
         ),
         position=json.dumps(
             {
@@ -2429,6 +2522,7 @@ def _decode_trace_cursor(
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
+    filters: Mapping[str, JsonValue] | None = None,
 ) -> "tuple[tuple[str, int, int], tuple[tuple[str, int, int], ...]] | None":
     if cursor is None:
         return None
@@ -2438,7 +2532,7 @@ def _decode_trace_cursor(
         tenant_id=tenant_id,
         resource_kind="execution_trace",
         filter_digest=_execution_filter_digest(
-            execution_id, _EXECUTION_TRACE_PROJECTION_VERSION
+            execution_id, _EXECUTION_TRACE_PROJECTION_VERSION, filters
         ),
     )
     try:
@@ -2512,6 +2606,7 @@ def _trace_cursor(
     occurrence: _TraceOccurrence,
     cutoffs: tuple[tuple[str, int, int], ...],
     signer: CursorSigner,
+    filters: Mapping[str, JsonValue] | None = None,
 ) -> str:
     normalized = tuple(sorted(cutoffs, key=lambda item: (item[0], item[1])))
     if len({(item[0], item[1]) for item in normalized}) != len(normalized):
@@ -2521,7 +2616,7 @@ def _trace_cursor(
         tenant_id=tenant_id,
         resource_kind="execution_trace",
         filter_digest=_execution_filter_digest(
-            execution_id, _EXECUTION_TRACE_PROJECTION_VERSION
+            execution_id, _EXECUTION_TRACE_PROJECTION_VERSION, filters
         ),
         position=json.dumps(
             {

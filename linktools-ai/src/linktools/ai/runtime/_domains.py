@@ -135,8 +135,30 @@ class RuntimeExecutions(Generic[AppT]):
     async def recover(self, execution_id: str, *, principal: Principal) -> ExecutionHandle:
         return await self._service.recover(execution_id, principal=principal)
 
-    async def trace(self, execution_id: str, *, principal: Principal, cursor: str | None = None, include_content: bool = False, limit: int = 100) -> Page[ExecutionTraceItem]:
-        return await self._service.trace(execution_id, principal=principal, cursor=cursor, include_content=include_content, limit=limit)
+    async def trace(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        include_content: bool = False,
+        limit: int = 100,
+        agent_run_sequence: int | None = None,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
+    ) -> Page[ExecutionTraceItem]:
+        return await self._service.trace(
+            execution_id,
+            principal=principal,
+            cursor=cursor,
+            include_content=include_content,
+            limit=limit,
+            agent_run_sequence=agent_run_sequence,
+            request_sequence=request_sequence,
+            step_index=step_index,
+            tool_call_id=tool_call_id,
+        )
 
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: str | None = None, include_content: bool = False, limit: int = 100) -> Page[TranscriptItem]:
         return await self._service.transcript(execution_id, principal=principal, cursor=cursor, include_content=include_content, limit=limit)
@@ -150,6 +172,8 @@ class RuntimeExecutions(Generic[AppT]):
         include_content: bool = False,
         limit: int = 100,
         agent_run_sequence: int | None = None,
+        request_sequence: int | None = None,
+        step_index: int | None = None,
         tool_call_id: str | None = None,
         message_sequence: int | None = None,
         part_index: int | None = None,
@@ -161,6 +185,8 @@ class RuntimeExecutions(Generic[AppT]):
             include_content=include_content,
             limit=limit,
             agent_run_sequence=agent_run_sequence,
+            request_sequence=request_sequence,
+            step_index=step_index,
             tool_call_id=tool_call_id,
             message_sequence=message_sequence,
             part_index=part_index,

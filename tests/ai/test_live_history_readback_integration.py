@@ -57,6 +57,8 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
     assistant_reads: list[str] = []
     live_items: tuple[ExecutionHistoryItem, ...] = ()
     frozen_first = None
+    frozen_partial = None
+    frozen_request = None
 
     async def quick(_ctx: AgentContext[None], value: str) -> None:
         assert value == "quick-argument"
@@ -92,7 +94,7 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
         principal = runtime.default_principal
 
         async def observe(tree_event: ExecutionTreeEvent) -> None:
-            nonlocal live_items, frozen_first
+            nonlocal live_items, frozen_first, frozen_partial, frozen_request
             event = tree_event.event
             payload = event.payload
             assert not any(secret in json.dumps(payload) for secret in (
@@ -107,6 +109,9 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
                 assert len(page.items) == 1
                 assert page.items[0].item_kind == "assistant"
                 assistant_reads.append(page.items[0].content)
+                if frozen_partial is None:
+                    assert page.items[0].request_sequence is None
+                    frozen_partial = await execution.history(include_content=True, limit=1)
             if payload.get("call_id") != "quick-call":
                 return
             selector = {"agent_run_sequence": payload["agent_run_sequence"], "tool_call_id": payload["call_id"]}
@@ -129,6 +134,9 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
                 metadata = await runtime.executions.history(tree_event.execution_id, principal=principal, **selector)
                 assert len(metadata.items) == 2
                 assert all(item.content is None and item.content_included is False for item in metadata.items)
+                assert all(item.request_sequence == 1 and item.step_index is not None for item in metadata.items)
+                frozen_request = await execution.history(request_sequence=1, limit=1)
+                assert frozen_request.next_cursor is not None
                 normal = await runtime.executions.history(tree_event.execution_id, principal=principal, include_content=True)
                 live_items = normal.items
                 assert _contents(tuple(item for item in normal.items if item.tool_call_id == "quick-call")) == _contents(exact.items)
@@ -173,6 +181,42 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
             ("quick-call", None), ("slow-call", "slow-result"),
         ]
         assert [item.content for item in fresh.items if item.item_kind == "assistant"] == assistant_reads
+        interactions = (await execution.model_interactions()).items
+        by_request = {item.request_sequence: item for item in interactions}
+        assert set(by_request) == {1, 2}
+        for item in fresh.items:
+            if item.item_kind in {"user", "system"}:
+                assert item.request_sequence is None and item.step_index is None
+            else:
+                expected = 2 if item.content == "all finished" else 1
+                assert item.request_sequence == expected
+                assert item.step_index == by_request[expected].step_index
+        for method in (execution.history, execution.trace):
+            assert (await method(request_sequence=99)).items == ()
+            selected = (await method(request_sequence=1, tool_call_id="quick-call")).items
+            assert len(selected) == 2
+            assert (await method(step_index=by_request[1].step_index)).items
+        assert frozen_partial is not None
+        partial_tail = await execution.history(include_content=True, cursor=frozen_partial.next_cursor)
+        partial_response = [item for item in partial_tail.items if item.item_kind == "assistant"]
+        assert len(partial_response) == 1
+        assert partial_response[0].content == "before tools"
+        assert partial_response[0].request_sequence is None
+        assert partial_response[0].step_index is None
+        assert frozen_request is not None
+        frozen_filtered = list(frozen_request.items)
+        cursor = frozen_request.next_cursor
+        while cursor is not None:
+            page = await execution.history(request_sequence=1, cursor=cursor, limit=1)
+            frozen_filtered.extend(page.items)
+            cursor = page.next_cursor
+        assert not any(item.item_kind == "tool_result" and item.tool_call_id == "slow-call" for item in frozen_filtered)
+        assert len((await execution.history(request_sequence=1)).items) == len(frozen_filtered) + 1
+        trace = (await execution.trace(request_sequence=2)).items
+        response = next(item for item in trace if item.payload["kind"] == "MODEL_RESPONSE")
+        final = next(item for item in fresh.items if item.content == "all finished")
+        assert response.payload["message_sequence"] == final.sequence
+
 
 
 @pytest.mark.asyncio
