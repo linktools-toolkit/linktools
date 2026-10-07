@@ -8,15 +8,15 @@ class NginxSite:
     """One nginx site owned by a container and identified by its local ID."""
 
     def __init__(
-            self, server_name: Any, proxy: Optional[Any] = None,
-            template: Optional[Any] = None, https: Optional[bool] = None,
-            waf: Optional[bool] = None, auth: Optional[bool] = None,
-            waf_bypass: Sequence[str] = (), auth_bypass: Sequence[str] = (),
-            auth_headers: Optional[Mapping[str, Any]] = None,
-            auth_rule: Optional[Mapping[str, Any]] = None,
-            oidc_redirects: Sequence[str] = (), url: Optional[Any] = None,
-            cert_domains: Sequence[str] = (),
-            vars: Optional[Mapping[str, Any]] = None,
+            self, server_name: Any, proxy: "Optional[Any]" = None,
+            template: "Optional[Any]" = None, https: "Optional[bool]" = None,
+            waf: "Optional[bool]" = None, auth: "Optional[bool]" = None,
+            waf_bypass: "Sequence[str]" = (), auth_bypass: "Sequence[str]" = (),
+            auth_headers: "Optional[Mapping[str, Any]]" = None,
+            auth_rule: "Optional[Mapping[str, Any]]" = None,
+            oidc_redirects: "Sequence[str]" = (), url: "Optional[Any]" = None,
+            cert_domains: "Sequence[str]" = (),
+            vars: "Optional[Mapping[str, Any]]" = None,
     ) -> None:
         self.server_name = server_name
         self.proxy = proxy
