@@ -1774,7 +1774,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 if state.status is TaskStatus.RECOVERY_REQUIRED:
                     return state
                 waiter = self._local_waiter
-                if _stable_waiting_state(state) and (
+                if state.wait_status is TaskStatus.WAITING and (
                     not _has_wait_bound_node(state)
                     or waiter is None
                     or not waiter.owns_graph(graph_id, tenant_id=tenant_id)
@@ -2680,25 +2680,6 @@ def _observation_boundary(status: TaskStatus) -> bool:
         _terminal(status)
         or status is TaskStatus.RECOVERY_REQUIRED
         or status is TaskStatus.WAITING
-    )
-
-
-def _stable_waiting_state(state: TaskGraphState) -> bool:
-    unfinished = tuple(
-        state
-        for state in state.node_states
-        if state.status not in {
-            TaskStatus.SUCCEEDED,
-            TaskStatus.FAILED,
-            TaskStatus.BLOCKED,
-            TaskStatus.CANCELLED,
-        }
-    )
-    return bool(unfinished) and any(
-        state.status is TaskStatus.WAITING for state in unfinished
-    ) and all(
-        state.status not in {TaskStatus.READY, TaskStatus.RUNNING}
-        for state in unfinished
     )
 
 

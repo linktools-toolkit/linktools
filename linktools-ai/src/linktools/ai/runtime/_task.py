@@ -28,6 +28,7 @@ from ..task import (
     TaskResultRef,
     TaskInputSupplyRequest,
 )
+from ._event import project_event_payload
 from ._observation import (
     _wait, _validate_wait, _call_observer,
     _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup,
@@ -1002,7 +1003,7 @@ class TaskGraphRun(Generic[AppT]):
                         execution_id,
                         event.sequence,
                         event.event_type,
-                        event.payload if include_content else {},
+                        project_event_payload(event.event_type, event.payload, include_content=include_content),
                     )
                     sequence = event.sequence
                     node_sequences = replay_execution_sequences.setdefault(

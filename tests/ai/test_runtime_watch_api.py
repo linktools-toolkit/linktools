@@ -929,7 +929,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
             del principal, limit
             assert execution_id == "execution"
             values = (
-                ExecutionEvent(execution_id, 1, "EXECUTION_STARTED", {"raw": "one"}),
+                ExecutionEvent(execution_id, 1, "TOOL_CALL_STARTED", {"call_id": "call", "tool_name": "tool", "arguments": "secret"}),
                 ExecutionEvent(execution_id, 2, "EXECUTION_SUCCEEDED", {"raw": "two"}),
                 ExecutionEvent(execution_id, 3, "LATE_EVENT", {"raw": "late"}),
             )
@@ -974,7 +974,8 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
         if isinstance(event.event, ExecutionTreeEvent)
     ]
     assert [event.durable_sequence for event in execution_events] == [1, 2]
-    assert all(event.payload == {} for event in execution_events)
+    assert execution_events[0].payload == {"call_id": "call", "tool_name": "tool"}
+    assert execution_events[1].payload == {}
     assert all(event.cursor is not None for event in observed)
     assert all(
         item.event.cursor is not None
