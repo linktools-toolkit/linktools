@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal, TaskStatus, UsageMetrics
+from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Page, Principal, TaskStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.evaluation import DatasetRef, EvaluationProgress, EvaluationView
 from linktools.ai.runtime import Agent, Execution, Runtime, RuntimeContext, Session, TaskGraphRun, WaitResult
@@ -25,7 +25,7 @@ from linktools.ai.runtime._watch_cursor import (
     encode_graph_watch_cursor,
 )
 from linktools.ai.runtime.service_api import ExecutionResult, ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView
-from linktools.ai.task import TaskGraphInfo, TaskGraphState
+from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphInfo, TaskGraphState
 
 
 _NAMESPACE = "unified-wait-test"
@@ -58,6 +58,7 @@ class _Tree:
         self.entered = asyncio.Event()
         self.closed = asyncio.Event()
         self.release = asyncio.Event()
+        self.release.set()
         self.emit = False
 
     def stream(
@@ -80,6 +81,24 @@ class _Tree:
         return values()
 
 
+    async def capture(self, execution_id: str, *, principal: Principal, after_event_seqs=None):
+        sequences = after_event_seqs or {}
+        root = ExecutionView(execution_id, "agent", ExecutionStatus.SUCCEEDED,
+            ExecutionLineageKind.RUN, None, execution_id, None)
+        values = [(root, 0, sequences.get(execution_id, 0))]
+        for child_id, sequence in sequences.items():
+            if child_id != execution_id:
+                child = ExecutionView(child_id, "agent", ExecutionStatus.SUCCEEDED,
+                    ExecutionLineageKind.SUBAGENT, execution_id, execution_id, "invocation")
+                values.append((child, 1, sequence))
+        return tuple(values)
+
+    async def replay(self, captured, *, principal: Principal, after_event_seqs=None,
+                     include_content=False) -> AsyncIterator[ExecutionTreeEvent]:
+        if False:
+            yield
+
+
 def _execution_event(sequence: int | None) -> ExecutionTreeEvent:
     return ExecutionTreeEvent(
         "execution", "agent", ExecutionLineageKind.RUN, None, "execution", None, 0,
@@ -89,7 +108,7 @@ def _execution_event(sequence: int | None) -> ExecutionTreeEvent:
 
 class _GraphService:
     def __init__(self) -> None:
-        self.result = TaskGraphState("graph", TaskStatus.SUCCEEDED, (), (), 0)
+        self.result = TaskGraphState("graph", TaskStatus.SUCCEEDED, (), (), 1)
         self.state_calls = 0
         self.wait_calls = 0
         self.stream_calls = 0
@@ -111,6 +130,11 @@ class _GraphService:
         if self.error is not None:
             raise self.error
         return self.result
+
+    async def list_events(self, graph_id: str, *, principal: Principal, after_event_seq=0, limit=100):
+        return Page(tuple(TaskEvent(1, graph_id, sequence, TaskEventType.GRAPH_CHANGED,
+            datetime.now(timezone.utc), self.result.status, TaskStatus.PENDING)
+            for sequence in range(after_event_seq + 1, min(self.result.event_seq, after_event_seq + limit) + 1)))
 
     async def stream_events(self, graph_id: str, *, principal: Principal, after_event_seq=0):
         self.stream_calls += 1
@@ -170,7 +194,7 @@ class _Bundle:
             stub, stub, self.execution, stub, self.graph, self.evaluations,
             stub, stub, stub, stub, None,
             namespace=_NAMESPACE, context=RuntimeContext(None, tenant_id="tenant"),
-            close_callback=close,
+            close_callback=close, tree_streamer=self.tree,
         )
         self.execution_run = Execution(self.runtime, "execution", _PRINCIPAL, self.tree.stream)
         self.graph_run = TaskGraphRun(self.runtime, self.graph, "graph", _PRINCIPAL, self.tree.stream)
@@ -197,7 +221,7 @@ class _Bundle:
         if owner == "graph":
             return encode_graph_watch_cursor(
                 _NAMESPACE, "tenant", identity or "graph", include_content=include_content,
-                graph_event_seq=0, execution_event_seqs={},
+                graph_event_seq=1, execution_event_seqs={},
             )
         return encode_evaluation_watch_cursor(
             _NAMESPACE, "tenant", identity or "evaluation", include_content=include_content, graph_cursors={},
@@ -220,7 +244,10 @@ async def test_each_owner_returns_wait_result_independent_of_callback(owner, obs
             **({"include_content": include_content} if owner == "graph" else {}),
         )
         assert type(outcome) is WaitResult
-        assert outcome.cursor is None
+        if owner == "graph" and observe:
+            assert outcome.cursor == bundle.cursor(owner, include_content=include_content)
+        else:
+            assert outcome.cursor is None
         assert outcome.observation_error is None
         if owner in {"execution", "facade"}:
             assert outcome.result is bundle.execution.result
@@ -233,7 +260,7 @@ async def test_each_owner_returns_wait_result_independent_of_callback(owner, obs
             assert bundle.graph.wait_calls == 1
             if include_content:
                 assert outcome.result is bundle.graph.result
-            assert bundle.graph.state_calls == int(observe)
+            assert bool(bundle.graph.state_calls) is observe
             assert bundle.graph.stream_calls == int(observe)
         else:
             assert outcome.result is bundle.evaluations.result
@@ -794,7 +821,7 @@ async def test_optional_first_tree_failure_cannot_skip_later_graph_member_valida
         "graph", node.node_id, (), TaskStatus.SUCCEEDED, None, 1, None, None, None, None,
         execution_id=f"execution-{node.node_id}",
     ) for node in nodes)
-    bundle.graph.result = TaskGraphState("graph", TaskStatus.SUCCEEDED, nodes, states, 0)
+    bundle.graph.result = TaskGraphState("graph", TaskStatus.SUCCEEDED, nodes, states, 1)
 
     async def inspect_execution(execution_id: str, *, principal: Principal) -> ExecutionView:
         return ExecutionView(
@@ -821,7 +848,7 @@ async def test_optional_first_tree_failure_cannot_skip_later_graph_member_valida
     run = TaskGraphRun(bundle.runtime, bundle.graph, "graph", _PRINCIPAL, tree)
     cursor = encode_graph_watch_cursor(
         _NAMESPACE, "tenant", "graph", include_content=False,
-        graph_event_seq=0, execution_event_seqs={"b": {"member-b": 1}},
+        graph_event_seq=1, execution_event_seqs={"b": {"member-b": 1}},
     )
     try:
         if second == "valid":
@@ -951,6 +978,10 @@ async def test_wait_cleanup_error_resumes_after_last_acknowledged_callback(owner
         ),))
 
     async def callback(event):
+        if owner == "graph" and not isinstance(event.event, TaskEvent):
+            return
+        if owner == "evaluation" and not isinstance(event.event, TaskEvent):
+            return
         delivered.append(event.cursor)
         if not committed:
             committed.append(event.cursor)
@@ -964,7 +995,7 @@ async def test_wait_cleanup_error_resumes_after_last_acknowledged_callback(owner
     bundle.graph.stream_events = graph_events
     bundle.evaluations._inspect = inspect_evaluation
     bundle.evaluations._record = record
-    waiting = asyncio.create_task(bundle.wait(owner, on_event=callback))
+    waiting = asyncio.create_task(bundle.wait(owner, on_event=callback, timeout_seconds=0.1))
     try:
         await asyncio.wait_for(entered.wait(), 1)
         bundle.execution.release.set()
