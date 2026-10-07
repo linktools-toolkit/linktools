@@ -196,6 +196,11 @@ serialization and contract projections. Custom source kinds such as `worker`
 can use `AgentDeclarationLoader("worker", defaults=...)`; explicit Agent
 fields still override validated defaults.
 
+Captured resource paths must also be portable: use relative POSIX paths with
+filenames valid on Windows as well as Unix. Colons, Windows reserved names,
+and trailing dots or spaces are rejected consistently during capture and
+materialization, including for in-memory assets.
+
 Skill filenames accept the two spellings supported by the Agent Skills
 [reference parser](https://github.com/agentskills/agentskills/blob/69ef37e9424c0a7ea9dd2293b559e43ec8176379/skills-ref/src/skills_ref/parser.py).
 Use `SKILL.md` for portability: other clients may require that exact spelling.
@@ -695,7 +700,8 @@ history projections without loading a ModelRegistry or compiling Agents.
 `inspect_execution()` returns safe durable summaries for binding, input,
 output, timestamps, usage, and errors; it does not return prompt/output bodies
 or raw error diagnostics. `result()`, `history()/trace()`,
-`transcript()/model_interactions()`, `task_graph()`, `list_events()`,
+`transcript()/model_interactions()`, `task_graph()`,
+`list_execution_events()/list_task_events()`,
 `usage()/graph_usage()`, `attachment_facts()`,
 `task_result()/task_result_ref()`, and `artifacts()` are owned by the same
 authorized query composition. Execution list and detail cursors are opaque namespace-bound continuations;
@@ -723,7 +729,9 @@ only for successful dependencies. `failure_policy="propagate"` is the default
 and includes node failures and dependency blocks in the graph's final status.
 `failure_policy="isolate"` keeps those node outcomes visible but excludes them
 from the graph's failed/blocked aggregate. It does not change scheduling,
-cancellation, recovery, or retry behavior; cancellation remains part of the
+cancellation, recovery, or retry behavior. An isolated graph can therefore
+finish `SUCCEEDED` while individual nodes failed; inspect node outcomes when
+all-success matters. Cancellation remains part of the
 normal node aggregate and is never isolated by `failure_policy`.
 
 Whole-graph cancellation is a separate durable control intent. If cancellation
@@ -745,13 +753,18 @@ request-level usage. It never includes prompts or response text. A successful
 handler call that later fails output validation remains successful, and the
 retry is a separate request.
 
-An uncursored `model_interactions(include_content=False)` query is a fixed
-lifecycle page: it includes RUNNING requests and terminal requests visible when
+An uncursored `model_interactions(include_content=False)` query captures a fixed
+set of request identities: it includes RUNNING requests and terminal requests visible when
 the query starts. RUNNING items have known `started_at`; `finished_at`,
 `duration_ns`, `usage`, and `error_code` are `None`. Usage is never shown as
-zero before it is known. Passing explicit `cutoffs` fixes the same lifecycle view to those request
-high-water marks; it does not switch to a second query mode. `cutoffs=()`
-selects an empty snapshot. Cursors retain their captured high-water marks.
+zero before it is known. Passing explicit `cutoffs` fixes request identities to
+those high-water marks; it does not switch to a second query mode. `cutoffs=()`
+selects an empty snapshot. Cursors retain their captured high-water marks but
+do not freeze lifecycle state: a captured RUNNING request may be terminal when
+read later. Root queries include recursive descendants; selecting a SUBAGENT
+reads only that execution. Model interactions can read process-local staging,
+while aggregate `usage()` reads archived usage and may lag. See the
+[history guide](docs/runtime-history.md) for query scopes and content budgets.
 
 The live event buffer can fall back to durable replay before an uncommitted
 start event is delivered. Clients that need to show every active request should
@@ -872,3 +885,9 @@ Execution, TaskGraphRun and EvaluationRun expose `watch()` and
 for recursive execution trees, evaluation graphs, cleanup guarantees, and the
 breaking SDK and StepEvent durable-wire changes. Existing development data is
 not automatically migrated or deleted.
+
+`Agent.plan()` and `Session.plan()` start real planner executions and wait for
+an observation boundary. They are not dry-run previews and can invoke models
+and authorized tools. Evaluation `completion="complete"` means planned work
+has settled; it does not assert that every target succeeded or every score is
+valid. Inspect trial outcomes, score statuses, and report gates separately.

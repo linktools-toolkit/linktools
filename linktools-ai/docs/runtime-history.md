@@ -11,13 +11,15 @@ request before reading the confirmed content in the **same Runtime instance**.
 | Completed assistant text/thinking part | execution ID, agent run sequence, message sequence, part index | `runtime.executions.history(...)` |
 | User/assistant transcript | execution ID; current agent run | `runtime.executions.transcript(...)` |
 | Execution step facts | execution ID and agent run | `runtime.executions.trace(...)` |
-| Request attachment inclusion | execution ID, agent run sequence, request sequence, attachment ID | `runtime.executions.attachment_facts(...)` |
+| Request attachment inclusion | execution ID, agent run sequence, request sequence, attachment ID | `runtime.history.attachment_facts(...)` |
 | Task result | graph ID, task ID, result reference | the task run's `result`, `result_ref`, or `results` operation |
 
-Model interactions retain their existing recursive execution scope. Ordinary
-history and trace retain their existing root/direct-child scope; transcript
-retains its selected-execution/current-run scope. A recursive watch does not
-expand these query scopes. Read a deeper subagent using that event's own
+For a root execution, model interactions include recursive descendants;
+selecting a `SUBAGENT` reads only that selected execution, not its subtree.
+Ordinary history and trace include a root and its direct children, or only the
+selected subagent. Transcript reads the selected execution/current run.
+Execution watch traverses the selected execution and its descendants, so its
+scope can be broader than a history query. Read a deeper subagent using that event's own
 `execution_id`, rather than substituting its parent's identity. Task and
 evaluation results remain in their own domains.
 
@@ -46,7 +48,9 @@ part does not acquire a fabricated result.
 
 An empty page means no matching fact is currently available. A result item with
 `content_included=True` and `content=None` represents a real JSON null.
-`content_included=False` means the caller did not request the body. Tool status
+`content_included=False` means the body was omitted, either because it was not
+requested or because the response content budget was exhausted. Requesting
+`include_content=True` does not guarantee that every body fits. Tool status
 and external-effect uncertainty remain separate from whether a result part
 exists; `EFFECT_UNKNOWN` is not success.
 
@@ -94,3 +98,11 @@ Bodies are opt-in in responses. Model interaction and attachment-metadata reads
 do not resolve unrequested bodies. Existing archived history/transcript
 projection may still decode message chunks to identify items even when
 `include_content=False`; it does not return those bodies to the caller.
+
+
+Model interaction cursors freeze request identities and high-water marks, not
+request lifecycle state. A captured RUNNING request can be terminal when a later
+page reads it. Refresh without a cursor to discover newly started requests.
+Model interaction reads can see confirmed process-local staging; aggregate
+`usage()` reads archived usage and may lag the active request view. Check its
+completeness metadata rather than treating an incomplete total as final.
