@@ -764,7 +764,7 @@ class TaskGraphRun(Generic[AppT]):
                         cursor=encode_execution_watch_cursor(
                             self._runtime.namespace,
                             self._principal.tenant_id,
-                            event.root_execution_id,
+                            execution_ids[node_id],
                             include_content=include_content,
                             sequences=node_sequences,
                         ),

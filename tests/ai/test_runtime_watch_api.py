@@ -1662,3 +1662,47 @@ async def test_task_graph_watch_preserves_authoritative_failure_during_cleanup()
         )))
 
     assert raised.value is cause
+
+
+@pytest.mark.asyncio
+async def test_graph_live_subagent_root_cursor_binds_selected_execution():
+    from types import SimpleNamespace
+    from linktools.ai.runtime._watch_cursor import decode_execution_watch_cursor
+    from linktools.ai.task import TaskNode, TaskNodeView
+
+    principal = Principal("owner", "tenant")
+    node = TaskNode("node")
+    state = TaskGraphState("graph", TaskStatus.SUCCEEDED, (node,), (
+        TaskNodeView("graph", "node", (), TaskStatus.SUCCEEDED, None, 1, None, None, None, None,
+                     execution_id="selected"),
+    ), 1)
+    class Graph:
+        async def state(self, graph_id, *, principal):
+            return state
+        async def stream_events(self, graph_id, *, principal, after_sequence=0):
+            if after_sequence < 1:
+                yield TaskEvent(1, "graph", 1, TaskEventType.GRAPH_ADMITTED,
+                                datetime.now(timezone.utc), TaskStatus.PENDING)
+    async def inspect(execution_id, *, principal):
+        assert execution_id == "selected"
+        return SimpleNamespace(binding_kind="agent")
+    async def tree(execution_id, *, principal, after_sequences=None, include_content=False, ready=None):
+        assert execution_id == "selected"
+        if ready is not None:
+            ready.set()
+        yield ExecutionTreeEvent(
+            "selected", "agent", ExecutionLineageKind.SUBAGENT,
+            "parent", "lineage-root", "invocation", 0,
+            ExecutionStreamEvent("selected", 1, ExecutionEventType.EXECUTION_SUCCEEDED.value, {}),
+        )
+    runtime = SimpleNamespace(namespace="selected-subtree", executions=SimpleNamespace(inspect=inspect))
+    handle = TaskGraphRun(runtime, Graph(), "graph", principal, tree)
+    items = [item async for item in handle.watch()]
+    nested = next(item.event for item in items if isinstance(item.event, ExecutionTreeEvent))
+    assert nested.root_execution_id == "lineage-root" and nested.depth == 0
+    assert decode_execution_watch_cursor("selected-subtree", "tenant", "selected", nested.cursor,
+                                         include_content=False) == {"selected": 1}
+    with pytest.raises(AIError) as error:
+        decode_execution_watch_cursor("selected-subtree", "tenant", "lineage-root", nested.cursor,
+                                      include_content=False)
+    assert error.value.code is ErrorCode.CURSOR_INVALID

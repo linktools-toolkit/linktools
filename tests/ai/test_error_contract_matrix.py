@@ -26,6 +26,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
     ExecutionResult,
+    WaitResult,
     ExecutionStreamEvent,
     ExecutionTreeEvent,
 )
@@ -334,8 +335,8 @@ class _ResultExecution:
     def __init__(self, result: ExecutionResult) -> None:
         self._result = result
 
-    async def wait(self) -> ExecutionResult:
-        return self._result
+    async def wait(self) -> WaitResult[ExecutionResult]:
+        return WaitResult(self._result, None)
 
     def stream(self, *args: object, **kwargs: object) -> object:
         del args, kwargs
@@ -408,13 +409,13 @@ class _StreamingExecution:
 
         return events()
 
-    async def wait(self) -> ExecutionResult:
-        return ExecutionResult(
+    async def wait(self) -> WaitResult[ExecutionResult]:
+        return WaitResult(ExecutionResult(
             self.execution_id,
             ExecutionStatus.SUCCEEDED,
             {"text": "hello"},
             UsageMetrics(),
-        )
+        ), None)
 
 
 class _StreamingAgent:
