@@ -94,6 +94,7 @@ from ._metrics import (
     _disabled_metric_status,
 )
 from .service_api import (
+    ExecutionView,
     ApprovalService,
     ArtifactService,
     CancelExecutionRequest,
@@ -234,6 +235,23 @@ class _MetricControl(Protocol):
 
 
 class _ExecutionTreeStreamer(Protocol):
+    async def capture(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+    ) -> tuple[tuple[ExecutionView, int, int], ...]: ...
+
+    def replay(
+        self,
+        captured: tuple[tuple[ExecutionView, int, int], ...],
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]: ...
+
     def stream(
         self,
         execution_id: str,
@@ -439,6 +457,34 @@ class Runtime(Generic[AppT]):
             principal=principal,
             after_event_seqs=after_event_seqs,
             include_content=include_content, ready=ready,
+        )
+
+    async def _capture_execution_tree(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+    ) -> tuple[tuple[ExecutionView, int, int], ...]:
+        if self._tree_streamer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._tree_streamer.capture(
+            execution_id, principal=principal, after_event_seqs=after_event_seqs,
+        )
+
+    def _replay_execution_tree(
+        self,
+        captured: tuple[tuple[ExecutionView, int, int], ...],
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        if self._tree_streamer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._tree_streamer.replay(
+            captured, principal=principal, after_event_seqs=after_event_seqs,
+            include_content=include_content,
         )
 
     @property

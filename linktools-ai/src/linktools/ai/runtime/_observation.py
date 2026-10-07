@@ -16,6 +16,7 @@ from .service_api import _ExecutionStreamFailure
 from ._wait import WaitResult
 
 _CLEANUP_CANCEL = object()
+_FINAL_DRAIN_TIMEOUT = 5.0
 _active_observation: ContextVar["_ObservationSession | None"] = ContextVar(
     "linktools_ai_active_observation", default=None,
 )
@@ -33,6 +34,7 @@ def _is_observation_cleanup(error: BaseException | None) -> bool:
         and len(error.args) == 1
         and error.args[0] is _CLEANUP_CANCEL
     )
+
 
 async def _drain_stream_tasks(
     tasks: Iterable[asyncio.Task[Any]], *,
@@ -127,17 +129,31 @@ class _ObservationSession:
         self.cursor = cursor
         self.close_timeout = close_timeout
         self.closing = False
+        self.stream_error: ObservationError | None = None
         self.observer_error: BaseException | None = None
         self._error_ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self.tasks: set[asyncio.Task[Any]] = set()
+        self.cleanup_tasks: set[asyncio.Task[Any]] = set()
         self.cancelled_by_owner: set[asyncio.Task[Any]] = set()
         self._release = release
 
     def record_error(self, error: BaseException) -> None:
-        if isinstance(error, (GeneratorExit, _ExecutionStreamFailure)) or _is_observation_cleanup(error):
+        if isinstance(error, GeneratorExit) or _is_observation_cleanup(error):
             return
+        if isinstance(error, _ExecutionStreamFailure):
+            cause = error.cause
+            projected = ObservationError(
+                "stream", cursor=self.cursor,
+                cause_code=cause.code.value if isinstance(cause, AIError) else None,
+                safe_details=cause.safe_details if isinstance(cause, AIError) else None,
+                diagnostics=cause.diagnostics if isinstance(cause, AIError) else None,
+            )
+            projected.__cause__ = cause
+            error = projected
         if (isinstance(error, ObservationError) and error.origin == "stream"
                 and error.safe_details.get("phase") != "cleanup"):
+            if self.stream_error is None:
+                self.stream_error = error
             return
         if (self.observer_error is None
                 or _error_priority(error, authoritative=False)
@@ -157,14 +173,23 @@ class _ObservationSession:
         self.track(task)
         return task
 
+    def start_cleanup(self, coroutine: Coroutine[Any, Any, None], *, name: str) -> asyncio.Task[None]:
+        task = asyncio.create_task(coroutine, name=name)
+        self.cleanup_tasks.add(task)
+        self.track(task)
+        return task
+
     def _done(self, task: asyncio.Task[Any]) -> None:
         if not task.cancelled():
-            task.exception()
+            error = task.exception()
+            if task in self.cleanup_tasks and error is not None:
+                self.record_error(error)
         if self.closing and all(task.done() for task in self.tasks):
             self._release(self)
 
     def _cancel(self, task: asyncio.Task[Any]) -> None:
-        if not task.done() and task not in self.cancelled_by_owner:
+        if (not task.done() and task not in self.cancelled_by_owner
+                and task not in self.cleanup_tasks):
             self.cancelled_by_owner.add(task)
             task.cancel(_CLEANUP_CANCEL)
 
@@ -199,6 +224,7 @@ class _ObservationSession:
         observe: Coroutine[Any, Any, None] | None,
         wait: Coroutine[Any, Any, T],
         timeout_seconds: float | None,
+        finish: "asyncio.Future[T] | None" = None,
     ) -> tuple[T, ObservationError | None]:
         loop = asyncio.get_running_loop()
         deadline = None if timeout_seconds is None else loop.time() + timeout_seconds
@@ -235,6 +261,28 @@ class _ObservationSession:
                             raise
                         observation_error = error
                 if waiter in done:
+                    result = waiter.result()
+                    if finish is not None and observer is not None:
+                        finish.set_result(result)
+                        drain_deadline = loop.time() + _FINAL_DRAIN_TIMEOUT
+                        if deadline is not None:
+                            drain_deadline = min(drain_deadline, deadline)
+                        while not observer.done():
+                            remaining = max(0.0, drain_deadline - loop.time())
+                            if remaining == 0:
+                                observation_error = ObservationError(
+                                    "stream", cursor=self.cursor,
+                                    safe_details={"phase": "drain", "coverage_complete": False,
+                                                  "scope": self.scope, "resource_id": self.resource_id},
+                                )
+                                break
+                            drained, _ = await asyncio.wait(
+                                {observer, self._error_ready}, timeout=remaining,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if self._error_ready in drained:
+                                assert self.observer_error is not None
+                                raise self.observer_error
                     break
                 if not done or (deadline is not None and loop.time() >= deadline):
                     deadline_error = AIError(ErrorCode.WAIT_TIMEOUT, safe_details={"scope": self.scope, "resource_id": self.resource_id, "cursor": self.cursor})
@@ -281,6 +329,10 @@ class _ObservationSession:
                 # errors reported before nested stream cleanup has completed.
                 error.cursor = self.cursor
             raise error
+        if self.stream_error is not None:
+            if observation_error is not None and observation_error is not self.stream_error:
+                self.stream_error.safe_details.update(observation_error.safe_details)
+            observation_error = self.stream_error
         if observation_error is not None:
             observation_error.cursor = self.cursor
         return waiter.result(), observation_error
@@ -381,6 +433,9 @@ async def _wait(
     cursor: str | None, timeout_seconds: float | None, close_timeout_seconds: float,
     register: Callable[[_ObservationSession], None],
     release: Callable[[_ObservationSession], None],
+    finalize: "Callable[[T, str | None], Awaitable[AsyncIterator[EventT]]] | None" = None,
+    drain_live: bool = False,
+    handover_ready: asyncio.Event | None = None,
 ) -> WaitResult[T]:
     if on_event is None:
         session = _ObservationSession(scope, resource_id, None, close_timeout_seconds, release)
@@ -395,12 +450,103 @@ async def _wait(
     events = watch(ready)
     session = _ObservationSession(scope, resource_id, cursor, close_timeout_seconds, release)
     register(session)
+    finish: asyncio.Future[T] | None = None
+    if finalize is not None:
+        finish = asyncio.get_running_loop().create_future()
 
     async def authoritative() -> T:
         await ready.wait()
         return await waiter()
 
     result, error = await session.wait(
-        _consume_events(on_event, events, session, ready), authoritative(), timeout_seconds,
+        _consume_events(on_event, events, session, ready) if finalize is None else
+        _consume_finalized_events(on_event, events, session, ready, finish, finalize, drain_live, handover_ready),
+        authoritative(), timeout_seconds, finish,
     )
     return WaitResult(result, session.cursor, error)
+
+
+async def _consume_finalized_events(
+    observer: Callable[[EventT], Awaitable[None]], events: AsyncIterator[EventT],
+    session: _ObservationSession, ready: asyncio.Event,
+    finish: "asyncio.Future[T] | None",
+    finalize: Callable[[T, str | None], Awaitable[AsyncIterator[EventT]]],
+    drain_live: bool,
+    handover_ready: asyncio.Event | None,
+) -> None:
+    """Switch from live reads to finite owner coverage on the same callback path."""
+    assert finish is not None
+    pending: asyncio.Task[EventT] | None = None
+    final_events: AsyncIterator[EventT] | None = None
+    stream_error: ObservationError | None = None
+
+    async def can_finish() -> None:
+        await asyncio.shield(finish)
+        if handover_ready is not None:
+            await handover_ready.wait()
+
+    switch = asyncio.create_task(can_finish())
+
+    async def close_live() -> None:
+        if pending is not None:
+            await _drain_stream_tasks((pending,), cancelled_by_owner=session.cancelled_by_owner)
+        await events.aclose()
+
+    cleanup: asyncio.Task[None] | None = None
+    try:
+        while (drain_live or not switch.done()) and not session.closing:
+            pending = asyncio.create_task(events.__anext__())
+            waits = {pending} if drain_live else {pending, switch}
+            done, _ = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+            if pending in done:
+                try:
+                    event = pending.result()
+                except StopAsyncIteration:
+                    ready.set()
+                    break
+                except ObservationError as error:
+                    if error.origin != "stream" or error.safe_details.get("phase") == "cleanup":
+                        raise
+                    stream_error = error
+                    ready.set()
+                    break
+                pending = None
+                # A ready event is acknowledged before fixing the final cutoff.
+                if session.closing:
+                    return
+                await _call_observer(observer, event, cursor=session.cursor)
+                session.cursor = event.cursor
+                if session.closing:
+                    return
+            else:
+                break
+        result = await finish
+        if session.closing:
+            return
+        # Closing a cancelled read can itself stall. It remains Runtime-owned,
+        # without holding the serial callback or spending the cleanup budget.
+        if pending is not None:
+            session.track(pending)
+        cleanup = session.start_cleanup(close_live(), name=f"observation-live-close-{session.resource_id}")
+        final_events = await finalize(result, session.cursor)
+        async for event in final_events:
+            if session.closing:
+                return
+            await _call_observer(observer, event, cursor=session.cursor)
+            session.cursor = event.cursor
+            if session.closing:
+                return
+        if stream_error is not None:
+            raise stream_error
+    finally:
+        active_error = sys.exc_info()[1]
+
+        async def cleanup_remaining() -> None:
+            switch.cancel()
+            await asyncio.gather(switch, return_exceptions=True)
+            if cleanup is None:
+                await close_live()
+            if final_events is not None:
+                await final_events.aclose()
+
+        await _await_stream_cleanup(cleanup_remaining(), active_error)

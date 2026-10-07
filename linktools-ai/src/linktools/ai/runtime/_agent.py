@@ -80,6 +80,23 @@ class Execution(Generic[AppT]):
     ) -> WaitResult[ExecutionResult]:
         """Wait for the full execution result; include_event_content only selects callback payloads."""
         _validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds)
+
+        async def finalize(result: ExecutionResult, last_cursor: str | None) -> AsyncIterator[ExecutionTreeEvent]:
+            sequences = None if last_cursor is None else decode_execution_watch_cursor(
+                self._runtime.namespace, self._principal.tenant_id, self.execution_id,
+                last_cursor, include_content=include_event_content,
+            )
+            captured = await self._runtime._capture_execution_tree(
+                self.execution_id, principal=self._principal, after_event_seqs=sequences,
+            )
+            return self._watch_with_cursor(
+                self._runtime._replay_execution_tree(
+                    captured, principal=self._principal, after_event_seqs=sequences,
+                    include_content=include_event_content,
+                ),
+                sequences, include_event_content, last_cursor,
+            )
+
         return await _wait(
             scope="execution", resource_id=self.execution_id,
             waiter=(lambda: self._task_wait(None)) if self._task_wait is not None else
@@ -89,6 +106,7 @@ class Execution(Generic[AppT]):
             on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
             close_timeout_seconds=close_timeout_seconds,
             register=self._runtime._register_observation, release=self._runtime._release_observation,
+            finalize=finalize, drain_live=True,
         )
 
     def watch(

@@ -12,6 +12,7 @@ from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionStatus,
+    Page,
     Principal,
 )
 from linktools.ai.errors import AIError, ErrorCode
@@ -21,6 +22,7 @@ from linktools.ai.runtime._execution_tree import (
     ExecutionTreeStreamer,
 )
 from linktools.ai.runtime.service_api import (
+    ExecutionEvent,
     ExecutionStreamEvent,
     ExecutionTreeEvent,
     ExecutionView,
@@ -155,6 +157,106 @@ class _EventStreamer:
             )
 
         return events()
+
+
+class _FiniteEvents:
+    def __init__(self, records: dict[str, tuple[ExecutionEvent, ...]]) -> None:
+        self.records = records
+        self.reads: list[tuple[str, int, int]] = []
+
+    async def list(
+        self, execution_id: str, *, principal: Principal,
+        after_event_seq: int = 0, limit: int = 100,
+    ) -> Page[ExecutionEvent]:
+        self.reads.append((execution_id, after_event_seq, limit))
+        return Page(tuple(
+            event for event in self.records.get(execution_id, ())
+            if event.event_seq > after_event_seq
+        )[:limit])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_content", [False, True])
+async def test_finite_tree_replay_stops_at_captured_cutoffs_and_preserves_content_mode(
+    include_content: bool,
+) -> None:
+    principal = Principal("owner", "tenant")
+    reader = _ExecutionReader()
+    reader.root = replace(reader.root, event_seq=205)
+    reader.child = replace(reader.child, event_seq=1)
+    payload = {"tool_name": "read_file", "arguments": {"path": "private.txt"}}
+    events = _FiniteEvents({
+        "root": tuple(ExecutionEvent("root", seq, ExecutionEventType.TOOL_CALL_STARTED.value, payload) for seq in range(1, 207)),
+        "child": (ExecutionEvent("child", 1, ExecutionEventType.TOOL_CALL_STARTED.value, payload),),
+    })
+    streamer = ExecutionTreeStreamer(reader, events, ExecutionTreeBroker())
+    captured = await streamer.capture("root", principal=principal, after_event_seqs={"root": 1})
+    reader.root = replace(reader.root, event_seq=206)
+    replayed = [event async for event in streamer.replay(
+        captured, principal=principal, after_event_seqs={"root": 1}, include_content=include_content,
+    )]
+
+    assert [(view.execution_id, depth, cutoff) for view, depth, cutoff in captured] == [
+        ("root", 0, 205), ("child", 1, 1),
+    ]
+    assert [(event.execution_id, event.event.durable_seq) for event in replayed] == [
+        *(("root", seq) for seq in range(2, 206)), ("child", 1),
+    ]
+    assert all(event.event.payload == (payload if include_content else {"tool_name": "read_file"}) for event in replayed)
+    assert replayed[-1].parent_execution_id == "root"
+    assert replayed[-1].parent_invocation_id == "delegate-call"
+    assert replayed[-1].depth == 1
+    assert events.reads == [("root", 1, 200), ("root", 201, 4), ("child", 0, 1)]
+
+
+@pytest.mark.asyncio
+async def test_finite_tree_capture_recovers_cursor_lineage_absent_from_child_index() -> None:
+    principal = Principal("owner", "tenant")
+    reader = _RootOnlyExecutionReader()
+    reader.child = replace(reader.child, event_seq=2)
+    events = _FiniteEvents({"child": (ExecutionEvent("child", 2, "PROGRESS", {}),)})
+    streamer = ExecutionTreeStreamer(reader, events, ExecutionTreeBroker())
+    captured = await streamer.capture("root", principal=principal, after_event_seqs={"child": 1})
+    replayed = [event async for event in streamer.replay(
+        captured, principal=principal, after_event_seqs={"child": 1},
+    )]
+    assert [(event.execution_id, event.depth, event.event.durable_seq) for event in replayed] == [("child", 1, 2)]
+    assert [(view.execution_id, depth, cutoff) for view, depth, cutoff in captured] == [
+        ("root", 0, 0), ("child", 1, 2),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["gap", "missing", "wrong_execution"])
+async def test_finite_tree_replay_rejects_missing_or_misdirected_durable_events(corruption: str) -> None:
+    principal = Principal("owner", "tenant")
+    reader = _RootOnlyExecutionReader()
+    reader.root = replace(reader.root, event_seq=2)
+    records = {
+        "gap": (ExecutionEvent("root", 2, "PROGRESS", {}),),
+        "missing": (),
+        "wrong_execution": (ExecutionEvent("outside", 1, "PROGRESS", {}),),
+    }[corruption]
+    streamer = ExecutionTreeStreamer(reader, _FiniteEvents({"root": records}), ExecutionTreeBroker())
+    captured = await streamer.capture("root", principal=principal)
+    with pytest.raises(AIError) as raised:
+        _ = [event async for event in streamer.replay(captured, principal=principal)]
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["foreign_lineage", "cursor_ahead"])
+async def test_finite_tree_capture_rejects_invalid_cursor_membership_or_highwater(failure: str) -> None:
+    principal = Principal("owner", "tenant")
+    reader = _RootOnlyExecutionReader()
+    if failure == "foreign_lineage":
+        reader.child = replace(reader.child, root_execution_id="outside")
+    streamer = ExecutionTreeStreamer(reader, _FiniteEvents({}), ExecutionTreeBroker())
+    with pytest.raises(AIError) as raised:
+        await streamer.capture("root", principal=principal, after_event_seqs={"child": 1})
+    assert raised.value.code is (
+        ErrorCode.REQUEST_FIELD_INVALID if failure == "foreign_lineage" else ErrorCode.STORAGE_INTEGRITY_ERROR
+    )
 
 
 @pytest.mark.asyncio

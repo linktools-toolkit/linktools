@@ -21,6 +21,7 @@ from .capability import CapabilityGroup
 from .core import (
     ExecutionDeltaType,
     ExecutionEventType,
+    ExecutionStatus,
     JsonValue,
     Principal,
     validate_memory_scope,
@@ -29,6 +30,7 @@ from .errors import AIError, ErrorCode
 from .model import ModelRegistry
 from .runtime import (
     CancelExecutionRequest,
+    ExecutionTreeEvent,
     ListSessionRequest,
     Runtime,
     RuntimeStorage,
@@ -161,36 +163,39 @@ class ACPAgent:
             session_id=session_id,
             memory_scope=self._memory_scope,
         )
-        stop_reason = "end_turn"
-        failure: AIError | None = None
-        async for item in execution.watch(include_content=True):
+        async def on_event(item: ExecutionTreeEvent) -> None:
             if item.depth != 0:
-                continue
+                return
             event = item.event
-            if event.event_type == ExecutionEventType.EXECUTION_CANCELLED.value:
-                stop_reason = "cancelled"
-            elif event.event_type in {
-                ExecutionEventType.EXECUTION_FAILED.value,
-                ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value,
-            }:
-                raw_code = event.payload.get("error_code") if isinstance(event.payload, dict) else None
-                try:
-                    code = ErrorCode(raw_code)
-                except (TypeError, ValueError):
-                    code = (
-                        ErrorCode.EXECUTION_FAILED
-                        if event.event_type == ExecutionEventType.EXECUTION_FAILED.value
-                        else ErrorCode.STORAGE_RECOVERY_REQUIRED
-                    )
-                failure = AIError(code, safe_details={"execution_id": execution.execution_id})
             if self._connection is not None:
                 update = _acp_update(schema, event.event_type, event.payload)
                 if update is not None:
                     await self._connection.session_update(session_id, update)
-        if failure is not None:
+
+        try:
+            outcome = await execution.wait(on_event=on_event, include_event_content=True)
+            result = outcome.result
+            if outcome.observation_error is not None:
+                _logger.warning(
+                    "ACP prompt observation incomplete: execution_id=%s code=%s",
+                    execution.execution_id, outcome.observation_error.code.value,
+                )
+            if result.status is ExecutionStatus.FAILED:
+                try:
+                    code = ErrorCode(result.error_code)
+                except (TypeError, ValueError):
+                    code = ErrorCode.EXECUTION_FAILED
+                raise AIError(code)
+        except AIError as error:
+            failure = AIError(
+                error.code,
+                retryable=error.retryable,
+                safe_details={"execution_id": execution.execution_id},
+            )
             raise acp.RequestError.internal_error(asdict(
                 failure.to_safe_error(operation_id=execution.execution_id)
-            ))
+            )) from error
+        stop_reason = "cancelled" if result.status is ExecutionStatus.CANCELLED else "end_turn"
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
