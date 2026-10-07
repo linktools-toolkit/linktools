@@ -68,7 +68,17 @@ class ACPAgent:
         if protocol_version != acp.PROTOCOL_VERSION:
             raise acp.RequestError.invalid_request({"reason": "no_common_protocol_version"})
         self._initialized = True
-        return schema.InitializeResponse(protocolVersion=protocol_version, agentCapabilities=schema.AgentCapabilities(loadSession=True), authMethods=[], agentInfo=schema.Implementation(name="linktools-ai", version="0.1"))
+        return schema.InitializeResponse(
+            protocolVersion=protocol_version,
+            agentCapabilities=schema.AgentCapabilities(
+                loadSession=True,
+                sessionCapabilities=schema.SessionCapabilities(
+                    list=schema.SessionListCapabilities(),
+                ),
+            ),
+            authMethods=[],
+            agentInfo=schema.Implementation(name="linktools-ai", version="0.1"),
+        )
 
     async def new_session(self, cwd: str, **kwargs: JsonValue) -> JsonValue:
         self._require_initialized()
@@ -86,11 +96,24 @@ class ACPAgent:
         await self._runtime.sessions.get(session_id, principal=self._principal)
         return schema.LoadSessionResponse()
 
-    async def list_sessions(self, cwd: "str | None" = None, **kwargs: JsonValue) -> JsonValue:
+    async def list_sessions(
+        self,
+        cwd: "str | None" = None,
+        cursor: "str | None" = None,
+        **kwargs: JsonValue,
+    ) -> JsonValue:
         self._require_initialized()
         _, schema = _require_acp()
-        page = await self._runtime.sessions.list(ListSessionRequest(self._principal, limit=200))
-        return schema.ListSessionsResponse(sessions=[schema.SessionInfo(sessionId=item.session_id, cwd=item.cwd or cwd or "") for item in page.items])
+        page = await self._runtime.sessions.list(
+            ListSessionRequest(self._principal, cursor=cursor, limit=200),
+        )
+        return schema.ListSessionsResponse(
+            sessions=[
+                schema.SessionInfo(sessionId=item.session_id, cwd=item.cwd or cwd or "")
+                for item in page.items
+            ],
+            nextCursor=page.next_cursor,
+        )
 
     async def resume_session(self, session_id: str, cwd: str, **kwargs: JsonValue) -> JsonValue:
         return await self.load_session(cwd, session_id, **kwargs)
