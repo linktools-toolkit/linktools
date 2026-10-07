@@ -106,6 +106,46 @@ class ExposeMixin:
             auth_enable: bool = False, auth_extra: "dict[str, Any] | None" = None,
     ) -> "Proxy":
 
+        if (isinstance(key, str) and proxy_name is MISSING
+                and proxy_domain_name is MISSING and proxy_conf is MISSING
+                and proxy_url is MISSING and https_enable is MISSING
+                and waf_enable is MISSING and auth_extra is None
+                and auth_enable is False):
+            sites = self.integrations.get("nginx", {})
+            if key not in sites:
+                from ..container import ContainerError
+                raise ContainerError(
+                    f"Unknown nginx site {key!r} in container {self.name}")
+            site = sites[key]
+
+            def site_url() -> str:
+                nginx = self.containers.get("nginx")
+                if nginx is None or not nginx.enable:
+                    return ""
+                domain = str(site.server_name)
+                if not domain:
+                    return ""
+                if site.url is not None:
+                    base_url = str(site.url)
+                else:
+                    if domain == "_" or any(ch in domain for ch in ("*", "~", " ")):
+                        from ..container import ContainerError
+                        raise ContainerError(
+                            f"Nginx site {self.name}/{key} requires an explicit URL")
+                    global_https = self.get_config("NGINX_HTTPS_ENABLE", type=bool)
+                    if site.https is True and not global_https:
+                        from ..container import ContainerError
+                        raise ContainerError(
+                            f"Nginx site {self.name}/{key} requires disabled HTTPS")
+                    https = global_https if site.https is None else site.https
+                    port_key = "NGINX_HTTPS_PORT" if https else "NGINX_HTTP_PORT"
+                    base_url = utils.make_url(
+                        "https" if https else "http", domain,
+                        self.get_config(port_key))
+                return utils.join_url(base_url, *path, queries=queries)
+
+            return lazy_load(site_url)
+
         if not proxy_conf and not proxy_url:
             return ""
 
