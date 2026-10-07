@@ -179,6 +179,7 @@ class _ObservationSession:
         observation_error: ObservationError | None = None
         primary: BaseException | None = None
         cleanup_error: BaseException | None = None
+        deadline_error: AIError | None = None
         try:
             active = {waiter, self._error_ready}
             if observer is not None:
@@ -200,7 +201,8 @@ class _ObservationSession:
                 if waiter in done:
                     break
                 if not done or (deadline is not None and loop.time() >= deadline):
-                    raise AIError(ErrorCode.WAIT_TIMEOUT, safe_details={"scope": self.scope, "resource_id": self.resource_id, "cursor": self.cursor})
+                    deadline_error = AIError(ErrorCode.WAIT_TIMEOUT, safe_details={"scope": self.scope, "resource_id": self.resource_id, "cursor": self.cursor})
+                    raise deadline_error
         except BaseException as error:
             primary = error
         finally:
@@ -236,6 +238,8 @@ class _ObservationSession:
         if errors:
             errors.sort(key=lambda item: item[0])
             error = errors[0][1]
+            if error is deadline_error:
+                deadline_error.safe_details["cursor"] = self.cursor
             if isinstance(error, ObservationError) and error.origin == "stream":
                 # Watch delivery may precede callback acknowledgement, including
                 # errors reported before nested stream cleanup has completed.
@@ -311,6 +315,8 @@ async def _consume_events(
                 return
             await _call_observer(observer, event, cursor=session.cursor)
             session.cursor = event.cursor
+            if session.closing:
+                return
         ready.set()
     except ObservationError as error:
         if error.origin == "stream" and error.safe_details.get("phase") != "cleanup":
