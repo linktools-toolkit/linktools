@@ -51,6 +51,8 @@ from .service_api import (
     ExecutionHistoryItem,
     ExecutionTraceItem,
     ModelInteractionItem,
+    ModelInteractionReadBoundary,
+    ModelInteractionSubscription,
     SessionHistoryItem,
     UsageReadCutoff,
     UsageSummary,
@@ -215,6 +217,13 @@ class _ToolOperationHistoryReader(Protocol):
 
 
 class _ExecutionHistoryStagingStore(Protocol):
+    @property
+    def model_interaction_history_available(self) -> bool: ...
+
+    def subscribe_model_interactions(
+        self, agent_conversation_id: str,
+    ) -> ModelInteractionSubscription: ...
+
     def staged_transcript(self, agent_run_id: str) -> StagedTranscript | None: ...
 
     async def list_events(self, *, agent_run_id: str) -> list[StepEvent]: ...
@@ -253,6 +262,7 @@ class StepExecutionHistoryReader:
         cursor_signer: CursorSigner,
         tool_operations: "_ToolOperationHistoryReader | None" = None,
         staging_store: "_ExecutionHistoryStagingStore | None" = None,
+        durable_history_available: bool = True,
     ) -> None:
         try:
             validate_persistence_namespace(namespace)
@@ -264,6 +274,7 @@ class StepExecutionHistoryReader:
         self._cursor_signer = cursor_signer
         self._tool_operations = tool_operations
         self._staging_store = staging_store
+        self._durable_history_available = durable_history_available
 
     async def trace(
         self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int,
@@ -517,6 +528,148 @@ class StepExecutionHistoryReader:
             len(selected),
         )
         return Page(selected, next_cursor)
+
+    async def capture_model_interaction_cutoffs(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> ModelInteractionReadBoundary:
+        """Capture one known execution without recursively rediscovering its tree.
+
+        Local activity is conservatively unavailable before its latest run is
+        registered here. Archive availability describes retained history, not
+        visibility of another producer's uncommitted requests.
+        """
+        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if record.agent_run_seq < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        staging = self._staging_store
+        archive_available = (
+            self._durable_history_available if staging is None
+            else staging.model_interaction_history_available
+        )
+        history_available = archive_available
+        local_available = False
+        cutoffs: list[UsageReadCutoff] = []
+        durable_cutoffs: list[UsageReadCutoff] = []
+        conversation_id = make_agent_conversation_id(
+            namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id,
+        )
+        for sequence in range(1, record.agent_run_seq + 1):
+            run_id = make_agent_run_id(
+                namespace=self._namespace, tenant_id=tenant_id,
+                execution_id=execution_id, agent_run_seq=sequence,
+            )
+            staged = None if staging is None else await staging.get_agent_run(agent_run_id=run_id)
+            archived = await self._store.get_agent_run(agent_run_id=run_id) if archive_available else None
+            durable_high_water = (
+                await self._store.model_interaction_count(agent_run_id=run_id)
+                if archive_available else 0
+            )
+            if archived is None and isinstance(durable_high_water, int) and durable_high_water > 0:
+                archived = await self._store.get_agent_run(agent_run_id=run_id)
+            if (isinstance(durable_high_water, bool) or not isinstance(durable_high_water, int)
+                    or durable_high_water < 0 or archived is None and durable_high_water > 0):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for run in (staged, archived):
+                if run is not None:
+                    _validate_agent_run(run, run_id, conversation_id, sequence)
+            if sequence == record.agent_run_seq:
+                local_available = staged is not None
+            if staged is None and archived is None:
+                history_available = False
+                continue
+            high_water = (
+                await self._store.model_interaction_count(agent_run_id=run_id)
+                if staging is None else
+                await staging.model_interaction_history_high_water(agent_run_id=run_id)
+            )
+            if isinstance(high_water, bool) or not isinstance(high_water, int) or high_water < 0:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            cutoffs.append(UsageReadCutoff(execution_id, sequence, high_water))
+            # An archive commit during capture can be newer than the declared
+            # request boundary. It cannot expand this finite identity set.
+            durable_cutoffs.append(UsageReadCutoff(execution_id, sequence, min(high_water, durable_high_water)))
+        if record.agent_run_seq == 0 and record.status is ExecutionStatus.SUCCEEDED:
+            history_available = False
+        return ModelInteractionReadBoundary(
+            cutoffs=tuple(cutoffs), durable_cutoffs=tuple(durable_cutoffs),
+            local_staging_available=local_available,
+            durable_history_available=history_available,
+        )
+
+    async def read_model_interaction_metadata(
+        self, execution_id: str, *, tenant_id: str, agent_run_seq: int,
+        after_model_request_seq: int, through_model_request_seq: int, limit: int = 200,
+    ) -> tuple[ModelInteractionItem, ...]:
+        """Read a bounded suffix or one active identity from an explicit cutoff."""
+        limit = validate_page_limit(limit)
+        if (isinstance(agent_run_seq, bool) or not isinstance(agent_run_seq, int)
+                or agent_run_seq < 1
+                or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                       for value in (after_model_request_seq, through_model_request_seq))
+                or after_model_request_seq > through_model_request_seq):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if agent_run_seq > record.agent_run_seq:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        count = min(limit, through_model_request_seq - after_model_request_seq)
+        if count == 0:
+            return ()
+        run_id = make_agent_run_id(
+            namespace=self._namespace, tenant_id=tenant_id,
+            execution_id=execution_id, agent_run_seq=agent_run_seq,
+        )
+        run = await self._history_run(run_id)
+        if run is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _validate_agent_run(run, run_id, make_agent_conversation_id(
+            namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id,
+        ), agent_run_seq)
+        staged: list[StagedModelInteraction] = []
+        if self._staging_store is None:
+            archived = await self._store.list_model_interactions(
+                agent_run_id=run_id, after_model_request_seq=after_model_request_seq, limit=count,
+            )
+        else:
+            archived, staged = await self._staging_store.list_model_interaction_history_snapshot(
+                agent_run_id=run_id, after_model_request_seq=after_model_request_seq, limit=count,
+            )
+        selected: dict[int, ModelInteractionItem] = {}
+        for values, expected_type in ((staged, StagedModelInteraction), (archived, ModelInteractionRecord)):
+            seen: set[int] = set()
+            for interaction in values:
+                if (not isinstance(interaction, expected_type) or interaction.agent_run_id != run_id
+                        or interaction.model_request_seq in seen
+                        or interaction.model_request_seq <= after_model_request_seq):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                seen.add(interaction.model_request_seq)
+                if interaction.model_request_seq > after_model_request_seq + count:
+                    continue
+                item = self._project_model_interaction(
+                    interaction, execution_id, agent_run_seq, 0, None, include_content=False,
+                )
+                previous = selected.get(item.model_request_seq)
+                if previous is not None and previous.status != "RUNNING" and previous != item:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                selected[item.model_request_seq] = item
+        expected = tuple(range(after_model_request_seq + 1, after_model_request_seq + count + 1))
+        if tuple(sorted(selected)) != expected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return tuple(selected[sequence] for sequence in expected)
+
+    async def subscribe_model_interactions(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> ModelInteractionSubscription | None:
+        if await self._executions.get(execution_id, tenant_id=tenant_id) is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if self._staging_store is None:
+            return None
+        return self._staging_store.subscribe_model_interactions(make_agent_conversation_id(
+            namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id,
+        ))
 
     async def model_interactions(
         self,

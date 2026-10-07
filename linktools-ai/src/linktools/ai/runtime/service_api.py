@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 from ..agent import AgentBindingContract
 from ..core import (
@@ -31,7 +31,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent
+from ..task import TaskBindingContract, TaskEffectResolution, TaskEvent, TaskGraphInfo
 from ._execution_context import ExecutionInputContext
 from ._input_contract import (
     UserPromptInput,
@@ -479,6 +479,23 @@ class UsageReadCutoff:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelInteractionReadBoundary:
+    cutoffs: tuple[UsageReadCutoff, ...]
+    durable_cutoffs: tuple[UsageReadCutoff, ...]
+    local_staging_available: bool
+    durable_history_available: bool
+
+
+class ModelInteractionSubscription(Protocol):
+    @property
+    def generation(self) -> int: ...
+
+    async def wait(self, after_generation: int) -> int: ...
+
+    async def close(self) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
 class UsageSummary:
     logical_requests: int = 0
     succeeded_requests: int = 0
@@ -596,6 +613,19 @@ class SessionTurn:
 
 
 class ExecutionHistoryReader(Protocol):
+    async def capture_model_interaction_cutoffs(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> ModelInteractionReadBoundary: ...
+
+    async def read_model_interaction_metadata(
+        self, execution_id: str, *, tenant_id: str, agent_run_seq: int,
+        after_model_request_seq: int, through_model_request_seq: int, limit: int = 200,
+    ) -> tuple[ModelInteractionItem, ...]: ...
+
+    async def subscribe_model_interactions(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> ModelInteractionSubscription | None: ...
+
     async def history(
         self,
         execution_id: str,
@@ -965,10 +995,75 @@ class ExecutionTreeEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskGraphProjectionCoverage:
+    """Finite read coverage; successful callback ACK accepts this checkpoint.
+
+    Positions describe source reads, never a durable replay cursor. Local active
+    visibility applies only to the producing Runtime, not other processes.
+    """
+
+    execution_event_seqs: Mapping[str, Mapping[str, int]]
+    model_cutoffs: tuple["UsageReadCutoff", ...]
+    durable_model_cutoffs: tuple["UsageReadCutoff", ...]
+    local_active_execution_ids: tuple[str, ...]
+    unavailable_active_execution_ids: tuple[str, ...]
+    unavailable_execution_ids: tuple[str, ...]
+    durable_events_complete: bool
+    state_complete: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "execution_event_seqs", {
+            node: dict(values) for node, values in self.execution_event_seqs.items()
+        })
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGraphProjection:
+    """A metadata-only replacement view at graph.event_seq, not an event ACK."""
+
+    graph: TaskGraphInfo
+    phase: Literal["initial", "update", "final"]
+    observed_at: datetime
+    coverage: TaskGraphProjectionCoverage | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.graph, TaskGraphInfo):
+            raise TypeError("graph projection requires a safe graph view")
+        if self.phase not in {"initial", "update", "final"}:
+            raise ValueError("graph projection phase is invalid")
+        if self.observed_at.tzinfo is None:
+            raise ValueError("graph projection time requires a timezone")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskModelProjection:
+    """Upsert by (execution_id, agent_run_seq, model_request_seq).
+
+    Terminal facts dominate RUNNING; duplicates assign own usage rather than
+    adding it. Neither a projection nor local staging advances a replay cursor.
+    """
+
+    item: ModelInteractionItem
+    root_execution_id: str
+    parent_execution_id: str | None
+    parent_invocation_id: str | None
+    visibility: Literal["local_staging", "durable_history"]
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item, ModelInteractionItem) or self.item.content_included:
+            raise ValueError("model projection requires metadata-only history")
+        if self.visibility not in {"local_staging", "durable_history"}:
+            raise ValueError("model projection visibility is invalid")
+        if self.observed_at.tzinfo is None:
+            raise ValueError("model projection time requires a timezone")
+
+
+@dataclass(frozen=True, slots=True)
 class TaskGraphRunEvent:
     graph_id: str
     node_id: "str | None"
-    event: "TaskEvent | ExecutionTreeEvent"
+    event: "TaskEvent | ExecutionTreeEvent | TaskGraphProjection | TaskModelProjection"
     cursor: str | None = None
 
     def __post_init__(self) -> None:
@@ -993,6 +1088,14 @@ class TaskGraphRunEvent:
             if self.node_id is None:
                 raise ValueError("task run execution event requires a node id")
             return
+        if isinstance(self.event, TaskGraphProjection):
+            if self.event.graph.graph_id != self.graph_id or self.node_id is not None:
+                raise ValueError("task graph projection identity is invalid")
+            return
+        if isinstance(self.event, TaskModelProjection):
+            if self.node_id is None:
+                raise ValueError("task model projection requires a node id")
+            return
         raise TypeError("task graph run event payload is invalid")
 
 
@@ -1011,6 +1114,19 @@ class ArtifactDownload:
 
 
 class ExecutionHistoryService(Protocol):
+    async def capture_model_interaction_cutoffs(
+        self, execution_id: str, *, principal: Principal,
+    ) -> ModelInteractionReadBoundary: ...
+
+    async def read_model_interaction_metadata(
+        self, execution_id: str, *, principal: Principal, agent_run_seq: int,
+        after_model_request_seq: int, through_model_request_seq: int, limit: int = 200,
+    ) -> tuple[ModelInteractionItem, ...]: ...
+
+    async def subscribe_model_interactions(
+        self, execution_id: str, *, principal: Principal,
+    ) -> ModelInteractionSubscription | None: ...
+
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView: ...
@@ -1465,6 +1581,8 @@ __all__ = [
     "ListExecutionRequest",
     "ListSessionRequest",
     "ModelInteractionItem",
+    "ModelInteractionReadBoundary",
+    "ModelInteractionSubscription",
     "Page",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
@@ -1475,6 +1593,9 @@ __all__ = [
     "SessionTurnItem",
     "SessionView",
     "TaskGraphRunEvent",
+    "TaskGraphProjection",
+    "TaskGraphProjectionCoverage",
+    "TaskModelProjection",
     "TranscriptItem",
     "UpdateSessionRequest",
     "UsageReadCutoff",

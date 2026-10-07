@@ -64,6 +64,8 @@ from .service_api import (
     ExecutionView,
     ListExecutionRequest,
     ModelInteractionItem,
+    ModelInteractionReadBoundary,
+    ModelInteractionSubscription,
     SessionTurn,
     SessionView,
     TranscriptItem,
@@ -924,6 +926,26 @@ class RuntimeHistory:
             limit=limit,
         )
 
+    async def capture_model_interaction_cutoffs(
+        self, execution_id: str, *, principal: Principal,
+    ) -> ModelInteractionReadBoundary:
+        return await self._service.capture_model_interaction_cutoffs(execution_id, principal=principal)
+
+    async def read_model_interaction_metadata(
+        self, execution_id: str, *, principal: Principal, agent_run_seq: int,
+        after_model_request_seq: int, through_model_request_seq: int, limit: int = 200,
+    ) -> tuple[ModelInteractionItem, ...]:
+        return await self._service.read_model_interaction_metadata(
+            execution_id, principal=principal, agent_run_seq=agent_run_seq,
+            after_model_request_seq=after_model_request_seq,
+            through_model_request_seq=through_model_request_seq, limit=limit,
+        )
+
+    async def subscribe_model_interactions(
+        self, execution_id: str, *, principal: Principal,
+    ) -> ModelInteractionSubscription | None:
+        return await self._service.subscribe_model_interactions(execution_id, principal=principal)
+
     async def model_interactions(
         self,
         execution_id: str,
@@ -1111,6 +1133,7 @@ async def _open_runtime_history(
                 token_seed(resolved_namespace),
             ),
             tool_operations=selected_storage.recovery.tools,
+            durable_history_available=selected_storage.run_store.model_interaction_history_available,
         )
         effective_authorization = (
             TenantAuthorizationPolicy(effective_tenant_id)

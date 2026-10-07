@@ -28,6 +28,8 @@ from .service_api import (
     ExecutionView,
     ListExecutionRequest,
     ModelInteractionItem,
+    ModelInteractionReadBoundary,
+    ModelInteractionSubscription,
     TranscriptItem,
     UsageReadCutoff,
     UsageSummary,
@@ -318,6 +320,31 @@ class DefaultExecutionHistoryService:
                 filter_digest=filter_digest,
             ),
         )
+
+    async def capture_model_interaction_cutoffs(
+        self, execution_id: str, *, principal: Principal,
+    ) -> ModelInteractionReadBoundary:
+        await self._authorize(execution_id, principal)
+        return await self._reader.capture_model_interaction_cutoffs(
+            execution_id, tenant_id=principal.tenant_id,
+        )
+
+    async def read_model_interaction_metadata(
+        self, execution_id: str, *, principal: Principal, agent_run_seq: int,
+        after_model_request_seq: int, through_model_request_seq: int, limit: int = 200,
+    ) -> tuple[ModelInteractionItem, ...]:
+        await self._authorize(execution_id, principal)
+        return await self._reader.read_model_interaction_metadata(
+            execution_id, tenant_id=principal.tenant_id, agent_run_seq=agent_run_seq,
+            after_model_request_seq=after_model_request_seq,
+            through_model_request_seq=through_model_request_seq, limit=limit,
+        )
+
+    async def subscribe_model_interactions(
+        self, execution_id: str, *, principal: Principal,
+    ) -> ModelInteractionSubscription | None:
+        await self._authorize(execution_id, principal)
+        return await self._reader.subscribe_model_interactions(execution_id, tenant_id=principal.tenant_id)
 
     async def model_interactions(
         self,
