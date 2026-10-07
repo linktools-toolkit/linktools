@@ -76,7 +76,7 @@ async def test_pages_save_only_resumable_snapshots(
                 assert await state.get_report_at(snapshot.cutoff) == snapshot
             pages[kind] = (filters, first, snapshot, all_pending)
         released.set()
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         final_cursors = {}
         for kind, (filters, first, snapshot, all_pending) in pages.items():
             read = run.trials if kind == "trials" else run.scores
@@ -100,19 +100,19 @@ async def test_pages_save_only_resumable_snapshots(
                 assert empty.items == () and empty.next_cursor is None
             assert len(published) == 2
             final_cursors[kind] = second.next_cursor
-        report = await run.report()
+        report = await run.create_report()
         assert len(published) == 3 and published[-1] == report
         assert await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL) == report
         spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "current"),
                               CandidateSlotRef(run.experiment_id, "current"),
                               (ScoreComparisonSelection(ScoreSelection("exact", "exact_match"),
                                                         ScoreSelection("exact", "exact_match")),))
-        comparison = await runtime.evaluations.compare(spec, principal=PRINCIPAL)
+        comparison = await runtime.evaluations.create_comparison_report(spec, principal=PRINCIPAL)
         assert len(published) == 5
         assert published[-2].cutoff == report.cutoff
         assert published[-1] == comparison
         assert await runtime.evaluations.get_report(comparison.report_id, principal=PRINCIPAL) == comparison
-        repeated = await runtime.evaluations.compare(replace(spec, cutoff=comparison.cutoff), principal=PRINCIPAL)
+        repeated = await runtime.evaluations.create_comparison_report(replace(spec, cutoff=comparison.cutoff), principal=PRINCIPAL)
         assert repeated.cutoff == comparison.cutoff and len(published) == 6
         experiment_id = run.experiment_id
         if backend == "memory":

@@ -74,7 +74,7 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
                 CapabilityGroup("workspace", workspace=Workspace.load(work)))) as runtime:
         parent = await runtime.agents.get().start("delegate this work", principal=PRINCIPAL,
                                                 idempotency_key="create-real-child")
-        assert (await parent.wait(timeout_seconds=10)).status is ExecutionStatus.SUCCEEDED
+        assert (await parent.wait(timeout_seconds=10)).result.status is ExecutionStatus.SUCCEEDED
         children = await runtime.executions.list_children(parent.execution_id, principal=PRINCIPAL)
         assert len(children) == models.delegations == 1
         source_view = children[0]
@@ -104,9 +104,9 @@ async def test_tool_created_child_capture_runs_independently_in_evaluation(tmp_p
             (CandidateSpec("historical-child", task=historical.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "evaluate-tool-child"),
             engine=runtime.tasks.bind(historical, scorer))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        report = await run.report()
+        report = await run.create_report()
         assert report.scores[0].valid == 1 and report.scores[0].mean == 1.0
         trial = (await run.trials()).items[0]
         replay_id = trial.subject.execution_id
@@ -159,7 +159,7 @@ async def test_graph_capture_ref_evaluates_new_inputs_after_reopen(tmp_path: Pat
             TaskNode("prepare", task=producer, input={"fallback_question": "old source input"}),
             TaskNode("answer", ("prepare",), task=consumer, input_refs={"prepared": TaskNodeResultRef("prepare")}),
         )), principal=PRINCIPAL, idempotency_key="source-captured-graph")
-        assert (await original.wait(timeout_seconds=10)).status is TaskStatus.SUCCEEDED
+        assert (await original.wait(timeout_seconds=10)).result.wait_status is TaskStatus.SUCCEEDED
         original_view = await original.inspect()
         original_answer = await original.result("answer")
         original_ids = tuple([(await original.execution(node)).execution_id for node in ("prepare", "answer")])
@@ -175,9 +175,9 @@ async def test_graph_capture_ref_evaluates_new_inputs_after_reopen(tmp_path: Pat
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("captured-workflow", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "answer"})),),
             (rule_scorer(scorer),)), PRINCIPAL, "evaluate-captured-graph-ref"), engine=engine)
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        report = await run.report()
+        report = await run.create_report()
         assert report.scores[0].valid == 1 and report.scores[0].mean == 1.0
         trial = (await run.trials()).items[0]
         assert trial.graph_ref.graph_id != original.graph_id

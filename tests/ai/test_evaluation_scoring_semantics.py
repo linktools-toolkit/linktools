@@ -62,7 +62,7 @@ async def test_rescore_validates_reopened_environment_before_reserving_or_scorin
             (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(external_effects="live" if live else "deny")), PRINCIPAL, "start"),
             engine=runtime.tasks.bind(target, scorer))
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         experiment_id = run.experiment_id
         assert len(received) == 1
     received.clear()
@@ -89,7 +89,7 @@ async def test_rescore_validates_reopened_environment_before_reserving_or_scorin
                 idempotency_key_digest(request.idempotency_key), tenant_id=PRINCIPAL.tenant_id) is None
         else:
             rescored = await run.rescore(request, engine=engine)
-            assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+            assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             assert len(received) == 1
             assert (await rescored.scores()).items[0].status == "valid"
         assert await storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id) == before
@@ -135,7 +135,7 @@ async def test_agent_input_evidence_reaches_rule_and_model_scorers_without_label
             (CandidateSpec("candidate", task=target.ref),), scorers,
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"),
             engine=runtime.tasks.bind(target, rule, judge))
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert len(received) == 1
         scores = (await run.scores()).items
         assert all(item.status == "valid" for item in scores)
@@ -175,7 +175,7 @@ async def test_agent_evidence_uses_the_accepted_projected_prompt(tmp_path: Path)
             (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"),
             engine=runtime.tasks.bind(target, scorer))
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert received == [{"kind": "agent_input", "prompt": {"kind": "text", "text": models.prompts[0]}}]
         assert models.prompts == ["Prepared question: accepted input"]
 
@@ -207,7 +207,7 @@ async def test_graph_evidence_retains_merged_task_inputs_and_dependency_values(t
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", graph_template=GraphTargetSpec(template=template, outputs={"answer": "finish"})),),
             (rule_scorer(scorer),)), PRINCIPAL, "start"), engine=runtime.tasks.bind(first, second, scorer))
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert len(received) == 1
         assert received[0]["inputs"]["prepare"]["input"] == {"fixed": "template data", "question": "original"}
         assert set(received[0]["inputs"]["finish"]["dependencies"]) == {"prepared"}
@@ -263,7 +263,7 @@ async def test_accepted_human_decision_is_consumed_after_deferred_input_becomes_
             assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
         finally:
             release.set()
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         accepted = (await run.scores()).items[0]
         assert accepted.status == "valid" and accepted.decision_id is not None
         assert (await run.submit_human_score(request)).decision_id == accepted.decision_id
@@ -360,7 +360,7 @@ async def test_same_human_decision_handles_concurrent_native_resume(
         request = HumanScoreRequest(pending.trial.trial_id, "human", pending.evidence_ref,
                                    ScoreBundle(dimensions={"exact_match": 1.0}), "decision")
         await run.submit_human_score(request)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         accepted = (await run.scores()).items[0]
         assert accepted.status == "valid" and accepted.decision_id is not None
         assert (await run.submit_human_score(request)).decision_id == accepted.decision_id
@@ -469,7 +469,7 @@ async def test_new_human_decision_is_rejected_after_its_slot_times_out(tmp_path:
             (CandidateSpec("candidate", task=target.ref),), (scorer,),
             policy=EvaluationPolicy(human_timeout_seconds=0.2)), PRINCIPAL, "start"),
             engine=runtime.tasks.bind(target))
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         expired = (await run.scores()).items[0]
         assert expired.status == "error" and expired.reason == "unanswered"
         with pytest.raises(AIError) as raised:
@@ -508,9 +508,9 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
             tuple(CandidateSpec(slot, task=target.ref) for slot in ("baseline", "candidate")),
             (rule_scorer(rule if score_only else judge),),
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start"), engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         scoring = await run.rescore(RescoreRequest((rule_scorer(judge),), "rescore"), engine=engine) if score_only else run
-        assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         scorer_usage = [await runtime.history.graph_usage(item.scorer_graph.graph_id, principal=PRINCIPAL)
                         for item in (await scoring.scores()).items]
         assert any(item.unknown_usage_requests for item in scorer_usage) is unknown_usage
@@ -518,7 +518,7 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
         spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"),
             CandidateSlotRef(run.experiment_id, "candidate"), (ScoreComparisonSelection(selection, selection),),
             gate_policy=GatePolicy(minimum_coverage=0.5, require_complete_usage=True))
-        report = await runtime.evaluations.compare(spec, principal=PRINCIPAL)
+        report = await runtime.evaluations.create_comparison_report(spec, principal=PRINCIPAL)
         assert report.gate == ("inconclusive" if unknown_usage else "pass")
         assert ("unknown_required_usage" in report.gate_reasons) is unknown_usage
         assert await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL) == report
@@ -527,9 +527,9 @@ async def test_comparison_usage_requirement_accounts_for_scorer_requests(
 
         with monkeypatch.context() as patch:
             patch.setattr(runtime.history, "graph_usage", changed_usage)
-            repeated = await runtime.evaluations.compare(replace(spec, cutoff=report.cutoff), principal=PRINCIPAL)
+            repeated = await runtime.evaluations.create_comparison_report(replace(spec, cutoff=report.cutoff), principal=PRINCIPAL)
         assert repeated.gate == report.gate and repeated.cutoff == report.cutoff
-        permissive = await runtime.evaluations.compare(replace(spec,
+        permissive = await runtime.evaluations.create_comparison_report(replace(spec,
             gate_policy=replace(spec.gate_policy, require_complete_usage=False)), principal=PRINCIPAL)
         assert permissive.gate == "pass"
 
@@ -589,7 +589,7 @@ async def test_budget_stops_new_scoring_without_cancelling_accepted_work(
                 monkeypatch.setattr(evaluation_module, "_now", lambda: record.content_expires_at + timedelta(seconds=1))
             else:
                 release.set()
-            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "cancelled"
+            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
             record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
             if finish == "result":
                 scores = (await run.scores()).items
@@ -651,15 +651,15 @@ async def test_budget_allows_reserved_human_score_to_complete_and_pass_a_gate(
         request = HumanScoreRequest(pending.trial.trial_id, "human", pending.evidence_ref,
                                     ScoreBundle(dimensions={"exact_match": 1.0}), "accepted")
         await run.submit_human_score(request)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert (await run.submit_human_score(request)).status == "valid"
-        report = await run.report()
+        report = await run.create_report()
         assert report.completion == "complete" and report.scores[0].coverage == 1
         selection = ScoreSelection("human", "exact_match")
         spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "candidate"),
             CandidateSlotRef(run.experiment_id, "candidate"), (ScoreComparisonSelection(selection, selection),),
             gate_policy=GatePolicy())
-        comparison = await runtime.evaluations.compare(spec, principal=PRINCIPAL)
+        comparison = await runtime.evaluations.create_comparison_report(spec, principal=PRINCIPAL)
         assert comparison.gate == "pass"
-        repeated = await runtime.evaluations.compare(replace(spec, cutoff=comparison.cutoff), principal=PRINCIPAL)
+        repeated = await runtime.evaluations.create_comparison_report(replace(spec, cutoff=comparison.cutoff), principal=PRINCIPAL)
         assert repeated.gate == "pass" and repeated.cutoff == comparison.cutoff

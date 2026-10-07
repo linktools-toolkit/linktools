@@ -44,7 +44,7 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
         source = await engine.start(TaskGraph("source", (
             TaskNode("target", task=original, input={"value": 1}),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
         execution = await source.execution("target")
         captured = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(PRINCIPAL, "input"))
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("source", 1), (
@@ -53,7 +53,7 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("current", task=current.ref),), (rule_scorer(scorer),), input_mode=source_mode),
             PRINCIPAL, "source-evaluation"), engine=engine)
-        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        assert (await run.wait(timeout_seconds=30)).result.completion == "complete"
         trial = (await run.trials()).items[0]
         graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
         accepted = await graph.result("target")
@@ -83,7 +83,7 @@ async def test_callable_graph_recapture_uses_current_accepted_input(
                 replay = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                     (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=graph_capture, outputs={"answer": "target"})),),
                     (rule_scorer(scorer),), input_mode=input_mode), PRINCIPAL, graph_mode + "-" + input_mode), engine=engine)
-                assert (await replay.wait(timeout_seconds=30)).completion == "complete"
+                assert (await replay.wait(timeout_seconds=30)).result.completion == "complete"
                 for replay_trial in (await replay.trials()).items:
                     replay_graph = await engine.get(replay_trial.graph_ref.graph_id, principal=PRINCIPAL)
                     expected = accepted if input_mode == "fixed_input" else {"value": 11, "prepared": preparation}
@@ -113,7 +113,7 @@ async def test_callable_graph_recapture_keeps_live_and_frozen_dependencies(tmp_p
             TaskNode("external", task=producer),
             TaskNode("target", ("external",), task=consumer, input_refs={"frozen": TaskNodeResultRef("external")}),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
         execution = await source.execution("target")
         captured = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(PRINCIPAL, "input"))
         external = await source.result_ref("external")
@@ -123,7 +123,7 @@ async def test_callable_graph_recapture_keeps_live_and_frozen_dependencies(tmp_p
             TaskNode("target", ("internal",), task=consumer, input_capture=projected,
                      input_refs={"live": TaskNodeResultRef("internal")}),
         )), principal=PRINCIPAL, idempotency_key="current")
-        assert (await graph.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+        assert (await graph.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
         capture = await runtime.tasks.capture_graph(graph.graph_id, CaptureGraphRequest(PRINCIPAL, "graph"))
         template = await runtime._input_captures.read_graph(capture, principal=PRINCIPAL)
         target = next(node for node in template.nodes if node.node_id == "target")
@@ -133,7 +133,7 @@ async def test_callable_graph_recapture_keeps_live_and_frozen_dependencies(tmp_p
         assert all(item.source_ref == external for item in contract.dependencies)
         assert target.input_refs == {"live": TaskNodeResultRef("internal")}
         replay = await engine.start(TaskGraph("replay", template.nodes), principal=PRINCIPAL, idempotency_key="replay")
-        assert (await replay.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+        assert (await replay.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
         assert await graph.result("target") == {"external": 1, "frozen": 1, "internal": 2, "live": 2}
         assert await replay.result("target") == {"external": 1, "frozen": 1, "internal": 3, "live": 3}
 
@@ -158,7 +158,7 @@ async def test_callable_graph_capture_distinguishes_unstarted_from_missing_invoc
         engine = runtime.tasks.bind(task, gate)
         source = await engine.start(TaskGraph("source", (TaskNode("target", task=task, input={"value": 1}),)),
                                     principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
         execution = await source.execution("target")
         captured = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(PRINCIPAL, "input"))
         for input_mode in ("fixed_input", "reproject_input"):
@@ -167,7 +167,7 @@ async def test_callable_graph_capture_distinguishes_unstarted_from_missing_invoc
                 TaskNode("gate", task=gate),
                 TaskNode("target", ("gate",), task=task, input_capture=projected),
             )), principal=PRINCIPAL, idempotency_key=input_mode)
-            assert (await blocked.wait(timeout_seconds=30)).status is TaskStatus.FAILED
+            assert (await blocked.wait(timeout_seconds=30)).result.wait_status is TaskStatus.FAILED
             assert next(node.execution_id for node in (await blocked.state()).node_states if node.node_id == "target") is None
             for mode in ("declaration_graph", "materialized_graph"):
                 request = CaptureGraphRequest(PRINCIPAL, input_mode + mode, mode=mode)
@@ -189,7 +189,7 @@ async def test_callable_graph_capture_distinguishes_unstarted_from_missing_invoc
         interrupted = await engine.start(TaskGraph("interrupted", (
             TaskNode("target", task=task, input_capture=projected),
         )), principal=PRINCIPAL, idempotency_key="interrupted")
-        assert (await interrupted.wait(timeout_seconds=30)).status is TaskStatus.FAILED
+        assert (await interrupted.wait(timeout_seconds=30)).result.wait_status is TaskStatus.FAILED
         assert (await interrupted.execution("target")).execution_id != execution.execution_id
         for mode in ("declaration_graph", "materialized_graph"):
             with pytest.raises(AIError) as missing:

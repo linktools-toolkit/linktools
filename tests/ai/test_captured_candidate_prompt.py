@@ -45,9 +45,9 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
                             storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
         if source_kind == "fork":
             first = await runtime.agents.get().start("historical question", principal=PRINCIPAL)
-            assert (await first.wait()).status is ExecutionStatus.SUCCEEDED
+            assert (await first.wait()).result.status is ExecutionStatus.SUCCEEDED
             source = await first.fork("captured question")
-            assert (await source.wait()).status is ExecutionStatus.SUCCEEDED
+            assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         else:
             context = ExecutionInputContext.from_messages((
                 ModelRequest(parts=[SystemPromptPart(original_prompt), UserPromptPart("historical question")]),
@@ -57,7 +57,7 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
             graph = await runtime.tasks.bind(source_task).start(TaskGraph("source", (
                 TaskNode("agent", task=source_task, input=AgentTaskInput("captured question", input_context=context)),
             )), principal=PRINCIPAL, idempotency_key="source")
-            assert (await graph.wait()).status is TaskStatus.SUCCEEDED
+            assert (await graph.wait()).result.wait_status is TaskStatus.SUCCEEDED
             source = await graph.execution("agent")
         native_request = str((await source.model_interactions(include_content=True)).items[0].request)
         assert native_request.count(original_prompt) == 1
@@ -86,7 +86,7 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
             candidates,
             (rule_scorer(scorer),), input_mode=input_mode, policy=EvaluationPolicy(model_fixtures=(models.contract,))),
             PRINCIPAL, "evaluate-fork"), engine=engine)
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         trials = (await run.trials()).items
         assert {trial.candidate_slot_id for trial in trials} == {"original", "selected"}
@@ -102,7 +102,7 @@ async def test_capture_uses_selected_candidate_prompt_and_preserves_history(
             assert "captured question" in request
             if trial.candidate_slot_id == "selected":
                 retry = await execution.retry("replacement question")
-                assert (await retry.wait()).status is ExecutionStatus.SUCCEEDED
+                assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
                 retry_request = str((await retry.model_interactions(include_content=True)).items[0].request)
                 assert retry_request.count(candidate_prompt) == 1
                 assert original_prompt not in retry_request

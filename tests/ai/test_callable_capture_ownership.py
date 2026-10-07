@@ -56,10 +56,10 @@ async def test_invocation_capture_interruption_retains_terminal_execution(
         assert bound.execution_id is not None
         if cancel_write:
             await asyncio.wait_for(run.cancel(idempotency_key="cancel"), 5)
-        result = await run.wait(timeout_seconds=5)
+        result = (await run.wait(timeout_seconds=5)).result
         state = (await run.state()).node_states[0]
         assert state.execution_id == bound.execution_id
-        assert result.status is (TaskStatus.CANCELLED if cancel_write else TaskStatus.FAILED)
+        assert result.wait_status is (TaskStatus.CANCELLED if cancel_write else TaskStatus.FAILED)
         if not cancel_write:
             assert state.error_code == ErrorCode.STORAGE_UNAVAILABLE.value
         view = await runtime.executions.inspect(state.execution_id, principal=principal)
@@ -138,14 +138,14 @@ async def test_invocation_capture_failed_cleanup_retains_recoverable_execution(
         assert pending.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
         monkeypatch.setattr(objects, "put", original_put)
         monkeypatch.setattr(runtime._execution_service, "cancel_task", original_cancel)
-        assert (await run.wait(timeout_seconds=5)).status is TaskStatus.RECOVERY_REQUIRED
+        assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.RECOVERY_REQUIRED
         if cancel_recovery:
             execution = await run.execution("work")
             await asyncio.wait_for(execution.cancel(idempotency_key="recover-cancel"), 5)
         else:
             await run.recover(idempotency_key="recover")
-        result = await run.wait(timeout_seconds=5)
-        assert result.status is (TaskStatus.CANCELLED if cancel_recovery else TaskStatus.SUCCEEDED)
+        result = (await run.wait(timeout_seconds=5)).result
+        assert result.wait_status is (TaskStatus.CANCELLED if cancel_recovery else TaskStatus.SUCCEEDED)
         assert (await run.state()).node_states[0].execution_id == state.execution_id
         view = await runtime.executions.inspect(state.execution_id, principal=principal)
         assert view.status is (ExecutionStatus.CANCELLED if cancel_recovery else ExecutionStatus.SUCCEEDED)
@@ -221,7 +221,7 @@ async def test_invocation_capture_repeated_cancellation_waits_for_cleanup(
             release_cleanup.set()
             await asyncio.wait_for(cancellation, 5)
         assert capture_owner.cancelled()
-        assert (await run.wait(timeout_seconds=5)).status is TaskStatus.CANCELLED
+        assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.CANCELLED
         view = await runtime.executions.inspect(state.execution_id, principal=principal)
         assert view.status is ExecutionStatus.CANCELLED
         assert calls == []
@@ -286,7 +286,7 @@ async def test_callable_capture_waits_for_original_input_and_dependencies(
                     assert pending.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
         finally:
             release.set()
-        assert (await run.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+        assert (await run.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
         monkeypatch.setattr(objects, "put", original_put)
         capture = await runtime.executions.capture_input(execution.execution_id, request)
         assert await runtime.executions.capture_input(execution.execution_id, request) == capture
@@ -299,7 +299,7 @@ async def test_callable_capture_waits_for_original_input_and_dependencies(
             captured = await runtime._input_captures.task_input(capture, principal=principal, input_mode=mode)
             replay = await engine.start(TaskGraph(mode, (TaskNode("consumer", task=candidate, input_capture=captured),)),
                 principal=principal, idempotency_key=mode)
-            assert (await replay.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+            assert (await replay.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
             assert await replay.result("consumer") == {"value": expected, "dependency": "captured dependency"}
         record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
         assert record.dependency_hold_ids == ()

@@ -75,9 +75,9 @@ async def test_usage_gate_uses_only_selected_scoring_work(monkeypatch: pytest.Mo
             tuple(CandidateSpec(name, task=target.ref) for name in ("baseline", "candidate")),
             (rule_scorer(judge, slot="failing"), rule_scorer(rule, slot="rule")),
             policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "run"), engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         scoring = await run.rescore(RescoreRequest((rule_scorer(rule, slot="rule"),), "rescore"), engine=engine)
-        assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
 
         async def no_new_usage(*args, **kwargs):
             raise AssertionError("a saved usage cutoff cannot observe later requests")
@@ -87,13 +87,13 @@ async def test_usage_gate_uses_only_selected_scoring_work(monkeypatch: pytest.Mo
                                        scoring.experiment_id if selected == "rescore" else None)
             spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"), CandidateSlotRef(run.experiment_id, "candidate"),
                 (ScoreComparisonSelection(selection, selection),), gate_policy=GatePolicy(require_complete_usage=True))
-            report = await runtime.evaluations.compare(spec, principal=PRINCIPAL)
+            report = await runtime.evaluations.create_comparison_report(spec, principal=PRINCIPAL)
             assert ("unknown_required_usage" in report.gate_reasons) is (selected == "failing"), selected
             assert report.gate == ("inconclusive" if selected == "failing" else "pass"), selected
 
             with monkeypatch.context() as saved_cutoff:
                 saved_cutoff.setattr(runtime.history, "graph_usage", no_new_usage)
-                repeated = await runtime.evaluations.compare(replace(spec, cutoff=report.cutoff), principal=PRINCIPAL)
+                repeated = await runtime.evaluations.create_comparison_report(replace(spec, cutoff=report.cutoff), principal=PRINCIPAL)
                 assert repeated.gate == report.gate and repeated.cutoff == report.cutoff, selected
                 assert await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL) == report, selected
 
@@ -120,11 +120,11 @@ async def test_selected_rescore_cannot_hide_unknown_target_usage() -> None:
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             tuple(CandidateSpec(name, task=target.ref) for name in ("baseline", "candidate")), (scorer,),
             policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "run"), engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         rescored = await run.rescore(RescoreRequest((scorer,), "rescore"), engine=engine)
-        assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         selection = ScoreSelection("exact", "exact_match", rescored.experiment_id)
-        report = await runtime.evaluations.compare(ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"),
+        report = await runtime.evaluations.create_comparison_report(ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"),
             CandidateSlotRef(run.experiment_id, "candidate"), (ScoreComparisonSelection(selection, selection),),
             gate_policy=GatePolicy(require_complete_usage=True)), principal=PRINCIPAL)
         assert report.dimensions[0].complete_pairs == 1
@@ -160,10 +160,10 @@ async def test_usage_gate_excludes_an_unselected_candidate() -> None:
              CandidateSpec("unselected", task=unrelated.ref)), (rule_scorer(judge),),
             policy=EvaluationPolicy(allow_volatile=True, model_fixtures=(models.contract,))), PRINCIPAL, "run"),
             engine=runtime.tasks.bind(target, unrelated, judge))
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
-        assert not (await run.report()).cutoff.usage_complete
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+        assert not (await run.create_report()).cutoff.usage_complete
         selection = ScoreSelection("exact", "exact_match")
-        report = await runtime.evaluations.compare(ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"),
+        report = await runtime.evaluations.create_comparison_report(ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"),
             CandidateSlotRef(run.experiment_id, "candidate"), (ScoreComparisonSelection(selection, selection),),
             gate_policy=GatePolicy(require_complete_usage=True)), principal=PRINCIPAL)
         assert report.gate == "pass"
@@ -186,14 +186,14 @@ async def test_saved_rescore_reports_expire_with_the_source_and_are_purged(
         )), principal=PRINCIPAL, idempotency_key="dataset")
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", task=target.ref),), (rule_scorer(rule),), policy=policy), PRINCIPAL, "run"), engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         clock.advance(30)
         scoring = await run.rescore(RescoreRequest((rule_scorer(rule),), "rescore"), engine=engine)
-        assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
-        saved = await scoring.report()
+        assert (await scoring.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+        saved = await scoring.create_report()
         assert await runtime.evaluations.get_report(saved.report_id, principal=PRINCIPAL) == saved
         clock.advance(31)
-        for read in (scoring.report, lambda: runtime.evaluations.get_report(saved.report_id, principal=PRINCIPAL)):
+        for read in (scoring.create_report, lambda: runtime.evaluations.get_report(saved.report_id, principal=PRINCIPAL)):
             with pytest.raises(AIError) as unavailable:
                 await read()
             assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
@@ -222,7 +222,7 @@ async def test_waiting_rescore_settles_when_its_source_lifetime_ends(
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", task=target.ref),), (rule_scorer(rule),),
             policy=EvaluationPolicy(allow_volatile=True, **{deadline + "_retention_seconds": 60})), PRINCIPAL, "run"), engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         clock.advance(30)
         rescored = await run.rescore(RescoreRequest((ScorerSpec("human", TaskRef.deferred_input(), (DIMENSION,)),), "human"), engine=engine)
 
@@ -236,7 +236,7 @@ async def test_waiting_rescore_settles_when_its_source_lifetime_ends(
                 await asyncio.sleep(0.01)
 
         graph = await asyncio.wait_for(ready(), 10)
-        saved = await rescored.report()
+        saved = await rescored.create_report()
         clock.advance(31)
 
         async def settled():
@@ -297,7 +297,7 @@ async def test_expired_launched_scoring_reaches_a_terminal_disposition_without_e
         graph = await asyncio.wait_for(ready(), 10)
         if state == "terminal":
             release.set()
-            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         clock.advance(61)
 
         async def no_expired_evidence(*args, **kwargs):
@@ -305,7 +305,7 @@ async def test_expired_launched_scoring_reaches_a_terminal_disposition_without_e
 
         monkeypatch.setattr(runtime.evaluations, "read_evidence", no_expired_evidence)
         try:
-            view = await run.wait(timeout_seconds=1)
+            view = (await run.wait(timeout_seconds=1)).result
             assert view.completion == ("complete" if state == "terminal" else "cancelled")
             assert view.progress.terminal_scores == view.progress.planned_scores == 1
             if state != "terminal":

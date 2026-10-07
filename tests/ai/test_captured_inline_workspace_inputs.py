@@ -65,7 +65,7 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
         source = await engine.start(TaskGraph("source", (
             TaskNode("agent", task=target, input=AgentTaskInput(prompt, files=files)),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=15)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=15)).result.wait_status is TaskStatus.SUCCEEDED
         expected = [b"DIRECT", b"INLINE ORIGINAL", b"INLINE ORIGINAL"]
         if files:
             expected.append(b"SUFFIX ORIGINAL")
@@ -95,8 +95,8 @@ async def test_capture_reprojects_inline_and_file_attachments_without_live_reads
                 (candidate,), (rule_scorer(scorer),), input_mode=input_mode,
                 policy=EvaluationPolicy(model_fixtures=(models.contract,))),
                 PRINCIPAL, f"{capture_kind}-{input_mode}"), engine=engine)
-            assert (await run.wait(timeout_seconds=20)).completion == "complete", (capture_kind, input_mode)
-            assert (await run.report()).scores[0].valid == 1, (capture_kind, input_mode)
+            assert (await run.wait(timeout_seconds=20)).result.completion == "complete", (capture_kind, input_mode)
+            assert (await run.create_report()).scores[0].valid == 1, (capture_kind, input_mode)
             assert models.attachments[-len(expected):] == expected, (capture_kind, input_mode)
         assert models.attachments[attachment_offset:] == expected * 2, capture_kind
         assert models.prompts[prompt_offset] == models.prompts[0], capture_kind
@@ -132,7 +132,7 @@ async def test_irreversible_projection_keeps_fixed_capture_and_rejects_reproject
         source = await engine.start(TaskGraph("source", (
             TaskNode("agent", task=target, input=AgentTaskInput((WorkspaceFileInput("unused.txt"),))),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=15)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=15)).result.wait_status is TaskStatus.SUCCEEDED
         assert models.attachments == []
         if capture_kind.endswith("graph"):
             capture = await runtime.tasks.capture_graph(source.graph_id,
@@ -153,8 +153,8 @@ async def test_irreversible_projection_keeps_fixed_capture_and_rejects_reproject
         fixed = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (candidate,), (rule_scorer(scorer),), policy=EvaluationPolicy(model_fixtures=(models.contract,))),
             PRINCIPAL, "fixed"), engine=engine)
-        assert (await fixed.wait(timeout_seconds=20)).completion == "complete"
-        assert (await fixed.report()).scores[0].valid == 1
+        assert (await fixed.wait(timeout_seconds=20)).result.completion == "complete"
+        assert (await fixed.create_report()).scores[0].valid == 1
         with pytest.raises(AIError) as raised:
             await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (candidate,), (rule_scorer(scorer),), input_mode="reproject_input",

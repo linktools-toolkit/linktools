@@ -89,9 +89,9 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("expanded", graph_template=GraphTargetSpec(template=template, selector="terminal_sinks")),),
             (rule_scorer(scorer),)), PRINCIPAL, "run"), engine=runtime.tasks.bind(*definitions))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        assert (await run.report()).scores[0].mean == 1.0
+        assert (await run.create_report()).scores[0].mean == 1.0
         trial = (await run.trials()).items[0]
         assert trial.execution_status is TaskStatus.SUCCEEDED
         evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
@@ -115,5 +115,5 @@ async def test_safe_nested_expansion_recovers_only_its_pinned_definition_scope(t
             assert rejected.value.code is ErrorCode.BINDING_CONFLICT
         recovered = await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(*definitions),
             principal=PRINCIPAL, idempotency_key="unchanged")
-        assert (await recovered.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await recovered.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         assert calls == ["seed", "middle", "yes"]
