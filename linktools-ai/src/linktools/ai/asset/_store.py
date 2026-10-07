@@ -459,15 +459,15 @@ class AssetStore:
     async def get_at_revision(
         self,
         key: AssetKey,
-        revision: StorageEntryRevision,
+        entry_revision: StorageEntryRevision,
     ) -> "bytes | None":
         """Return bytes for one immutable file revision."""
         self._ensure_ready()
         versions = await self.list_versions(key)
-        if not any(version.entry_revision == revision for version in versions):
+        if not any(version.entry_revision == entry_revision for version in versions):
             raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
         try:
-            return await self._storage.get_at_revision(key, revision)
+            return await self._storage.get_at_revision(key, entry_revision)
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_LAYER_UNKNOWN:
                 raise
@@ -866,10 +866,10 @@ class _SnapshotAssetStore(AssetStore):
     async def get_at_revision(
         self,
         key: AssetKey,
-        revision: StorageEntryRevision,
+        entry_revision: StorageEntryRevision,
     ) -> bytes | None:
         info = await self.stat(key)
-        if info is None or info.revision != revision:
+        if info is None or info.revision != entry_revision:
             raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
         return await self.get(key)
 

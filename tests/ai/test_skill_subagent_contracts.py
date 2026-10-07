@@ -284,7 +284,7 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
         SkillSourceRegistry(),
         preloaded_skill_ids=(definition.id,),
     )
-    instructions = capability.instructions()
+    instructions = capability.get_instructions()
     assert instructions is not None
     assert "Do the review." in instructions
     assert "author: Mei" not in instructions

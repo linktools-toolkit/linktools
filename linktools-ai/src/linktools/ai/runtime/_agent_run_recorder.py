@@ -36,7 +36,7 @@ from .state._contracts import LoadedModelContext, TranscriptMessageRef
 from .state._plan import RuntimeDomain
 from .state._step_contracts import (
     AgentRunCheckpoint,
-    EventKind,
+    StepEventType,
     AgentRunRecord,
     StepEvent,
     AgentRunStore,
@@ -152,7 +152,7 @@ class AgentRunRecorder:
 
     async def record_event(
         self,
-        kind: EventKind,
+        event_type: StepEventType,
         step_index: int,
         *,
         tool_call_id: str | None = None,
@@ -169,7 +169,7 @@ class AgentRunRecorder:
         await self.append_event(
             StepEvent(
                 agent_run_id=run.agent_run_id,
-                kind=kind,
+                event_type=event_type,
                 step_index=step_index,
                 timestamp=(datetime.now(timezone.utc) if timestamp is None else timestamp),
                 agent_conversation_id=run.agent_conversation_id,
@@ -180,7 +180,7 @@ class AgentRunRecorder:
                 error=error,
                 metadata={} if metadata is None else dict(metadata),
                 idempotency_key=(
-                    f"{event_index}:{step_index}:{kind}:{tool_call_id or ''}"
+                    f"{event_index}:{step_index}:{event_type}:{tool_call_id or ''}"
                 ),
                 event_index=event_index,
             )
@@ -451,14 +451,14 @@ class AgentRunRecorder:
         run = self._run
         if run is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        kinds = {
-            "started": "model_request_started",
-            "completed": "model_request_completed",
-            "failed": "model_request_failed",
-            "cancelled": "model_request_cancelled",
+        event_types = {
+            "started": "MODEL_REQUEST_STARTED",
+            "completed": "MODEL_REQUEST_SUCCEEDED",
+            "failed": "MODEL_REQUEST_FAILED",
+            "cancelled": "MODEL_REQUEST_CANCELLED",
         }
-        kind = kinds.get(phase)
-        if kind is None:
+        event_type = event_types.get(phase)
+        if event_type is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
             fact.purpose == "agent"
@@ -498,7 +498,7 @@ class AgentRunRecorder:
         else:
             timestamp = None
         await self.record_event(
-            cast(EventKind, kind),
+            cast(StepEventType, event_type),
             fact.step_index,
             error=error_code,
             metadata=metadata,

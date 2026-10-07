@@ -144,7 +144,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         transcript = self.recorder.transcript_messages()
         self._last_checkpoint_transcript_count = len(transcript)
         self._replay_request_captured = bool(transcript and isinstance(transcript[-1], ModelRequest))
-        await self.recorder.record_event("run_started", ctx.run_step)
+        await self.recorder.record_event("AGENT_RUN_STARTED", ctx.run_step)
 
     async def before_model_request(
         self,
@@ -210,7 +210,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             state="interrupted" if interrupted else "complete",
         )
         await self.recorder.record_event(
-            "run_interrupted" if interrupted else "run_completed",
+            "AGENT_RUN_INTERRUPTED" if interrupted else "AGENT_RUN_SUCCEEDED",
             ctx.run_step,
         )
         return result
@@ -228,7 +228,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             state="interrupted",
         )
         await self.recorder.record_event(
-            "run_failed",
+            "AGENT_RUN_FAILED",
             ctx.run_step,
             error=repr(error),
         )
@@ -254,7 +254,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._tool_started_ns[call.tool_call_id] = monotonic_ns()
         await self.recorder.record_event(
-            "tool_call_started",
+            "TOOL_CALL_STARTED",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
@@ -278,7 +278,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
         await self.recorder.record_event(
-            "tool_call_completed",
+            "TOOL_CALL_SUCCEEDED",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
@@ -302,7 +302,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
         await self.recorder.record_event(
-            "tool_call_failed",
+            "TOOL_CALL_FAILED",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,

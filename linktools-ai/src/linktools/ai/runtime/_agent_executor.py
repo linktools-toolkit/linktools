@@ -148,13 +148,13 @@ _PLAN_SAFE_FRAMEWORK_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 
 @dataclass(frozen=True, slots=True)
 class LiveDelta:
-    kind: ExecutionDeltaType
+    event_type: ExecutionDeltaType
     content: str
 
 
 @dataclass(frozen=True, slots=True)
 class DurableBoundary:
-    kind: ExecutionEventType
+    event_type: ExecutionEventType
     payload: JsonValue
 
 
@@ -1291,7 +1291,7 @@ def _map_event(event: object) -> "AgentEmission | None":
                     "tool_name": part.tool_name or "unknown",
                     "result_digest": None,
                     "status": "FAILED",
-                    "safe_error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
+                    "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
                 },
             )
     return None

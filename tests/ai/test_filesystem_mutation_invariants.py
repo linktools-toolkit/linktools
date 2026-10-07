@@ -137,7 +137,7 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
     )
     try:
         await state.execution.executions.create(execution)
-        event = await state.execution.events.append(
+        event = await state.execution.events.append_expected(
             "execution",
             tenant_id="tenant",
             expected_sequence=0,

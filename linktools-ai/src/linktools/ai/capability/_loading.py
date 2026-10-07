@@ -283,7 +283,7 @@ class CapabilityLoadContext:
                 self._cache[key] = data
         return tuple(self._cache[key] for key in keys)
 
-    async def verify(self) -> None:
+    async def verify_source_revision(self) -> None:
         if await self._store.current_revision() != self._source_revision:
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
 

@@ -1936,15 +1936,6 @@ class EventRepository(RuntimeRepository, Protocol):
         payload: JsonValue,
     ) -> ExecutionEventRecord: ...
 
-    async def append(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        expected_sequence: int,
-        event_type: str,
-        payload: JsonValue,
-    ) -> ExecutionEventRecord: ...
     async def list(
         self, execution_id: str, *, tenant_id: str, after_sequence: int, limit: int
     ) -> Page[ExecutionEventRecord]: ...

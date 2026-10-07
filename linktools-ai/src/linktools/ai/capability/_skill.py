@@ -161,9 +161,6 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         self._preloaded = tuple(self._by_id[skill_id] for skill_id in preload_ids)
         self._max_preloaded_bytes = max_preloaded_bytes
 
-    def get_instructions(self) -> str | None:
-        return self.instructions()
-
     def get_toolset(self) -> FunctionToolset[AgentContext[object]]:
         toolset = FunctionToolset[AgentContext[object]](id=self.id)
 
@@ -237,7 +234,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
     def get_serialization_name(cls) -> str | None:
         return None
 
-    def instructions(self) -> "str | None":
+    def get_instructions(self) -> str | None:
         if not self._skills:
             return None
         lines = [

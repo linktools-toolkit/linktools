@@ -1045,10 +1045,10 @@ class StepExecutionHistoryReader:
             raise AIError(ErrorCode.CURSOR_INVALID)
         values: dict[str, list[object | None]] = {}
         for event in events[:event_high_water]:
-            if event.kind not in {
-                "tool_call_started",
-                "tool_call_completed",
-                "tool_call_failed",
+            if event.event_type not in {
+                "TOOL_CALL_STARTED",
+                "TOOL_CALL_SUCCEEDED",
+                "TOOL_CALL_FAILED",
             }:
                 continue
             call_id = event.tool_call_id
@@ -1061,7 +1061,7 @@ class StepExecutionHistoryReader:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 value[4] = request_sequence
             timestamp = _event_timestamp(event)
-            if event.kind == "tool_call_started":
+            if event.event_type == "TOOL_CALL_STARTED":
                 if value[0] is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 value[0] = timestamp
@@ -1074,7 +1074,7 @@ class StepExecutionHistoryReader:
                 if not raw_duration.isdigit():
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 value[2] = int(raw_duration)
-            value[3] = "SUCCEEDED" if event.kind == "tool_call_completed" else "FAILED"
+            value[3] = "SUCCEEDED" if event.event_type == "TOOL_CALL_SUCCEEDED" else "FAILED"
 
         if self._tool_operations is not None and values:
             operations = await self._tool_operations.list_by_execution(
@@ -1762,23 +1762,18 @@ def _trace_item(
     event: StepEvent,
 ) -> "ExecutionTraceItem | None":
     mapping = {
-        "model_request_started": ("MODEL_REQUEST", "STARTED"),
-        "model_request_completed": ("MODEL_RESPONSE", "SUCCEEDED"),
-        "model_request_failed": ("MODEL_RESPONSE", "FAILED"),
-        "model_request_cancelled": ("MODEL_RESPONSE", "CANCELLED"),
-        "tool_call_started": ("TOOL_CALL", "STARTED"),
-        "tool_call_completed": ("TOOL_RESULT", "SUCCEEDED"),
-        "tool_call_failed": ("TOOL_ERROR", "FAILED"),
+        "MODEL_REQUEST_STARTED": ("MODEL_REQUEST", "STARTED"),
+        "MODEL_REQUEST_SUCCEEDED": ("MODEL_RESPONSE", "SUCCEEDED"),
+        "MODEL_REQUEST_FAILED": ("MODEL_RESPONSE", "FAILED"),
+        "MODEL_REQUEST_CANCELLED": ("MODEL_RESPONSE", "CANCELLED"),
+        "TOOL_CALL_STARTED": ("TOOL_CALL", "STARTED"),
+        "TOOL_CALL_SUCCEEDED": ("TOOL_RESULT", "SUCCEEDED"),
+        "TOOL_CALL_FAILED": ("TOOL_ERROR", "FAILED"),
     }
-    value = mapping.get(event.kind)
+    value = mapping.get(event.event_type)
     if value is None:
         return None
     kind, status = value
-    if (
-        event.kind == "model_request_failed"
-        and event.error == ErrorCode.EXECUTION_CANCELLED.value
-    ):
-        status = "CANCELLED"
     payload = {
         "kind": kind,
         "status": status,

@@ -3002,12 +3002,12 @@ class LocalExecutionBackend:
                     self._live_broker.publish(
                         ExecutionDelta(
                             current.execution_id,
-                            emission.kind,
+                            emission.event_type,
                             emission.content,
                         )
                     )
                     return
-                await self._append_event(current, emission.kind, emission.payload)
+                await self._append_event(current, emission.event_type, emission.payload)
 
             subagent_refs = binding.binding_contract.subagents
             subagent_available = (

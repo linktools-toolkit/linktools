@@ -1908,7 +1908,7 @@ class StateStepArchive(AgentRunStore):
             checkpoints,
         )
         facts = tuple(
-            ("event", event, _step_event_kind(event)) for event in events
+            ("event", event, _step_event_type(event)) for event in events
         ) + tuple(
             ("checkpoint", checkpoint.stored, checkpoint.stored.state)
             for checkpoint in checkpoints
@@ -2260,7 +2260,7 @@ class StateStepArchive(AgentRunStore):
             event.agent_run_id,
             "event",
             event,
-            _step_event_kind(event),
+            _step_event_type(event),
             execution_id=execution_id,
         )
 
@@ -2818,8 +2818,8 @@ def _step_subject(value: object) -> bytes | None:
     return None
 
 
-def _step_event_kind(value: StepEvent) -> str:
-    return str(value.kind)
+def _step_event_type(value: StepEvent) -> str:
+    return str(value.event_type)
 
 
 def _decode_step(value: Mapping[str, object]) -> object:

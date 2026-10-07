@@ -8,6 +8,7 @@ from pydantic_ai.messages import (
     FunctionToolResultEvent,
     PartDeltaEvent,
     PartStartEvent,
+    RetryPromptPart,
     TextPart,
     TextPartDelta,
     ThinkingPart,
@@ -26,6 +27,7 @@ from linktools.ai.runtime._agent_executor import (
     _thinking_capability,
     _validate_thinking_model,
 )
+from linktools.ai.runtime._event import ExecutionDelta
 from linktools.ai.runtime._tool_return_codec import tool_return_content_digest
 
 
@@ -62,6 +64,23 @@ def test_tool_result_uses_model_visible_content_digest() -> None:
             "tool_name": "tool",
             "result_digest": tool_return_content_digest(content),
             "status": "SUCCEEDED",
+        },
+    )
+
+
+def test_tool_retry_boundary_carries_error_code() -> None:
+    event = FunctionToolResultEvent(
+        part=RetryPromptPart("retry", tool_name="tool", tool_call_id="call-1")
+    )
+
+    assert _map_event(event) == DurableBoundary(
+        ExecutionEventType.TOOL_CALL_FINISHED,
+        {
+            "call_id": "call-1",
+            "tool_name": "tool",
+            "result_digest": None,
+            "status": "FAILED",
+            "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
         },
     )
 
@@ -121,3 +140,27 @@ def test_thinking_uses_native_capability_with_request_model_validation() -> None
         "field": "thinking",
         "reason": "model_always_enabled",
     }
+
+
+@pytest.mark.parametrize(
+    ("event", "event_type"),
+    (
+        (
+            LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "text"),
+            ExecutionDeltaType.ASSISTANT_TEXT_DELTA,
+        ),
+        (
+            DurableBoundary(ExecutionEventType.TOOL_CALL_FINISHED, {"status": "FAILED"}),
+            ExecutionEventType.TOOL_CALL_FINISHED,
+        ),
+        (
+            ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_THINKING_DELTA, "thought"),
+            ExecutionDeltaType.ASSISTANT_THINKING_DELTA,
+        ),
+    ),
+)
+def test_event_emissions_expose_owner_specific_event_type(
+    event: LiveDelta | DurableBoundary | ExecutionDelta,
+    event_type: ExecutionDeltaType | ExecutionEventType,
+) -> None:
+    assert event.event_type is event_type

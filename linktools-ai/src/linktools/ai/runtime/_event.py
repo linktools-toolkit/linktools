@@ -57,7 +57,7 @@ _OBSERVATION_BOUNDARY_STATUSES = frozenset(
 @dataclass(frozen=True, slots=True)
 class ExecutionDelta:
     execution_id: str
-    delta_type: ExecutionDeltaType
+    event_type: ExecutionDeltaType
     content: str
     stream_truncated: bool = False
 
@@ -145,7 +145,7 @@ class _LiveSubscription:
                 return False
         truncated = value.stream_truncated or self._truncated_pending
         self._truncated_pending = False
-        value = ExecutionDelta(value.execution_id, value.delta_type, value.content, truncated)
+        value = ExecutionDelta(value.execution_id, value.event_type, value.content, truncated)
         self._queue.append(value)
         self._queue_bytes += value_size
         self._wakeup.set()
@@ -246,14 +246,14 @@ class LiveExecutionEventBroker:
         execution_id = delta.execution_id
         buffer = self._buffers.setdefault(execution_id, deque())
         size = len(delta.content.encode("utf-8"))
-        if self._last_type.get(execution_id) is delta.delta_type and buffer:
+        if self._last_type.get(execution_id) is delta.event_type and buffer:
             previous = buffer.pop()
             if not isinstance(previous, ExecutionDelta):
                 raise RuntimeError("live broker delta ordering is corrupt")
             merged = _bounded_delta(
                 ExecutionDelta(
                     execution_id,
-                    delta.delta_type,
+                    delta.event_type,
                     previous.content + delta.content,
                     previous.stream_truncated
                     or delta.stream_truncated
@@ -270,20 +270,20 @@ class LiveExecutionEventBroker:
             buffer.append(
                 ExecutionDelta(
                     execution_id,
-                    delta.delta_type,
+                    delta.event_type,
                     delta.content,
                     delta.stream_truncated or execution_id in self._truncated,
                 )
             )
             self._buffer_bytes[execution_id] = self._buffer_bytes.get(execution_id, 0) + size
-        self._last_type[execution_id] = delta.delta_type
+        self._last_type[execution_id] = delta.event_type
         while len(buffer) > _QUEUE_LIMIT or self._buffer_bytes[execution_id] > self._max_bytes:
             if not self._drop_oldest_delta(buffer, execution_id):
                 self._require_replay(execution_id)
                 return
         published = ExecutionDelta(
             execution_id,
-            delta.delta_type,
+            delta.event_type,
             delta.content,
             delta.stream_truncated or execution_id in self._truncated,
         )
@@ -481,7 +481,7 @@ class LiveExecutionEventBroker:
                 subscription.put_delta(
                     ExecutionDelta(
                         item.execution_id,
-                        item.delta_type,
+                        item.event_type,
                         item.content,
                         item.stream_truncated or execution_id in self._truncated,
                     )
@@ -553,7 +553,7 @@ def _bounded_delta(delta: ExecutionDelta, max_bytes: int) -> ExecutionDelta:
             break
         parts.append(character)
         size += character_size
-    return ExecutionDelta(delta.execution_id, delta.delta_type, "".join(parts), True)
+    return ExecutionDelta(delta.execution_id, delta.event_type, "".join(parts), True)
 
 
 class _ExecutionWorkerFailureProbe(Protocol):
@@ -791,7 +791,7 @@ class DefaultEventService:
                     yield ExecutionStreamEvent(
                         item.execution_id,
                         None,
-                        item.delta_type,
+                        item.event_type,
                         {"text": item.content, "stream_truncated": item.stream_truncated},
                     )
                     continue

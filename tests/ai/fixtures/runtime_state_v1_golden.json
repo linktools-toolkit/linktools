@@ -249,5 +249,34 @@
       "alias": "6666666666666666666666666666666666666666666666666666666666666666",
       "record": "7777777777777777777777777777777777777777777777777777777777777777"
     }
+  },
+  "step_event": {
+    "v": 1,
+    "value": {
+      "type": "step_event",
+      "payload": {
+        "$dataclass": "step_event",
+        "schema": 1,
+        "fields": {
+          "agent_run_id": "run",
+          "event_type": "AGENT_RUN_SUCCEEDED",
+          "step_index": 1,
+          "timestamp": {
+            "$datetime": "2026-09-20T00:00:00+00:00"
+          },
+          "agent_conversation_id": null,
+          "parent_agent_run_id": null,
+          "agent_id": null,
+          "tool_call_id": null,
+          "tool_name": null,
+          "error": null,
+          "metadata": {
+            "$mapping": []
+          },
+          "idempotency_key": null,
+          "event_index": 0
+        }
+      }
+    }
   }
 }

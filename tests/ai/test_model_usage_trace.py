@@ -24,7 +24,7 @@ from linktools.ai.runtime.state._steps import (
     StagingAgentRunStore,
 )
 from linktools.ai.runtime.state._step_contracts import (
-    EventKind,
+    StepEventType,
     StepEvent,
 )
 
@@ -82,7 +82,7 @@ def _project_usage(usage: RequestUsage) -> dict[str, object] | None:
     return _project_event(
         StepEvent(
             agent_run_id="run",
-            kind="model_request_completed",
+            event_type="MODEL_REQUEST_SUCCEEDED",
             step_index=1,
             metadata=_model_usage_metadata(ModelResponse(parts=(), usage=usage)),
         )
@@ -149,7 +149,7 @@ async def _completed_usage(
     values = [
         _project_event(event, ordinal)
         for ordinal, event in enumerate(events)
-        if event.kind == "model_request_completed"
+        if event.event_type == "MODEL_REQUEST_SUCCEEDED"
     ]
     assert all(value is not None for value in values)
     return [value for value in values if value is not None]
@@ -176,7 +176,7 @@ async def test_model_usage_trace_does_not_depend_on_registration_order() -> None
     started = [
         event
         for event in events
-        if event.kind == "model_request_started"
+        if event.event_type == "MODEL_REQUEST_STARTED"
     ]
     assert len(started) == 1
     assert started[0].metadata["linktools.ai.request_sequence"] == "1"
@@ -185,7 +185,7 @@ async def test_model_usage_trace_does_not_depend_on_registration_order() -> None
     completed = [
         event
         for event in events
-        if event.kind == "model_request_completed"
+        if event.event_type == "MODEL_REQUEST_SUCCEEDED"
     ]
     assert len(completed) == 1
     assert completed[0].metadata["linktools.ai.request_sequence"] == "1"
@@ -217,11 +217,11 @@ async def test_asyncio_model_cancellation_preserves_cancelled_status() -> None:
 
     events = await store.list_events(agent_run_id="cancelled-model-run")
     model_events = [
-        event.kind for event in events if event.kind.startswith("model_request_")
+        event.event_type for event in events if event.event_type.startswith("MODEL_REQUEST_")
     ]
-    assert model_events == ["model_request_started", "model_request_cancelled"]
+    assert model_events == ["MODEL_REQUEST_STARTED", "MODEL_REQUEST_CANCELLED"]
     cancelled = next(
-        event for event in events if event.kind == "model_request_cancelled"
+        event for event in events if event.event_type == "MODEL_REQUEST_CANCELLED"
     )
     assert cancelled.metadata["linktools.ai.request_sequence"] == "1"
     assert cancelled.metadata["linktools.ai.request_purpose"] == "agent"
@@ -318,7 +318,7 @@ def test_model_response_trace_keeps_each_request_usage_separate() -> None:
 def test_successful_model_response_trace_allows_missing_usage_fact() -> None:
     event = StepEvent(
         agent_run_id="run",
-        kind="model_request_completed",
+        event_type="MODEL_REQUEST_SUCCEEDED",
         step_index=1,
         metadata={},
     )
@@ -336,7 +336,7 @@ def test_successful_model_response_trace_allows_missing_usage_fact() -> None:
 def test_successful_model_response_trace_allows_partial_usage_fact() -> None:
     event = StepEvent(
         agent_run_id="run",
-        kind="model_request_completed",
+        event_type="MODEL_REQUEST_SUCCEEDED",
         step_index=1,
         metadata={
             "linktools.ai.model_usage.input_tokens": "10",
@@ -360,7 +360,7 @@ def test_successful_model_response_trace_allows_partial_usage_fact() -> None:
 def test_model_response_trace_rejects_invalid_usage_value() -> None:
     event = StepEvent(
         agent_run_id="run",
-        kind="model_request_completed",
+        event_type="MODEL_REQUEST_SUCCEEDED",
         step_index=1,
         metadata={"linktools.ai.model_usage.input_tokens": "-1"},
     )
@@ -376,15 +376,15 @@ def test_model_response_trace_rejects_invalid_usage_value() -> None:
 
 
 @pytest.mark.parametrize(
-    "kind",
-    ("tool_call_started", "tool_call_completed", "tool_call_failed"),
+    "event_type",
+    ("TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"),
 )
 def test_tool_trace_accepts_request_sequence_without_request_purpose(
-    kind: EventKind,
+    event_type: StepEventType,
 ) -> None:
     event = StepEvent(
         agent_run_id="run",
-        kind=kind,
+        event_type=event_type,
         step_index=1,
         tool_call_id="call",
         tool_name="lookup",
@@ -405,7 +405,7 @@ def test_tool_trace_accepts_request_sequence_without_request_purpose(
 def test_model_trace_accepts_sparse_request_lineage() -> None:
     event = StepEvent(
         agent_run_id="run",
-        kind="model_request_started",
+        event_type="MODEL_REQUEST_STARTED",
         step_index=1,
         metadata={"linktools.ai.request_sequence": "1"},
     )
@@ -424,7 +424,7 @@ def test_model_trace_accepts_sparse_request_lineage() -> None:
 def test_model_trace_preserves_unknown_request_purpose() -> None:
     event = StepEvent(
         agent_run_id="run",
-        kind="model_request_started",
+        event_type="MODEL_REQUEST_STARTED",
         step_index=1,
         metadata={"linktools.ai.request_purpose": "future"},
     )
@@ -439,36 +439,16 @@ def test_model_trace_preserves_unknown_request_purpose() -> None:
     assert item.payload["purpose"] == "future"
 
 
-def test_legacy_cancelled_model_response_trace_is_normalized() -> None:
-    event = StepEvent(
-        agent_run_id="run",
-        kind="model_request_failed",
-        step_index=1,
-        error=ErrorCode.EXECUTION_CANCELLED.value,
-        metadata={},
-    )
-    item = _trace_item(
-        SimpleNamespace(execution_id="execution"),
-        1,
-        0,
-        0,
-        event,
-    )
-    assert item is not None
-    assert item.payload["status"] == "CANCELLED"
-    assert item.payload["token_usage"] is None
-
-
 @pytest.mark.parametrize(
     "error_code",
-    (None, ErrorCode.INTERNAL_ERROR.value),
+    (None, ErrorCode.INTERNAL_ERROR.value, ErrorCode.EXECUTION_CANCELLED.value),
 )
 def test_failed_model_response_trace_has_no_request_usage(
     error_code: str | None,
 ) -> None:
     event = StepEvent(
         agent_run_id="run",
-        kind="model_request_failed",
+        event_type="MODEL_REQUEST_FAILED",
         step_index=1,
         error=error_code,
         metadata={},

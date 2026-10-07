@@ -214,7 +214,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                 events=(
                     StepEvent(
                         agent_run_id=agent_run_id,
-                        kind="after-seal",
+                        event_type="AGENT_RUN_SUCCEEDED",
                         step_index=3,
                         timestamp=now,
                         agent_conversation_id=run.agent_conversation_id,
@@ -547,7 +547,7 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
     await state.run_store.append_event(
         StepEvent(
             agent_run_id=agent_run_id,
-            kind="model_request_started",
+            event_type="MODEL_REQUEST_STARTED",
             step_index=1,
             timestamp=now,
             agent_conversation_id=agent_conversation_id,
@@ -557,7 +557,7 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
     await state.run_store.append_event(
         StepEvent(
             agent_run_id=agent_run_id,
-            kind="model_request_completed",
+            event_type="MODEL_REQUEST_SUCCEEDED",
             step_index=2,
             timestamp=now,
             agent_conversation_id=agent_conversation_id,

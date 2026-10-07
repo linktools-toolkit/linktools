@@ -135,7 +135,7 @@ class _Store:
         return [
             StepEvent(
                 agent_run_id=agent_run_id,
-                kind="model_request_started",
+                event_type="MODEL_REQUEST_STARTED",
                 step_index=0,
                 timestamp=record.created_at,
                 agent_conversation_id=run.agent_conversation_id,

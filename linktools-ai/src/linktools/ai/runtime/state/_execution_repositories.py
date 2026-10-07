@@ -1642,23 +1642,6 @@ class EventRepositoryImpl(_RepositoryBase):
         )
         return values[0]
 
-    async def append(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        expected_sequence: int,
-        event_type: str,
-        payload: object,
-    ) -> ExecutionEventRecord:
-        return await self.append_expected(
-            execution_id,
-            tenant_id=tenant_id,
-            expected_sequence=expected_sequence,
-            event_type=event_type,
-            payload=payload,
-        )
-
     async def list(
         self, execution_id: str, *, tenant_id: str, after_sequence: int, limit: int
     ) -> Page[ExecutionEventRecord]:

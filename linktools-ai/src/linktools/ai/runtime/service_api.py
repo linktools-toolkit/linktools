@@ -1274,6 +1274,7 @@ class ExecutionService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]": ...
 
 

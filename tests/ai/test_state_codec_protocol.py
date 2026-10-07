@@ -32,6 +32,7 @@ from linktools.ai.runtime.state._contracts import (
     StoredAgentRunCheckpoint,
     TranscriptMessageRef,
 )
+from linktools.ai.runtime.state._step_contracts import StepEvent
 from linktools.ai.task import TaskBindingContract
 
 
@@ -176,3 +177,15 @@ def test_checkpoint_frontier_preserves_pending_request_index() -> None:
 
     assert fields["pending_request_index"] == 3
     assert _decode_step_envelope(encoded) == checkpoint
+
+
+def test_golden_step_event_uses_current_event_type_wire() -> None:
+    event = StepEvent(
+        "run",
+        "AGENT_RUN_SUCCEEDED",
+        1,
+        timestamp=datetime(2026, 9, 20, tzinfo=timezone.utc),
+    )
+    encoded = _fixture()["step_event"]
+    assert _encode_step_envelope(event) == encoded
+    assert _decode_step_envelope(encoded) == event
