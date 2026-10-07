@@ -116,6 +116,12 @@ class _InteractionOccurrence:
 
 
 @dataclass(frozen=True, slots=True)
+class _AttachmentOccurrence:
+    key: tuple[int, int, str, str, int]
+    item: AttachmentFact
+
+
+@dataclass(frozen=True, slots=True)
 class _HistorySource:
     record: ExecutionRecord
     depth: int
@@ -803,25 +809,24 @@ class StepExecutionHistoryReader:
             execution_id=execution_id,
             signer=self._cursor_signer,
         )
-        offset = 0 if cursor_state is None else cursor_state[0]
+        after_key = None if cursor_state is None else cursor_state[0]
         fixed_cutoffs = None if cursor_state is None else dict(cursor_state[1])
-        target = offset + limit + 1
+        target = limit + 1
 
-        facts: list[AttachmentFact] = []
+        facts: list[_AttachmentOccurrence] = []
         accepted_ids: set[str] = set()
         view = record.stored_user_input.view
         if view is not None:
             raw_attachments = view.get("attachments", [])
             if not isinstance(raw_attachments, list):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for raw in raw_attachments:
-                if not isinstance(raw, Mapping):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                fact = _project_attachment_fact(record.execution_id, raw)
+            for occurrence in _attachment_occurrences(record.execution_id, raw_attachments):
+                fact = occurrence.item
                 if fact.fact != "accepted":
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                facts.append(fact)
                 accepted_ids.add(fact.attachment_id)
+                if after_key is None or occurrence.key > after_key:
+                    facts.append(occurrence)
 
         cutoffs: list[tuple[int, int]] = []
         if record.binding_kind != "task":
@@ -903,19 +908,21 @@ class StepExecutionHistoryReader:
                         ):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         after_sequence = value.model_request_seq
-                        for raw in value.attachments:
-                            fact = _project_attachment_fact(
-                                record.execution_id,
-                                raw,
-                                agent_run_seq=agent_run_seq,
-                                model_request_seq=value.model_request_seq,
-                                step_index=value.step_index,
-                            )
+                        for occurrence in _attachment_occurrences(
+                            record.execution_id,
+                            value.attachments,
+                            agent_run_seq=agent_run_seq,
+                            model_request_seq=value.model_request_seq,
+                            step_index=value.step_index,
+                        ):
+                            fact = occurrence.item
                             if fact.fact == "accepted":
                                 if fact.attachment_id in accepted_ids:
                                     continue
                                 accepted_ids.add(fact.attachment_id)
-                            facts.append(fact)
+                            if after_key is not None and occurrence.key <= after_key:
+                                continue
+                            facts.append(occurrence)
                             if len(facts) >= target:
                                 break
                         if len(facts) >= target:
@@ -924,16 +931,13 @@ class StepExecutionHistoryReader:
                 if len(facts) >= target:
                     break
 
-        if offset > len(facts):
-            raise AIError(ErrorCode.CURSOR_INVALID)
-        page = facts[offset : offset + limit + 1]
-        selected = tuple(page[:limit])
+        selected = tuple(value.item for value in facts[:limit])
         next_cursor = None
-        if len(page) > limit:
+        if len(facts) > limit:
             next_cursor = _attachment_fact_cursor(
                 tenant_id,
                 execution_id,
-                offset + limit,
+                facts[limit - 1].key,
                 tuple(cutoffs),
                 self._cursor_signer,
             )
@@ -2146,7 +2150,7 @@ def _decode_attachment_fact_cursor(
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
-) -> tuple[int, tuple[tuple[int, int], ...]] | None:
+) -> tuple[tuple[int, int, str, str, int], tuple[tuple[int, int], ...]] | None:
     if cursor is None:
         return None
     payload = decode_runtime_cursor(
@@ -2163,15 +2167,23 @@ def _decode_attachment_fact_cursor(
     if (
         payload.revision != 0
         or not isinstance(value, dict)
-        or set(value) != {"offset", "cutoffs"}
+        or set(value) != {"after", "cutoffs"}
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    offset = value.get("offset")
+    after = value.get("after")
     raw_cutoffs = value.get("cutoffs")
     if (
-        isinstance(offset, bool)
-        or not isinstance(offset, int)
-        or offset < 0
+        not isinstance(after, list)
+        or len(after) != 5
+        or any(isinstance(after[index], bool) or not isinstance(after[index], int)
+               or after[index] < 0 for index in (0, 1, 4))
+        or not isinstance(after[2], str)
+        or after[2] not in {"accepted", "included_in_request"}
+        or not isinstance(after[3], str)
+        or len(after[3]) != 64
+        or any(character not in "0123456789abcdef" for character in after[3])
+        or (after[0] == 0) != (after[1] == 0)
+        or after[0] == 0 and after[2] != "accepted"
         or not isinstance(raw_cutoffs, list)
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
@@ -2192,13 +2204,15 @@ def _decode_attachment_fact_cursor(
             raise AIError(ErrorCode.CURSOR_INVALID)
         cutoffs.append((raw[0], raw[1]))
         previous = raw[0]
-    return offset, tuple(cutoffs)
+    if after[0] and after[1] > dict(cutoffs).get(after[0], 0):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return (after[0], after[1], after[2], after[3], after[4]), tuple(cutoffs)
 
 
 def _attachment_fact_cursor(
     tenant_id: str,
     execution_id: str,
-    offset: int,
+    after: tuple[int, int, str, str, int],
     cutoffs: tuple[tuple[int, int], ...],
     signer: CursorSigner,
 ) -> str:
@@ -2209,7 +2223,7 @@ def _attachment_fact_cursor(
         filter_digest=_attachment_fact_filter_digest(execution_id),
         position=json.dumps(
             {
-                "offset": offset,
+                "after": list(after),
                 "cutoffs": [list(value) for value in cutoffs],
             },
             ensure_ascii=False,
@@ -2217,6 +2231,32 @@ def _attachment_fact_cursor(
             sort_keys=True,
         ),
     )
+
+
+def _attachment_occurrences(
+    execution_id: str,
+    attachments: Sequence[Mapping[str, JsonValue]],
+    *,
+    agent_run_seq: int | None = None,
+    model_request_seq: int | None = None,
+    step_index: int | None = None,
+) -> tuple[_AttachmentOccurrence, ...]:
+    occurrences: list[_AttachmentOccurrence] = []
+    counts: dict[tuple[str, str], int] = {}
+    for raw in attachments:
+        if not isinstance(raw, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        fact = _project_attachment_fact(
+            execution_id, raw, agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq, step_index=step_index,
+        )
+        identity = (fact.fact, fact.attachment_id)
+        ordinal = counts.get(identity, 0)
+        counts[identity] = ordinal + 1
+        occurrences.append(_AttachmentOccurrence(
+            (agent_run_seq or 0, model_request_seq or 0, *identity, ordinal), fact,
+        ))
+    return tuple(sorted(occurrences, key=lambda value: value.key))
 
 
 def _project_attachment_fact(

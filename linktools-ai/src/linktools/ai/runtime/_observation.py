@@ -235,7 +235,14 @@ class _ObservationSession:
             _logger.warning("observation cleanup failed: resource_id=%s", self.resource_id)
         if errors:
             errors.sort(key=lambda item: item[0])
-            raise errors[0][1]
+            error = errors[0][1]
+            if isinstance(error, ObservationError) and error.origin == "stream":
+                # Watch delivery may precede callback acknowledgement, including
+                # errors reported before nested stream cleanup has completed.
+                error.cursor = self.cursor
+            raise error
+        if observation_error is not None:
+            observation_error.cursor = self.cursor
         return waiter.result(), observation_error
 
 def _error_priority(error: BaseException, *, authoritative: bool) -> int:

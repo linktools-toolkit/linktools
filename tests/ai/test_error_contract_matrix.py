@@ -178,6 +178,7 @@ def test_invalid_storage_path_has_stable_code() -> None:
         (ErrorCode.EXECUTION_NOT_READY, True),
         (ErrorCode.EXECUTION_WAIT_TIMEOUT, True),
         (ErrorCode.TASK_WAIT_TIMEOUT, True),
+        (ErrorCode.WAIT_TIMEOUT, True),
         (ErrorCode.TOOL_RETRY_REQUIRED, False),
         (ErrorCode.TOOL_EXECUTION_FAILED, False),
         (ErrorCode.ASSET_NOT_FOUND, False),

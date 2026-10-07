@@ -194,3 +194,16 @@ page reads it. Refresh without a cursor to discover newly started requests.
 Model interaction reads can see confirmed process-local staging; aggregate
 `usage()` reads archived usage and may lag the active request view. Check its
 completeness metadata rather than treating an incomplete total as final.
+
+Attachment cursors likewise retain request high-water marks, while continuing
+after a fact identity ordered by agent run, request, fact kind, attachment ID,
+and occurrence ordinal. Initial input acceptance sorts before request facts.
+Acceptance and inclusion are distinct facts; repeated inclusions of one
+attachment retain their multiplicity, numbered within that fact/attachment pair.
+Removing an indistinguishable repeated inclusion contracts that ordinal range.
+Preparation may update positions or remove inclusion without shifting unrelated
+identities, and accepted occurrences remain visible after preparation and archive.
+Continuation reads current values, including newly added facts after its last
+identity; facts added before it require a fresh query. New requests above the
+captured high-water marks remain excluded. A cursor contains one identity and
+one cutoff per captured agent run, never attachment bodies or a fact snapshot.

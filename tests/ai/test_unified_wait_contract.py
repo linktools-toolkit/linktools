@@ -904,3 +904,143 @@ async def test_optional_first_graph_failure_cannot_skip_later_evaluation_member_
         assert closed == checked
     finally:
         await bundle.runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["execution", "graph", "evaluation"])
+async def test_wait_cleanup_error_resumes_after_last_acknowledged_callback(owner) -> None:
+    from dataclasses import replace
+    from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+    from linktools.ai.task import TaskEvent, TaskEventType
+
+    bundle = _Bundle()
+    entered = asyncio.Event()
+    released = asyncio.Event()
+    committed = []
+    delivered = []
+    cause = AIError(ErrorCode.SERVICE_NOT_READY, safe_details={"source": "presentation"})
+
+    async def tree(*args, ready=None, **kwargs):
+        if ready is not None:
+            ready.set()
+        try:
+            for sequence in (1, 2):
+                yield _execution_event(sequence)
+            await asyncio.Event().wait()
+        finally:
+            raise _ExecutionStreamFailure(cause)
+
+    async def graph_events(*args, **kwargs):
+        try:
+            for sequence in (1, 2):
+                yield TaskEvent(1, "graph", sequence, TaskEventType.GRAPH_CHANGED,
+                                datetime.now(timezone.utc), TaskStatus.RUNNING, TaskStatus.PENDING)
+            await asyncio.Event().wait()
+        finally:
+            raise _ExecutionStreamFailure(cause)
+
+    async def inspect_evaluation(*args):
+        return replace(bundle.evaluations.result, completion="complete" if released.is_set() else "running")
+
+    async def record(*args):
+        return SimpleNamespace(intents=(SimpleNamespace(
+            confirmed=True, submission=SimpleNamespace(graph=SimpleNamespace(graph_id="graph")),
+        ),))
+
+    async def callback(event):
+        delivered.append(event.cursor)
+        if not committed:
+            committed.append(event.cursor)
+            return
+        entered.set()
+        await asyncio.Event().wait()
+
+    bundle.execution.release.clear()
+    bundle.graph.release.clear()
+    bundle.execution_run = Execution(bundle.runtime, "execution", _PRINCIPAL, tree)
+    bundle.graph.stream_events = graph_events
+    bundle.evaluations._inspect = inspect_evaluation
+    bundle.evaluations._record = record
+    waiting = asyncio.create_task(bundle.wait(owner, on_event=callback))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        bundle.execution.release.set()
+        bundle.graph.release.set()
+        released.set()
+        with pytest.raises(ObservationError) as raised:
+            await asyncio.wait_for(waiting, 1)
+        assert delivered[1] != committed[0]
+        assert raised.value.cursor == committed[0]
+        assert raised.value.origin == "stream"
+        assert raised.value.safe_details == (
+            {"phase": "cleanup"} if owner == "execution"
+            else {"source": "presentation", "phase": "cleanup"}
+        )
+        assert raised.value.cause_code == ErrorCode.SERVICE_NOT_READY.value
+        assert raised.value.__cause__ is cause
+    finally:
+        if not waiting.done():
+            waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        await bundle.runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["execution", "graph", "evaluation", "facade"])
+async def test_sdk_wait_deadline_remains_retryable(owner) -> None:
+    bundle = _Bundle()
+    bundle.execution.release.clear()
+    bundle.graph.release.clear()
+
+    async def inspect_evaluation(*args):
+        await asyncio.Event().wait()
+
+    bundle.evaluations._inspect = inspect_evaluation
+    try:
+        with pytest.raises(AIError) as raised:
+            await bundle.wait(owner, timeout_seconds=0.01)
+        assert raised.value.code is ErrorCode.WAIT_TIMEOUT
+        assert raised.value.retryable is True
+        assert raised.value.to_safe_error(operation_id="wait").retryable is True
+    finally:
+        await bundle.runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_early_cleanup_notification_keeps_ack_cursor_while_stream_is_pending() -> None:
+    from linktools.ai.runtime._observation import _ObservationSession, _report_observation_error
+
+    release = asyncio.Event()
+    stopped = asyncio.Event()
+    session = _ObservationSession("execution", "execution", "acknowledged", 0.01, lambda _: None)
+    cause = RuntimeError("stream cleanup failed")
+    failure = ObservationError(
+        "stream", cursor="delivered", cause_code="PRESENTATION_UNAVAILABLE",
+        safe_details={"phase": "cleanup", "source": "presentation"},
+    )
+    failure.__cause__ = cause
+
+    async def observe():
+        _report_observation_error(failure)
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.set()
+            await release.wait()
+
+    async def authority():
+        await asyncio.Event().wait()
+
+    try:
+        with pytest.raises(ObservationError) as raised:
+            await session.wait(observe(), authority(), None)
+        assert stopped.is_set()
+        assert any(not task.done() for task in session.tasks)
+        assert raised.value is failure
+        assert raised.value.cursor == "acknowledged"
+        assert raised.value.__cause__ is cause
+        assert raised.value.cause_code == "PRESENTATION_UNAVAILABLE"
+        assert raised.value.safe_details == {"phase": "cleanup", "source": "presentation"}
+    finally:
+        release.set()
+        await session.close()

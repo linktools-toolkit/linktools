@@ -324,6 +324,7 @@ class AIError(Error):
                 ErrorCode.EXECUTION_NOT_READY,
                 ErrorCode.EXECUTION_WAIT_TIMEOUT,
                 ErrorCode.TASK_WAIT_TIMEOUT,
+                ErrorCode.WAIT_TIMEOUT,
             }
             if retryable is None
             else retryable

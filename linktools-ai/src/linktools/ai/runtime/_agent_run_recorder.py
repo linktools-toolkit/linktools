@@ -495,6 +495,14 @@ class AgentRunRecorder:
             self._initial_attachments,
             accepted_attachment_ids=self._accepted_attachment_ids,
         )
+        # Acceptance survives provider preparation even when the final input
+        # drops an attachment. Inclusion follows the current prepared request.
+        accepted = tuple(
+            value
+            for value in self._interaction_attachments.get(fact.model_request_seq, ())
+            if value["fact"] == "accepted"
+        )
+        attachments = (*accepted, *attachments)
         stage = (
             self._staging_store.prepare_model_interaction
             if prepared
