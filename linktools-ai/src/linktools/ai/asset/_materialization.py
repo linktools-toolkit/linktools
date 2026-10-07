@@ -3,9 +3,11 @@
 """Disposable local projections of pinned Asset bytes."""
 
 import asyncio
+import ntpath
 import os
 import shutil
 import stat
+import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -148,7 +150,8 @@ def validate_materialized_path(path: str) -> None:
         or any(
             part in {"", ".", ".."}
             or part.endswith((".", " "))
-            or PureWindowsPath(part).is_reserved()
+            or (ntpath.isreserved(part) if sys.version_info >= (3, 13)
+                else PureWindowsPath(part).is_reserved())
             for part in parts
         )
     ):

@@ -5,6 +5,7 @@
 import asyncio
 import os
 import threading
+import warnings
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +20,7 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     FilesystemAssetBackend,
     InMemoryAssetBackend,
+    validate_materialized_path,
 )
 from linktools.ai.asset import _materialization
 from linktools.ai.capability import CapabilityGroup, SkillResource, validate_resource_path
@@ -406,3 +408,16 @@ async def test_capability_capture_rejects_unmaterializable_resource_paths(
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()
+
+
+@pytest.mark.parametrize("path,reserved", (
+    ("scripts/run.py", False), ("AUX.txt", True), ("COM¹.txt", True), ("folder/NUL", True),
+))
+def test_portable_reserved_path_validation_uses_supported_stdlib_api(path: str, reserved: bool) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        if reserved:
+            with pytest.raises(ValueError):
+                validate_materialized_path(path)
+        else:
+            validate_materialized_path(path)
