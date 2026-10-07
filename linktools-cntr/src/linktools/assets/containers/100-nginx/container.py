@@ -252,91 +252,78 @@ class Container(BaseContainer):
             conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}.conf")
             sub_conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}_confs", f"{proxy_name}.conf")
 
-        try:
-            if not domain:
-                raise ContainerError("not found domain")
-            if not proxy_conf:
-                if not proxy_url:
-                    raise ContainerError("not found url")
-                proxy_conf = self.get_source_path("templates", "default.conf")
+        if not domain:
+            raise ContainerError("not found domain")
+        if not proxy_conf:
+            if not proxy_url:
+                raise ContainerError("not found url")
+            proxy_conf = self.get_source_path("templates", "default.conf")
 
-            self.logger.debug(f"Write nginx conf for {container} {domain}")
+        self.logger.debug(f"Write nginx conf for {container} {domain}")
 
-            https_enable = True if https_enable is MISSING else https_enable
-            https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
+        https_enable = True if https_enable is MISSING else https_enable
+        https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
 
-            waf_enable = True if waf_enable is MISSING else waf_enable
-            waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
+        waf_enable = True if waf_enable is MISSING else waf_enable
+        waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
 
-            if auth_enable:
-                if not self.get_config("NGINX_AUTH_ENABLE", type=bool):
-                    self.logger.warning(f"NGINX_AUTH_ENABLE is false, disable auth in {container}")
-                    auth_enable = False
+        if auth_enable and not self.get_config("NGINX_AUTH_ENABLE", type=bool):
+            raise ContainerError(
+                f"Authelia auth is required for {container.name}, but NGINX_AUTH_ENABLE is disabled")
 
-            context = dict(
-                DOMAIN=domain,
-                DOMAIN_NAME=proxy_domain_name,
-                HTTPS_ENABLE=https_enable,
-                WAF_ENABLE=waf_enable,
-                AUTH_ENABLE=auth_enable,
-                AUTH_HEADERS=auth_extra.get("auth_headers", None) if auth_extra else None,
-                AUTH_BYPASS=auth_extra.get("acl_bypass", None) if auth_extra else None,
-            )
+        context = dict(
+            DOMAIN=domain,
+            DOMAIN_NAME=proxy_domain_name,
+            HTTPS_ENABLE=https_enable,
+            WAF_ENABLE=waf_enable,
+            AUTH_ENABLE=auth_enable,
+            AUTH_HEADERS=auth_extra.get("auth_headers", None) if auth_extra else None,
+            AUTH_BYPASS=auth_extra.get("acl_bypass", None) if auth_extra else None,
+        )
 
-            conf_path.parent.mkdir(parents=True, exist_ok=True)
-            sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
+        conf_path.parent.mkdir(parents=True, exist_ok=True)
+        sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
+        container.render_template(
+            self.get_source_path("templates", "server.conf"),
+            conf_path,
+            **context,
+        )
+        if proxy_conf is not MISSING or proxy_url is not MISSING:
             container.render_template(
-                self.get_source_path("templates", "server.conf"),
-                conf_path,
+                proxy_conf,
+                sub_conf_path,
+                PROXY_URL=proxy_url,
                 **context,
             )
-            if proxy_conf is not MISSING or proxy_url is not MISSING:
-                container.render_template(
-                    proxy_conf,
-                    sub_conf_path,
-                    PROXY_URL=proxy_url,
-                    **context,
-                )
-            if auth_enable:
-                authelia = self.containers["authelia"]
-                authelia.write_nginx_conf(
-                    domain=domain,
-                    proxy_name="auth_location",
-                    proxy_domain_name=proxy_domain_name,
-                    proxy_conf=self.get_source_path("templates", "auth_location.conf"),
-                    waf_enable=waf_enable,
-                )
-                if auth_extra:
-                    uris = auth_extra.get("oidc_redirect_uris", None)
-                    if uris:
-                        oidc_redirect_uris = authelia.oidc_clients[0].get("RedirectURLs")
-                        for uri in uris:
-                            if not uri:
-                                self.logger.info(f"{container} invalid oidc redirect uri: None, skip.")
-                                continue
-                            scheme = self.get_config("NGINX_DEFAULT_SCHEME")
-                            port = self.get_config("NGINX_DEFAULT_PORT")
-                            base_url = utils.make_url(scheme, domain, port)
-                            redirect_uri = uri.format(scheme=scheme, domain=domain, port=port, base_url=base_url)
-                            if not redirect_uri:
-                                self.logger.info(f"{container} invalid oidc redirect uri: {uri}, skip.")
-                                continue
-                            oidc_redirect_uris.add(redirect_uri)
+        if auth_enable:
+            authelia = self.containers["authelia"]
+            authelia.write_nginx_conf(
+                domain=domain,
+                proxy_name="auth_location",
+                proxy_domain_name=proxy_domain_name,
+                proxy_conf=self.get_source_path("templates", "auth_location.conf"),
+                waf_enable=waf_enable,
+            )
+            if auth_extra:
+                uris = auth_extra.get("oidc_redirect_uris", None)
+                if uris:
+                    oidc_redirect_uris = authelia.oidc_clients[0].get("RedirectURLs")
+                    for uri in uris:
+                        if not uri:
+                            self.logger.info(f"{container} invalid oidc redirect uri: None, skip.")
+                            continue
+                        scheme = self.get_config("NGINX_DEFAULT_SCHEME")
+                        port = self.get_config("NGINX_DEFAULT_PORT")
+                        base_url = utils.make_url(scheme, domain, port)
+                        redirect_uri = uri.format(scheme=scheme, domain=domain, port=port, base_url=base_url)
+                        if not redirect_uri:
+                            self.logger.info(f"{container} invalid oidc redirect uri: {uri}, skip.")
+                            continue
+                        oidc_redirect_uris.add(redirect_uri)
 
-                    acl_rule = auth_extra.get("acl_rule", None)
-                    if acl_rule:
-                        target_acl_rule = authelia.acl_rules.setdefault(domain, {})
-                        target_acl_rule["Subject"] = acl_rule.get("subject", None)
-                        target_acl_rule["Policy"] = acl_rule.get("policy", None)
+                acl_rule = auth_extra.get("acl_rule", None)
+                if acl_rule:
+                    target_acl_rule = authelia.acl_rules.setdefault(domain, {})
+                    target_acl_rule["Subject"] = acl_rule.get("subject", None)
+                    target_acl_rule["Policy"] = acl_rule.get("policy", None)
 
-        except ContainerError as e:
-            self.logger.debug(f"{container} write nginx conf: {e}, skip.")
-
-            utils.remove_file(sub_conf_path)
-            if sub_conf_path.parent.exists():
-                try:
-                    if not any(f.endswith(".conf") for f in os.listdir(sub_conf_path.parent)):
-                        utils.remove_file(sub_conf_path.parent)
-                        utils.remove_file(conf_path)
-                except:
-                    pass
