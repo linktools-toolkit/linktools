@@ -11,7 +11,7 @@ from typing import Protocol
 from ..core import ExecutionEventType, ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
 from ._event import project_event_payload
-from ._observation import _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup, _report_observation_error
+from ._observation import _is_observation_cleanup, _drain_stream_tasks, _await_stream_cleanup, _report_observation_error
 from .service_api import (
     ExecutionStreamEvent,
     ExecutionTreeEvent,
@@ -394,28 +394,19 @@ class ExecutionTreeStreamer:
             active_error = sys.exc_info()[1]
 
             async def cleanup() -> None:
-                errors: list[BaseException] = []
                 wait_tasks = tuple(child_waits.values()) + tuple(pending.values())
                 if discovery_wait is not None:
                     wait_tasks += (discovery_wait,)
-                for task in wait_tasks:
-                    if task.cancelled():
-                        try:
-                            task.result()
-                        except asyncio.CancelledError as error:
-                            _report_observation_error(error)
-                            errors.append(error)
-                    elif not task.done():
-                        _cancel_stream_task(task)
-                pending_tasks = set(wait_tasks)
-                while pending_tasks:
-                    done, pending_tasks = await asyncio.wait(
-                        pending_tasks, return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    completed_errors = _completed_errors(tuple(done), set(child_waits.values()))
-                    for error in completed_errors:
-                        _report_observation_error(error)
-                    errors.extend(completed_errors)
+                broker_tasks = set(child_waits.values())
+
+                def map_error(task: asyncio.Task, error: BaseException) -> BaseException:
+                    if task in broker_tasks and isinstance(error, Exception) and not isinstance(
+                        error, (AIError, _ExecutionStreamFailure)
+                    ):
+                        return _ExecutionStreamFailure(error)
+                    return error
+
+                errors = await _drain_stream_tasks(wait_tasks, map_error=map_error)
 
                 async def close_stream(stream: AsyncIterator[ExecutionStreamEvent]) -> None:
                     close = getattr(stream, "aclose", None)
@@ -444,25 +435,6 @@ class ExecutionTreeStreamer:
                     raise failure
 
             await _await_stream_cleanup(cleanup(), active_error)
-
-
-def _completed_errors(
-    tasks: tuple[asyncio.Task, ...],
-    broker_tasks: set[asyncio.Task],
-) -> list[BaseException]:
-    errors: list[BaseException] = []
-    for task in tasks:
-        if task.cancelled():
-            continue
-        error = task.exception()
-        if error is None or isinstance(error, StopAsyncIteration):
-            continue
-        if task in broker_tasks and isinstance(error, Exception) and not isinstance(
-            error, (AIError, _ExecutionStreamFailure)
-        ):
-            error = _ExecutionStreamFailure(error)
-        errors.append(error)
-    return errors
 
 
 def _cleanup_failure(

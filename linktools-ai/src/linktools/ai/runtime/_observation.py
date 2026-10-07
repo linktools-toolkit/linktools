@@ -5,7 +5,7 @@
 import asyncio
 import math
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable
 from contextvars import ContextVar
 from typing import Any, Protocol, TypeVar
 
@@ -34,8 +34,44 @@ def _is_observation_cleanup(error: BaseException | None) -> bool:
         and error.args[0] is _CLEANUP_CANCEL
     )
 
-def _cancel_stream_task(task: asyncio.Task[Any]) -> None:
-    task.cancel(_CLEANUP_CANCEL)
+async def _drain_stream_tasks(
+    tasks: Iterable[asyncio.Task[Any]], *,
+    cancelled_by_owner: set[asyncio.Task[Any]] | None = None,
+    map_error: Callable[[asyncio.Task[Any], BaseException], BaseException] | None = None,
+) -> list[BaseException]:
+    """Cancel owned reads and report failures as each finishes unwinding."""
+    if cancelled_by_owner is None:
+        cancelled_by_owner = set()
+    errors: list[BaseException] = []
+
+    def collect(task: asyncio.Task[Any]) -> None:
+        if task.cancelled() and task in cancelled_by_owner:
+            return
+        try:
+            task.result()
+        except StopAsyncIteration:
+            pass
+        except BaseException as error:
+            if not _is_observation_cleanup(error):
+                if map_error is not None:
+                    error = map_error(task, error)
+                _report_observation_error(error)
+                errors.append(error)
+
+    pending = set()
+    for task in tasks:
+        if task.cancelled():
+            collect(task)
+            continue
+        if not task.done() and task not in cancelled_by_owner:
+            cancelled_by_owner.add(task)
+            task.cancel(_CLEANUP_CANCEL)
+        pending.add(task)
+    while pending:
+        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            collect(task)
+    return errors
 
 
 T = TypeVar("T")

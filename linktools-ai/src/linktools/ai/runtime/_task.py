@@ -31,7 +31,7 @@ from ..task import (
 from ._event import project_event_payload
 from ._observation import (
     _wait, _validate_wait, _call_observer,
-    _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup,
+    _is_observation_cleanup, _drain_stream_tasks, _await_stream_cleanup,
     _report_observation_error,
 )
 from ._wait import WaitResult
@@ -799,31 +799,10 @@ class TaskGraphRun(Generic[AppT]):
             active_error = sys.exc_info()[1]
 
             async def cleanup() -> None:
-                cleanup_errors: list[BaseException] = []
                 tasks = list(execution_tasks.values())
                 if graph_task is not None:
                     tasks.append(graph_task)
-                for task in tasks:
-                    if task.cancelled():
-                        try:
-                            task.result()
-                        except asyncio.CancelledError as error:
-                            _report_observation_error(error)
-                            cleanup_errors.append(error)
-                    elif not task.done():
-                        _cancel_stream_task(task)
-                pending_tasks = set(tasks)
-                while pending_tasks:
-                    done, pending_tasks = await asyncio.wait(
-                        pending_tasks, return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    for task in done:
-                        if task.cancelled():
-                            continue
-                        error = task.exception()
-                        if error is not None and not isinstance(error, StopAsyncIteration):
-                            _report_observation_error(error)
-                            cleanup_errors.append(error)
+                cleanup_errors = await _drain_stream_tasks(tasks)
                 if graph_stream is not None:
                     close = getattr(graph_stream, "aclose", None)
                     if close is not None:

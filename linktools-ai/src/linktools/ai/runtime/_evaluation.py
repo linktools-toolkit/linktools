@@ -54,7 +54,7 @@ from .service_api import ExecutionService, UsageSummary, TaskGraphRunEvent
 from ._wait import WaitResult
 from ._observation import (
     _ObservationSession, _wait, _validate_wait, _await_stream_cleanup,
-    _cancel_stream_task, _is_observation_cleanup, _report_observation_error,
+    _drain_stream_tasks, _is_observation_cleanup, _report_observation_error,
 )
 from ._watch_cursor import (
     decode_evaluation_watch_cursor, encode_evaluation_watch_cursor, decode_graph_watch_cursor,
@@ -1416,26 +1416,10 @@ class EvaluationRun:
             return scoped
 
         async def close_streams() -> None:
-            errors: list[BaseException] = []
-            for task in tasks.values():
-                if not task.done() and task not in cancelled_by_owner:
-                    cancelled_by_owner.add(task)
-                    _cancel_stream_task(task)
-            pending = set(tasks.values())
-            while pending:
-                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    if task.cancelled() and task in cancelled_by_owner:
-                        continue
-                    try:
-                        task.result()
-                    except StopAsyncIteration:
-                        pass
-                    except BaseException as error:
-                        if not _is_observation_cleanup(error):
-                            error = scoped_error(error)
-                            errors.append(error)
-                            _report_observation_error(error)
+            errors = await _drain_stream_tasks(
+                tasks.values(), cancelled_by_owner=cancelled_by_owner,
+                map_error=lambda task, error: scoped_error(error),
+            )
             for stream in streams.values():
                 try:
                     await stream.aclose()
