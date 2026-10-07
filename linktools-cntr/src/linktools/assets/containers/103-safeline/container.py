@@ -30,7 +30,7 @@ class Container(BaseContainer):
             SAFELINE_POSTGRES_PASSWORD="Pg-pAssw0rd",
             SAFELINE_SUBNET_PREFIX="172.22.242",
             SAFELINE_ARCH_SUFFIX="",
-            SAFELINE_RELEASE="",
+            SAFELINE_REGION="",
             SAFELINE_PORT=ConfigField(cast=int, default=9200),
             SAFELINE_API_TOKEN="",
         )

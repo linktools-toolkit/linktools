@@ -8,8 +8,8 @@ import yaml
 from linktools import utils
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
-from linktools.cntr import BaseContainer
-from linktools.cntr.container import ExposeMixin, ExposeLink, ExposeCategory
+from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.container import ExposeLink
 from linktools.errors import ConfigNotFoundError
 from linktools.rich import prompt
 
@@ -69,17 +69,22 @@ class Container(BaseContainer):
         apps = []
         bookmarks = []
 
-        for key, value in vars(ExposeMixin).items():
-            if isinstance(value, ExposeCategory):
-                categories.setdefault(value, list())
-
         for container in sorted(self.manager.installed_state.get(), key=lambda o: o.order):
             for expose in container.exposes:
-                if isinstance(expose, ExposeLink) and expose.is_valid:
-                    categories[expose.category].append(expose)
-                    if expose.category is self.expose_public:
-                        apps.append(expose)
-                    bookmarks.append(expose)
+                if not isinstance(expose, ExposeLink) or not expose.is_valid:
+                    continue
+                category = expose.category
+                existing = categories.get(category.name)
+                if existing is None:
+                    existing = (category.desc, [])
+                    categories[category.name] = existing
+                elif existing[0] != category.desc:
+                    raise ContainerError(
+                        f"Conflicting description for category {category.name!r}")
+                existing[1].append(expose)
+                if category.name == "public":
+                    apps.append(expose)
+                bookmarks.append(expose)
 
         data = {"links": []}
         for app in apps:
@@ -95,18 +100,18 @@ class Container(BaseContainer):
         )
 
         data = {"categories": [], "links": []}
-        for category, links in categories.items():
-            if category.name == "public":
+        for name, (description, links) in categories.items():
+            if name == "public":
                 continue
             if not links:
                 continue
             data["categories"].append({
-                "id": category.name,
-                "title": category.desc,
+                "id": name,
+                "title": description,
             })
             for link in links:
                 data["links"].append({
-                    "category": category.name,
+                    "category": name,
                     "name": link.name,
                     "icon": link.icon,
                     "link": link.url,
