@@ -75,16 +75,17 @@ class Execution(Generic[AppT]):
 
     async def wait(
         self, *, on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
-        cursor: str | None = None, include_content: bool = False,
+        cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
     ) -> WaitResult[ExecutionResult]:
-        _validate_wait(on_event, cursor, include_content, timeout_seconds, close_timeout_seconds)
+        """Wait for the full execution result; include_event_content only selects callback payloads."""
+        _validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds)
         return await _wait(
             scope="execution", resource_id=self.execution_id,
             waiter=(lambda: self._task_wait(None)) if self._task_wait is not None else
                 lambda: self._runtime._execution_service.wait(
                     self.execution_id, principal=self._principal),
-            watch=lambda ready: self._watch_prepared(cursor, include_content, ready),
+            watch=lambda ready: self._watch_prepared(cursor, include_event_content, ready),
             on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
             close_timeout_seconds=close_timeout_seconds,
             register=self._runtime._register_observation, release=self._runtime._release_observation,
@@ -93,6 +94,7 @@ class Execution(Generic[AppT]):
     def watch(
         self, *, cursor: str | None = None, include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]:
+        """Watch this execution and all descendants; use event.execution_id for content reads."""
         return self._watch_prepared(cursor, include_content, None)
 
     def _watch_prepared(
@@ -271,6 +273,7 @@ class Execution(Generic[AppT]):
         message_seq: int | None = None,
         part_index: int | None = None,
     ) -> "Page[ExecutionHistoryItem]":
+        """Read a root and direct children, or a selected subagent alone, over a fixed cursor range."""
         return await self._runtime.executions.history(
             self.execution_id,
             principal=self._principal,
@@ -289,18 +292,17 @@ class Execution(Generic[AppT]):
         self,
         *,
         cursor: "str | None" = None,
-        include_content: bool = False,
         limit: int = 100,
         agent_run_seq: int | None = None,
         model_request_seq: int | None = None,
         step_index: int | None = None,
         tool_call_id: str | None = None,
     ) -> "Page[ExecutionTraceItem]":
+        """Read step metadata and locators for a root and direct children, or one selected subagent."""
         return await self._runtime.executions.trace(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
-            include_content=include_content,
             limit=limit,
             agent_run_seq=agent_run_seq,
             model_request_seq=model_request_seq,
@@ -315,6 +317,7 @@ class Execution(Generic[AppT]):
         include_content: bool = False,
         limit: int = 100,
     ) -> "Page[TranscriptItem]":
+        """Read user/assistant text for this execution's current run."""
         return await self._runtime.executions.transcript(
             self.execution_id,
             principal=self._principal,
@@ -331,6 +334,7 @@ class Execution(Generic[AppT]):
         limit: int = 100,
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]":
+        """Read a root recursively, or a selected subagent alone. Cursor identities stay fixed; lifecycle may advance."""
         return await self._runtime.executions.model_interactions(
             self.execution_id,
             principal=self._principal,
@@ -363,6 +367,7 @@ class Session(Generic[AppT]):
         thinking: "ThinkingValue | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
+        """Start run mode; planning enables the planning capability without selecting plan mode."""
         if self._agent_revision is None:
             return await self._runtime.agents.get(self.agent_id).start(
                 user_prompt,
@@ -407,10 +412,11 @@ class Session(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
-        include_content: bool = False,
+        include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
     ) -> WaitResult[ExecutionResult]:
-        _validate_wait(on_event, None, include_content, timeout_seconds, close_timeout_seconds)
+        """Run and wait; planning enables a capability, while include_event_content only controls observation."""
+        _validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds)
         execution = await self.start(
             user_prompt,
             files=files,
@@ -423,7 +429,7 @@ class Session(Generic[AppT]):
             correlation=correlation,
         )
         return await execution.wait(
-            timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+            timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
         )
 
@@ -440,10 +446,11 @@ class Session(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
-        include_content: bool = False,
+        include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
     ) -> WaitResult[ExecutionResult]:
-        _validate_wait(on_event, None, include_content, timeout_seconds, close_timeout_seconds)
+        """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
+        _validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds)
         if self._agent_revision is None:
             return await self._runtime.agents.get(self.agent_id).plan(
                 user_prompt,
@@ -455,7 +462,7 @@ class Session(Generic[AppT]):
                 memory_scope=memory_scope,
                 thinking=thinking,
                 correlation=correlation,
-                timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+                timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
                 close_timeout_seconds=close_timeout_seconds,
             )
         execution = await self._runtime._start_for_agent(
@@ -475,7 +482,7 @@ class Session(Generic[AppT]):
             compiled_agent=self._compiled_agent,
         )
         return await execution.wait(
-            timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+            timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
         )
 
@@ -627,6 +634,7 @@ class Agent(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
         input_context: ExecutionInputContext | None = None,
     ) -> "Execution[AppT]":
+        """Start run mode; planning enables the planning capability without selecting plan mode."""
         return await self._runtime._start_for_agent(
             self.id,
             self._agent_revision,
@@ -661,10 +669,11 @@ class Agent(Generic[AppT]):
         timeout_seconds: "float | None" = None,
         input_context: ExecutionInputContext | None = None,
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
-        include_content: bool = False,
+        include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
     ) -> WaitResult[ExecutionResult]:
-        _validate_wait(on_event, None, include_content, timeout_seconds, close_timeout_seconds)
+        """Run and wait; planning enables a capability, while include_event_content only controls observation."""
+        _validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds)
         execution = await self.start(
             user_prompt,
             files=files,
@@ -679,7 +688,7 @@ class Agent(Generic[AppT]):
             input_context=input_context,
         )
         return await execution.wait(
-            timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+            timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
         )
 
@@ -697,10 +706,11 @@ class Agent(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
         timeout_seconds: "float | None" = None,
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
-        include_content: bool = False,
+        include_event_content: bool = False,
         close_timeout_seconds: float = 5.0,
     ) -> WaitResult[ExecutionResult]:
-        _validate_wait(on_event, None, include_content, timeout_seconds, close_timeout_seconds)
+        """Execute plan mode with plan-safe tools and wait. This can call models and tools; it is not a dry run."""
+        _validate_wait(on_event, None, include_event_content, timeout_seconds, close_timeout_seconds)
         execution = await self._runtime._start_for_agent(
             self.id,
             self._agent_revision,
@@ -718,7 +728,7 @@ class Agent(Generic[AppT]):
             compiled_agent=self._compiled_agent,
         )
         return await execution.wait(
-            timeout_seconds=timeout_seconds, on_event=on_event, include_content=include_content,
+            timeout_seconds=timeout_seconds, on_event=on_event, include_event_content=include_event_content,
             close_timeout_seconds=close_timeout_seconds,
         )
 
@@ -728,6 +738,7 @@ class Agent(Generic[AppT]):
         *,
         principal: "Principal | None" = None,
     ) -> "Session[AppT]":
+        """Build a lazy definition-bound session handle without creating or checking a stored session."""
         return Session(
             self._runtime,
             self.id,

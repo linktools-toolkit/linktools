@@ -813,6 +813,8 @@ def _borrowed_runtime_history(
         executions=storage.execution.executions,
         events=storage.execution.events,
         sessions=storage.conversation.sessions,
+        conversation=storage.conversation,
+        session_transcript_store=storage.run_store,
         tasks=storage.task.tasks,
         authorization=authorization,
         namespace=storage.namespace,

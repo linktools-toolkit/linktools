@@ -21,7 +21,7 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
     canonical_sha256,
 )
-from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.runtime import (
     ArtifactView,
     Execution,
@@ -611,6 +611,33 @@ class _InspectionService:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", (ExecutionStatus.FAILED, ExecutionStatus.CANCELLED))
+async def test_history_result_rejects_invalid_terminal_diagnostics(
+    status: ExecutionStatus,
+) -> None:
+    executions = _ResultExecutions()
+    executions.record.status = status
+    executions.record.error_code = (
+        ErrorCode.INTERNAL_ERROR.value if status is ExecutionStatus.FAILED
+        else ErrorCode.EXECUTION_CANCELLED.value
+    )
+    executions.record.error_diagnostics = (
+        {"exception_type": "unvalidated"} if status is ExecutionStatus.FAILED
+        else ErrorDiagnostics.from_exception(RuntimeError("invalid cancellation evidence"))
+    )
+    executions.result.output = None
+    history = RuntimeHistory(
+        SimpleNamespace(), tenant_id="tenant", executions=executions,
+        authorization=TenantAuthorizationPolicy("tenant"),
+    )
+    with pytest.raises(AIError) as error:
+        await history.result(
+            "execution", principal=Principal("caller", "tenant", "service"),
+        )
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
 async def test_runtime_history_inspection_uses_safe_durable_summaries() -> None:
     executions = _ResultExecutions()
     history = RuntimeHistory(
@@ -763,7 +790,7 @@ async def test_runtime_history_reads_execution_task_results_and_artifacts() -> N
 @pytest.mark.parametrize("api", ("history-result", "history-ref", "live-result", "live-ref"))
 @pytest.mark.parametrize(
     "corruption",
-    ("execution", "digest", "missing-result", "missing-execution", "none"),
+    ("execution", "digest", "missing-result", "missing-execution", "missing-digest", "none"),
 )
 async def test_task_result_requires_matching_durable_execution(
     api: str,
@@ -777,6 +804,11 @@ async def test_task_result_requires_matching_durable_execution(
         tasks.record = replace(tasks.record, execution_id="other-execution")
     elif corruption == "digest":
         tasks.record = replace(tasks.record, result_digest=canonical_sha256("other"))
+    elif corruption == "missing-digest":
+        tasks._graph_state = replace(
+            tasks._graph_state,
+            node_states=(replace(tasks._graph_state.node_states[0], result_digest=None),),
+        )
     elif corruption == "missing-execution":
         tasks._graph_state = replace(
             tasks._graph_state,
@@ -875,22 +907,15 @@ async def test_task_result_requires_matching_durable_execution(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reference", (False, True))
-@pytest.mark.parametrize(
-    "status, error_code, details",
-    (
-        (TaskStatus.READY, ErrorCode.TASK_NOT_READY, {}),
-        (TaskStatus.FAILED, ErrorCode.TASK_NODE_FAILED, {
-            "graph_id": "graph", "node_id": "node", "status": "FAILED", "error_code": "failed",
-        }),
-    ),
-)
-async def test_history_task_result_preserves_unready_and_failed_error_details(
-    reference: bool,
+@pytest.mark.parametrize("api", ("history-result", "history-ref", "live-result", "live-ref"))
+@pytest.mark.parametrize("status", (
+    TaskStatus.READY, TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED,
+))
+async def test_task_result_preserves_unready_and_failed_error_details(
+    api: str,
     status: TaskStatus,
-    error_code: ErrorCode,
-    details: dict[str, str],
 ) -> None:
+    principal = Principal("caller", "tenant", "service")
     tasks = _TaskResults()
     tasks._graph_state = replace(
         tasks._graph_state,
@@ -900,11 +925,29 @@ async def test_history_task_result_preserves_unready_and_failed_error_details(
         SimpleNamespace(), tenant_id="tenant", namespace="workspace",
         tasks=tasks, authorization=TenantAuthorizationPolicy("tenant"),
     )
-    read = history.task_result_ref if reference else history.task_result
+
+    async def graph_state(graph_id: str, *, principal: Principal) -> TaskGraphState:
+        return tasks._graph_state
+
+    live = TaskGraphRun(
+        SimpleNamespace(namespace="workspace"), SimpleNamespace(state=graph_state),
+        "graph", principal, None,
+    )
+    if api.startswith("history"):
+        read = history.task_result_ref if api.endswith("ref") else history.task_result
+        request = read("graph", "node", principal=principal)
+    else:
+        read = live.result_ref if api.endswith("ref") else live.result
+        request = read("node")
     with pytest.raises(AIError) as raised:
-        await read("graph", "node", principal=Principal("caller", "tenant", "service"))
-    assert raised.value.code is error_code
-    assert raised.value.safe_details == details
+        await request
+    if status is TaskStatus.READY:
+        assert raised.value.code is ErrorCode.TASK_NOT_READY
+    else:
+        assert raised.value.code is ErrorCode.TASK_NODE_FAILED
+        assert raised.value.safe_details == {
+            "graph_id": "graph", "node_id": "node", "status": status.value, "error_code": "failed",
+        }
 
 
 @pytest.mark.asyncio
@@ -954,12 +997,13 @@ async def test_execution_query_cursor_binds_exact_selector(query: str) -> None:
                     "execution", principal=principal, cursor=page.next_cursor, **changed,
                 )
             assert error.value.code is ErrorCode.CURSOR_INVALID
-    with pytest.raises(AIError) as error:
-        await read(
-            "execution", principal=principal, cursor=page.next_cursor,
-            include_content=True, **filters,
-        )
-    assert error.value.code is ErrorCode.CURSOR_INVALID
+    if query == "history":
+        with pytest.raises(AIError) as error:
+            await read(
+                "execution", principal=principal, cursor=page.next_cursor,
+                include_content=True, **filters,
+            )
+        assert error.value.code is ErrorCode.CURSOR_INVALID
     second = await read("execution", principal=principal, cursor=page.next_cursor, **filters)
     assert (second.items[0].message_seq if query == "history" else second.items[0].step_event_seq) == 1
     assert second.next_cursor is None
@@ -997,7 +1041,7 @@ async def test_execution_history_and_trace_forward_filters(
         *args, include_content=include_content, **kwargs, **history_filters,
     )
     trace = await target.trace(
-        *args, include_content=include_content, **kwargs, **trace_filters,
+        *args, **kwargs, **trace_filters,
     )
     assert reader.history_filters == history_filters
     assert reader.trace_filters == trace_filters

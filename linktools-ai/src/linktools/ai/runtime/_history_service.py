@@ -142,7 +142,6 @@ class DefaultExecutionHistoryService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
-        include_content: bool = False,
         limit: int = 100,
         agent_run_seq: int | None = None,
         model_request_seq: int | None = None,
@@ -157,13 +156,18 @@ class DefaultExecutionHistoryService:
             "tool_call_id": tool_call_id,
         }
         _validate_history_filters(filters)
-        inner_cursor = self._decode_content_cursor(
+        filter_digest = canonical_sha256(
+            {
+                "execution_id": execution_id,
+                "query_kind": "trace",
+                "filters": filters,
+            }
+        )
+        inner_cursor = self._decode_query_cursor(
             cursor,
-            execution_id=execution_id,
             tenant_id=self._executions.tenant_id,
             query_kind="trace",
-            include_content=include_content,
-            filters=filters,
+            filter_digest=filter_digest,
         )
         page = await self._reader.trace(
             execution_id,
@@ -177,13 +181,11 @@ class DefaultExecutionHistoryService:
         )
         return Page(
             page.items,
-            self._encode_content_cursor(
+            self._encode_query_cursor(
                 page.next_cursor,
-                execution_id=execution_id,
                 tenant_id=self._executions.tenant_id,
                 query_kind="trace",
-                include_content=include_content,
-                filters=filters,
+                filter_digest=filter_digest,
             ),
         )
 
@@ -197,12 +199,14 @@ class DefaultExecutionHistoryService:
         limit: int = 100,
     ) -> Page[TranscriptItem]:
         record = await self._authorize(execution_id, principal)
-        inner_cursor = self._decode_content_cursor(
+        filter_digest = self._content_filter_digest(
+            execution_id, "transcript", include_content,
+        )
+        inner_cursor = self._decode_query_cursor(
             cursor,
-            execution_id=execution_id,
             tenant_id=self._executions.tenant_id,
             query_kind="transcript",
-            include_content=include_content,
+            filter_digest=filter_digest,
         )
         page = await self._reader.transcript(
             execution_id,
@@ -225,12 +229,11 @@ class DefaultExecutionHistoryService:
         )
         return Page(
             items,
-            self._encode_content_cursor(
+            self._encode_query_cursor(
                 page.next_cursor,
-                execution_id=execution_id,
                 tenant_id=self._executions.tenant_id,
                 query_kind="transcript",
-                include_content=include_content,
+                filter_digest=filter_digest,
             ),
         )
 
@@ -259,13 +262,15 @@ class DefaultExecutionHistoryService:
             "part_index": part_index,
         }
         _validate_history_filters(filters)
-        inner_cursor = self._decode_content_cursor(
+        filter_digest = self._content_filter_digest(
+            execution_id, "history", include_content,
+            filters,
+        )
+        inner_cursor = self._decode_query_cursor(
             cursor,
-            execution_id=execution_id,
             tenant_id=self._executions.tenant_id,
             query_kind="history",
-            include_content=include_content,
-            filters=filters,
+            filter_digest=filter_digest,
         )
         page = await self._reader.history(
             execution_id,
@@ -306,13 +311,11 @@ class DefaultExecutionHistoryService:
         )
         return Page(
             items,
-            self._encode_content_cursor(
+            self._encode_query_cursor(
                 page.next_cursor,
-                execution_id=execution_id,
                 tenant_id=self._executions.tenant_id,
                 query_kind="history",
-                include_content=include_content,
-                filters=filters,
+                filter_digest=filter_digest,
             ),
         )
 
@@ -327,12 +330,14 @@ class DefaultExecutionHistoryService:
         cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> Page[ModelInteractionItem]:
         await self._authorize(execution_id, principal)
-        inner_cursor = self._decode_content_cursor(
+        filter_digest = self._content_filter_digest(
+            execution_id, "model_interactions", include_content,
+        )
+        inner_cursor = self._decode_query_cursor(
             cursor,
-            execution_id=execution_id,
             tenant_id=self._executions.tenant_id,
             query_kind="model_interactions",
-            include_content=include_content,
+            filter_digest=filter_digest,
         )
         page = await self._reader.model_interactions(
             execution_id,
@@ -344,12 +349,11 @@ class DefaultExecutionHistoryService:
         )
         return Page(
             page.items,
-            self._encode_content_cursor(
+            self._encode_query_cursor(
                 page.next_cursor,
-                execution_id=execution_id,
                 tenant_id=self._executions.tenant_id,
                 query_kind="model_interactions",
-                include_content=include_content,
+                filter_digest=filter_digest,
             ),
         )
 
@@ -401,23 +405,15 @@ class DefaultExecutionHistoryService:
             }
         )
 
-    def _decode_content_cursor(
+    def _decode_query_cursor(
         self,
         cursor: "str | None",
         *,
-        execution_id: str,
         tenant_id: str,
         query_kind: str,
-        include_content: bool,
-        filters: Mapping[str, JsonValue] | None = None,
+        filter_digest: str,
     ) -> "str | None":
         if cursor is None:
-            self._content_filter_digest(
-                execution_id,
-                query_kind,
-                include_content,
-                filters,
-            )
             return None
         signer = self._cursor_signer
         if signer is None:
@@ -427,26 +423,19 @@ class DefaultExecutionHistoryService:
             signer,
             tenant_id=tenant_id,
             resource_kind=f"EXECUTION_{query_kind.upper()}",
-            filter_digest=self._content_filter_digest(
-                execution_id,
-                query_kind,
-                include_content,
-                filters,
-            ),
+            filter_digest=filter_digest,
         )
         if payload.revision != 0:
             raise AIError(ErrorCode.CURSOR_INVALID)
         return payload.position
 
-    def _encode_content_cursor(
+    def _encode_query_cursor(
         self,
         cursor: "str | None",
         *,
-        execution_id: str,
         tenant_id: str,
         query_kind: str,
-        include_content: bool,
-        filters: Mapping[str, JsonValue] | None = None,
+        filter_digest: str,
     ) -> "str | None":
         if cursor is None:
             return None
@@ -457,12 +446,7 @@ class DefaultExecutionHistoryService:
             signer,
             tenant_id=tenant_id,
             resource_kind=f"EXECUTION_{query_kind.upper()}",
-            filter_digest=self._content_filter_digest(
-                execution_id,
-                query_kind,
-                include_content,
-                filters,
-            ),
+            filter_digest=filter_digest,
             position=cursor,
         )
 

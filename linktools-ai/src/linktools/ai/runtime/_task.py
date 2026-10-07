@@ -20,12 +20,12 @@ from ..task import (
     TaskGraphResult,
     TaskGraphService,
     TaskGraphState,
-    TaskGraphView,
     TaskEffectResolution,
     TaskEffectResolutionRequest,
     RecoverGraphRequest,
     TaskNodeResult,
     TaskResultRef,
+    TaskResultRecord,
     TaskInputSupplyRequest,
 )
 from ._event import project_event_payload
@@ -84,6 +84,7 @@ class TaskGraphRun(Generic[AppT]):
     async def wait(
         self, *, on_event: Callable[[TaskGraphRunEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_content: Literal[False] = False,
+        include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
     ) -> WaitResult[TaskGraphInfo]: ...
 
@@ -91,6 +92,7 @@ class TaskGraphRun(Generic[AppT]):
     async def wait(
         self, *, on_event: Callable[[TaskGraphRunEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_content: Literal[True],
+        include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
     ) -> WaitResult[TaskGraphState]: ...
 
@@ -98,19 +100,28 @@ class TaskGraphRun(Generic[AppT]):
     async def wait(
         self, *, on_event: Callable[[TaskGraphRunEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_content: bool,
+        include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
     ) -> WaitResult[TaskGraphInfo | TaskGraphState]: ...
 
     async def wait(
         self, *, on_event: Callable[[TaskGraphRunEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_content: bool = False,
+        include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
     ) -> WaitResult[TaskGraphInfo | TaskGraphState]:
-        _validate_wait(on_event, cursor, include_content, timeout_seconds, close_timeout_seconds)
+        """Wait for an authoritative graph snapshot, optionally observing events.
+
+        include_content selects raw node inputs in the result; include_event_content
+        controls callback payloads only. Neither option reads node outputs.
+        """
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        _validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds)
         outcome = await _wait(
             scope="task_graph", resource_id=self.graph_id,
             waiter=lambda: self._graph.wait(self.graph_id, principal=self._principal),
-            watch=lambda ready: self._watch_prepared(cursor, include_content, ready),
+            watch=lambda ready: self._watch_prepared(cursor, include_event_content, ready),
             on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
             close_timeout_seconds=close_timeout_seconds,
             register=self._runtime._register_observation, release=self._runtime._release_observation,
@@ -181,6 +192,23 @@ class TaskGraphRun(Generic[AppT]):
         )
 
     async def result(self, node_id: str) -> JsonValue:
+        record = await self._result_record(node_id)
+        return await self._runtime._require_task_node_runtime().read_result_record(
+            record,
+            principal=self._principal,
+        )
+
+    async def result_ref(self, node_id: str) -> TaskResultRef:
+        record = await self._result_record(node_id)
+        return TaskResultRef(
+            self._runtime.namespace,
+            self._principal.tenant_id,
+            self.graph_id,
+            node_id,
+            record.result_digest,
+        )
+
+    async def _result_record(self, node_id: str) -> TaskResultRecord:
         graph_state = await self._state()
         state = next(
             (item for item in graph_state.node_states if item.node_id == node_id),
@@ -229,41 +257,7 @@ class TaskGraphRun(Generic[AppT]):
             or record.execution_id != state.execution_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await task_runtime.read_result_record(
-            record,
-            principal=self._principal,
-        )
-
-    async def result_ref(self, node_id: str) -> TaskResultRef:
-        graph_state = await self._state()
-        state = next(
-            (item for item in graph_state.node_states if item.node_id == node_id),
-            None,
-        )
-        if state is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        if state.status is not TaskStatus.SUCCEEDED or state.result_digest is None:
-            raise AIError(ErrorCode.TASK_NOT_READY)
-        if state.execution_id is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        record = await self._runtime._require_task_node_runtime().get_result_record(
-            self.graph_id,
-            node_id,
-            tenant_id=self._principal.tenant_id,
-        )
-        if (
-            record is None
-            or record.result_digest != state.result_digest
-            or record.execution_id != state.execution_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return TaskResultRef(
-            self._runtime.namespace,
-            self._principal.tenant_id,
-            self.graph_id,
-            node_id,
-            state.result_digest,
-        )
+        return record
 
     async def results(
         self,
@@ -273,6 +267,7 @@ class TaskGraphRun(Generic[AppT]):
         include_content: bool = False,
         max_content_bytes: int = 1_048_576,
     ) -> Page[TaskNodeResult]:
+        """Page results at one graph revision; discard partial pages and restart if it changes."""
         if (
             isinstance(limit, bool)
             or not isinstance(limit, int)
@@ -471,17 +466,12 @@ class TaskGraphRun(Generic[AppT]):
                 last_cursor = event.cursor
         return result
 
-    async def inspect(self) -> TaskGraphView:
-        return await self._graph.inspect(
-            self.graph_id,
-            principal=self._principal,
-        )
-
     async def state(
         self,
         *,
         include_content: bool = False,
     ) -> "TaskGraphInfo | TaskGraphState":
+        """Read current expanded nodes and state; include_content opts into raw invocation inputs."""
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         graph_state = await self._state()

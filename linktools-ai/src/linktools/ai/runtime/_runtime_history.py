@@ -304,15 +304,18 @@ class RuntimeHistory:
             if stored.output is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             error_code = _terminal_error_code(record)
-            return ExecutionResult(
-                record.execution_id,
-                record.status,
-                None,
-                stored.usage,
-                error_code,
-                record.safe_error_details,
-                None,
-            )
+            try:
+                return ExecutionResult(
+                    record.execution_id,
+                    record.status,
+                    None,
+                    stored.usage,
+                    error_code,
+                    record.safe_error_details,
+                    record.error_diagnostics,
+                )
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
         if stored.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -887,7 +890,6 @@ class RuntimeHistory:
         *,
         principal: Principal,
         cursor: "str | None" = None,
-        include_content: bool = False,
         limit: int = 100,
         agent_run_seq: int | None = None,
         model_request_seq: int | None = None,
@@ -898,7 +900,6 @@ class RuntimeHistory:
             execution_id,
             principal=principal,
             cursor=cursor,
-            include_content=include_content,
             limit=limit,
             agent_run_seq=agent_run_seq,
             model_request_seq=model_request_seq,

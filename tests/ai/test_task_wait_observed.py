@@ -73,11 +73,20 @@ async def ignore(event):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED,
                                     TaskStatus.BLOCKED, TaskStatus.WAITING, TaskStatus.RECOVERY_REQUIRED])
-@pytest.mark.parametrize("include_content", [False, True])
-async def test_wait_observed_returns_authoritative_same_read(status, include_content):
+@pytest.mark.parametrize("include_content, include_event_content", [(False, True), (True, False)])
+async def test_wait_observed_returns_authoritative_same_read(status, include_content, include_event_content):
     graph = Graph(status)
     runtime, run = make_run(graph)
-    outcome = await run.wait(on_event=ignore, include_content=include_content)
+    from linktools.ai.runtime._watch_cursor import encode_graph_watch_cursor
+    cursor = encode_graph_watch_cursor(
+        "observed-test", "tenant", "graph", include_content=include_event_content,
+        graph_event_seq=0, execution_event_seqs={},
+    )
+    outcome = await run.wait(
+        on_event=ignore, cursor=cursor, include_content=include_content,
+        include_event_content=include_event_content,
+    )
+    assert outcome.cursor == cursor
     assert isinstance(outcome, WaitResult)
     assert outcome.result.wait_status is status
     assert outcome.result.event_seq == 1
@@ -183,7 +192,7 @@ async def test_wait_observed_callback_cancelled_error_is_not_success():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field,value", [("timeout_seconds", True), ("timeout_seconds", float("nan")),
     ("timeout_seconds", float("inf")), ("timeout_seconds", -1), ("close_timeout_seconds", 0),
-    ("close_timeout_seconds", float("inf")), ("close_timeout_seconds", None), ("include_content", 1),
+    ("close_timeout_seconds", float("inf")), ("close_timeout_seconds", None), ("include_content", 1), ("include_event_content", 1),
     ("cursor", "invalid")])
 async def test_wait_observed_invalid_arguments_start_nothing(field, value):
     graph = Graph()

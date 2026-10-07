@@ -215,7 +215,10 @@ async def _ignore(event) -> None:
 async def test_each_owner_returns_wait_result_independent_of_callback(owner, observe, include_content) -> None:
     bundle = _Bundle()
     try:
-        outcome = await bundle.wait(owner, on_event=_ignore if observe else None, include_content=include_content)
+        outcome = await bundle.wait(
+            owner, on_event=_ignore if observe else None, include_event_content=include_content,
+            **({"include_content": include_content} if owner == "graph" else {}),
+        )
         assert type(outcome) is WaitResult
         assert outcome.cursor is None
         assert outcome.observation_error is None
@@ -299,7 +302,7 @@ def test_graph_wait_overloads_preserve_content_selected_result_type() -> None:
 @pytest.mark.parametrize("invalid", [
     {"timeout_seconds": True}, {"timeout_seconds": -1}, {"timeout_seconds": float("nan")},
     {"timeout_seconds": float("inf")}, {"close_timeout_seconds": 0},
-    {"close_timeout_seconds": True}, {"include_content": 1}, {"on_event": object()},
+    {"close_timeout_seconds": True}, {"include_event_content": 1}, {"on_event": object()},
 ])
 async def test_convenience_wait_arguments_are_validated_before_start(owner, method, invalid) -> None:
     starts = []
@@ -337,12 +340,12 @@ async def test_convenience_wait_preserves_container_and_all_options(owner, metho
     handle = Agent(runtime, "agent", 1) if owner == "agent" else Session(runtime, "agent", 1, "session")
     callback = _ignore if observe else None
     result = await getattr(handle, method)(
-        "prompt", on_event=callback, include_content=True, timeout_seconds=0.25, close_timeout_seconds=0.5,
+        "prompt", on_event=callback, include_event_content=True, timeout_seconds=0.25, close_timeout_seconds=0.5,
     )
     assert result is expected
     assert starts[0]["mode"] == method
     assert waits == [{
-        "on_event": callback, "include_content": True, "timeout_seconds": 0.25, "close_timeout_seconds": 0.5,
+        "on_event": callback, "include_event_content": True, "timeout_seconds": 0.25, "close_timeout_seconds": 0.5,
     }]
 
 
@@ -395,7 +398,7 @@ async def test_terminal_owner_validates_cursor_membership_before_authoritative_w
 @pytest.mark.parametrize("owner", ["execution", "graph", "evaluation", "facade"])
 @pytest.mark.parametrize("options", [
     {"timeout_seconds": True}, {"timeout_seconds": float("nan")},
-    {"close_timeout_seconds": 0}, {"include_content": 1}, {"on_event": 1},
+    {"close_timeout_seconds": 0}, {"include_event_content": 1}, {"on_event": 1},
 ])
 async def test_invalid_wait_options_start_no_work_for_any_owner(owner, options) -> None:
     bundle = _Bundle()

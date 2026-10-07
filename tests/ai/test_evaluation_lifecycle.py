@@ -73,6 +73,7 @@ async def test_closed_evaluations_reject_control_without_persisting(
                     pending.scorer_slot_id, pending.evidence_ref,
                     ScoreBundle(dimensions={"exact_match": 1.0}), key))
         assert raised.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+        assert not raised.value.retryable
         assert await repository.state_store.read(
             lambda transaction: transaction.list_records(RecordQuery(kind="evaluation"))) == before
         assert await storage.evaluation.idempotency.get("evaluation.run", idempotency_key_digest(key),

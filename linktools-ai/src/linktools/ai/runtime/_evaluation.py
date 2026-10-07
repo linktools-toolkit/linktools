@@ -162,7 +162,7 @@ class RuntimeEvaluations:
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, retryable=False)
 
     async def _authorize(
         self, principal: Principal, action: AuthorizationAction, identity: str,
@@ -964,7 +964,7 @@ class RuntimeEvaluations:
                 cursor = None
                 while True:
                     page = await self._history.trace(execution_id, principal=principal, cursor=cursor,
-                                                     include_content=True, limit=100)
+                                                     limit=100)
                     for item in page.items:
                         trace[(item.execution_id, item.step_event_seq)] = {"execution_id": item.execution_id,
                             "step_event_seq": item.step_event_seq, "payload": item.payload}
@@ -1364,10 +1364,10 @@ class EvaluationRun:
 
     async def wait(
         self, *, on_event: Callable[[TaskGraphRunEvent], Awaitable[None]] | None = None,
-        cursor: str | None = None, include_content: bool = False,
+        cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
     ) -> WaitResult[EvaluationView]:
-        _validate_wait(on_event, cursor, include_content, timeout_seconds, close_timeout_seconds)
+        _validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds)
 
         async def authoritative() -> EvaluationView:
             while True:
@@ -1378,7 +1378,7 @@ class EvaluationRun:
 
         return await _wait(
             scope="evaluation", resource_id=self.experiment_id, waiter=authoritative,
-            watch=lambda ready: self._watch_prepared(cursor, include_content, ready),
+            watch=lambda ready: self._watch_prepared(cursor, include_event_content, ready),
             on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
             close_timeout_seconds=close_timeout_seconds,
             register=self._evaluations._register_observation,

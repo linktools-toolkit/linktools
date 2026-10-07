@@ -310,12 +310,12 @@ EventT = TypeVar("EventT", bound=_CursorEvent)
 
 def _validate_wait(
     on_event: Callable[[EventT], Awaitable[None]] | None,
-    cursor: str | None, include_content: bool,
+    cursor: str | None, include_event_content: bool,
     timeout_seconds: float | None, close_timeout_seconds: float,
 ) -> None:
     _validate_timeout(timeout_seconds)
     _validate_timeout(close_timeout_seconds, positive=True)
-    if (not isinstance(include_content, bool)
+    if (not isinstance(include_event_content, bool)
             or on_event is not None and not callable(on_event)
             or cursor is not None and (not isinstance(cursor, str) or not cursor)
             or on_event is None and cursor is not None):

@@ -108,12 +108,12 @@ class RuntimeExecutions(Generic[AppT]):
     async def wait(
         self, execution_id: str, *, principal: Principal,
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
-        cursor: str | None = None, include_content: bool = False,
+        cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
     ) -> WaitResult[ExecutionResult]:
         execution = await self.get(execution_id, principal=principal)
         return await execution.wait(
-            on_event=on_event, cursor=cursor, include_content=include_content,
+            on_event=on_event, cursor=cursor, include_event_content=include_event_content,
             timeout_seconds=timeout_seconds, close_timeout_seconds=close_timeout_seconds,
         )
 
@@ -141,7 +141,6 @@ class RuntimeExecutions(Generic[AppT]):
         *,
         principal: Principal,
         cursor: str | None = None,
-        include_content: bool = False,
         limit: int = 100,
         agent_run_seq: int | None = None,
         model_request_seq: int | None = None,
@@ -152,7 +151,6 @@ class RuntimeExecutions(Generic[AppT]):
             execution_id,
             principal=principal,
             cursor=cursor,
-            include_content=include_content,
             limit=limit,
             agent_run_seq=agent_run_seq,
             model_request_seq=model_request_seq,

@@ -231,7 +231,6 @@ async def test_session_tool_turn_commits_terminal_and_history(
             execution_trace = await runtime.history.trace(
                 execution.execution_id,
                 principal=runtime.default_principal,
-                include_content=True,
             )
             tool_trace = tuple(
                 item
@@ -251,6 +250,11 @@ async def test_session_tool_turn_commits_terminal_and_history(
                 == tool_items[0].model_request_seq
             )
             assert all("purpose" not in item.payload for item in tool_trace)
+            assert all(
+                not {"content", "args", "arguments", "result", "output", "text", "error_diagnostics"}
+                .intersection(item.payload)
+                for item in execution_trace.items
+            )
 
             retried = await session.start(
                 "inspect",
