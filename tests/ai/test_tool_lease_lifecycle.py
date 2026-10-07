@@ -14,9 +14,10 @@ from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.toolsets import FunctionToolset
 
 from linktools.ai.capability import ToolCallFailed, ToolCallRetry
-from linktools.ai.core import ToolOperationStatus
+from linktools.ai.core import RunBudget, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import _tool_boundary as boundary_module
+from linktools.ai.runtime._budget import RunBudgetContext
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import BoundaryToolset, ManagedToolDescriptor
 from linktools.ai.runtime.state import RuntimeStorage
@@ -90,6 +91,7 @@ async def _call(
     handler: Callable[[], Awaitable[str]],
     *,
     replay_safe: bool = False,
+    budget: RunBudgetContext | None = None,
 ) -> object:
     descriptor = ManagedToolDescriptor(
         effect_owner="tool_operation",
@@ -101,6 +103,7 @@ async def _call(
         {handler.__name__: descriptor},
         id="test.lease",
         tool_operations=bridge,
+        budget=budget,
     )
     context = tool_run_context()
     tools = await boundary.get_tools(context)
@@ -422,3 +425,167 @@ async def test_caller_cancellation_stops_heartbeat_and_preserves_unknown_effect(
         operation, = await bridge.list_operations()
         assert operation.status is ToolOperationStatus.EFFECT_UNKNOWN
         assert operation.result_payload is None
+
+
+@pytest.mark.asyncio
+async def test_budget_admission_keeps_effect_claim_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _runtime(monkeypatch) as (state, bridge, clock):
+        budgets = state.execution.budgets
+        await budgets.ensure("scope", RunBudget(tool_calls=2))
+        admit = budgets.admit_tool
+
+        async def slow_admission(*args: Any, **kwargs: Any) -> Any:
+            result = await admit(*args, **kwargs)
+            await asyncio.sleep(0)
+            for seconds in (20, 20, 21):
+                await clock.advance(seconds)
+                operation, = await bridge.list_operations()
+                reconciled = await state.recovery.tools.reconcile_expired_claim(
+                    operation.tool_operation_id, tenant_id="tenant"
+                )
+                assert reconciled.status is ToolOperationStatus.CLAIMED
+            return result
+
+        monkeypatch.setattr(budgets, "admit_tool", slow_admission)
+
+        async def effect() -> str:
+            return "committed"
+
+        assert await _call(
+            bridge, effect, budget=RunBudgetContext(budgets, "scope", "execution", "run")
+        ) == "committed"
+        operation, = await bridge.list_operations()
+        assert operation.status is ToolOperationStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replay_safe", (False, True))
+async def test_budget_admission_cannot_dispatch_after_claim_loss(
+    monkeypatch: pytest.MonkeyPatch, replay_safe: bool,
+) -> None:
+    async with _runtime(monkeypatch) as (state, bridge, clock):
+        budgets = state.execution.budgets
+        await budgets.ensure("scope", RunBudget(tool_calls=2))
+        admit = budgets.admit_tool
+        expected = None
+
+        async def slow_admission(*args: Any, **kwargs: Any) -> Any:
+            nonlocal expected
+            result = await admit(*args, **kwargs)
+            # No event-loop turn: the heartbeat cannot detect the stolen claim first.
+            clock.current += timedelta(seconds=61)
+            operation, = await bridge.list_operations()
+            if replay_safe:
+                expected = await state.recovery.tools.claim(
+                    operation.tool_operation_id, tenant_id="tenant",
+                    owner="successor", lease_seconds=60,
+                )
+            else:
+                expected = await state.recovery.tools.reconcile_expired_claim(
+                    operation.tool_operation_id, tenant_id="tenant"
+                )
+            return result
+
+        monkeypatch.setattr(budgets, "admit_tool", slow_admission)
+        calls = []
+
+        async def effect() -> str:
+            calls.append("effect")
+            return "unexpected"
+
+        with pytest.raises(AIError) as raised:
+            await _call(
+                bridge, effect, replay_safe=replay_safe,
+                budget=RunBudgetContext(budgets, "scope", "execution", "run"),
+            )
+        assert raised.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
+        assert not calls
+        operation, = await bridge.list_operations()
+        assert operation == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", (False, True))
+async def test_budget_admission_failure_defers_without_external_effect(
+    monkeypatch: pytest.MonkeyPatch, cancelled: bool,
+) -> None:
+    async with _runtime(monkeypatch) as (state, bridge, clock):
+        budgets = state.execution.budgets
+        await budgets.ensure("scope", RunBudget(tool_calls=2))
+        started = asyncio.Event()
+
+        async def failed_admission(*args: Any, **kwargs: Any) -> None:
+            started.set()
+            if cancelled:
+                await asyncio.Event().wait()
+            else:
+                await asyncio.sleep(0)
+                for seconds in (20, 20, 21):
+                    await clock.advance(seconds)
+                raise AIError(ErrorCode.STORAGE_CLOSED)
+
+        monkeypatch.setattr(budgets, "admit_tool", failed_admission)
+        calls = []
+
+        async def effect() -> str:
+            calls.append("effect")
+            return "unexpected"
+
+        task = asyncio.create_task(_call(
+            bridge, effect, budget=RunBudgetContext(budgets, "scope", "execution", "run")
+        ))
+        await asyncio.wait_for(started.wait(), 1)
+        if cancelled:
+            for seconds in (20, 20, 21):
+                await clock.advance(seconds)
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancelled else AIError) as raised:
+            await asyncio.wait_for(task, 1)
+        if not cancelled:
+            assert raised.value.code is ErrorCode.STORAGE_CLOSED
+        assert not calls
+        operation, = await bridge.list_operations()
+        assert operation.status is ToolOperationStatus.PENDING
+        assert operation.lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_budget_admission_suppressing_lease_loss_cannot_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _runtime(monkeypatch) as (state, bridge, clock):
+        budgets = state.execution.budgets
+        await budgets.ensure("scope", RunBudget(tool_calls=2))
+        started = asyncio.Event()
+
+        async def admission(*args: Any, **kwargs: Any) -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                pass
+
+        async def failed_renew(decision: ToolOperationDecision) -> ToolOperationDecision:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+
+        monkeypatch.setattr(budgets, "admit_tool", admission)
+        monkeypatch.setattr(bridge, "renew", failed_renew)
+        calls = []
+
+        async def effect() -> str:
+            calls.append("effect")
+            return "unexpected"
+
+        task = asyncio.create_task(_call(
+            bridge, effect, budget=RunBudgetContext(budgets, "scope", "execution", "run")
+        ))
+        await asyncio.wait_for(started.wait(), 1)
+        await clock.advance(20)
+        with pytest.raises(AIError) as raised:
+            await asyncio.wait_for(task, 1)
+        assert raised.value.code is ErrorCode.STORAGE_CLOSED
+        assert not calls
+        operation, = await bridge.list_operations()
+        assert operation.status is ToolOperationStatus.PENDING

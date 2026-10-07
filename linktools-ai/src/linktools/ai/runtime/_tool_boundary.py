@@ -313,17 +313,6 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         if decision.has_cached_result:
             return decision.cached_result
 
-        if self._budget is not None:
-            try:
-                await self._budget.admit_tool(
-                    call_id, operation_id=decision.operation_id, fence=decision.fence,
-                )
-            except BaseException:
-                cancelled = await bridge.defer(decision)
-                if cancelled:
-                    raise asyncio.CancelledError
-                raise
-
         async def invoke(args: dict[str, Any]) -> Any:
             return await raw_toolset.call_tool(name, args, ctx, raw_tool)
 
@@ -400,6 +389,24 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             renew(), name=f"tool-heartbeat-{decision.operation_id}"
         )
         try:
+            if self._budget is not None:
+                try:
+                    await self._budget.admit_tool(
+                        call_id, operation_id=decision.operation_id, fence=decision.fence,
+                    )
+                    if heartbeat_error is not None:
+                        raise heartbeat_error
+                    # Admission may outlast the lease before the heartbeat runs.
+                    # Renew synchronously so a stale owner cannot dispatch an effect.
+                    decision = await bridge.renew(decision)
+                    if heartbeat_error is not None:
+                        raise heartbeat_error
+                except BaseException:
+                    leaf_active = False
+                    cancelled = await bridge.defer(decision)
+                    if cancelled:
+                        raise asyncio.CancelledError
+                    raise
             return await invoke_and_settle()
         finally:
             stopping = True
