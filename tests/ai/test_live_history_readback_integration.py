@@ -4,15 +4,16 @@
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.capability import AgentContext, CapabilityGroup
-from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
-from linktools.ai.runtime import ExecutionHistoryItem, ExecutionTreeEvent, Runtime, RuntimeStorage
+from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, Page
+from linktools.ai.runtime import ExecutionHistoryItem, ExecutionTreeEvent, Runtime, RuntimeHistory, RuntimeStorage
 
 from ._runtime_test_helpers import _UsageFunctionModel
 
@@ -46,6 +47,38 @@ class _Models:
 
 def _contents(items: tuple[ExecutionHistoryItem, ...]) -> list[tuple[object, ...]]:
     return [(item.item_kind, item.tool_call_id, item.content, item.content_included) for item in items]
+
+
+async def _assert_request_part_coordinates(
+    read: Callable[..., Awaitable[Page[ExecutionHistoryItem]]],
+) -> None:
+    selectors = {"agent_run_sequence": 1, "message_sequence": 1}
+    for include_content in (False, True):
+        items = []
+        cursor = None
+        while True:
+            page = await read(**selectors, include_content=include_content,
+                                           limit=1, cursor=cursor)
+            items.extend(page.items)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        assert [(item.item_kind, item.part_index) for item in items] == [
+            ("instructions", None), ("system", 0), ("user", 1),
+        ]
+        assert all(item.request_sequence is None and item.step_index is None for item in items)
+        for index, expected in enumerate(items[1:]):
+            selected = await read(**selectors, part_index=index,
+                                               include_content=include_content, limit=1)
+            assert selected.items == (expected,)
+            assert selected.next_cursor is None
+        assert (await read(**selectors, part_index=2)).items == ()
+        if not include_content:
+            assert all(item.content is None and not item.content_included for item in items)
+        else:
+            assert "Coordinate instructions" in items[0].content
+            assert "Coordinate system prompt" in items[1].content
+            assert items[2].content == "run both tools"
 
 
 @pytest.mark.asyncio
@@ -85,7 +118,8 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
     group = CapabilityGroup("live-history")
     group.tool(quick, effect_policy="replay_safe")
     group.tool(slow, effect_policy="replay_safe")
-    group.agent("default", model="default", allow_tools=("quick", "slow"))
+    group.agent("default", model="default", allow_tools=("quick", "slow"),
+                system_prompt="Coordinate system prompt", instructions=("Coordinate instructions",))
     async with Runtime.open(
         "live-history", models=_Models(_UsageFunctionModel(model)),
         storage=RuntimeStorage.in_memory(), capabilities=(group,),
@@ -137,6 +171,9 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
                 assert all(item.request_sequence == 1 and item.step_index is not None for item in metadata.items)
                 frozen_request = await execution.history(request_sequence=1, limit=1)
                 assert frozen_request.next_cursor is not None
+                await _assert_request_part_coordinates(execution.history)
+                assert exact.items[0].part_index == 1
+                assert exact.items[1].part_index is None
                 normal = await runtime.executions.history(tree_event.execution_id, principal=principal, include_content=True)
                 live_items = normal.items
                 assert _contents(tuple(item for item in normal.items if item.tool_call_id == "quick-call")) == _contents(exact.items)
@@ -164,6 +201,7 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
                 await asyncio.wait_for(observed, 5)
         result = (await observed).result
         assert result.status is ExecutionStatus.SUCCEEDED
+        await _assert_request_part_coordinates(execution.history)
         assert assistant_reads == ["before tools", "all finished"]
         assert frozen_first is not None
         frozen_items = list(frozen_first.items)
@@ -185,7 +223,7 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
         by_request = {item.request_sequence: item for item in interactions}
         assert set(by_request) == {1, 2}
         for item in fresh.items:
-            if item.item_kind in {"user", "system"}:
+            if item.item_kind in {"user", "system", "instructions"}:
                 assert item.request_sequence is None and item.step_index is None
             else:
                 expected = 2 if item.content == "all finished" else 1
@@ -216,6 +254,7 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
         response = next(item for item in trace if item.payload["kind"] == "MODEL_RESPONSE")
         final = next(item for item in fresh.items if item.content == "all finished")
         assert response.payload["message_sequence"] == final.sequence
+
 
 
 
@@ -284,3 +323,53 @@ async def test_child_event_locator_does_not_mix_same_call_id_in_parent_history()
         assert [item.content for item in history.items if item.item_kind == "assistant"] == ["child done"]
         transcript = await runtime.executions.transcript(child_id, principal=principal, include_content=True)
         assert [item.text for item in transcript.items] == ["echo child-value", "child done"]
+
+
+@pytest.mark.asyncio
+async def test_request_raw_part_coordinates_survive_readonly_archive_reopen(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        del info
+        assert [part.part_kind for part in messages[-1].parts] == ["system-prompt", "user-prompt"]
+        entered.set()
+        await release.wait()
+        return ModelResponse(parts=[TextPart("archived answer")])
+
+    group = CapabilityGroup("raw-parts")
+    group.agent("default", model="default", system_prompt="Coordinate system prompt",
+                instructions=("Coordinate instructions",))
+    async with Runtime.open("raw-parts", models=_Models(_UsageFunctionModel(model)),
+                            storage=RuntimeStorage.filesystem(tmp_path), capabilities=(group,)) as runtime:
+        principal = runtime.default_principal
+        execution = await runtime.agents.get("default").start("run both tools")
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            await _assert_request_part_coordinates(execution.history)
+            first = await execution.history(include_content=True, limit=1)
+            assert first.items[0].item_kind == "instructions" and first.next_cursor is not None
+        finally:
+            release.set()
+        assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
+        await _assert_request_part_coordinates(execution.history)
+
+    async with RuntimeHistory.open("raw-parts", storage=RuntimeStorage.filesystem(tmp_path)) as archived:
+        async def read_archived(**selectors):
+            return await archived.history(execution.execution_id, principal=principal, **selectors)
+
+        await _assert_request_part_coordinates(read_archived)
+        items = list(first.items)
+        cursor = first.next_cursor
+        while cursor is not None:
+            page = await read_archived(include_content=True, cursor=cursor, limit=1)
+            items.extend(page.items)
+            cursor = page.next_cursor
+        assert [(item.item_kind, item.part_index) for item in items] == [
+            ("instructions", None), ("system", 0), ("user", 1),
+        ]
+        response = await read_archived(agent_run_sequence=1, message_sequence=2, part_index=0)
+        assert len(response.items) == 1
+        assert response.items[0].item_kind == "assistant"
+        assert response.items[0].request_sequence == 1 and response.items[0].step_index is not None
+        assert response.items[0].content is None and not response.items[0].content_included

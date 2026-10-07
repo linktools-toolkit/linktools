@@ -2835,12 +2835,16 @@ def _history_parts(
     selected_keys: tuple[str, ...] = (),
 ) -> tuple[_ProjectedHistoryItem, ...]:
     values = _project_message(message)
+    has_instructions = isinstance(message, ModelRequest) and message.instructions is not None
+    raw_parts = values[1:] if has_instructions else values
     keys = staged_keys or tuple(
         f"{item.item_kind}:{item.tool_call_id}"
         if item.tool_call_id is not None and item.item_kind in {"tool_result", "retry"}
         else f"part:{index}"
-        for index, item in enumerate(values)
+        for index, item in enumerate(raw_parts)
     )
+    if has_instructions:
+        keys = ("instructions", *keys)
     values = tuple(
         replace(item, part_index=int(key[5:]) if key.startswith("part:") else None)
         for key, item in zip(keys, values, strict=True)

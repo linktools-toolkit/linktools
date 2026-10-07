@@ -74,6 +74,13 @@ page = await runtime.executions.history(
 independently. Different runs and child executions may reuse a call ID. Selectors,
 execution identity, content mode, and tenant are bound to the cursor.
 
+When present, `part_index` is the zero-based coordinate in the raw message's
+`parts`, not its position in the projected history page. Message-level
+`instructions` are synthetic, have `part_index=None`, and do not shift system,
+user, or response part coordinates. Tool results and tool retries retain their
+call-based stable identity across pending-tail completion and archival; select
+them with `tool_call_id` rather than assuming a positional locator.
+
 Only confirmed parts are included. Streaming text deltas are live updates, not
 complete history parts. `transcript` contains user and assistant text; thinking,
 tool arguments and tool returns belong to `history`.
