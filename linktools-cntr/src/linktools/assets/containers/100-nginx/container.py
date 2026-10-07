@@ -7,7 +7,7 @@ import shutil
 from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr import BaseContainer, ContainerError, NginxSite
 from linktools.core import (
     ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
 )
@@ -188,7 +188,61 @@ class Container(BaseContainer):
                     self.get_app_path("conf.d", create_parent=True),
                     dirs_exist_ok=True,
                 )
-        if not self.get_app_path("conf.d", "_.conf").exists():
+        explicit_default = False
+        seen_domains = {}
+        for producer, local_id, site in self.manager.iter_integrations("nginx"):
+            if not isinstance(site, NginxSite):
+                raise ContainerError(
+                    f"Invalid nginx site {producer.name}/{local_id}: expected NginxSite")
+            domain = str(site.server_name)
+            if not domain:
+                continue
+            if not site.proxy and not site.template:
+                raise ContainerError(f"Nginx site {producer.name}/{local_id} has no upstream or template")
+            for capability, setting in (
+                    ("https", "NGINX_HTTPS_ENABLE"),
+                    ("waf", "NGINX_WAF_ENABLE"),
+                    ("auth", "NGINX_AUTH_ENABLE")):
+                if getattr(site, capability) is True and not self.get_config(setting, type=bool):
+                    raise ContainerError(
+                        f"Nginx site {producer.name}/{local_id} requires disabled {capability}")
+            https = self.get_config("NGINX_HTTPS_ENABLE", type=bool) if site.https is None else bool(site.https)
+            waf = self.get_config("NGINX_WAF_ENABLE", type=bool) if site.waf is None else bool(site.waf)
+            auth = self.get_config("NGINX_AUTH_ENABLE", type=bool) if site.auth is None else bool(site.auth)
+            if auth and not https:
+                raise ContainerError(
+                    f"Nginx site {producer.name}/{local_id} requires HTTPS for Authelia")
+            if site.waf_bypass or site.vars:
+                raise ContainerError(
+                    f"Nginx site {producer.name}/{local_id} needs the new WAF/template renderer")
+            key = domain.lower()
+            previous = seen_domains.setdefault(key, (producer.name, local_id))
+            if previous != (producer.name, local_id):
+                raise ContainerError(
+                    f"Duplicate nginx server_name {domain!r}: {previous} and "
+                    f"{(producer.name, local_id)}")
+            explicit_default = explicit_default or domain == "_"
+            site_name = "site_" + producer.name.encode("utf-8").hex() + "_" + local_id.encode("utf-8").hex()
+            self.write_conf(
+                producer, domain, proxy_name=site_name,
+                proxy_domain_name=site_name,
+                proxy_conf=site.template,
+                proxy_url=site.proxy,
+                https_enable=https, waf_enable=waf,
+                auth_enable=auth,
+                auth_extra={
+                    "acl_bypass": site.auth_bypass,
+                    "auth_headers": site.auth_headers,
+                    "acl_rule": site.auth_rule,
+                    "oidc_redirect_uris": tuple(
+                        "{base_url}" if uri == "" else uri
+                        for uri in site.oidc_redirects
+                    ),
+                },
+                flush=True,
+            )
+
+        if not explicit_default and not self.get_app_path("conf.d", "_.conf").exists():
             self.write_conf(
                 self, "_",
                 proxy_name="default",

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
-from linktools.cntr import BaseContainer
+from linktools.cntr import BaseContainer, NginxSite
 
 if TYPE_CHECKING:
     from typing import Any
@@ -25,17 +25,24 @@ class Container(BaseContainer):
         )
 
     @cached_property
+    def integrations(self) -> "dict[str, dict[str, NginxSite]]":
+        return {
+            "nginx": {
+                "web": NginxSite(
+                    server_name=self.get_config_later("PORTAINER_DOMAIN"),
+                    proxy="http://portainer:9000",
+                    auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
+                    auth_bypass=(r"\\.(css|js)$",),
+                    oidc_redirects=("",) if self.get_config("PORTAINER_AUTH_ENABLE") else (),
+                ),
+            },
+        }
+
+    @cached_property
     def exposes(self) -> "Iterable[ExposeLink]":
         return [
-            self.expose_public("Portainer", "docker", "Docker管理工具", self.load_nginx_url(
-                "PORTAINER_DOMAIN",
-                proxy_url="http://portainer:9000",
-                auth_enable=self.get_config("PORTAINER_AUTH_ENABLE"),
-                auth_extra={
-                    "acl_bypass": ["\\.(css|js)$"],
-                    "oidc_redirect_uris": ["{base_url}"]
-                }
-            )),
+            self.expose_public("Portainer", "docker", "Docker管理工具",
+                               self.load_nginx_url("web")),
             self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
                 "PORTAINER_PORT",
                 https=False
