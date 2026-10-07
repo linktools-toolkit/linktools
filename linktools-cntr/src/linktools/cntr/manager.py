@@ -315,6 +315,31 @@ class ContainerManager:
         from .repo.service import RepoService
         return RepoService(self)
 
+    def iter_integrations(self, consumer_name: str):
+        """Yield stable declarations from the complete installed project."""
+        from collections.abc import Mapping
+
+        if consumer_name not in self.containers:
+            raise ContainerError(f"Unknown integration consumer: {consumer_name}")
+        for producer in self.installed_state.get(resolve=True):
+            integrations = producer.integrations
+            if not isinstance(integrations, Mapping):
+                raise ContainerError(f"Invalid integrations in {producer.name}")
+            for name, declarations in integrations.items():
+                if name not in self.containers:
+                    raise ContainerError(
+                        f"Unknown integration consumer {name!r} in {producer.name}")
+                if name != consumer_name:
+                    continue
+                if not isinstance(declarations, Mapping):
+                    raise ContainerError(
+                        f"Invalid {name} integrations in {producer.name}")
+                for local_id, declaration in declarations.items():
+                    if not isinstance(local_id, str) or not local_id:
+                        raise ContainerError(
+                            f"Invalid {name} integration ID in {producer.name}")
+                    yield producer, local_id, declaration
+
     def load_installed_config_metadata(self) -> "list[BaseContainer]":
         """Load installed containers and register their own config fields,
         without running any container's ``on_prepare()`` (arbitrary

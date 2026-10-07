@@ -118,6 +118,14 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def exposes(self) -> "Iterable[ExposeLink]":
         return []
 
+    @property
+    def integrations(self) -> "dict[str, dict[str, Any]]":
+        return {}
+
+    @property
+    def config_sources(self) -> "Iterable[str]":
+        return []
+
     @cached_property
     def settings(self) -> "ConfigNamespace":
         """Return this container's persistent operational settings namespace.

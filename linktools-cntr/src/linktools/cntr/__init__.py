@@ -4,4 +4,5 @@
 
 from .container import ContainerError, BaseContainer, SourceContainer, ExposeLink, ExposeCategory
 from .manager import ContainerManager
+from ._nginx import NginxSite
 from .context import EventContext
