@@ -312,6 +312,8 @@ class ExecutionHistoryItem:
     duration_ns: "int | None" = None
     status: "str | None" = None
 
+    part_index: int | None = None
+
     def __post_init__(self) -> None:
         if self.sequence < 0 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("execution history item is invalid")
@@ -323,6 +325,12 @@ class ExecutionHistoryItem:
             raise ValueError("Agent run sequence is invalid")
         if self.request_sequence is not None and self.request_sequence < 1:
             raise ValueError("history request sequence is invalid")
+        if self.part_index is not None and (
+            isinstance(self.part_index, bool)
+            or not isinstance(self.part_index, int)
+            or self.part_index < 0
+        ):
+            raise ValueError("history part index is invalid")
         if self.duration_ns is not None and self.duration_ns < 0:
             raise ValueError("history duration is invalid")
 
@@ -586,6 +594,10 @@ class ExecutionHistoryReader(Protocol):
         tenant_id: str,
         cursor: "str | None",
         limit: int,
+        agent_run_sequence: int | None = None,
+        tool_call_id: str | None = None,
+        message_sequence: int | None = None,
+        part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]: ...
 
     async def trace(
@@ -1020,6 +1032,10 @@ class ExecutionHistoryService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_sequence: int | None = None,
+        tool_call_id: str | None = None,
+        message_sequence: int | None = None,
+        part_index: int | None = None,
     ) -> "Page[ExecutionHistoryItem]": ...
 
     async def model_interactions(
@@ -1269,6 +1285,10 @@ class ExecutionService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_sequence: int | None = None,
+        tool_call_id: str | None = None,
+        message_sequence: int | None = None,
+        part_index: int | None = None,
     ) -> "Page[ExecutionHistoryItem]": ...
 
     async def model_interactions(

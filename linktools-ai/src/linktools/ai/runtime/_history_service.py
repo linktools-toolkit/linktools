@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """Authorized read-only execution query and history service."""
 
+from collections.abc import Mapping
+
+from ..core import JsonValue
+
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -221,20 +225,57 @@ class DefaultExecutionHistoryService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_sequence: int | None = None,
+        tool_call_id: str | None = None,
+        message_sequence: int | None = None,
+        part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
         record = await self._authorize(execution_id, principal)
+        for name, value, minimum in (
+            ("agent_run_sequence", agent_run_sequence, 1),
+            ("message_sequence", message_sequence, 1),
+            ("part_index", part_index, 0),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < minimum
+            ):
+                raise AIError(
+                    ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": name}
+                )
+        if tool_call_id is not None and (
+            not isinstance(tool_call_id, str) or not tool_call_id
+        ):
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID, safe_details={"field": "tool_call_id"}
+            )
+        if (
+            (tool_call_id is not None or message_sequence is not None)
+            and agent_run_sequence is None
+        ) or (part_index is not None and message_sequence is None):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        filters = {
+            "agent_run_sequence": agent_run_sequence,
+            "tool_call_id": tool_call_id,
+            "message_sequence": message_sequence,
+            "part_index": part_index,
+        }
         inner_cursor = self._decode_content_cursor(
             cursor,
             execution_id=execution_id,
             tenant_id=self._executions.tenant_id,
             query_kind="history",
             include_content=include_content,
+            filters=filters,
         )
         page = await self._reader.history(
             execution_id,
             tenant_id=self._executions.tenant_id,
             cursor=inner_cursor,
             limit=limit,
+            agent_run_sequence=agent_run_sequence,
+            tool_call_id=tool_call_id,
+            message_sequence=message_sequence,
+            part_index=part_index,
         )
         items = (
             page.items
@@ -255,6 +296,7 @@ class DefaultExecutionHistoryService:
                     finished_at=item.finished_at,
                     duration_ns=item.duration_ns,
                     status=item.status,
+                    part_index=item.part_index,
                 )
                 for item in page.items
             )
@@ -267,6 +309,7 @@ class DefaultExecutionHistoryService:
                 tenant_id=self._executions.tenant_id,
                 query_kind="history",
                 include_content=include_content,
+                filters=filters,
             ),
         )
 
@@ -342,6 +385,7 @@ class DefaultExecutionHistoryService:
         execution_id: str,
         query_kind: str,
         include_content: bool,
+        filters: Mapping[str, JsonValue] | None = None,
     ) -> str:
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -350,6 +394,7 @@ class DefaultExecutionHistoryService:
                 "execution_id": execution_id,
                 "query_kind": query_kind,
                 "include_content": include_content,
+                "filters": filters,
             }
         )
 
@@ -361,12 +406,14 @@ class DefaultExecutionHistoryService:
         tenant_id: str,
         query_kind: str,
         include_content: bool,
+        filters: Mapping[str, JsonValue] | None = None,
     ) -> "str | None":
         if cursor is None:
             self._content_filter_digest(
                 execution_id,
                 query_kind,
                 include_content,
+                filters,
             )
             return None
         signer = self._cursor_signer
@@ -381,6 +428,7 @@ class DefaultExecutionHistoryService:
                 execution_id,
                 query_kind,
                 include_content,
+                filters,
             ),
         )
         if payload.revision != 0:
@@ -395,6 +443,7 @@ class DefaultExecutionHistoryService:
         tenant_id: str,
         query_kind: str,
         include_content: bool,
+        filters: Mapping[str, JsonValue] | None = None,
     ) -> "str | None":
         if cursor is None:
             return None
@@ -409,6 +458,7 @@ class DefaultExecutionHistoryService:
                 execution_id,
                 query_kind,
                 include_content,
+                filters,
             ),
             position=cursor,
         )

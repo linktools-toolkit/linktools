@@ -42,6 +42,7 @@ from ..task import (
     TaskResultRef,
 )
 from ._artifact import DefaultArtifactService
+from ._event import project_event_payload
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history_projection import StepExecutionHistoryReader
@@ -573,7 +574,9 @@ class RuntimeHistory:
                     event.execution_id,
                     event.sequence,
                     event.event_type,
-                    event.payload if include_content else {},
+                    project_event_payload(
+                        event.event_type, event.payload, include_content=include_content
+                    ),
                 )
             )
         if len(projected) != page_limit:
@@ -857,6 +860,10 @@ class RuntimeHistory:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_sequence: int | None = None,
+        tool_call_id: str | None = None,
+        message_sequence: int | None = None,
+        part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
         return await self._service.history(
             execution_id,
@@ -864,6 +871,10 @@ class RuntimeHistory:
             cursor=cursor,
             include_content=include_content,
             limit=limit,
+            agent_run_sequence=agent_run_sequence,
+            tool_call_id=tool_call_id,
+            message_sequence=message_sequence,
+            part_index=part_index,
         )
 
     async def trace(

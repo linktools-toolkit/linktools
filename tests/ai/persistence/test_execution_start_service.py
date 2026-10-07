@@ -60,6 +60,10 @@ class _History:
         tenant_id: str,
         cursor: str | None,
         limit: int,
+        agent_run_sequence: int | None = None,
+        tool_call_id: str | None = None,
+        message_sequence: int | None = None,
+        part_index: int | None = None,
     ) -> Page[object]:
         del execution_id, tenant_id, cursor, limit
         return Page((), None)

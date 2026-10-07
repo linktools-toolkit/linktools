@@ -18,6 +18,7 @@ from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectStore, StoredPayload
 from .._message import decode_model_messages, encode_model_messages
+from .._transcript_staging import StagedTranscript
 from .._model_interaction import (
     StagedContextSpan,
     StagedModelInteraction,
@@ -355,6 +356,7 @@ class StagingAgentRunStore(AgentRunStore):
         self._interactions: dict[str, list[StagedModelInteraction]] = {}
         self._prepared_interactions: set[tuple[str, int]] = set()
         self._payloads: dict[str, dict[str, bytes]] = {}
+        self._transcripts: dict[str, StagedTranscript] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -431,6 +433,22 @@ class StagingAgentRunStore(AgentRunStore):
         return self.latest_checkpoint_local(
             agent_run_id,
             include_interrupted=include_interrupted,
+        )
+
+    def stage_transcript(self, agent_run_id: str, transcript: StagedTranscript) -> None:
+        self._ensure_open()
+        self._transcripts[agent_run_id] = transcript
+
+    def staged_transcript(self, agent_run_id: str) -> StagedTranscript | None:
+        self._ensure_open()
+        transcript = self._transcripts.get(agent_run_id)
+        if transcript is not None:
+            return transcript
+        checkpoint = self.latest_checkpoint_local(
+            agent_run_id, include_interrupted=True
+        )
+        return (
+            None if checkpoint is None else StagedTranscript(tuple(checkpoint.messages))
         )
 
     def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]:
@@ -661,6 +679,7 @@ class StagingAgentRunStore(AgentRunStore):
             key for key in self._prepared_interactions if key[0] != agent_run_id
         }
         self._payloads.pop(agent_run_id, None)
+        self._transcripts.pop(agent_run_id, None)
 
     def capture_projection_local(
         self,

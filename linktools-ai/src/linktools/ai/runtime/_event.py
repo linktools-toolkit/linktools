@@ -4,7 +4,7 @@
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Protocol
@@ -52,6 +52,53 @@ _OBSERVATION_BOUNDARY_STATUSES = frozenset(
         ExecutionStatus.RECOVERY_REQUIRED,
     }
 )
+
+
+_BOUNDARY_METADATA_FIELDS = {
+    ExecutionEventType.TOOL_CALL_STARTED.value: frozenset(
+        {"agent_run_sequence", "call_id", "tool_name", "arguments_digest"}
+    ),
+    ExecutionEventType.TOOL_CALL_FINISHED.value: frozenset(
+        {
+            "agent_run_sequence",
+            "call_id",
+            "tool_name",
+            "result_digest",
+            "status",
+            "error_code",
+        }
+    ),
+    ExecutionEventType.ASSISTANT_PART_COMPLETED.value: frozenset(
+        {
+            "agent_run_sequence",
+            "message_sequence",
+            "part_index",
+            "part_type",
+            "digest",
+            "characters",
+        }
+    ),
+}
+
+
+def project_event_payload(
+    event_type: str, payload: JsonValue, *, include_content: bool
+) -> JsonValue:
+    if include_content:
+        return payload
+    if event_type in {
+        ExecutionEventType.MODEL_REQUEST_STARTED.value,
+        ExecutionEventType.MODEL_REQUEST_FINISHED.value,
+    }:
+        if not isinstance(payload, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return dict(payload)
+    fields = _BOUNDARY_METADATA_FIELDS.get(event_type)
+    if fields is None:
+        return {}
+    if not isinstance(payload, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return {key: value for key, value in payload.items() if key in fields}
 
 
 @dataclass(frozen=True, slots=True)
@@ -960,4 +1007,4 @@ class DefaultEventService:
         )
 
 
-__all__ = ["DefaultEventService", "ExecutionDelta"]
+__all__ = ["DefaultEventService", "ExecutionDelta", "project_event_payload"]

@@ -42,6 +42,7 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    BaseToolCallPart,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
@@ -555,10 +556,6 @@ class AgentExecutor:
                     replace_existing=True, id="linktools.ai.reinject-system-prompt"
                 ),
             )
-        capabilities = (
-            *capabilities,
-            _event_stream_capability(scope.event_sink),
-        )
         _logger.debug(
             "agent execution started: agent=%s revision=%s step=%s "
             "mode=%s planning=%s thinking=%s selected_tools=%s",
@@ -1061,6 +1058,11 @@ async def _materialize_agent(
         },
         toolsets=tuple(raw_toolsets),
     )
+    capabilities.append(
+        _event_stream_capability(
+            scope.event_sink, run_recorder, scope.agent_run_sequence
+        )
+    )
     return agent, tuple(capabilities)
 
 
@@ -1147,13 +1149,34 @@ def _assistant_text_output(value: str) -> AssistantTextOutput:
 
 def _event_stream_capability(
     sink: EventSink,
+    recorder: AgentRunRecorder,
+    agent_run_sequence: int,
 ) -> ProcessEventStream[AgentContext[object]]:
     async def forward(
         _ctx: PydanticRunContext[AgentContext[object]],
         events: AsyncIterable[AgentStreamEvent],
     ) -> None:
         async for event in events:
+            position: dict[str, JsonValue] = {"agent_run_sequence": agent_run_sequence}
+            if isinstance(event, PartStartEvent) and not isinstance(
+                event.part, (TextPart, ThinkingPart, BaseToolCallPart)
+            ):
+                recorder.stage_response_part(event.part, event.index)
+            if isinstance(event, PartEndEvent):
+                position["message_sequence"] = recorder.stage_response_part(
+                    event.part, event.index
+                )
+                position["part_index"] = event.index
+            elif isinstance(event, FunctionToolCallEvent):
+                await recorder.record_tool_start(event.part, _ctx.run_step)
+            elif isinstance(event, FunctionToolResultEvent):
+                recorder.stage_tool_result(event.part)
+                await recorder.record_tool_result_boundary(event.part, _ctx.run_step)
             emission = _map_event(event)
+            if isinstance(emission, DurableBoundary):
+                emission = DurableBoundary(
+                    emission.event_type, {**emission.payload, **position}
+                )
             if emission is None:
                 event_type = type(event)
                 _logger.debug(

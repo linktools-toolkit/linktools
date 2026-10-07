@@ -8,15 +8,25 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Protocol, cast
 
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+    RetryPromptPart,
+    ModelResponsePart,
+)
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
 from ..core import JsonValue, UsageMetrics
 from ..errors import AIError, ErrorCode
 from ._attachment import request_attachment_facts
+from ._transcript_staging import StagedTranscript
 from ._journal import (
     DURATION_NS_METADATA_KEY,
+    REQUEST_SEQUENCE_METADATA_KEY,
     MODEL_USAGE_CACHE_READ_METADATA_KEY,
     MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     MODEL_USAGE_INPUT_METADATA_KEY,
@@ -43,7 +53,11 @@ from .state._step_contracts import (
 )
 
 
-class _InteractionStagingPort(Protocol):
+class _RunStagingPort(Protocol):
+    def stage_transcript(
+        self, agent_run_id: str, transcript: StagedTranscript
+    ) -> None: ...
+
     def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]: ...
 
     def stage_model_interaction(self, interaction: object) -> None: ...
@@ -67,11 +81,12 @@ class AgentRunRecorder:
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise ValueError("agent_run_id is required")
         self._store = store
-        self._interaction_store = cast(_InteractionStagingPort, store)
+        self._staging_store = cast(_RunStagingPort, store)
         self._execution_id = execution_id
         self._agent_run_id = agent_run_id
         self._run: AgentRunRecord | None = None
         self._event_sequence = 0
+        self._tool_events: dict[str, set[str]] = {}
         self._request_sequence_by_tool_call: dict[str, int] = {}
         self._initial_attachments = tuple(dict(value) for value in initial_attachments)
         self._accepted_attachment_ids = {
@@ -116,6 +131,7 @@ class AgentRunRecorder:
             baseline_refs
         )
         self._transcript_messages: list[ModelMessage] = []
+        self._pending_parts: dict[str, ModelMessage] = {}
 
         self._projection_source_count: int | None = None
         self._projection_messages: tuple[ModelMessage, ...] | None = None
@@ -143,6 +159,13 @@ class AgentRunRecorder:
         if previous is not None:
             self._transcript_messages = list(freeze_model_messages(previous.messages))
         events = await self._store.list_events(agent_run_id=record.agent_run_id)
+        for event in events:
+            if event.tool_call_id is not None and event.event_type.startswith(
+                "TOOL_CALL_"
+            ):
+                self._tool_events.setdefault(event.tool_call_id, set()).add(
+                    event.event_type
+                )
         self._event_sequence = max((event.event_index for event in events), default=-1) + 1
 
     async def append_event(self, event: StepEvent) -> None:
@@ -164,6 +187,8 @@ class AgentRunRecorder:
         run = self._run
         if run is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if tool_call_id is not None and event_type.startswith("TOOL_CALL_"):
+            self._tool_events.setdefault(tool_call_id, set()).add(event_type)
         event_index = self._event_sequence
         self._event_sequence += 1
         await self.append_event(
@@ -208,7 +233,98 @@ class AgentRunRecorder:
         self._source_messages.append(frozen)
         self._source_keys.append(encode_model_messages((frozen,)))
         self._source_refs.append(local_index)
+        self._pending_parts.clear()
+        self._stage_transcript()
         return frozen
+
+    def stage_response_part(self, part: ModelResponsePart, part_index: int) -> int:
+        key = f"part:{part_index}"
+        self._pending_parts[key] = freeze_model_messages(
+            (ModelResponse(parts=[part]),)
+        )[0]
+        self._stage_transcript()
+        return len(self._transcript_messages) + 1
+
+    def stage_tool_result(self, part: ToolReturnPart | RetryPromptPart) -> None:
+        kind = "tool_result" if isinstance(part, ToolReturnPart) else "retry"
+        self._pending_parts[f"{kind}:{part.tool_call_id}"] = freeze_model_messages(
+            (ModelRequest(parts=[part]),)
+        )[0]
+        self._stage_transcript()
+
+    async def record_tool_start(
+        self, part: ToolCallPart | ToolReturnPart | RetryPromptPart, step_index: int
+    ) -> None:
+        if "TOOL_CALL_STARTED" in self._tool_events.get(part.tool_call_id, ()):
+            return
+        request_sequence = self.request_sequence_for_tool_call(part.tool_call_id)
+        metadata = (
+            {}
+            if request_sequence is None
+            else {REQUEST_SEQUENCE_METADATA_KEY: str(request_sequence)}
+        )
+        await self.record_event(
+            "TOOL_CALL_STARTED",
+            step_index,
+            tool_call_id=part.tool_call_id,
+            tool_name=part.tool_name,
+            metadata=metadata,
+        )
+
+    async def record_tool_result_boundary(
+        self, part: ToolReturnPart | RetryPromptPart, step_index: int
+    ) -> None:
+        recorded = self._tool_events.get(part.tool_call_id, set())
+        request_sequence = self.request_sequence_for_tool_call(part.tool_call_id)
+        metadata = (
+            {}
+            if request_sequence is None
+            else {REQUEST_SEQUENCE_METADATA_KEY: str(request_sequence)}
+        )
+        await self.record_tool_start(part, step_index)
+        if not recorded.intersection({"TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"}):
+            succeeded = isinstance(part, ToolReturnPart) and part.outcome == "success"
+            await self.record_event(
+                "TOOL_CALL_SUCCEEDED" if succeeded else "TOOL_CALL_FAILED",
+                step_index,
+                tool_call_id=part.tool_call_id,
+                tool_name=part.tool_name,
+                metadata=metadata,
+            )
+
+    def _stage_transcript(self) -> None:
+        pending = None
+        keys = tuple(self._pending_parts)
+        if keys:
+            first = self._pending_parts[keys[0]]
+            parts = [part for key in keys for part in self._pending_parts[key].parts]
+            pending = (
+                ModelResponse(parts=parts)
+                if isinstance(first, ModelResponse)
+                else ModelRequest(parts=parts)
+            )
+        self._staging_store.stage_transcript(
+            self._agent_run_id,
+            StagedTranscript(tuple(self._transcript_messages), pending, keys),
+        )
+
+    def finish_transcript(self, *, interrupted: bool = False) -> None:
+        """Retain confirmed parts when no next request can capture their message."""
+        if self._pending_parts:
+            first = next(iter(self._pending_parts.values()))
+            parts = [
+                part
+                for message in self._pending_parts.values()
+                for part in message.parts
+            ]
+            message = (
+                ModelResponse(parts=parts)
+                if isinstance(first, ModelResponse)
+                else ModelRequest(parts=parts)
+            )
+            if interrupted:
+                message.state = "interrupted"
+            self.append_transcript_message(message)
 
     def transcript_messages(self) -> tuple[ModelMessage, ...]:
         return tuple(self._transcript_messages)
@@ -330,7 +446,7 @@ class AgentRunRecorder:
         projection = build_context_projection(
             source,
             frozen,
-            lambda payload: self._interaction_store.intern_payload(
+            lambda payload: self._staging_store.intern_payload(
                 self._agent_run_id,
                 payload,
             ),
@@ -342,7 +458,7 @@ class AgentRunRecorder:
             parameters=parameters,
             streaming=streaming,
         )
-        digest, _size = self._interaction_store.intern_payload(
+        digest, _size = self._staging_store.intern_payload(
             self._agent_run_id,
             envelope_bytes,
         )
@@ -356,8 +472,9 @@ class AgentRunRecorder:
             accepted_attachment_ids=self._accepted_attachment_ids,
         )
         stage = (
-            self._interaction_store.prepare_model_interaction
-            if prepared else self._interaction_store.stage_model_interaction
+            self._staging_store.prepare_model_interaction
+            if prepared
+            else self._staging_store.stage_model_interaction
         )
         stage(
             StagedModelInteraction(
@@ -410,12 +527,12 @@ class AgentRunRecorder:
             frozen_response = freeze_model_messages((response,))
             response_projection = build_inline_context_projection(
                 frozen_response,
-                lambda payload: self._interaction_store.intern_payload(
+                lambda payload: self._staging_store.intern_payload(
                     self._agent_run_id,
                     payload,
                 ),
             )
-        self._interaction_store.stage_model_interaction(
+        self._staging_store.stage_model_interaction(
             StagedModelInteraction(
                 agent_run_id=self._agent_run_id,
                 step_index=fact.step_index,

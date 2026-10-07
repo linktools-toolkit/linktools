@@ -92,7 +92,11 @@ async def test_event_stream_forwarding_uses_native_capability() -> None:
     async def sink(emission: object) -> None:
         emissions.append(emission)
 
-    capability = _event_stream_capability(sink)  # type: ignore[arg-type]
+    from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
+    from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
+
+    recorder = AgentRunRecorder(StagingAgentRunStore(), execution_id="execution", agent_run_id="run")
+    capability = _event_stream_capability(sink, recorder, 1)
     assert isinstance(capability, ProcessEventStream)
     assert capability.id == "linktools.ai.event-stream"
 

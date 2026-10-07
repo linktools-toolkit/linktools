@@ -80,6 +80,10 @@ class _Reader:
         tenant_id: str,
         cursor: str | None,
         limit: int,
+        agent_run_sequence: int | None = None,
+        tool_call_id: str | None = None,
+        message_sequence: int | None = None,
+        part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
         assert tenant_id == "tenant"
         assert cursor is None
@@ -159,6 +163,10 @@ class _PagingReader(_Reader):
         tenant_id: str,
         cursor: str | None,
         limit: int,
+        agent_run_sequence: int | None = None,
+        tool_call_id: str | None = None,
+        message_sequence: int | None = None,
+        part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
         assert tenant_id == "tenant"
         if cursor is None:
@@ -864,3 +872,30 @@ async def test_history_task_result_authorizes_before_reading_records(reference: 
     with pytest.raises(AIError) as raised:
         await read("graph", "node", principal=Principal("caller", "other-tenant", "service"))
     assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+@pytest.mark.asyncio
+async def test_history_cursor_binds_exact_selector() -> None:
+    service = DefaultExecutionHistoryService(
+        _Executions(), TenantAuthorizationPolicy("tenant"), _PagingReader(),
+        HmacCursorSigner("public-history", b"public-history-key"),
+    )
+    principal = Principal("caller", "tenant", "service")
+    page = await service.history("execution", principal=principal, agent_run_sequence=1, tool_call_id="call")
+    for changed in (
+        {"agent_run_sequence": 2, "tool_call_id": "call"},
+        {"agent_run_sequence": 1, "tool_call_id": "other"},
+        {"agent_run_sequence": 1, "message_sequence": 1, "part_index": 0},
+        {},
+    ):
+        with pytest.raises(AIError) as error:
+            await service.history("execution", principal=principal, cursor=page.next_cursor, **changed)
+        assert error.value.code is ErrorCode.CURSOR_INVALID
+    for invalid in (
+        {"tool_call_id": "call"}, {"message_sequence": 1}, {"part_index": 0},
+        {"agent_run_sequence": True}, {"agent_run_sequence": 0},
+        {"agent_run_sequence": 1, "tool_call_id": ""},
+    ):
+        with pytest.raises(AIError) as error:
+            await service.history("execution", principal=principal, **invalid)
+        assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID

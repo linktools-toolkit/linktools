@@ -10,6 +10,7 @@ from typing import Protocol
 
 from ..core import ExecutionEventType, ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
+from ._event import project_event_payload
 from ._observation import _is_observation_cleanup, _cancel_stream_task, _await_stream_cleanup, _report_observation_error
 from .service_api import (
     ExecutionStreamEvent,
@@ -522,25 +523,13 @@ def _project_stream_event(
     event: ExecutionStreamEvent,
     include_content: bool,
 ) -> ExecutionStreamEvent:
-    if include_content:
-        return event
-    if event.event_type in {
-        ExecutionEventType.MODEL_REQUEST_STARTED.value,
-        ExecutionEventType.MODEL_REQUEST_FINISHED.value,
-    }:
-        if not isinstance(event.payload, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return ExecutionStreamEvent(
-            event.execution_id,
-            event.durable_sequence,
-            event.event_type,
-            dict(event.payload),
-        )
     return ExecutionStreamEvent(
         event.execution_id,
         event.durable_sequence,
         event.event_type,
-        {},
+        project_event_payload(
+            event.event_type, event.payload, include_content=include_content
+        ),
     )
 
 

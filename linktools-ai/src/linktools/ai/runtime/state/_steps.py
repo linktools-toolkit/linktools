@@ -13,6 +13,7 @@ from pydantic_ai.messages import ModelMessage
 
 from ...errors import AIError, ErrorCode
 from .._message import decode_model_messages
+from .._transcript_staging import StagedTranscript
 from .._model_interaction import (
     StagedContextInline,
     StagedContextSpan,
@@ -309,6 +310,12 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
         await self._ensure_business()
         return await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=include_interrupted)
+
+    def stage_transcript(self, agent_run_id: str, transcript: StagedTranscript) -> None:
+        self._staging.stage_transcript(agent_run_id, transcript)
+
+    def staged_transcript(self, agent_run_id: str) -> StagedTranscript | None:
+        return self._staging.staged_transcript(agent_run_id)
 
     def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]:
         return self._staging.intern_payload(agent_run_id, payload)

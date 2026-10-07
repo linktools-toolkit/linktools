@@ -152,6 +152,8 @@ TaskGraphRun.replay remains a finite historical replay plus result read, not an
 alias for watch. Content/history pagination remains a separate capability:
 ordinary history/trace/transcript preserve their existing scope; recursive tree
 watch does not silently change their ordering or paging contracts.
+For immediate same-Runtime content readback and event locators, see
+[Runtime history](runtime-history.md).
 
 ## Cancellation and results paging
 

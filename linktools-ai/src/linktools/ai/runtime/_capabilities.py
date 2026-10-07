@@ -197,6 +197,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         result: AgentRunResult[Any],
     ) -> AgentRunResult[Any]:
         self._live_messages = result.all_messages()
+        self.recorder.finish_transcript()
         interrupted = isinstance(result.output, DeferredToolRequests)
         if interrupted:
             if self._last_observed_step_index is None:
@@ -222,6 +223,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         error: BaseException,
     ) -> AgentRunResult[Any]:
         messages = self._live_messages or ctx.messages
+        self.recorder.finish_transcript(interrupted=True)
         await self._save_checkpoint(
             ctx,
             messages=messages,
@@ -253,13 +255,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         if call.tool_call_id in self._tool_started_ns:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._tool_started_ns[call.tool_call_id] = monotonic_ns()
-        await self.recorder.record_event(
-            "TOOL_CALL_STARTED",
-            ctx.run_step,
-            tool_call_id=call.tool_call_id,
-            tool_name=tool_def.name,
-            metadata=self._tool_request_metadata(call.tool_call_id),
-        )
+        await self.recorder.record_tool_start(call, ctx.run_step)
         return args
 
     async def after_tool_execute(
