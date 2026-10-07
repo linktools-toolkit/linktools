@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from pydantic_ai.exceptions import CallDeferred
@@ -165,8 +166,9 @@ async def test_long_leaf_signals_settle_with_renewed_claim(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("suppress_cancellation", (False, True))
+@pytest.mark.parametrize("failure", (AIError(ErrorCode.STORAGE_CLOSED), asyncio.CancelledError()))
 async def test_renewal_failure_stops_leaf_and_never_commits_success(
-    monkeypatch: pytest.MonkeyPatch, suppress_cancellation: bool,
+    monkeypatch: pytest.MonkeyPatch, suppress_cancellation: bool, failure: BaseException,
 ) -> None:
     async with _runtime(monkeypatch) as (_, bridge, clock):
         started, stopped = asyncio.Event(), asyncio.Event()
@@ -184,7 +186,7 @@ async def test_renewal_failure_stops_leaf_and_never_commits_success(
 
         async def failed_renew(decision: ToolOperationDecision) -> ToolOperationDecision:
             del decision
-            raise AIError(ErrorCode.STORAGE_CLOSED)
+            raise failure
 
         monkeypatch.setattr(bridge, "renew", failed_renew)
         task = asyncio.create_task(_call(bridge, effect))
@@ -197,6 +199,78 @@ async def test_renewal_failure_stops_leaf_and_never_commits_success(
         operation, = await bridge.list_operations()
         assert operation.status is ToolOperationStatus.EFFECT_UNKNOWN
         assert operation.result_payload is None
+
+
+@pytest.mark.asyncio
+async def test_claim_renewal_covers_large_result_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _runtime(monkeypatch) as (_, bridge, clock):
+        async def effect() -> str:
+            for seconds in (20, 20, 21):
+                await clock.advance(seconds)
+            return "x" * 70000
+
+        put = bridge._recovery_objects.put
+
+        async def slow_put(*args: Any, **kwargs: Any) -> Any:
+            for _ in range(4):
+                await clock.advance(20)
+            return await put(*args, **kwargs)
+
+        monkeypatch.setattr(bridge._recovery_objects, "put", slow_put)
+        assert await _call(bridge, effect) == "x" * 70000
+        operation, = await bridge.list_operations()
+        assert operation.status is ToolOperationStatus.COMPLETED
+        assert operation.result_payload is not None
+        assert operation.updated_at - operation.created_at == timedelta(seconds=141)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_commit", (False, True))
+@pytest.mark.parametrize(
+    ("method", "signal", "expected_status"),
+    (
+        ("complete_payload", None, ToolOperationStatus.COMPLETED),
+        ("fail_payload", ToolCallFailed("failed"), ToolOperationStatus.FAILED),
+        ("defer", CallDeferred(), ToolOperationStatus.PENDING),
+    ),
+)
+async def test_terminal_commit_renews_and_wins_racing_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    signal: Exception | None,
+    expected_status: ToolOperationStatus,
+    after_commit: bool,
+) -> None:
+    async with _runtime(monkeypatch) as (state, bridge, clock):
+        async def effect() -> str:
+            await asyncio.sleep(0)
+            if signal is not None:
+                raise signal
+            return "known result"
+
+        settle = getattr(state.recovery.tools, method)
+
+        async def delayed_response(*args: Any, **kwargs: Any) -> Any:
+            if not after_commit:
+                for _ in range(4):
+                    await clock.advance(20)
+            result = await settle(*args, **kwargs)
+            if after_commit:
+                await clock.advance(20)
+                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
+            return result
+
+        monkeypatch.setattr(state.recovery.tools, method, delayed_response)
+        if signal is None:
+            assert await _call(bridge, effect, replay_safe=True) == "known result"
+        else:
+            with pytest.raises(type(signal)):
+                await _call(bridge, effect, replay_safe=True)
+        operation, = await bridge.list_operations()
+        assert operation.status is expected_status
+        assert operation.lease_expires_at is None
 
 
 @pytest.mark.asyncio

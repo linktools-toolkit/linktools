@@ -311,82 +311,92 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         async def invoke(args: dict[str, Any]) -> Any:
             return await raw_toolset.call_tool(name, args, ctx, raw_tool)
 
-        cancelled_after_leaf = False
+        caller = asyncio.current_task()
+        if caller is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        stopping = False
+        leaf_active = True
+        heartbeat_error: BaseException | None = None
 
-        async def invoke_with_lease() -> Any:
-            nonlocal cancelled_after_leaf
-            caller = asyncio.current_task()
-            if caller is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            stopping = False
-
-            async def renew() -> None:
-                nonlocal decision
-                try:
-                    while not stopping:
-                        await asyncio.sleep(TOOL_OPERATION_LEASE_SECONDS / 3)
-                        decision = await bridge.renew(decision)
-                except BaseException:
-                    if not stopping:
-                        caller.cancel()
-                    raise
-
-            heartbeat = asyncio.create_task(
-                renew(), name=f"tool-heartbeat-{decision.operation_id}"
-            )
+        async def renew() -> None:
+            nonlocal decision, heartbeat_error
             try:
-                return await self._invoke(call, tool.tool_def, final_args, invoke)
-            finally:
-                stopping = True
-                heartbeat.cancel()
-                cleanup = asyncio.gather(heartbeat, return_exceptions=True)
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        cancelled_after_leaf = True
-                # A leaf may suppress cancellation; it still cannot commit a lost claim.
-                if not heartbeat.cancelled():
-                    heartbeat.result()
+                while not stopping:
+                    await asyncio.sleep(TOOL_OPERATION_LEASE_SECONDS / 3)
+                    decision = await bridge.renew(decision)
+            except BaseException as error:
+                if not stopping:
+                    heartbeat_error = error
+                    if leaf_active:
+                        caller.cancel()
+                raise
 
         async def unknown_after_leaf(error: BaseException) -> None:
             await bridge.unknown(decision, error)
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
 
+        async def invoke_and_settle() -> Any:
+            nonlocal leaf_active
+            try:
+                try:
+                    result = await self._invoke(call, tool.tool_def, final_args, invoke)
+                finally:
+                    leaf_active = False
+                    # A leaf may suppress cancellation; loss still forbids its success.
+                    if heartbeat_error is not None:
+                        raise heartbeat_error
+            except (
+                ApprovalRequired,
+                CallDeferred,
+            ) as error:
+                if not replay_safe:
+                    await unknown_after_leaf(error)
+                cancelled = await bridge.defer(decision)
+                if cancelled:
+                    raise asyncio.CancelledError
+                raise
+            except (ToolCallRetry, ToolCallFailed) as error:
+                cancelled = await bridge.fail(decision, error)
+                if cancelled:
+                    raise asyncio.CancelledError
+                raise
+            except SkipToolExecution as error:
+                if not replay_safe:
+                    await unknown_after_leaf(error)
+                cancelled = await bridge.complete(decision, error.result)
+                if cancelled:
+                    raise asyncio.CancelledError
+                raise
+            except asyncio.CancelledError as error:
+                await bridge.unknown(decision, error)
+                raise
+            except BaseException as error:
+                await unknown_after_leaf(error)
+                raise AssertionError("unreachable")
+            # Keep renewing through payload storage and commit. Fenced settlement and
+            # its readback, rather than a racing heartbeat, determine durable truth.
+            cancelled = await bridge.complete(decision, result)
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+
+        heartbeat = asyncio.create_task(
+            renew(), name=f"tool-heartbeat-{decision.operation_id}"
+        )
         try:
-            result = await invoke_with_lease()
-        except (
-            ApprovalRequired,
-            CallDeferred,
-        ) as error:
-            if not replay_safe:
-                await unknown_after_leaf(error)
-            cancelled = await bridge.defer(decision)
-            if cancelled or cancelled_after_leaf:
+            return await invoke_and_settle()
+        finally:
+            stopping = True
+            heartbeat.cancel()
+            cleanup = asyncio.gather(heartbeat, return_exceptions=True)
+            cancelled = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
                 raise asyncio.CancelledError
-            raise
-        except (ToolCallRetry, ToolCallFailed) as error:
-            cancelled = await bridge.fail(decision, error)
-            if cancelled or cancelled_after_leaf:
-                raise asyncio.CancelledError
-            raise
-        except SkipToolExecution as error:
-            if not replay_safe:
-                await unknown_after_leaf(error)
-            cancelled = await bridge.complete(decision, error.result)
-            if cancelled or cancelled_after_leaf:
-                raise asyncio.CancelledError
-            raise
-        except asyncio.CancelledError as error:
-            await bridge.unknown(decision, error)
-            raise
-        except BaseException as error:
-            await unknown_after_leaf(error)
-            raise AssertionError("unreachable")
-        cancelled = await bridge.complete(decision, result)
-        if cancelled or cancelled_after_leaf:
-            raise asyncio.CancelledError
-        return result
 
     async def _raw_tool(
         self,
