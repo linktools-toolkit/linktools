@@ -17,7 +17,7 @@ from .runtime.process import DEFAULT_DOCKER_HOST
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import Any
+    from typing import Any, Iterator, Tuple
     from linktools.core import CacheNamespace, ConfigStore, Environ
     from .registry.registry import ContainerResolver
     from .registry.loader import ContainerLoader
@@ -315,7 +315,7 @@ class ContainerManager:
         from .repo.service import RepoService
         return RepoService(self)
 
-    def iter_integrations(self, consumer_name: str):
+    def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, str, Any]]":
         """Yield stable declarations from the complete installed project."""
         from collections.abc import Mapping
 
