@@ -46,7 +46,12 @@ from .recovery import (
 
 
 class _ExecutionStreamFailure(Exception):
-    """Marks a live stream or pure tree projection failure for TaskGraph views."""
+    """Marks an optional broker or validated presentation-only failure.
+
+    Authoritative reads, durable decoding, identity/cursor validation and
+    cancellation retain their original exceptions. Broker boundaries must
+    preserve AIError rather than classifying it as an optional failure.
+    """
 
     def __init__(self, cause: Exception) -> None:
         super().__init__(type(cause).__name__)
@@ -170,7 +175,7 @@ class _ExecutionViewSource(Protocol):
     task_attempt: int
     task_deadline_at: datetime | None
     task_next_attempt_at: datetime | None
-    event_sequence: int
+    event_seq: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +193,7 @@ class ExecutionView:
     task_attempt: int = 0
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
-    event_sequence: int = 0
+    event_seq: int = 0
 
 
 def project_execution_view(source: object) -> ExecutionView:
@@ -208,7 +213,7 @@ def project_execution_view(source: object) -> ExecutionView:
         task_attempt=value.task_attempt,
         task_deadline_at=value.task_deadline_at,
         task_next_attempt_at=value.task_next_attempt_at,
-        event_sequence=value.event_sequence,
+        event_seq=value.event_seq,
     )
 
 
@@ -263,24 +268,24 @@ class ExecutionResult:
 @dataclass(frozen=True, slots=True)
 class ExecutionTraceItem:
     execution_id: str
-    sequence: int
+    step_event_seq: int
     payload: JsonValue
 
     def __post_init__(self) -> None:
-        if self.sequence < 0:
-            raise ValueError("execution trace sequence must be non-negative")
+        if self.step_event_seq < 0:
+            raise ValueError("execution trace step_event_seq must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
 class TranscriptItem:
     execution_id: str
-    sequence: int
+    message_seq: int
     text: "str | None"
     content_included: bool = True
 
     def __post_init__(self) -> None:
-        if self.sequence < 0:
-            raise ValueError("transcript sequence must be non-negative")
+        if self.message_seq < 0:
+            raise ValueError("transcript message_seq must be non-negative")
         if not isinstance(self.content_included, bool):
             raise TypeError("transcript content flag must be bool")
         if self.content_included:
@@ -292,32 +297,49 @@ class TranscriptItem:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionHistoryItem:
+    """One raw transcript part; request/step identify its originating model request."""
+
     execution_id: str
-    sequence: int
+    message_seq: int
     item_kind: str
     content: JsonValue
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
     content_included: bool = True
-    agent_run_sequence: "int | None" = None
-    request_sequence: "int | None" = None
+    agent_run_seq: "int | None" = None
+    model_request_seq: "int | None" = None
     tool_operation_id: "str | None" = None
     started_at: "datetime | None" = None
     finished_at: "datetime | None" = None
     duration_ns: "int | None" = None
     status: "str | None" = None
 
+    part_index: int | None = None
+    step_index: int | None = None
+
     def __post_init__(self) -> None:
-        if self.sequence < 0 or not isinstance(self.item_kind, str) or not self.item_kind:
+        if self.message_seq < 0 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("execution history item is invalid")
         if not isinstance(self.content_included, bool):
             raise TypeError("history content flag must be bool")
         if not self.content_included and self.content is not None:
             raise ValueError("omitted history content must be None")
-        if self.agent_run_sequence is not None and self.agent_run_sequence < 1:
-            raise ValueError("Agent run sequence is invalid")
-        if self.request_sequence is not None and self.request_sequence < 1:
-            raise ValueError("history request sequence is invalid")
+        if self.agent_run_seq is not None and self.agent_run_seq < 1:
+            raise ValueError("agent_run_seq is invalid")
+        if self.model_request_seq is not None and self.model_request_seq < 1:
+            raise ValueError("model_request_seq is invalid")
+        if self.part_index is not None and (
+            isinstance(self.part_index, bool)
+            or not isinstance(self.part_index, int)
+            or self.part_index < 0
+        ):
+            raise ValueError("history part index is invalid")
+        if self.step_index is not None and (
+            isinstance(self.step_index, bool)
+            or not isinstance(self.step_index, int)
+            or self.step_index < 0
+        ):
+            raise ValueError("history step index is invalid")
         if self.duration_ns is not None and self.duration_ns < 0:
             raise ValueError("history duration is invalid")
 
@@ -325,9 +347,9 @@ class ExecutionHistoryItem:
 @dataclass(frozen=True, slots=True)
 class ModelInteractionItem:
     execution_id: str
-    agent_run_sequence: int
+    agent_run_seq: int
     depth: int
-    request_sequence: int
+    model_request_seq: int
     purpose: str
     step_index: int
     output_retry_index: int | None
@@ -345,9 +367,9 @@ class ModelInteractionItem:
     def __post_init__(self) -> None:
         if (
             not self.execution_id
-            or self.agent_run_sequence < 1
+            or self.agent_run_seq < 1
             or self.depth < 0
-            or self.request_sequence < 1
+            or self.model_request_seq < 1
             or self.step_index < 0
             or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}
             or self.duration_ns is not None and self.duration_ns < 0
@@ -382,8 +404,8 @@ class AttachmentFact:
     digest: str | None
     position: int
     processing_status: str = "unknown"
-    agent_run_sequence: int | None = None
-    request_sequence: int | None = None
+    agent_run_seq: int | None = None
+    model_request_seq: int | None = None
     step_index: int | None = None
     call_id: str | None = None
     input_identifier: str | None = None
@@ -412,7 +434,7 @@ class AttachmentFact:
             or self.processing_status != "unknown"
         ):
             raise ValueError("attachment fact is invalid")
-        for value in (self.agent_run_sequence, self.request_sequence):
+        for value in (self.agent_run_seq, self.model_request_seq):
             if value is not None and (
                 isinstance(value, bool)
                 or not isinstance(value, int)
@@ -439,19 +461,19 @@ class AttachmentFact:
 @dataclass(frozen=True, slots=True)
 class UsageReadCutoff:
     execution_id: str
-    agent_run_sequence: int
-    request_sequence: int
+    agent_run_seq: int
+    model_request_seq: int
 
     def __post_init__(self) -> None:
         if (
             not isinstance(self.execution_id, str)
             or not self.execution_id
-            or isinstance(self.agent_run_sequence, bool)
-            or not isinstance(self.agent_run_sequence, int)
-            or self.agent_run_sequence < 1
-            or isinstance(self.request_sequence, bool)
-            or not isinstance(self.request_sequence, int)
-            or self.request_sequence < 0
+            or isinstance(self.agent_run_seq, bool)
+            or not isinstance(self.agent_run_seq, int)
+            or self.agent_run_seq < 1
+            or isinstance(self.model_request_seq, bool)
+            or not isinstance(self.model_request_seq, int)
+            or self.model_request_seq < 0
         ):
             raise ValueError("usage read cutoff is invalid")
 
@@ -517,13 +539,13 @@ class UsageSummary:
             self.cutoffs,
             key=lambda value: (
                 value.execution_id,
-                value.agent_run_sequence,
+                value.agent_run_seq,
             ),
         ))
         if (
             any(not isinstance(value, UsageReadCutoff) for value in cutoffs)
             or len({
-                (value.execution_id, value.agent_run_sequence)
+                (value.execution_id, value.agent_run_seq)
                 for value in cutoffs
             }) != len(cutoffs)
         ):
@@ -533,14 +555,14 @@ class UsageSummary:
 
 @dataclass(frozen=True, slots=True)
 class SessionHistoryItem:
-    sequence: int
+    message_seq: int
     item_kind: str
     content: JsonValue
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
 
     def __post_init__(self) -> None:
-        if self.sequence < 1 or not isinstance(self.item_kind, str) or not self.item_kind:
+        if self.message_seq < 1 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("session history item is invalid")
 
 
@@ -581,6 +603,12 @@ class ExecutionHistoryReader(Protocol):
         tenant_id: str,
         cursor: "str | None",
         limit: int,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
+        message_seq: int | None = None,
+        part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]: ...
 
     async def trace(
@@ -590,6 +618,10 @@ class ExecutionHistoryReader(Protocol):
         tenant_id: str,
         cursor: str | None,
         limit: int,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
     ) -> "Page[ExecutionTraceItem]": ...
 
     async def transcript(
@@ -851,7 +883,7 @@ class ExternalSupplyResult:
 @dataclass(frozen=True, slots=True)
 class ExecutionEvent:
     execution_id: str
-    sequence: int
+    event_seq: int
     event_type: str
     payload: JsonValue
 
@@ -863,7 +895,7 @@ class ExecutionEvent:
 @dataclass(frozen=True, slots=True)
 class ExecutionStreamEvent:
     execution_id: str
-    durable_sequence: int | None
+    durable_seq: int | None
     event_type: str
     payload: JsonValue
 
@@ -874,6 +906,8 @@ class ExecutionStreamEvent:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionTreeEvent:
+    """Preserve real lineage with depth relative to the selected watch root."""
+
     execution_id: str
     agent_id: str | None
     lineage_kind: ExecutionLineageKind
@@ -901,9 +935,9 @@ class ExecutionTreeEvent:
         if (
             isinstance(self.depth, bool)
             or not isinstance(self.depth, int)
-            or self.depth not in (0, 1)
+            or self.depth < 0
         ):
-            raise ValueError("execution tree event depth must be zero or one")
+            raise ValueError("execution tree event depth must be nonnegative")
         if not isinstance(self.event, ExecutionStreamEvent):
             raise TypeError("execution tree event requires an execution event")
         if self.cursor is not None and (
@@ -912,19 +946,22 @@ class ExecutionTreeEvent:
             raise ValueError("execution tree event cursor is invalid")
         if self.execution_id != self.event.execution_id:
             raise ValueError("execution tree event identity does not match execution")
-        if self.depth == 0:
+        if self.lineage_kind is ExecutionLineageKind.SUBAGENT:
             if (
-                self.parent_execution_id is not None
-                or self.parent_invocation_id is not None
-                or self.lineage_kind is ExecutionLineageKind.SUBAGENT
+                not isinstance(self.parent_execution_id, str)
+                or not self.parent_execution_id
+                or self.parent_execution_id == self.execution_id
+                or not isinstance(self.parent_invocation_id, str)
+                or not self.parent_invocation_id
+                or self.root_execution_id == self.execution_id
             ):
-                raise ValueError("root execution tree event lineage is invalid")
+                raise ValueError("subagent execution tree event lineage is invalid")
         elif (
-            self.lineage_kind is not ExecutionLineageKind.SUBAGENT
-            or not self.parent_execution_id
-            or not self.parent_invocation_id
+            self.depth != 0
+            or self.parent_execution_id is not None
+            or self.parent_invocation_id is not None
         ):
-            raise ValueError("child execution tree event lineage is invalid")
+            raise ValueError("root execution tree event lineage is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -990,6 +1027,10 @@ class ExecutionHistoryService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
     ) -> "Page[ExecutionTraceItem]": ...
 
     async def transcript(
@@ -1010,6 +1051,12 @@ class ExecutionHistoryService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
+        message_seq: int | None = None,
+        part_index: int | None = None,
     ) -> "Page[ExecutionHistoryItem]": ...
 
     async def model_interactions(
@@ -1241,6 +1288,10 @@ class ExecutionService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
     ) -> "Page[ExecutionTraceItem]": ...
     async def transcript(
         self,
@@ -1259,6 +1310,12 @@ class ExecutionService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
+        message_seq: int | None = None,
+        part_index: int | None = None,
     ) -> "Page[ExecutionHistoryItem]": ...
 
     async def model_interactions(
@@ -1269,6 +1326,7 @@ class ExecutionService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]": ...
 
 
@@ -1347,12 +1405,12 @@ class EventService(Protocol):
         execution_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
         limit: int = 100,
     ) -> "Page[ExecutionEvent]": ...
 
     def stream(
-        self, execution_id: str, *, principal: Principal, after_sequence: int = 0
+        self, execution_id: str, *, principal: Principal, after_event_seq: int = 0
     ) -> "AsyncIterator[ExecutionStreamEvent]": ...
 
 

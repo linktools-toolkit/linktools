@@ -55,8 +55,8 @@ def _execution() -> ExecutionRecord:
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=1,
+        event_seq=0,
+        agent_run_seq=1,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -78,14 +78,14 @@ async def test_step_events_wait_for_a_safe_checkpoint(tmp_path: Path) -> None:
         run = _run()
         await state.run_store.register_agent_run(run)
         now = datetime.now(timezone.utc)
-        for index, kind in enumerate(
-            ("model_request_started", "model_request_completed", "tool_call_started"),
+        for index, event_type in enumerate(
+            ("MODEL_REQUEST_STARTED", "MODEL_REQUEST_SUCCEEDED", "TOOL_CALL_STARTED"),
             1,
         ):
             await state.run_store.append_event(
                 StepEvent(
                     agent_run_id=run.agent_run_id,
-                    kind=kind,
+                    event_type=event_type,
                     step_index=index,
                     timestamp=now,
                     agent_conversation_id=run.agent_conversation_id,

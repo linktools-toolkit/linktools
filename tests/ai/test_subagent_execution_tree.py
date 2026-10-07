@@ -60,8 +60,8 @@ def _record(*, subagent: bool, parent_invocation_id: str | None) -> ExecutionRec
         ),
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=0,
+        event_seq=0,
+        agent_run_seq=0,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -121,9 +121,7 @@ class _ExecutionReader:
         principal: Principal,
     ) -> tuple[ExecutionView, ...]:
         del principal
-        if execution_id != "root":
-            raise AssertionError("execution tree must only list direct children")
-        return (self.child,)
+        return (self.child,) if execution_id == "root" else ()
 
 
 class _RootOnlyExecutionReader(_ExecutionReader):
@@ -134,8 +132,6 @@ class _RootOnlyExecutionReader(_ExecutionReader):
         principal: Principal,
     ) -> tuple[ExecutionView, ...]:
         del principal
-        if execution_id != "root":
-            raise AssertionError("execution tree must only list direct children")
         return ()
 
 
@@ -145,12 +141,12 @@ class _EventStreamer:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ):
         del principal
 
         async def events():
-            sequence = after_sequence + 1
+            sequence = after_event_seq + 1
             yield ExecutionStreamEvent(
                 execution_id,
                 sequence,
@@ -174,7 +170,7 @@ async def test_tree_stream_projects_root_and_child_without_global_sequence() -> 
         async for item in streamer.stream(
             "root",
             principal=Principal("owner", "tenant", "service"),
-            after_sequences={"child": 4},
+            after_event_seqs={"child": 4},
         )
     ]
     assert {(item.execution_id, item.depth) for item in values} == {
@@ -185,26 +181,18 @@ async def test_tree_stream_projects_root_and_child_without_global_sequence() -> 
         item for item in values if item.execution_id == "child"
     )
     assert child.parent_invocation_id == "delegate-call"
-    assert child.event.durable_sequence == 5
+    assert child.event.durable_seq == 5
 
 
-def test_execution_tree_event_rejects_nested_depth() -> None:
+@pytest.mark.parametrize("depth", [-1, True, 1.5])
+def test_execution_tree_event_rejects_invalid_relative_depth(depth) -> None:
     event = ExecutionStreamEvent(
-        "child",
-        1,
-        ExecutionEventType.EXECUTION_SUCCEEDED.value,
-        {},
+        "child", 1, ExecutionEventType.EXECUTION_SUCCEEDED.value, {},
     )
     with pytest.raises(ValueError):
         ExecutionTreeEvent(
-            "child",
-            "child-agent",
-            ExecutionLineageKind.SUBAGENT,
-            "root",
-            "root",
-            "delegate-call",
-            2,
-            event,
+            "child", "child-agent", ExecutionLineageKind.SUBAGENT,
+            "root", "root", "delegate-call", depth, event,
         )
 
 
@@ -219,13 +207,13 @@ async def test_tree_stream_validates_cursors_before_starting_event_sources() -> 
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             self.started.append(execution_id)
             return super().stream(
                 execution_id,
                 principal=principal,
-                after_sequence=after_sequence,
+                after_event_seq=after_event_seq,
             )
 
     events = RecordingEventStreamer()
@@ -237,7 +225,7 @@ async def test_tree_stream_validates_cursors_before_starting_event_sources() -> 
     stream = streamer.stream(
         "root",
         principal=Principal("owner", "tenant", "service"),
-        after_sequences={"unknown": 1},
+        after_event_seqs={"unknown": 1},
     )
 
     with pytest.raises(AIError) as error:
@@ -258,7 +246,7 @@ async def test_tree_stream_keeps_at_most_one_prefetched_event_per_execution() ->
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             del principal
 
@@ -269,7 +257,7 @@ async def test_tree_stream_keeps_at_most_one_prefetched_event_per_execution() ->
                     )
                     yield ExecutionStreamEvent(
                         execution_id,
-                        after_sequence + offset,
+                        after_event_seq + offset,
                         ExecutionEventType.EXECUTION_STARTED.value,
                         {},
                     )
@@ -305,7 +293,7 @@ async def test_tree_stream_does_not_close_terminal_source_before_delivery() -> N
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             del principal
 
@@ -313,7 +301,7 @@ async def test_tree_stream_does_not_close_terminal_source_before_delivery() -> N
                 try:
                     yield ExecutionStreamEvent(
                         execution_id,
-                        after_sequence + 1,
+                        after_event_seq + 1,
                         ExecutionEventType.EXECUTION_SUCCEEDED.value,
                         {},
                     )
@@ -367,9 +355,7 @@ async def test_tree_stream_discovers_persisted_child_without_local_notification(
             principal: Principal,
         ) -> tuple[ExecutionView, ...]:
             del principal
-            if execution_id != "root":
-                raise AssertionError("execution tree must only list direct children")
-            return (self.child,) if self.child_visible else ()
+            return (self.child,) if execution_id == "root" and self.child_visible else ()
 
     class PersistedEventStreamer:
         def __init__(self) -> None:
@@ -380,7 +366,7 @@ async def test_tree_stream_discovers_persisted_child_without_local_notification(
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             del principal
 
@@ -389,7 +375,7 @@ async def test_tree_stream_discovers_persisted_child_without_local_notification(
                     await self.release_root.wait()
                 yield ExecutionStreamEvent(
                     execution_id,
-                    after_sequence + 1,
+                    after_event_seq + 1,
                     ExecutionEventType.EXECUTION_SUCCEEDED.value,
                     {},
                 )
@@ -430,8 +416,6 @@ async def test_tree_stream_adds_dynamic_direct_child_once() -> None:
             principal: Principal,
         ) -> tuple[ExecutionView, ...]:
             del principal
-            if execution_id != "root":
-                raise AssertionError("execution tree must only list direct children")
             return ()
 
     class DynamicEventStreamer:
@@ -443,7 +427,7 @@ async def test_tree_stream_adds_dynamic_direct_child_once() -> None:
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             del principal
 
@@ -452,7 +436,7 @@ async def test_tree_stream_adds_dynamic_direct_child_once() -> None:
                     await self.release_root.wait()
                 yield ExecutionStreamEvent(
                     execution_id,
-                    after_sequence + 1,
+                    after_event_seq + 1,
                     ExecutionEventType.EXECUTION_SUCCEEDED.value,
                     {},
                 )
@@ -530,9 +514,7 @@ class _RetryExecutionReader:
         principal: Principal,
     ) -> tuple[ExecutionView, ...]:
         del principal
-        if execution_id != "retry":
-            raise AssertionError("execution tree must only list direct children")
-        return (self.child,)
+        return (self.child,) if execution_id == "retry" else ()
 
 
 @pytest.mark.asyncio
@@ -593,3 +575,466 @@ async def test_subagent_execution_cannot_be_retried_or_forked(
             ForkExecutionRequest("fork", principal, "fork-key"),
         )
     assert fork_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["root", "child", "event_identity", "model_payload"])
+async def test_tree_stream_protocol_failures_remain_authoritative(invalid: str) -> None:
+    reader = _ExecutionReader()
+    if invalid == "root":
+        reader.root = replace(reader.root, execution_id="other-root")
+    elif invalid == "child":
+        reader.child = replace(reader.child, parent_execution_id="other-root")
+
+    class InvalidEvents(_EventStreamer):
+        def stream(self, execution_id: str, **kwargs):
+            if invalid not in {"event_identity", "model_payload"}:
+                return super().stream(execution_id, **kwargs)
+
+            async def values():
+                yield ExecutionStreamEvent(
+                    "other" if invalid == "event_identity" else execution_id,
+                    1,
+                    ExecutionEventType.MODEL_REQUEST_STARTED.value,
+                    [] if invalid == "model_payload" else {},
+                )
+            return values()
+
+    streamer = ExecutionTreeStreamer(reader, InvalidEvents(), ExecutionTreeBroker())
+    with pytest.raises(ValueError if invalid == "event_identity" else AIError) as raised:
+        await anext(streamer.stream("root", principal=Principal("owner", "tenant")))
+
+    if invalid != "event_identity":
+        assert raised.value.code is (
+            ErrorCode.REQUEST_FIELD_INVALID if invalid == "root" else ErrorCode.STORAGE_INTEGRITY_ERROR
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["subscribe", "wait", "drain", "close"])
+@pytest.mark.parametrize("typed", [False, True])
+async def test_tree_broker_wraps_only_untyped_optional_failures(
+    operation: str,
+    typed: bool,
+) -> None:
+    from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+
+    cause = AIError(ErrorCode.STORAGE_UNAVAILABLE) if typed else OSError("broker failed")
+
+    class Subscription:
+        async def wait(self):
+            if operation == "wait":
+                raise cause
+            await asyncio.Event().wait()
+
+        def drain(self):
+            if operation == "drain":
+                raise cause
+            return ()
+
+        async def close(self):
+            if operation == "close":
+                raise cause
+
+    class Broker:
+        def subscribe(self, _execution_id):
+            if operation == "subscribe":
+                raise cause
+            return Subscription()
+
+    streamer = ExecutionTreeStreamer(_RootOnlyExecutionReader(), _EventStreamer(), Broker())
+    with pytest.raises(AIError if typed else _ExecutionStreamFailure) as raised:
+        async for _event in streamer.stream("root", principal=Principal("owner", "tenant")):
+            pass
+
+    assert (raised.value if typed else raised.value.cause) is cause
+
+
+@pytest.mark.asyncio
+async def test_tree_stream_durable_error_wins_over_same_round_broker_failure() -> None:
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    class BrokenEvents:
+        def stream(self, *args, **kwargs):
+            async def values():
+                raise cause
+                yield
+            return values()
+
+    class Subscription:
+        async def wait(self):
+            raise OSError("broker failed")
+
+        async def close(self):
+            pass
+
+    class Broker:
+        def subscribe(self, _execution_id):
+            return Subscription()
+
+    streamer = ExecutionTreeStreamer(_RootOnlyExecutionReader(), BrokenEvents(), Broker())
+    with pytest.raises(AIError) as raised:
+        await anext(streamer.stream("root", principal=Principal("owner", "tenant")))
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+async def test_tree_stream_preserves_authoritative_failure_during_cleanup() -> None:
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    started = asyncio.Event()
+
+    class BrokenEvents:
+        def stream(self, *args, **kwargs):
+            async def values():
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise cause
+                yield
+            return values()
+
+    class Subscription:
+        async def wait(self):
+            await started.wait()
+            raise OSError("broker failed")
+
+        async def close(self):
+            pass
+
+    class Broker:
+        def subscribe(self, _execution_id):
+            return Subscription()
+
+    streamer = ExecutionTreeStreamer(_RootOnlyExecutionReader(), BrokenEvents(), Broker())
+    with pytest.raises(AIError) as raised:
+        await anext(streamer.stream("root", principal=Principal("owner", "tenant")))
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+async def test_tree_close_keeps_child_live_cleanup_authoritative_failure():
+    from linktools.ai.core import ExecutionDeltaType
+    from linktools.ai.runtime._event import DefaultEventService, ExecutionDelta
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    class Subscription:
+        def __init__(self, key):
+            self.key = key
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            if self.key == "root":
+                return ExecutionDelta("root", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "x")
+            await asyncio.Event().wait()
+        async def close(self):
+            if self.key == "child":
+                raise cause
+    class Live:
+        def claim_local_producer(self, key):
+            return Subscription(key)
+        def is_local_producer(self, key):
+            return True
+        def base_event_seq(self, key):
+            return 0
+    class Events(DefaultEventService):
+        async def _authorize_read(self, *args):
+            pass
+    tree = ExecutionTreeStreamer(_ExecutionReader(), Events(None, None, None, None, Live()),
+                                 ExecutionTreeBroker())
+    stream = tree.stream("root", principal=Principal("owner", "tenant"))
+    await anext(stream)
+    with pytest.raises(AIError) as raised:
+        await stream.aclose()
+    assert raised.value is cause
+
+
+class _RecursiveExecutionReader:
+    def __init__(self) -> None:
+        self.views = {
+            "root": ExecutionView(
+                "root", "root-agent", ExecutionStatus.SUCCEEDED,
+                ExecutionLineageKind.RUN, None, "root", None,
+            ),
+        }
+        parent = "root"
+        for key in ("child", "grandchild", "leaf"):
+            self.views[key] = ExecutionView(
+                key, f"{key}-agent", ExecutionStatus.SUCCEEDED,
+                ExecutionLineageKind.SUBAGENT, parent, "root", f"{key}-invocation",
+            )
+            parent = key
+        self.visible = set(self.views)
+
+    async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
+        return self.views[execution_id]
+
+    async def list_children(
+        self, execution_id: str, *, principal: Principal,
+    ) -> tuple[ExecutionView, ...]:
+        return tuple(
+            view for key, view in self.views.items()
+            if key in self.visible and view.parent_execution_id == execution_id
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root_id", ["root", "child"])
+async def test_tree_stream_recurses_with_relative_depth_and_real_lineage(root_id: str) -> None:
+    reader = _RecursiveExecutionReader()
+    ready = asyncio.Event()
+    stream = ExecutionTreeStreamer(reader, _EventStreamer(), ExecutionTreeBroker()).stream(
+        root_id, principal=Principal("owner", "tenant"),
+        after_event_seqs={"leaf": 8}, ready=ready,
+    )
+    values = [item async for item in stream]
+    offset = 0 if root_id == "root" else 1
+    assert {item.execution_id: item.depth for item in values} == {
+        key: depth - offset
+        for depth, key in enumerate(("root", "child", "grandchild", "leaf"))
+        if depth >= offset
+    }
+    assert ready.is_set()
+    for item in values:
+        view = reader.views[item.execution_id]
+        assert item.parent_execution_id == view.parent_execution_id
+        assert item.root_execution_id == "root"
+        assert item.lineage_kind is view.lineage_kind
+    assert next(item for item in values if item.execution_id == "leaf").event.durable_seq == 9
+
+
+@pytest.mark.asyncio
+async def test_tree_prepare_validates_cursor_ancestor_chain_before_ready() -> None:
+    class Reader(_RecursiveExecutionReader):
+        async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
+            if execution_id == "grandchild":
+                assert not ready.is_set()
+                raise denied
+            return await super().inspect(execution_id, principal=principal)
+
+    ready = asyncio.Event()
+    denied = AIError(ErrorCode.AUTHORIZATION_DENIED)
+    reader = Reader()
+    reader.visible = {"root"}
+    stream = ExecutionTreeStreamer(reader, _EventStreamer(), ExecutionTreeBroker()).stream(
+        "root", principal=Principal("owner", "tenant"),
+        after_event_seqs={"leaf": 1}, ready=ready,
+    )
+    with pytest.raises(AIError) as raised:
+        await anext(stream)
+    assert raised.value is denied
+    assert not ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_tree_cursor_resumes_descendants_missing_from_child_index() -> None:
+    reader = _RecursiveExecutionReader()
+    reader.visible = {"root"}
+    values = [
+        item async for item in ExecutionTreeStreamer(
+            reader, _EventStreamer(), ExecutionTreeBroker(),
+        ).stream(
+            "root", principal=Principal("owner", "tenant"), after_event_seqs={"leaf": 4},
+        )
+    ]
+    assert {item.execution_id for item in values} == set(reader.views)
+    assert next(item for item in values if item.execution_id == "leaf").event.durable_seq == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["outside", "cycle", "parent", "root"])
+async def test_tree_prepare_rejects_invalid_deep_membership(invalid: str) -> None:
+    reader = _RecursiveExecutionReader()
+    ready = asyncio.Event()
+    if invalid == "outside":
+        reader.visible = {"root"}
+        reader.views["leaf"] = replace(reader.views["leaf"], parent_execution_id="foreign")
+        reader.views["foreign"] = replace(reader.views["root"], execution_id="foreign")
+    elif invalid == "cycle":
+        reader.visible = {"root"}
+        reader.views["grandchild"] = replace(reader.views["grandchild"], parent_execution_id="leaf")
+    elif invalid == "parent":
+        reader.views["leaf"] = replace(reader.views["leaf"], parent_invocation_id=None)
+    else:
+        reader.views["leaf"] = replace(reader.views["leaf"], root_execution_id="foreign")
+    stream = ExecutionTreeStreamer(reader, _EventStreamer(), ExecutionTreeBroker()).stream(
+        "root", principal=Principal("owner", "tenant"),
+        after_event_seqs={"leaf": 2}, ready=ready,
+    )
+    with pytest.raises(AIError) as raised:
+        await anext(stream)
+    assert raised.value.code is (
+        ErrorCode.REQUEST_FIELD_INVALID if invalid == "outside"
+        else ErrorCode.STORAGE_INTEGRITY_ERROR
+    )
+    assert not ready.is_set()
+
+
+@pytest.mark.asyncio
+async def test_tree_subscribes_each_parent_before_listing_its_children() -> None:
+    broker = ExecutionTreeBroker()
+
+    class Reader(_RecursiveExecutionReader):
+        async def list_children(
+            self, execution_id: str, *, principal: Principal,
+        ) -> tuple[ExecutionView, ...]:
+            if execution_id == "child":
+                broker.publish("child", "grandchild")
+                return ()
+            return await super().list_children(execution_id, principal=principal)
+
+    values = [
+        item async for item in ExecutionTreeStreamer(Reader(), _EventStreamer(), broker).stream(
+            "root", principal=Principal("owner", "tenant"),
+        )
+    ]
+    assert sorted(item.execution_id for item in values) == ["child", "grandchild", "leaf", "root"]
+    assert not broker._subscriptions
+
+
+@pytest.mark.asyncio
+async def test_tree_discovers_cross_process_descendants_below_existing_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("linktools.ai.runtime._execution_tree._DISCOVERY_BACKOFF_INITIAL", 0.01)
+    monkeypatch.setattr("linktools.ai.runtime._execution_tree._DISCOVERY_BACKOFF_MAX", 0.01)
+    reader = _RecursiveExecutionReader()
+    reader.visible = {"root", "child"}
+    release = asyncio.Event()
+    ready = asyncio.Event()
+
+    class Events(_EventStreamer):
+        def stream(self, execution_id: str, **kwargs):
+            async def values():
+                if execution_id in {"root", "child"}:
+                    await release.wait()
+                async for event in super(Events, self).stream(execution_id, **kwargs):
+                    yield event
+            return values()
+
+    stream = ExecutionTreeStreamer(reader, Events(), ExecutionTreeBroker()).stream(
+        "root", principal=Principal("owner", "tenant"), ready=ready,
+    )
+    first = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(ready.wait(), 1)
+    reader.visible.update(("grandchild", "leaf"))
+    first_value = await asyncio.wait_for(first, 1)
+    release.set()
+    values = [first_value, *[item async for item in stream]]
+    assert {item.execution_id: item.depth for item in values} == {
+        "root": 0, "child": 1, "grandchild": 2, "leaf": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_tree_final_discovery_drains_once_and_leaves_later_admissions() -> None:
+    class Reader(_RecursiveExecutionReader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.visible = {"root"}
+            self.final_scan = False
+
+        async def list_children(
+            self, execution_id: str, *, principal: Principal,
+        ) -> tuple[ExecutionView, ...]:
+            values = await super().list_children(execution_id, principal=principal)
+            if execution_id == "root" and self.final_scan:
+                # This child is admitted after the final root membership read.
+                self.visible.add("child")
+            return values
+
+    reader = Reader()
+
+    class Events(_EventStreamer):
+        def stream(self, execution_id: str, **kwargs):
+            async def values():
+                async for event in super(Events, self).stream(execution_id, **kwargs):
+                    yield event
+                reader.final_scan = True
+            return values()
+
+    streamer = ExecutionTreeStreamer(reader, Events(), ExecutionTreeBroker())
+    first = [item async for item in streamer.stream("root", principal=Principal("owner", "tenant"))]
+    assert [item.execution_id for item in first] == ["root"]
+    second = [item async for item in streamer.stream("root", principal=Principal("owner", "tenant"))]
+    assert {item.execution_id for item in second} == {"root", "child"}
+
+
+@pytest.mark.asyncio
+async def test_tree_final_discovery_drains_new_recursive_members_once() -> None:
+    class Reader(_RecursiveExecutionReader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.visible = {"root", "child"}
+            self.scans: dict[str, int] = {}
+
+        async def list_children(
+            self, execution_id: str, *, principal: Principal,
+        ) -> tuple[ExecutionView, ...]:
+            self.scans[execution_id] = self.scans.get(execution_id, 0) + 1
+            return await super().list_children(execution_id, principal=principal)
+
+    reader = Reader()
+
+    class Events(_EventStreamer):
+        def stream(self, execution_id: str, **kwargs):
+            async def values():
+                async for event in super(Events, self).stream(execution_id, **kwargs):
+                    yield event
+                if execution_id == "child":
+                    reader.visible.update(("grandchild", "leaf"))
+            return values()
+
+    broker = ExecutionTreeBroker()
+    values = [
+        item async for item in ExecutionTreeStreamer(reader, Events(), broker).stream(
+            "root", principal=Principal("owner", "tenant"),
+        )
+    ]
+    assert {item.execution_id: item.depth for item in values} == {
+        "root": 0, "child": 1, "grandchild": 2, "leaf": 3,
+    }
+    assert reader.scans == {"root": 2, "child": 2, "grandchild": 1, "leaf": 1}
+    assert not broker._subscriptions
+
+
+@pytest.mark.asyncio
+async def test_tree_broker_discovers_descendants_after_parent_stream_ends() -> None:
+    reader = _RecursiveExecutionReader()
+    reader.visible = {"root", "child"}
+    release_root = asyncio.Event()
+
+    class Events(_EventStreamer):
+        def stream(self, execution_id: str, **kwargs):
+            async def values():
+                if execution_id == "root":
+                    await release_root.wait()
+                async for event in super(Events, self).stream(execution_id, **kwargs):
+                    yield event
+            return values()
+
+    broker = ExecutionTreeBroker()
+    stream = ExecutionTreeStreamer(reader, Events(), broker).stream(
+        "root", principal=Principal("owner", "tenant"),
+    )
+    try:
+        values = [await asyncio.wait_for(anext(stream), 1)]
+        assert values[0].execution_id == "child"
+        next_item = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)
+        reader.visible.update(("grandchild", "leaf"))
+        broker.publish("child", "grandchild")
+        broker.publish("child", "grandchild")
+        values.append(await asyncio.wait_for(next_item, 1))
+        values.append(await asyncio.wait_for(anext(stream), 1))
+        release_root.set()
+        values.extend([item async for item in stream])
+    finally:
+        release_root.set()
+        await stream.aclose()
+    assert {item.execution_id: item.depth for item in values} == {
+        "root": 0, "child": 1, "grandchild": 2, "leaf": 3,
+    }
+    assert len(values) == 4
+    assert not broker._subscriptions

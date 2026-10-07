@@ -109,7 +109,7 @@ def _cancelled_interaction(sequence: int = 1) -> StagedModelInteraction:
     return StagedModelInteraction(
         agent_run_id="run",
         step_index=1,
-        request_sequence=sequence,
+        model_request_seq=sequence,
         purpose="agent",
         output_retry_index=None,
         model={"route_id": "default"},
@@ -261,7 +261,7 @@ async def test_model_request_records_attach_files_call_identity() -> None:
         ModelRequestParameters(),
         False,
     )
-    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    finished = journal.finish(fact.model_request_seq, status="SUCCEEDED")
     capture.finish_model_interaction(
         finished,
         model=TestModel(),
@@ -311,7 +311,7 @@ async def test_model_request_preserves_duplicate_initial_attachment_identity() -
         ModelRequestParameters(),
         False,
     )
-    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    finished = journal.finish(fact.model_request_seq, status="SUCCEEDED")
     capture.finish_model_interaction(
         finished,
         model=TestModel(),
@@ -366,7 +366,7 @@ async def test_model_request_preserves_input_attachment_identifiers() -> None:
         ModelRequestParameters(),
         False,
     )
-    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    finished = journal.finish(fact.model_request_seq, status="SUCCEEDED")
     capture.finish_model_interaction(
         finished,
         model=TestModel(),
@@ -403,7 +403,7 @@ async def test_success_request_does_not_stage_full_message_payloads() -> None:
         fact, TestModel(), (message,), None, ModelRequestParameters(), False, "alias"
     )
     assert len(store._payloads["run"]) == 1
-    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    finished = journal.finish(fact.model_request_seq, status="SUCCEEDED")
     capture.finish_model_interaction(
         finished,
         model=TestModel(),
@@ -441,7 +441,7 @@ async def test_failed_request_inlines_context_only_after_failure() -> None:
         fact, TestModel(), (message,), None, ModelRequestParameters(), False
     )
     assert len(store._payloads["run"]) == 1
-    finished = journal.finish(fact.request_sequence, status="FAILED")
+    finished = journal.finish(fact.model_request_seq, status="FAILED")
     capture.finish_model_interaction(
         finished,
         model=TestModel(),
@@ -488,7 +488,7 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
     business["nested"]["value"] = 2  # type: ignore[index]
     request.parts = [UserPromptPart("mutated")]
     response = ModelResponse(parts=[TextPart("done")])
-    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    finished = journal.finish(fact.model_request_seq, status="SUCCEEDED")
     capture.finish_model_interaction(
         finished,
         model=TestModel(),
@@ -570,7 +570,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             conversation_id="conversation",
         )
         first_finished = journal.finish(
-            first_fact.request_sequence,
+            first_fact.model_request_seq,
             status="SUCCEEDED",
         )
         capture.finish_model_interaction(
@@ -609,7 +609,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             conversation_id="conversation",
         )
         second_finished = journal.finish(
-            second_fact.request_sequence,
+            second_fact.model_request_seq,
             status="SUCCEEDED",
         )
         capture.finish_model_interaction(
@@ -640,7 +640,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
         )
         archive = state.run_store.read_store(RuntimeDomain.RECOVERY)
         interactions = await archive.list_model_interactions(agent_run_id="run")
-        assert [value.request_sequence for value in interactions] == [1, 2]
+        assert [value.model_request_seq for value in interactions] == [1, 2]
         resolved = await archive.resolve_model_interactions(interactions)
         second_request, second_resolved_response, _envelope = resolved[1]
         assert len(second_request) == 3
@@ -684,7 +684,7 @@ async def test_compaction_request_uses_explicit_source_not_stale_projection() ->
         False,
         source_messages=source,
     )
-    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    finished = journal.finish(fact.model_request_seq, status="SUCCEEDED")
     capture.finish_model_interaction(
         finished,
         model=TestModel(),
@@ -703,7 +703,7 @@ async def test_compaction_request_uses_explicit_source_not_stale_projection() ->
 
 async def _assert_public_interaction(runtime: Runtime[object]) -> None:
     execution = await runtime.agents.get("default").start("hello")
-    result = await execution.wait()
+    result = (await execution.wait()).result
     page = await execution.model_interactions(include_content=True)
     assert result.status == "SUCCEEDED"
     assert len(page.items) == 1

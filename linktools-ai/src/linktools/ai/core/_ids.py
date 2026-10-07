@@ -46,16 +46,16 @@ def agent_run_id(
     namespace: str,
     tenant_id: str,
     execution_id: str,
-    agent_run_sequence: int,
+    agent_run_seq: int,
 ) -> str:
     """Return the deterministic AgentRun identity for one execution."""
     validate_persistence_namespace(namespace)
     validate_tenant_id(tenant_id)
     validate_resource_id(execution_id)
-    if agent_run_sequence < 1:
-        raise ValueError("agent_run_sequence must be positive")
+    if agent_run_seq < 1:
+        raise ValueError("agent_run_seq must be positive")
     return "r-" + canonical_sha256(
-        ["agent-run", namespace, tenant_id, execution_id, str(agent_run_sequence)]
+        ["agent-run", namespace, tenant_id, execution_id, str(agent_run_seq)]
     )
 
 

@@ -114,7 +114,7 @@ async def test_model_metric_and_trace_share_observation_id_and_duration() -> Non
     completed = [
         event
         for event in await store.list_events(agent_run_id=agent_run_id)
-        if event.kind == "model_request_completed"
+        if event.event_type == "MODEL_REQUEST_SUCCEEDED"
     ]
     assert len(completed) == 1
     event = completed[0]
@@ -177,7 +177,7 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
     failed = [
         event
         for event in await store.list_events(agent_run_id=agent_run_id)
-        if event.kind == "model_request_failed"
+        if event.event_type == "MODEL_REQUEST_FAILED"
     ]
     assert len(failed) == 1
     event = failed[0]
@@ -240,8 +240,8 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
     assert model_observations[2].correlation["linktools.output_retry_index"] == 2
 
     events = await store.list_events(agent_run_id=agent_run_id)
-    started = [event for event in events if event.kind == "model_request_started"]
-    completed = [event for event in events if event.kind == "model_request_completed"]
+    started = [event for event in events if event.event_type == "MODEL_REQUEST_STARTED"]
+    completed = [event for event in events if event.event_type == "MODEL_REQUEST_SUCCEEDED"]
     assert [
         event.metadata.get("linktools.ai.output_retry_index") for event in started
     ] == [None, "1", "2"]
@@ -289,7 +289,7 @@ async def test_output_retry_trace_lineage_does_not_require_metrics() -> None:
 
     assert result.output == "done"
     events = await store.list_events(agent_run_id=agent_run_id)
-    completed = [event for event in events if event.kind == "model_request_completed"]
+    completed = [event for event in events if event.event_type == "MODEL_REQUEST_SUCCEEDED"]
     assert [
         event.metadata.get("linktools.ai.output_retry_index") for event in completed
     ] == [None, "1"]
@@ -323,7 +323,7 @@ async def test_model_trace_omits_metric_metadata_when_metrics_disabled() -> None
     completed = [
         event
         for event in await store.list_events(agent_run_id=agent_run_id)
-        if event.kind == "model_request_completed"
+        if event.event_type == "MODEL_REQUEST_SUCCEEDED"
     ]
     assert len(completed) == 1
     assert "linktools.ai.observation_id" not in completed[0].metadata

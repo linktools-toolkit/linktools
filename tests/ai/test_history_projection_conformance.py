@@ -92,8 +92,8 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
         lineage_kind=ExecutionLineageKind.RUN,
         status=status,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=sequence,
+        event_seq=0,
+        agent_run_seq=sequence,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -199,7 +199,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
             namespace="history",
             tenant_id="tenant",
             execution_id="execution",
-            agent_run_sequence=1,
+            agent_run_seq=1,
         )
         run = await archive.get_agent_run(agent_run_id=agent_run_id)
         assert run is not None
@@ -214,7 +214,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                 events=(
                     StepEvent(
                         agent_run_id=agent_run_id,
-                        kind="after-seal",
+                        event_type="AGENT_RUN_SUCCEEDED",
                         step_index=3,
                         timestamp=now,
                         agent_conversation_id=run.agent_conversation_id,
@@ -275,7 +275,7 @@ async def test_terminal_prepare_accepts_an_unprojected_execution_run(
             namespace="history-unprojected",
             tenant_id="tenant",
             execution_id="execution",
-            agent_run_sequence=1,
+            agent_run_seq=1,
         )
         now = datetime.now(timezone.utc)
         await state.run_store.register_agent_run(
@@ -288,7 +288,7 @@ async def test_terminal_prepare_accepts_an_unprojected_execution_run(
                 ),
                 parent_agent_run_id=None,
                 agent_id="default",
-                metadata={"agent_run_sequence": "1"},
+                metadata={"agent_run_seq": "1"},
                 started_at=now,
             )
         )
@@ -424,7 +424,7 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
         del args, kwargs
         started.set()
         await asyncio.sleep(0.01)
-        return SimpleNamespace(execution=SimpleNamespace(event_sequence=0))
+        return SimpleNamespace(execution=SimpleNamespace(event_seq=0))
 
     backend._commit_execution_terminal_checkpoint_locked_body = commit
     current = _record(ExecutionStatus.SUCCEEDED, 0)
@@ -523,7 +523,7 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
         namespace="history",
         tenant_id="tenant",
         execution_id="execution",
-        agent_run_sequence=sequence,
+        agent_run_seq=sequence,
     )
     agent_conversation_id = make_agent_conversation_id(
         namespace="history",
@@ -538,7 +538,7 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
             parent_agent_run_id=None,
             agent_id="default",
             metadata={
-                "agent_run_sequence": str(sequence),
+                "agent_run_seq": str(sequence),
                 "agent_id": "default",
             },
             started_at=now,
@@ -547,7 +547,7 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
     await state.run_store.append_event(
         StepEvent(
             agent_run_id=agent_run_id,
-            kind="model_request_started",
+            event_type="MODEL_REQUEST_STARTED",
             step_index=1,
             timestamp=now,
             agent_conversation_id=agent_conversation_id,
@@ -557,7 +557,7 @@ async def _materialize_attempt(state: RuntimeStorage, sequence: int, prompt: str
     await state.run_store.append_event(
         StepEvent(
             agent_run_id=agent_run_id,
-            kind="model_request_completed",
+            event_type="MODEL_REQUEST_SUCCEEDED",
             step_index=2,
             timestamp=now,
             agent_conversation_id=agent_conversation_id,
@@ -640,7 +640,7 @@ async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> No
             namespace="history",
             tenant_id="tenant",
             execution_id="execution",
-            agent_run_sequence=1,
+            agent_run_seq=1,
         )
         resolved = await archive.resolve_transcript_message_refs(
             (TranscriptMessageRef(RuntimeDomain.EXECUTION, agent_run_id, 0),)
@@ -674,7 +674,7 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
             namespace="history",
             tenant_id="tenant",
             execution_id="execution",
-            agent_run_sequence=1,
+            agent_run_seq=1,
         )
         terminal_plan = await state.run_store.prepare_execution_terminal_seal(
             execution_id="execution",
@@ -750,7 +750,7 @@ async def test_history_skips_missing_non_final_attempt() -> None:
             "plan",
             "response",
         ]
-        assert [item.payload["agent_run_sequence"] for item in trace.items] == [2, 2]
+        assert [item.payload["agent_run_seq"] for item in trace.items] == [2, 2]
         assert [item.text for item in transcript.items] == ["attempt-2", "response"]
     finally:
         await state.close()
@@ -800,8 +800,12 @@ async def test_successful_history_preserves_user_prompt_and_projects_all_views()
         )
 
         assert [item.content for item in history.items] == [prompt, "plan", "response"]
-        assert [item.payload["agent_run_sequence"] for item in trace.items] == [1, 1]
+        assert [item.payload["agent_run_seq"] for item in trace.items] == [1, 1]
         assert [item.text for item in transcript.items] == [prompt, "response"]
+        assert [item.message_seq for item in history.items] == [1, 2, 2]
+        assert [item.part_index for item in history.items] == [0, 0, 1]
+        assert [item.message_seq for item in transcript.items] == [1, 2]
+        assert [item.step_event_seq for item in trace.items] == [1, 2]
     finally:
         await state.close()
 
@@ -830,7 +834,7 @@ async def test_public_transcript_rejects_corrupt_chunk_content(
         archive = state.run_store.read_store(RuntimeDomain.EXECUTION)
         repository = archive.transcript_repository
         owner_id = make_agent_run_id(
-            namespace="history", tenant_id="tenant", execution_id="execution", agent_run_sequence=1,
+            namespace="history", tenant_id="tenant", execution_id="execution", agent_run_seq=1,
         )
         chunk = await repository.latest_chunk(owner_id)
         assert chunk is not None

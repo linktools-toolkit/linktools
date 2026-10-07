@@ -26,6 +26,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
     ExecutionResult,
+    WaitResult,
     ExecutionStreamEvent,
     ExecutionTreeEvent,
 )
@@ -141,7 +142,7 @@ def test_tool_retry_event_uses_stable_retry_code() -> None:
         )
     )
     assert isinstance(emission, DurableBoundary)
-    assert emission.payload["safe_error_code"] == ErrorCode.TOOL_RETRY_REQUIRED.value
+    assert emission.payload["error_code"] == ErrorCode.TOOL_RETRY_REQUIRED.value
 
 
 def test_local_task_child_error_contract_is_preserved() -> None:
@@ -177,6 +178,7 @@ def test_invalid_storage_path_has_stable_code() -> None:
         (ErrorCode.EXECUTION_NOT_READY, True),
         (ErrorCode.EXECUTION_WAIT_TIMEOUT, True),
         (ErrorCode.TASK_WAIT_TIMEOUT, True),
+        (ErrorCode.WAIT_TIMEOUT, True),
         (ErrorCode.TOOL_RETRY_REQUIRED, False),
         (ErrorCode.TOOL_EXECUTION_FAILED, False),
         (ErrorCode.ASSET_NOT_FOUND, False),
@@ -309,10 +311,10 @@ class _RunningTasks:
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]:
-        del graph_id, tenant_id, after_sequence, limit
+        del graph_id, tenant_id, after_event_seq, limit
         return Page(())
 
 
@@ -334,8 +336,8 @@ class _ResultExecution:
     def __init__(self, result: ExecutionResult) -> None:
         self._result = result
 
-    async def wait(self) -> ExecutionResult:
-        return self._result
+    async def wait(self) -> WaitResult[ExecutionResult]:
+        return WaitResult(self._result, None)
 
     def stream(self, *args: object, **kwargs: object) -> object:
         del args, kwargs
@@ -408,13 +410,13 @@ class _StreamingExecution:
 
         return events()
 
-    async def wait(self) -> ExecutionResult:
-        return ExecutionResult(
+    async def wait(self) -> WaitResult[ExecutionResult]:
+        return WaitResult(ExecutionResult(
             self.execution_id,
             ExecutionStatus.SUCCEEDED,
             {"text": "hello"},
             UsageMetrics(),
-        )
+        ), None)
 
 
 class _StreamingAgent:

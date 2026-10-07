@@ -20,7 +20,7 @@ from ._domain import (
     WritableAssetBackend,
 )
 from ._filesystem import FilesystemAssetBackend, filesystem_root
-from ._materialization import AssetMaterializer, MaterializedAssets
+from ._materialization import AssetMaterializer, MaterializedAssets, validate_materialized_path
 from ._object import AssetObjectKeyFactory
 from ._sql import SqlAssetBackend, build_asset_sql_metadata
 from ._store import AssetCacheAdapter, AssetStore, AssetStoreReader
@@ -50,4 +50,5 @@ __all__ = [
     "directory_root",
     "filesystem_root",
     "resolved_name",
+    "validate_materialized_path",
 ]

@@ -109,7 +109,7 @@ class _AgentRunInput:
     agent_conversation_id: str
     run_store: AgentRunStore
     agent_run_id: str
-    agent_run_sequence: int
+    agent_run_seq: int
     history_id: str | None
     memory_store: MemoryStore | None
     plan_store_resolver: Callable[..., RuntimePlanStore] | None
@@ -172,7 +172,7 @@ class _AgentRunRunner:
             agent_conversation_id=agent_run_input.agent_conversation_id,
             run_store=agent_run_input.run_store,
             agent_run_id=agent_run_input.agent_run_id,
-            agent_run_sequence=agent_run_input.agent_run_sequence,
+            agent_run_seq=agent_run_input.agent_run_seq,
             history_id=agent_run_input.history_id,
             memory_store=agent_run_input.memory_store,
             plan_store_resolver=agent_run_input.plan_store_resolver,

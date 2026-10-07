@@ -60,9 +60,6 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
         self._descriptions = metadata
         self._delegate = delegate
 
-    def get_instructions(self) -> str | None:
-        return self.instructions()
-
     def get_toolset(self) -> FunctionToolset[AgentContext[object]]:
         toolset = FunctionToolset[AgentContext[object]](id=self.id)
 
@@ -141,7 +138,7 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
     def get_serialization_name(cls) -> str | None:
         return None
 
-    def instructions(self) -> "str | None":
+    def get_instructions(self) -> str | None:
         if not self._refs:
             return None
         lines = [

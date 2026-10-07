@@ -385,15 +385,15 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             [session_id],
         )
 
-    def _timeline_commit_key(self, session_id: str, sequence: int) -> bytes:
-        return self._key("session_turn_commit", [session_id, sequence])
+    def _timeline_commit_key(self, session_id: str, turn_seq: int) -> bytes:
+        return self._key("session_turn_commit", [session_id, turn_seq])
 
     def _stored_timeline_commit(
         self, value: SessionTurnCommitRef
     ) -> StoredRecord:
-        identity = [value.session_id, value.sequence]
+        identity = [value.session_id, value.turn_seq]
         return StoredRecord(
-            self._timeline_commit_key(value.session_id, value.sequence),
+            self._timeline_commit_key(value.session_id, value.turn_seq),
             self._scope("session_turn_commit", "session", value.session_id),
             None,
             "session_turn_commit",
@@ -406,7 +406,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             {
                 "version": 1,
                 "session_id": value.session_id,
-                "sequence": value.sequence,
+                "turn_seq": value.turn_seq,
                 "execution_id": value.execution_id,
                 "start_message_index": value.start_message_index,
                 "end_message_index": value.end_message_index,
@@ -434,28 +434,28 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         return SessionTurnRef(session_id, fact.sequence, execution_id)
 
     def _decode_timeline_commit(
-        self, session_id: str, sequence: int, record: StoredRecord
+        self, session_id: str, turn_seq: int, record: StoredRecord
     ) -> SessionTurnCommitRef:
         if (
-            record.key_digest != self._timeline_commit_key(session_id, sequence)
+            record.key_digest != self._timeline_commit_key(session_id, turn_seq)
             or record.scope_digest
             != self._scope("session_turn_commit", "session", session_id)
             or record.parent_digest is not None
             or record.kind != "session_turn_commit"
-            or record.sort_key != sortable_identity([session_id, sequence])
+            or record.sort_key != sortable_identity([session_id, turn_seq])
             or record.state is not None
             or set(record.data)
             != {
                 "version",
                 "session_id",
-                "sequence",
+                "turn_seq",
                 "execution_id",
                 "start_message_index",
                 "end_message_index",
             }
             or record.data.get("version") != 1
             or record.data.get("session_id") != session_id
-            or record.data.get("sequence") != sequence
+            or record.data.get("turn_seq") != turn_seq
             or not isinstance(record.data.get("execution_id"), str)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -471,7 +471,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             return SessionTurnCommitRef(
-                session_id, sequence, execution_id, start, end
+                session_id, turn_seq, execution_id, start, end
             )
         except ValueError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -737,7 +737,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 timeline_parent_cutoff = timeline_cutoff
             else:
                 timeline_parent = source.timeline_parent_session_id
-                timeline_parent_cutoff = source.timeline_parent_turn_sequence
+                timeline_parent_cutoff = source.timeline_parent_turn_seq
             child = ConversationHistoryRecord(
                 history_id=child_history_id,
                 session_id=target.session_id,
@@ -750,7 +750,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 history_id=child_history_id,
                 history_quality="complete",
                 timeline_parent_session_id=timeline_parent,
-                timeline_parent_turn_sequence=timeline_parent_cutoff,
+                timeline_parent_turn_seq=timeline_parent_cutoff,
                 continuation=(
                     None
                     if target.continuation is None
@@ -895,28 +895,28 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         session_id: str,
         *,
         tenant_id: str,
-        start_sequence: int,
-        end_sequence: int,
+        start_turn_seq: int,
+        end_turn_seq: int,
     ) -> tuple[SessionTurnRef, ...]:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        if start_sequence < 1 or end_sequence < start_sequence:
+        if start_turn_seq < 1 or end_turn_seq < start_turn_seq:
             raise ValueError("session timeline range is invalid")
-        if start_sequence == end_sequence:
+        if start_turn_seq == end_turn_seq:
             return ()
         facts = await self._store.read(
             lambda transaction: transaction.list_facts(
                 FactQuery(
                     self._timeline_stream(session_id),
-                    after_sequence=start_sequence - 1,
-                    limit=end_sequence - start_sequence,
+                    after_sequence=start_turn_seq - 1,
+                    limit=end_turn_seq - start_turn_seq,
                 )
             )
         )
         selected = tuple(
-            fact for fact in facts if fact.sequence < end_sequence
+            fact for fact in facts if fact.sequence < end_turn_seq
         )
         if tuple(fact.sequence for fact in selected) != tuple(
-            range(start_sequence, end_sequence)
+            range(start_turn_seq, end_turn_seq)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(
@@ -928,15 +928,15 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         session_id: str,
         *,
         tenant_id: str,
-        start_sequence: int,
-        end_sequence: int,
+        start_turn_seq: int,
+        end_turn_seq: int,
     ) -> tuple[SessionTurnCommitRef, ...]:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        if start_sequence < 1 or end_sequence < start_sequence:
+        if start_turn_seq < 1 or end_turn_seq < start_turn_seq:
             raise ValueError("session timeline range is invalid")
-        if start_sequence == end_sequence:
+        if start_turn_seq == end_turn_seq:
             return ()
-        sequences = tuple(range(start_sequence, end_sequence))
+        sequences = tuple(range(start_turn_seq, end_turn_seq))
         keys = tuple(
             self._timeline_commit_key(session_id, sequence)
             for sequence in sequences
@@ -973,11 +973,11 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         turn = self._decode_timeline_turn(session_id, turns[0])
         if turn.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        commit_key = self._timeline_commit_key(session_id, turn.sequence)
+        commit_key = self._timeline_commit_key(session_id, turn.turn_seq)
         existing = await transaction.get_record(commit_key)
         if existing is not None:
             committed = self._decode_timeline_commit(
-                session_id, turn.sequence, existing
+                session_id, turn.turn_seq, existing
             )
             if committed.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -991,7 +991,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         committed = SessionTurnCommitRef(
             session_id,
-            turn.sequence,
+            turn.turn_seq,
             execution_id,
             start_message_index,
             end_message_index,

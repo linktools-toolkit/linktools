@@ -9,18 +9,18 @@ from typing import Literal, Protocol
 
 from pydantic_ai.messages import ModelMessage, ModelRequest
 
-EventKind = Literal[
-    "run_started",
-    "run_completed",
-    "run_interrupted",
-    "run_failed",
-    "model_request_started",
-    "model_request_completed",
-    "model_request_failed",
-    "model_request_cancelled",
-    "tool_call_started",
-    "tool_call_completed",
-    "tool_call_failed",
+StepEventType = Literal[
+    "AGENT_RUN_STARTED",
+    "AGENT_RUN_SUCCEEDED",
+    "AGENT_RUN_INTERRUPTED",
+    "AGENT_RUN_FAILED",
+    "MODEL_REQUEST_STARTED",
+    "MODEL_REQUEST_SUCCEEDED",
+    "MODEL_REQUEST_FAILED",
+    "MODEL_REQUEST_CANCELLED",
+    "TOOL_CALL_STARTED",
+    "TOOL_CALL_SUCCEEDED",
+    "TOOL_CALL_FAILED",
 ]
 CheckpointState = Literal["complete", "interrupted"]
 
@@ -38,7 +38,7 @@ class AgentRunRecord:
 @dataclass(slots=True)
 class StepEvent:
     agent_run_id: str
-    kind: EventKind
+    event_type: StepEventType
     step_index: int
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     agent_conversation_id: str | None = None
@@ -134,7 +134,7 @@ class AgentRunStore(Protocol):
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int | None = None,
+        after_model_request_seq: int | None = None,
         limit: int | None = None,
     ) -> list[object]: ...
 
@@ -157,7 +157,7 @@ class AgentRunStore(Protocol):
 
 __all__ = [
     "AgentRunCheckpoint",
-    "EventKind",
+    "StepEventType",
     "AgentRunRecord",
     "CheckpointState",
     "StepEvent",

@@ -55,7 +55,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
         source = await runtime.tasks.bind(target).start(TaskGraph("source", (
             TaskNode("answer", task=target, input=AgentTaskInput("question"), output_type=Answer),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=10)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=10)).result.wait_status is TaskStatus.SUCCEEDED
         source_output = await source.result("answer")
         source_contract = (await source.state(include_content=True)).nodes[0].output_contract
         capture = await runtime.tasks.capture_graph(source.graph_id, CaptureGraphRequest(PRINCIPAL, "capture"))
@@ -70,7 +70,7 @@ async def test_captured_graph_keeps_node_output_contract_after_reopen(tmp_path: 
             (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "answer"})),),
             (rule_scorer(scorer),), policy=EvaluationPolicy(model_fixtures=(models.contract,))),
             PRINCIPAL, "evaluate"), engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         trial = (await run.trials()).items[0]
         evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
         assert evidence.target.outputs["answer"].value.value == source_output == {"answer": "yes"}

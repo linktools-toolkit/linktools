@@ -18,8 +18,10 @@ from linktools.ai.evaluation import (
 )
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime.state._contracts import IdempotencyRecord
+from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._evaluation_records import (
-    EvaluationLaunchIntent, EvaluationRecord, EvaluationSlotDisposition,
+    EvaluationCleanupRecord, EvaluationLaunchIntent, EvaluationRecord, EvaluationSlotDisposition,
+    EvaluationTombstone,
 )
 from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphSubmission, TaskNode, TaskRef
 
@@ -59,6 +61,36 @@ def intent() -> EvaluationLaunchIntent:
     admission = TaskGraphAdmission.from_request(TaskGraphRequest(graph, PRINCIPAL, "trial-start"))
     return EvaluationLaunchIntent("target:trial", TargetTrialRef("experiment", "trial"), None,
                                   TaskGraphSubmission("evaluation", admission, graph), None)
+
+
+def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> None:
+    record = experiment()
+    restored = decode_domain(encode_domain(record), EvaluationRecord)
+    assert restored == record
+    assert restored.experiment_id == record.manifest.experiment_id
+
+    tombstone = EvaluationTombstone(record.experiment_id, "owner", record.request_digest,
+        record.idempotency_key_digest, record.manifest_digest, NOW)
+    cleanup = EvaluationCleanupRecord(record.experiment_id, "owner", (), NOW)
+    for value, wire_id, fields in (
+        (tombstone, "evaluation_tombstone", {
+            "evaluation_id": record.experiment_id,
+            "owner_principal_id": "owner",
+            "request_digest": record.request_digest,
+            "idempotency_key_digest": record.idempotency_key_digest,
+            "manifest_digest": record.manifest_digest,
+            "deleted_at": {"$datetime": NOW.isoformat()},
+        }),
+        (cleanup, "evaluation_cleanup_record", {
+            "evaluation_id": record.experiment_id,
+            "owner_principal_id": "owner",
+            "objects": {"$tuple": []},
+            "created_at": {"$datetime": NOW.isoformat()},
+        }),
+    ):
+        wire = {"$dataclass": wire_id, "fields": fields}
+        assert encode_domain(value) == wire
+        assert decode_domain(wire, type(value)) == value
 
 
 @pytest.mark.asyncio

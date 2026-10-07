@@ -52,7 +52,7 @@ async def test_captured_session_context_ignores_later_turns_and_metadata(tmp_pat
         await third.wait()
         replay_principal = Principal("new-owner", runtime.tenant_id)
         replay = await runtime.agents.get("candidate").start(value.prompt, input_context=value.input_context, principal=replay_principal)
-        assert (await replay.wait()).status is ExecutionStatus.SUCCEEDED
+        assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
         interaction = (await replay.model_interactions(include_content=True)).items[0]
         assert "candidate-only behavior" in str(interaction.request)
         assert "original-only behavior" not in str(interaction.request)
@@ -77,13 +77,13 @@ async def test_captured_memory_preserves_versions_in_new_execution_scope(tmp_pat
                                     namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("facts.txt", "old content", expected_version=None)
         source = await runtime.agents.get().start("question", memory_scope="production", principal=principal)
-        assert (await source.wait()).status is ExecutionStatus.SUCCEEDED
+        assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         captured = await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(principal, "memory-context-0001"))
         value = await runtime._input_captures.read_agent(captured, principal=principal)
         assert value.input_context.memory["facts.txt"]["content"] == "old content"
         await memory.write("facts.txt", "new production content", expected_version=original.version)
         replay = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
-        assert (await replay.wait()).status is ExecutionStatus.SUCCEEDED
+        assert (await replay.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(replay.execution_id, tenant_id=principal.tenant_id)
         isolated = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id=replay.execution_id, memory_scope=record.memory_scope)
@@ -149,7 +149,7 @@ async def test_captured_repository_instructions_never_refresh_from_workspace(tmp
         value = await runtime._input_captures.read_agent(capture, principal=principal)
         instructions.write_text("Changed live repository instruction", encoding="utf-8")
         rerun = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
-        assert (await rerun.wait()).status is ExecutionStatus.SUCCEEDED
+        assert (await rerun.wait()).result.status is ExecutionStatus.SUCCEEDED
         interactions = await rerun.model_interactions(include_content=True)
         assert "Historical repository instruction" in str(interactions.items[0].request)
         assert "Changed live repository instruction" not in str(interactions.items[0].request)
@@ -172,7 +172,7 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
     storage = RuntimeStorage.filesystem(source_root)
     async with Runtime.open("portable-context", models=_NoToolsModels(), storage=storage, capabilities=(group,)) as runtime:
         execution = await runtime.agents.get().start("question", input_context=baseline, principal=principal)
-        assert (await execution.wait()).status is ExecutionStatus.SUCCEEDED
+        assert (await execution.wait()).result.status is ExecutionStatus.SUCCEEDED
         record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
         assert record.input_context.payload.kind == "object"
     archive = InMemoryObjectStore("context-snapshot")
@@ -190,7 +190,7 @@ async def test_large_captured_context_survives_portable_storage_snapshot(tmp_pat
         imported = await runtime._input_captures.read_agent(capture, principal=principal)
         assert imported.input_context.digest == baseline.digest
         rerun = await runtime.agents.get().start(imported.prompt, input_context=imported.input_context, principal=principal)
-        assert (await rerun.wait()).status is ExecutionStatus.SUCCEEDED
+        assert (await rerun.wait()).result.status is ExecutionStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
@@ -217,13 +217,13 @@ async def test_reprojection_uses_captured_history_without_reopening_source_sessi
         engine = runtime.tasks.bind(original, candidate)
         source = await engine.start(TaskGraph("projected-source", (TaskNode("node", task=original,
             input=AgentTaskInput(parameters={"example": 1}, session_id="context-session")),)), principal=principal, idempotency_key="projected-context-source")
-        assert (await source.wait()).status is TaskStatus.SUCCEEDED
+        assert (await source.wait()).result.wait_status is TaskStatus.SUCCEEDED
         source_execution = await source.execution("node")
         captured = await runtime.executions.capture_input(source_execution.execution_id, CaptureInputRequest(principal, "projected-context-capture"))
         source_value = await runtime._input_captures.read_agent(captured, principal=principal)
         capture = await runtime._input_captures.task_input(captured, principal=principal, input_mode="reproject_input")
         replay = await engine.start(TaskGraph("projected-replay", (TaskNode("node", task=candidate, input_capture=capture),)), principal=principal, idempotency_key="projected-context-replay")
-        assert (await replay.wait()).status is TaskStatus.SUCCEEDED
+        assert (await replay.wait()).result.wait_status is TaskStatus.SUCCEEDED
         replay_execution = await replay.execution("node")
         replay_capture = await runtime.executions.capture_input(replay_execution.execution_id, CaptureInputRequest(principal, "projected-context-rerun"))
         value = await runtime._input_captures.read_agent(replay_capture, principal=principal)
@@ -244,7 +244,7 @@ async def test_custom_memory_without_consistent_read_view_reports_precise_unavai
         backend = runtime._execution_service.runtime_backend()
         backend._memory_store_factory = lambda *_args: InMemoryStore()
         source = await runtime.agents.get().start("question", memory_scope="custom", principal=principal)
-        assert (await source.wait()).status is ExecutionStatus.SUCCEEDED
+        assert (await source.wait()).result.status is ExecutionStatus.SUCCEEDED
         with pytest.raises(AIError) as raised:
             await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(principal, "unsupported-context-capture"))
         assert raised.value.code is ErrorCode.INPUT_CONTEXT_UNAVAILABLE
@@ -277,14 +277,14 @@ async def test_reprojected_files_use_accepted_bytes_after_workspace_file_changes
         engine = runtime.tasks.bind(task)
         source = await engine.start(TaskGraph("file-source", (TaskNode("node", task=task, input=AgentTaskInput(files=("input.txt",))),)),
                                     principal=principal, idempotency_key="file-context-source")
-        assert (await source.wait()).status is TaskStatus.SUCCEEDED
+        assert (await source.wait()).result.wait_status is TaskStatus.SUCCEEDED
         execution = await source.execution("node")
         ref = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "file-context-capture"))
         path.write_text("changed live file", encoding="utf-8")
         replay_input = await runtime._input_captures.task_input(ref, principal=principal, input_mode="reproject_input")
         replay = await engine.start(TaskGraph("file-replay", (TaskNode("node", task=task, input_capture=replay_input),)),
                                    principal=principal, idempotency_key="file-context-replay")
-        assert (await replay.wait()).status is TaskStatus.SUCCEEDED
+        assert (await replay.wait()).result.wait_status is TaskStatus.SUCCEEDED
         replay_execution = await replay.execution("node")
         replay_ref = await runtime.executions.capture_input(replay_execution.execution_id, CaptureInputRequest(principal, "file-context-rerun"))
         value = await runtime._input_captures.read_agent(replay_ref, principal=principal)
@@ -327,10 +327,10 @@ async def test_model_memory_tool_reads_captured_content_after_production_changes
             namespace=runtime.namespace, tenant_id=principal.tenant_id, execution_id="setup", memory_scope="production")
         original = await memory.write("memory/facts.md", "frozen memory value", expected_version=None)
         source = await runtime.agents.get().start("read memory", memory_scope="production", principal=principal)
-        assert (await source.wait()).output == {"text": "read:frozen memory value"}
+        assert (await source.wait()).result.output == {"text": "read:frozen memory value"}
         ref = await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(principal, "model-memory-capture"))
         value = await runtime._input_captures.read_agent(ref, principal=principal)
         await memory.write("memory/facts.md", "changed production value", expected_version=original.version)
         replay = await runtime.agents.get().start(value.prompt, input_context=value.input_context, principal=principal)
-        assert (await replay.wait()).output == {"text": "read:frozen memory value"}
+        assert (await replay.wait()).result.output == {"text": "read:frozen memory value"}
         assert (await memory.read("memory/facts.md", max_chars=1000)).content == "changed production value"

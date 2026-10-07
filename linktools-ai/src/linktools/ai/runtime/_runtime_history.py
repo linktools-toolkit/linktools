@@ -42,6 +42,7 @@ from ..task import (
     TaskResultRef,
 )
 from ._artifact import DefaultArtifactService
+from ._event import project_event_payload
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history_projection import StepExecutionHistoryReader
@@ -468,18 +469,18 @@ class RuntimeHistory:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return TaskGraphInfo.from_state(state)
 
-    async def task_events(
+    async def list_task_events(
         self,
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
         limit: int = 100,
     ) -> Page[TaskEvent]:
         if (
-            isinstance(after_sequence, bool)
-            or not isinstance(after_sequence, int)
-            or after_sequence < 0
+            isinstance(after_event_seq, bool)
+            or not isinstance(after_event_seq, int)
+            or after_event_seq < 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if (
@@ -501,11 +502,11 @@ class RuntimeHistory:
         return await tasks.list_events(
             graph_id,
             tenant_id=principal.tenant_id,
-            after_sequence=after_sequence,
+            after_event_seq=after_event_seq,
             limit=limit,
         )
 
-    async def list_events(
+    async def list_execution_events(
         self,
         execution_id: str,
         *,
@@ -520,8 +521,8 @@ class RuntimeHistory:
         record = await self._authorized_record(execution_id, principal)
         events, signer = self._require_event_reader()
         if cursor is None:
-            high_water = record.event_sequence
-            after_sequence = 0
+            high_water = record.event_seq
+            after_event_seq = 0
         else:
             payload = decode_runtime_cursor(
                 cursor,
@@ -540,45 +541,47 @@ class RuntimeHistory:
             try:
                 high_water_raw, after_raw = payload.position.split(":", 1)
                 high_water = int(high_water_raw)
-                after_sequence = int(after_raw)
+                after_event_seq = int(after_raw)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.CURSOR_INVALID) from error
             if (
                 high_water < 0
-                or after_sequence < 0
-                or after_sequence > high_water
+                or after_event_seq < 0
+                or after_event_seq > high_water
             ):
                 raise AIError(ErrorCode.CURSOR_INVALID)
-        if after_sequence >= high_water:
+        if after_event_seq >= high_water:
             return Page((), None)
-        page_limit = min(limit, high_water - after_sequence)
+        page_limit = min(limit, high_water - after_event_seq)
         page = await events.list(
             execution_id,
             tenant_id=principal.tenant_id,
-            after_sequence=after_sequence,
+            after_event_seq=after_event_seq,
             limit=page_limit,
         )
-        expected = after_sequence
+        expected = after_event_seq
         projected: list[ExecutionEvent] = []
         for event in page.items:
             expected += 1
             if (
                 event.execution_id != execution_id
-                or event.sequence != expected
-                or event.sequence > high_water
+                or event.event_seq != expected
+                or event.event_seq > high_water
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             projected.append(
                 ExecutionEvent(
                     event.execution_id,
-                    event.sequence,
+                    event.event_seq,
                     event.event_type,
-                    event.payload if include_content else {},
+                    project_event_payload(
+                        event.event_type, event.payload, include_content=include_content
+                    ),
                 )
             )
         if len(projected) != page_limit:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        next_after = after_sequence + len(projected)
+        next_after = after_event_seq + len(projected)
         next_cursor = (
             None
             if next_after >= high_water
@@ -857,6 +860,12 @@ class RuntimeHistory:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
+        message_seq: int | None = None,
+        part_index: int | None = None,
     ) -> Page[ExecutionHistoryItem]:
         return await self._service.history(
             execution_id,
@@ -864,6 +873,12 @@ class RuntimeHistory:
             cursor=cursor,
             include_content=include_content,
             limit=limit,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
+            step_index=step_index,
+            tool_call_id=tool_call_id,
+            message_seq=message_seq,
+            part_index=part_index,
         )
 
     async def trace(
@@ -874,6 +889,10 @@ class RuntimeHistory:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
     ) -> Page[ExecutionTraceItem]:
         return await self._service.trace(
             execution_id,
@@ -881,6 +900,10 @@ class RuntimeHistory:
             cursor=cursor,
             include_content=include_content,
             limit=limit,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
+            step_index=step_index,
+            tool_call_id=tool_call_id,
         )
 
     async def transcript(

@@ -18,7 +18,6 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AssetSkillSource,
     CapabilityGroup,
-    LocalSkillSource,
     SkillResource,
     SkillCapability,
     SkillDefinition,
@@ -27,9 +26,8 @@ from linktools.ai.capability import (
 )
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.spec import SkillSpec
 from linktools.ai.storage import StorageLayer, StorageOverlay
-from linktools.ai.workspace import SandboxResource, WorkspacePolicy
+from linktools.ai.workspace import SandboxResource
 
 
 class _SuffixSkillPathAdapter:
@@ -181,7 +179,9 @@ async def test_local_skill_resource_discovery_ignores_noise_but_explicit_read_wo
     (package / "references").mkdir(parents=True)
     (package / "scripts" / "__pycache__").mkdir(parents=True)
     (package / "assets").mkdir()
-    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    (package / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Review files\n---\nReview.", encoding="utf-8"
+    )
     (package / "references" / "rules.md").write_text("rules", encoding="utf-8")
     (package / "assets" / "payload.bin").write_bytes(b"\xff\xfe")
     (package / ".hidden.md").write_text("hidden", encoding="utf-8")
@@ -191,27 +191,30 @@ async def test_local_skill_resource_discovery_ignores_noise_but_explicit_read_wo
     (package / "__MACOSX").mkdir()
     (package / "__MACOSX" / "metadata").write_bytes(b"noise")
 
-    source = LocalSkillSource("local", skills_root)
-    capability = SkillCapability(
-        (
-            SkillDefinition(
-                SkillSpec("review", "pinned"),
-                SkillSourceRef("local", "review"),
-            ),
-        ),
-        SkillSourceRegistry((source,)),
-    )
-    root = await capability.load_skill("review")
-
-    assert root["resources"] == ["assets/payload.bin", "references/rules.md"]
-    assert await capability.load_skill("review", ".hidden.md") == {
-        "id": "review",
-        "path": ".hidden.md",
-        "content": "hidden",
-    }
-    assert await source.read(
-        SkillSourceRef("local", "review"), "scripts/helper.PYO"
-    ) == b"\xff"
+    store = AssetStore(StorageOverlay(DirectoryAssetBackend(
+        str(tmp_path),
+        path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+        kinds=("skill",),
+    )))
+    await store.initialize()
+    try:
+        capture = await CapabilityGroup("local", assets=store).capture()
+        definition = capture.contributions[0].value
+        assert isinstance(definition, SkillDefinition)
+        assert definition.source_ref is not None
+        assert capture.asset_reader is not None
+        source = AssetSkillSource("local", capture.asset_reader)
+        capability = SkillCapability((definition,), SkillSourceRegistry((source,)))
+        root = await capability.load_skill("review")
+        assert root["resources"] == ["assets/payload.bin", "references/rules.md"]
+        assert await capability.load_skill("review", ".hidden.md") == {
+            "id": "review",
+            "path": ".hidden.md",
+            "content": "hidden",
+        }
+        assert await source.read(definition.source_ref, "scripts/helper.PYO") == b"\xff"
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

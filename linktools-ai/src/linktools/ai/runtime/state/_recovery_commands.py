@@ -30,7 +30,7 @@ from ._durability import CommitObservation, DurableCommitState, run_durable_comm
 from ._repositories import (
     EventRepositoryImpl,
     ExecutionRepositoryImpl,
-    OperationLedgerRepository,
+    OperationLedgerRepositoryImpl,
     ToolRepositoryImpl,
 )
 from ._repository_common import (
@@ -48,10 +48,10 @@ class RuntimeRecoveryCommands:
         self,
         execution: ExecutionRepositoryImpl,
         events: EventRepositoryImpl,
-        operations: OperationLedgerRepository,
+        operations: OperationLedgerRepositoryImpl,
         tools: ToolRepositoryImpl,
         *,
-        execution_operations: OperationLedgerRepository,
+        execution_operations: OperationLedgerRepositoryImpl,
         background_tasks: "set[asyncio.Task[object]]",
     ) -> None:
         self._execution = execution
@@ -128,14 +128,14 @@ class RuntimeRecoveryCommands:
                 if (
                     current.status is ExecutionStatus.CANCELLING
                     and current.revision >= target.revision
-                    and current.event_sequence == execution.event_sequence
+                    and current.event_seq == execution.event_seq
                 ):
                     return CommitObservation(DurableCommitState.COMMITTED, value=current)
                 if current == execution:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 if (
                     current.revision > execution.revision
-                    or current.event_sequence > execution.event_sequence
+                    or current.event_seq > execution.event_seq
                 ):
                     return CommitObservation(
                         DurableCommitState.NOT_COMMITTED,
@@ -208,7 +208,7 @@ class RuntimeRecoveryCommands:
                 if (
                     current.status is not ExecutionStatus.RECOVERY_REQUIRED
                     or current.revision != execution.revision
-                    or current.event_sequence != execution.event_sequence
+                    or current.event_seq != execution.event_seq
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 admitted, replayed = await _append_operation(
@@ -221,7 +221,7 @@ class RuntimeRecoveryCommands:
                 updated = replace(
                     current,
                     revision=current.revision + 1,
-                    event_sequence=current.event_sequence + 1,
+                    event_seq=current.event_seq + 1,
                     updated_at=await execution_tx.now(),
                 )
                 await _replace_checked(
@@ -233,7 +233,7 @@ class RuntimeRecoveryCommands:
                     (
                         StoredFact(
                             stream,
-                            updated.event_sequence,
+                            updated.event_seq,
                             key,
                             ExecutionEventType.CANCEL_REQUESTED.value,
                             None,
@@ -275,8 +275,8 @@ class RuntimeRecoveryCommands:
                     if (
                         current_execution is None
                         or current_execution.revision < execution.revision + 1
-                        or current_execution.event_sequence
-                        < execution.event_sequence + 1
+                        or current_execution.event_seq
+                        < execution.event_seq + 1
                     ):
                         return _partial()
                     return CommitObservation(
@@ -315,7 +315,7 @@ class RuntimeRecoveryCommands:
         events = (*ordered_audit, ExecutionEventAppend(event_type, event_payload))
         event_count = len(events)
         target_revision = execution.revision + event_count
-        target_sequence = execution.event_sequence + event_count
+        target_sequence = execution.event_seq + event_count
         store = self._execution.state_store
         key = self._execution._key("execution", execution.execution_id)
         stream = stream_digest(
@@ -334,7 +334,7 @@ class RuntimeRecoveryCommands:
                 current = await self._execution._decode(stored, ExecutionRecord)
                 if (
                     current.revision != execution.revision
-                    or current.event_sequence != execution.event_sequence
+                    or current.event_seq != execution.event_seq
                     or current.status is not execution.status
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -343,7 +343,7 @@ class RuntimeRecoveryCommands:
                     current,
                     status=next_status,
                     revision=target_revision,
-                    event_sequence=target_sequence,
+                    event_seq=target_sequence,
                     error_code=next_error_code,
                     safe_error_details=dict(next_safe_error_details),
                     error_diagnostics=None,
@@ -358,7 +358,7 @@ class RuntimeRecoveryCommands:
                     tuple(
                         StoredFact(
                             stream,
-                            execution.event_sequence + index,
+                            execution.event_seq + index,
                             key,
                             event.event_type,
                             None,
@@ -383,14 +383,14 @@ class RuntimeRecoveryCommands:
                 page = await self._events.list(
                     execution.execution_id,
                     tenant_id=self._execution.tenant_id,
-                    after_sequence=execution.event_sequence,
+                    after_event_seq=execution.event_seq,
                     limit=event_count + 1,
                 )
                 prefix = page.items[:event_count]
                 prefix_matches = (
                     len(prefix) == event_count
                     and all(
-                        actual.sequence == execution.event_sequence + index
+                        actual.event_seq == execution.event_seq + index
                         and actual.event_type == expected.event_type
                         and actual.payload == expected.payload
                         for index, (actual, expected) in enumerate(
@@ -402,7 +402,7 @@ class RuntimeRecoveryCommands:
                 target_matches = (
                     current.status is next_status
                     and current.revision >= target_revision
-                    and current.event_sequence >= target_sequence
+                    and current.event_seq >= target_sequence
                     and current.error_code == next_error_code
                     and dict(current.safe_error_details)
                     == dict(next_safe_error_details)
@@ -416,7 +416,7 @@ class RuntimeRecoveryCommands:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 if (
                     current.revision > execution.revision
-                    or current.event_sequence > execution.event_sequence
+                    or current.event_seq > execution.event_seq
                 ):
                     return CommitObservation(
                         DurableCommitState.NOT_COMMITTED,

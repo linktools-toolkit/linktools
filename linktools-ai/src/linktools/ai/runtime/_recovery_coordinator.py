@@ -304,7 +304,7 @@ class _RecoveryCoordinatorPort(Protocol):
     def _publish_recovery_resumed(
         self,
         execution_id: str,
-        event_sequence: int,
+        event_seq: int,
     ) -> None: ...
 
     async def restore_user_input(
@@ -924,7 +924,7 @@ class _RecoveryCoordinator:
         resumed, _ = await self._port._commit_recovery_resume(current)
         self._port._publish_recovery_resumed(
             execution_id,
-            resumed.event_sequence,
+            resumed.event_seq,
         )
         await self.reconcile_checkpoint(checkpoint)
         latest = await self._port.load_execution(

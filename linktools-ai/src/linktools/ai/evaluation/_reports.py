@@ -20,7 +20,7 @@ from ._contracts import (
     EvaluationManifest, ScorerContract, TargetTrialRef,
 )
 from ._evidence import EvidenceRef, ScoreBundle, ScoreNotApplicable
-from ._views import ScoreAttemptView, TrialView
+from ._views import ScoreAttemptView, TrialView, evaluation_completion
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,7 +349,7 @@ def _trial_state(trial: TrialView | None) -> str:
         if trial.disposition.terminal:
             kind = trial.disposition.kind
             return {"cancelled": "cancelled", "permanent_invalid": "failed"}.get(kind, "unavailable")
-        if trial.disposition.kind == "recovery_required":
+        if trial.disposition.kind == "recoverable_blocked":
             return "recovery_required"
     return "pending"
 
@@ -415,9 +415,9 @@ def build_evaluation_report(
                     counts["not_applicable"], counts["error"], counts["not_attempted"], mean, weight_sum,
                     counts["valid"] / len(selected) if selected else 0.0, _failures(reasons), slot,
                 ))
-    target_states = {_trial_state(trial) for trial in selected_trials} if manifest.kind == "experiment" else set()
-    completion = "needs_attention" if "recovery_required" in target_states else (
-        "running" if "pending" in target_states or any(score.status == "pending" for score in selected_scores) else "complete")
+    completion = evaluation_completion(
+        selected_trials if manifest.kind == "experiment" else (), selected_scores,
+    )
     return EvaluationReport(report_id, manifest.experiment_id, manifest.kind, manifest.source_experiment_id,
                             manifest.dataset, tuple(summaries), tuple(scorer_summaries), _failures(failures),
                             cutoff, created_at, selected_trials, selected_scores, completion)
@@ -620,6 +620,7 @@ def build_comparison_report(
                    for plan in manifest.trials if plan.candidate_slot_id == slot]
     states = [_trial_state(trial_map.get(ref)) for ref in target_refs]
     pending |= any(state in ("pending", "recovery_required") for state in states)
+    pending |= any(trial_map[ref].needs_attention for ref in target_refs if ref in trial_map)
     completion_values = [value for key, value in (completions or {}).items() if key in relevant_experiments]
     pending |= any(value in ("running", "cancelling", "needs_attention") for value in completion_values)
     cancelled = "cancelled" in completion_values

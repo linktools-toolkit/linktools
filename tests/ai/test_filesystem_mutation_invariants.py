@@ -123,8 +123,8 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=0,
+        event_seq=0,
+        agent_run_seq=0,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -137,14 +137,14 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
     )
     try:
         await state.execution.executions.create(execution)
-        event = await state.execution.events.append(
+        event = await state.execution.events.append_expected(
             "execution",
             tenant_id="tenant",
-            expected_sequence=0,
+            expected_event_seq=0,
             event_type=ExecutionEventType.EXECUTION_STARTED,
             payload={},
         )
-        assert event.sequence == 1
+        assert event.event_seq == 1
     finally:
         await state.close()
 
@@ -154,7 +154,7 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
         events = await reopened.execution.events.list(
             "execution",
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=10,
         )
         assert tuple(item.event_type for item in events.items) == (

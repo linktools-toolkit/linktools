@@ -343,7 +343,7 @@ async def test_runtime_reads_rules_from_asset_store_not_workspace_storage(
                 CapabilityGroup("rules", assets=store),
             ),
         ) as runtime:
-            result = await runtime.agents.get("default").run("hello", timeout_seconds=10)
+            result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert any("asset-rule" in request for request in observed)
         assert all("legacy-rule" not in request for request in observed)

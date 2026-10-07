@@ -76,7 +76,7 @@ async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
             TaskNode("agent", task=target, input=AgentTaskInput(parameters={"question": "Question"},
                 files=("file.txt",), input_context=context)),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=15)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=15)).result.wait_status is TaskStatus.SUCCEEDED
         capture = await runtime.tasks.capture_graph(source.graph_id,
             CaptureGraphRequest(PRINCIPAL, "capture", mode=mode, context_policy=context_policy))
         if file_change == "changed":
@@ -91,8 +91,8 @@ async def test_projected_graph_capture_reuses_accepted_prompt_and_file_bytes(
             (rule_scorer(scorer),), input_mode=input_mode,
             policy=EvaluationPolicy(model_fixtures=(models.contract,))),
             PRINCIPAL, "evaluate"), engine=engine)
-        assert (await run.wait(timeout_seconds=20)).completion == "complete"
-        report = await run.report()
+        assert (await run.wait(timeout_seconds=20)).result.completion == "complete"
+        report = await run.create_report()
         assert report.scores[0].valid == 1
         assert models.attachments == [b"ORIGINAL", b"ORIGINAL"]
         assert models.prompts[0].startswith("Prepared in source: Question")
@@ -140,7 +140,7 @@ async def test_graph_capture_retains_only_bindings_required_by_its_execution_top
         source = await engine.start(TaskGraph("source", (
             TaskNode("seed", task=seed_task, expander=expander),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=15)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=15)).result.wait_status is TaskStatus.SUCCEEDED
         capture = await runtime.tasks.capture_graph(source.graph_id,
             CaptureGraphRequest(PRINCIPAL, "capture", mode=mode))
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("data", 1), (
@@ -152,8 +152,8 @@ async def test_graph_capture_retains_only_bindings_required_by_its_execution_top
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, selector="terminal_sinks")),),
             (rule_scorer(scorer),)), PRINCIPAL, "evaluate"), engine=replay_engine)
-        assert (await run.wait(timeout_seconds=20)).completion == "complete"
-        report = await run.report()
+        assert (await run.wait(timeout_seconds=20)).result.completion == "complete"
+        report = await run.create_report()
         assert report.scores[0].valid == 1
         assert len(expanded) == (1 if mode == "materialized_graph" else 2)
         trial = (await run.trials()).items[0]
@@ -187,7 +187,7 @@ async def test_graph_capture_rejects_unavailable_projected_input(
             TaskNode("failure", task=failure),
             TaskNode("agent", ("failure",), task=target, input=AgentTaskInput(parameters={"question": "unrun"})),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=15)).status is TaskStatus.FAILED
+        assert (await source.wait(timeout_seconds=15)).result.wait_status is TaskStatus.FAILED
         with pytest.raises(AIError) as raised:
             await runtime.tasks.capture_graph(source.graph_id,
                 CaptureGraphRequest(PRINCIPAL, "capture", mode=mode, context_policy=context_policy))
@@ -234,7 +234,7 @@ async def test_clean_recapture_replays_unstarted_fixed_projected_graph(
             TaskNode("agent", ("prepare",), task=target, input=AgentTaskInput(
                 parameters={"question": "Question"}, input_context=context)),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait()).status is TaskStatus.SUCCEEDED
+        assert (await source.wait()).result.wait_status is TaskStatus.SUCCEEDED
         capture = await runtime.tasks.capture_graph(source.graph_id,
             CaptureGraphRequest(PRINCIPAL, "source-capture"))
         original = await runtime._input_captures.read_graph(capture, principal=PRINCIPAL)
@@ -247,17 +247,17 @@ async def test_clean_recapture_replays_unstarted_fixed_projected_graph(
             (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "agent"})),),
             (rule_scorer(scorer),), input_mode="fixed_input",
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "evaluate"), engine=engine)
-        assert (await run.wait(timeout_seconds=30)).completion == "complete"
+        assert (await run.wait(timeout_seconds=30)).result.completion == "complete"
         trials = {trial.case_ref.case_id: trial for trial in (await run.trials()).items}
         control = await engine.get(trials["control"].graph_ref.graph_id, principal=PRINCIPAL)
-        assert (await control.wait()).status is TaskStatus.SUCCEEDED
+        assert (await control.wait()).result.wait_status is TaskStatus.SUCCEEDED
         execution = await control.execution("agent")
         request = str((await execution.model_interactions(include_content=True)).items[0].request)
         assert "Prepared in source: Question" in request
         assert "Historical question" in request
         assert projected_graphs == ["source"]
         blocked = await engine.get(trials["blocked"].graph_ref.graph_id, principal=PRINCIPAL)
-        assert (await blocked.wait()).status is TaskStatus.FAILED
+        assert (await blocked.wait()).result.wait_status is TaskStatus.FAILED
         assert next(node for node in (await blocked.state()).node_states
                     if node.node_id == "agent").execution_id is None
         clean = await runtime.tasks.capture_graph(blocked.graph_id,
@@ -278,8 +278,8 @@ async def test_clean_recapture_replays_unstarted_fixed_projected_graph(
             (CandidateSpec("clean", graph_template=GraphTargetSpec(capture=clean, outputs={"answer": "agent"})),),
             (rule_scorer(scorer),), input_mode="fixed_input",
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "replay"), engine=engine)
-        assert (await replay.wait(timeout_seconds=30)).completion == "complete"
-        assert (await replay.report()).scores[0].valid == 1
+        assert (await replay.wait(timeout_seconds=30)).result.completion == "complete"
+        assert (await replay.create_report()).scores[0].valid == 1
         trial = (await replay.trials()).items[0]
         graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
         execution = await graph.execution("agent")
@@ -314,7 +314,7 @@ async def test_fixed_agent_task_capture_can_reproject_without_live_files(tmp_pat
         source = await engine.start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput(parameters={"question": "Question"}, files=("file.txt",))),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=15)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=15)).result.wait_status is TaskStatus.SUCCEEDED
         execution = await source.execution("agent")
         agent_capture = await runtime.executions.capture_input(execution.execution_id,
             CaptureInputRequest(PRINCIPAL, "agent-input", context_policy="clean"))
@@ -326,8 +326,8 @@ async def test_fixed_agent_task_capture_can_reproject_without_live_files(tmp_pat
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("captured", task=task.ref),), (rule_scorer(scorer),), input_mode="reproject_input",
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "evaluate"), engine=engine)
-        assert (await run.wait(timeout_seconds=20)).completion == "complete"
-        assert (await run.report()).scores[0].valid == 1
+        assert (await run.wait(timeout_seconds=20)).result.completion == "complete"
+        assert (await run.create_report()).scores[0].valid == 1
         assert models.attachments == [b"ORIGINAL", b"ORIGINAL"]
         assert models.prompts[1] != models.prompts[0]
 
@@ -363,7 +363,7 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
             TaskNode("prepare", task=producer),
             TaskNode("agent", ("prepare",), task=target, input=AgentTaskInput(("Question", WorkspaceFileInput("inline.txt")), files=("file.txt",))),
         )), principal=PRINCIPAL, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=15)).status is TaskStatus.FAILED
+        assert (await source.wait(timeout_seconds=15)).result.wait_status is TaskStatus.FAILED
         assert not models.prompts
         capture = await runtime.tasks.capture_graph(source.graph_id,
             CaptureGraphRequest(PRINCIPAL, "capture", context_policy="clean"))
@@ -376,7 +376,7 @@ async def test_clean_unstarted_literal_graph_can_reproject_its_admitted_files(tm
             (CandidateSpec("captured", graph_template=GraphTargetSpec(capture=capture, outputs={"answer": "agent"})),),
             (rule_scorer(scorer),), input_mode="reproject_input",
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "evaluate"), engine=engine)
-        assert (await run.wait(timeout_seconds=20)).completion == "complete"
-        assert (await run.report()).scores[0].valid == 1
+        assert (await run.wait(timeout_seconds=20)).result.completion == "complete"
+        assert (await run.create_report()).scores[0].valid == 1
         assert models.attachments == [b"INLINE ORIGINAL", b"ORIGINAL"]
         assert models.prompts[0].startswith("Question")

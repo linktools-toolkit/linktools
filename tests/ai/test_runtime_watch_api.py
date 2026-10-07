@@ -14,9 +14,10 @@ from linktools.ai.core import (
     Principal,
     TaskStatus,
 )
-from linktools.ai.errors import AIError, ErrorCode, TaskObservationError
+from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
 from linktools.ai.runtime._domains import RuntimeExecutions, RuntimeSessions
+from linktools.ai.runtime._watch_cursor import encode_graph_watch_cursor
 from linktools.ai.runtime.service_api import (
     ExecutionEvent,
     ExecutionStreamEvent,
@@ -24,7 +25,7 @@ from linktools.ai.runtime.service_api import (
     ExecutionView,
 )
 from linktools.ai.runtime.service_api import _ExecutionStreamFailure
-from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphResult
+from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphResult, TaskGraphState
 
 
 class _ExecutionService:
@@ -38,11 +39,14 @@ class _ExecutionService:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ):
+        if ready is not None:
+            ready.set()
         del principal, include_content
-        after = 0 if after_sequences is None else after_sequences.get(execution_id, 0)
+        after = 0 if after_event_seqs is None else after_event_seqs.get(execution_id, 0)
 
         async def values():
             if after >= 1:
@@ -67,6 +71,9 @@ class _ExecutionService:
 
 
 class _TaskGraphService:
+    async def wait(self, graph_id: str, *, principal: Principal, timeout_seconds=None):
+        await asyncio.Event().wait()
+
     async def state(self, graph_id: str, *, principal: Principal):
         del principal
 
@@ -75,6 +82,7 @@ class _TaskGraphService:
             execution_id = "execution"
 
         class Snapshot:
+            event_seq = 4
             node_states = (State(),)
             nodes = (type("Node", (), {"node_id": "node", "task": None})(),)
 
@@ -86,7 +94,7 @@ class _TaskGraphService:
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ):
         del principal
 
@@ -137,14 +145,14 @@ class _TaskGraphService:
                 ),
             )
             for event in events:
-                if event.sequence > after_sequence:
+                if event.event_seq > after_event_seq:
                     yield event
 
         return values()
 
 
 class _HistoryService:
-    async def list_events(
+    async def list_execution_events(
         self,
         execution_id: str,
         *,
@@ -179,6 +187,13 @@ class _Runtime:
         self.executions = self.execution
         self.graph = _TaskGraphService()
         self.history = _HistoryService()
+        self.observations = set()
+
+    def _register_observation(self, session) -> None:
+        self.observations.add(session)
+
+    def _release_observation(self, session) -> None:
+        self.observations.discard(session)
 
 
 def _task_graph_run(
@@ -200,13 +215,16 @@ def _watch_tree(
     execution_id,
     *,
     principal,
-    after_sequences=None,
+    after_event_seqs=None,
     include_content=False,
+    ready: asyncio.Event | None = None,
 ):
+    if ready is not None:
+        ready.set()
     return _ExecutionService().stream(
         execution_id,
         principal=principal,
-        after_sequences=after_sequences,
+        after_event_seqs=after_event_seqs,
         include_content=include_content,
     )
 
@@ -255,10 +273,13 @@ async def test_task_graph_watch_forwards_model_request_progress_with_execution_i
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ):
-        del principal, after_sequences, include_content
+        if ready is not None:
+            ready.set()
+        del principal, after_event_seqs, include_content
 
         async def values():
             yield ExecutionTreeEvent(
@@ -275,8 +296,8 @@ async def test_task_graph_watch_forwards_model_request_progress_with_execution_i
                     ExecutionEventType.MODEL_REQUEST_STARTED.value,
                     {
                         "execution_id": execution_id,
-                        "agent_run_sequence": 2,
-                        "request_sequence": 1,
+                        "agent_run_seq": 2,
+                        "model_request_seq": 1,
                         "purpose": "agent",
                         "status": "RUNNING",
                     },
@@ -303,7 +324,7 @@ async def test_task_graph_watch_forwards_model_request_progress_with_execution_i
     assert len(progress) == 1
     assert progress[0].execution_id == "execution"
     assert progress[0].event.payload["execution_id"] == "execution"  # type: ignore[index]
-    assert progress[0].event.payload["request_sequence"] == 1  # type: ignore[index]
+    assert progress[0].event.payload["model_request_seq"] == 1  # type: ignore[index]
 
 
 @pytest.mark.asyncio
@@ -314,10 +335,13 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ):
-        del principal, after_sequences, include_content
+        if ready is not None:
+            ready.set()
+        del principal, after_event_seqs, include_content
         started.append(execution_id)
 
         async def values():
@@ -336,9 +360,9 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
     stream = run.watch()
     try:
         await anext(stream)
-        assert started == []
+        assert started == ["execution"]
         await anext(stream)
-        assert started == []
+        assert started == ["execution"]
         binding = await anext(stream)
         assert isinstance(binding.event, TaskEvent)
         assert binding.event.execution_id == "execution"
@@ -371,6 +395,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
                 "Snapshot",
                 (),
                 {
+                    "event_seq": 4,
                     "node_states": tuple(
                         type(
                             "NodeState",
@@ -396,7 +421,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
             requested_graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
             assert requested_graph_id == graph_id
             assert principal == principal_arg
@@ -440,10 +465,10 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
                     ),
                 )
                 for event in events:
-                    if event.sequence == 2:
+                    if event.event_seq == 2:
                         await expand.wait()
                         self.expanded = True
-                    if event.sequence > after_sequence:
+                    if event.event_seq > after_event_seq:
                         yield event
 
             return values()
@@ -468,12 +493,15 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ):
+        if ready is not None:
+            ready.set()
         del include_content
         assert principal == principal_arg
-        after_sequence = (after_sequences or {}).get(execution_id, 0)
+        after_event_seq = (after_event_seqs or {}).get(execution_id, 0)
         event_type = (
             ExecutionEventType.EXECUTION_FAILED.value
             if execution_id == "execution-failed"
@@ -481,7 +509,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         )
 
         async def values():
-            if after_sequence >= 1:
+            if after_event_seq >= 1:
                 return
             yield ExecutionTreeEvent(
                 execution_id,
@@ -502,7 +530,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
     try:
         first = await anext(first_watch)
         assert isinstance(first.event, TaskEvent)
-        assert first.event.sequence == 1
+        assert first.event.event_seq == 1
         expand.set()
         observed = [first]
         observed.extend([item async for item in first_watch])
@@ -510,7 +538,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         await first_watch.aclose()
 
     task_events = [item for item in observed if isinstance(item.event, TaskEvent)]
-    assert [item.event.sequence for item in task_events] == [1, 2, 3]
+    assert [item.event.event_seq for item in task_events] == [1, 2, 3]
     execution_events = [
         item.event.event
         for item in observed
@@ -540,7 +568,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
 
 
 @pytest.mark.asyncio
-async def test_task_graph_watch_classifies_missing_dynamic_node_as_stream_error() -> None:
+async def test_task_graph_watch_preserves_missing_dynamic_node_integrity_error() -> None:
     cause_details = {"graph_id": "graph", "node_id": "late-node"}
 
     class MissingNodeGraphService:
@@ -555,11 +583,11 @@ async def test_task_graph_watch_classifies_missing_dynamic_node_as_stream_error(
             return type(
                 "Snapshot",
                 (),
-                {"node_states": (state,), "nodes": (node,)},
+                {"event_seq": 4, "node_states": (state,), "nodes": (node,)},
             )()
 
-        def stream_events(self, graph_id: str, *, principal: Principal, after_sequence: int = 0):
-            del principal, after_sequence
+        def stream_events(self, graph_id: str, *, principal: Principal, after_event_seq: int = 0):
+            del principal, after_event_seq
 
             async def values():
                 yield TaskEvent(
@@ -590,15 +618,12 @@ async def test_task_graph_watch_classifies_missing_dynamic_node_as_stream_error(
         _watch_tree,
     )
 
-    with pytest.raises(TaskObservationError) as raised:
+    with pytest.raises(AIError) as raised:
         await anext(run.watch())
 
-    assert raised.value.origin == "stream"
-    assert raised.value.cause_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
+    assert not isinstance(raised.value, ObservationError)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert raised.value.safe_details == cause_details
-    assert isinstance(raised.value.__cause__, AIError)
-    assert raised.value.__cause__.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert raised.value.__cause__.safe_details == cause_details
 
 
 @pytest.mark.asyncio
@@ -649,6 +674,7 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
                 "Snapshot",
                 (),
                 {
+                    "event_seq": 4,
                     "node_states": (state,),
                     "nodes": (
                         type("Node", (), {"node_id": "node", "task": None})(),
@@ -661,9 +687,9 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
-            del graph_id, principal, after_sequence
+            del graph_id, principal, after_event_seq
             self.stream_calls += 1
 
             async def values():
@@ -685,9 +711,10 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
         Principal("owner", "tenant"),
         _watch_tree,
     )
-    stream = run.watch(
-        after_execution_sequences={"node": {"execution": 1}},
-    )
+    stream = run.watch(cursor=encode_graph_watch_cursor(
+        "watch-test", "tenant", "graph", include_content=False,
+        graph_event_seq=0, execution_event_seqs={"node": {"execution": 1}},
+    ))
     try:
         with pytest.raises(AIError) as raised:
             await anext(stream)
@@ -711,8 +738,9 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
                 (),
                 {
                     "graph_id": graph_id,
+                    "wait_status": property(lambda state: TaskGraphResult(state.graph_id, state.status, state.node_states).wait_status),
                     "status": TaskStatus.RUNNING,
-                    "event_sequence": 2,
+                    "event_seq": 2,
                     "node_states": (),
                     "nodes": (),
                 },
@@ -723,12 +751,12 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
             assert graph_id == "graph"
-            if after_sequence == 0:
+            if after_event_seq == 0:
                 return Page(
                     (
                         TaskEvent(
@@ -776,8 +804,8 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
 
     async def observer(event: TaskGraphRunEvent) -> None:
         assert isinstance(event.event, TaskEvent)
-        observed.append(event.event.sequence)
-        if event.event.sequence == 1:
+        observed.append(event.event.event_seq)
+        if event.event.event_seq == 1:
             observed_first.set()
 
     await asyncio.wait_for(run.replay(observer), timeout=1)
@@ -797,8 +825,9 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                 (),
                 {
                     "graph_id": "graph",
+                    "wait_status": property(lambda state: TaskGraphResult(state.graph_id, state.status, state.node_states).wait_status),
                     "status": TaskStatus.RUNNING,
-                    "event_sequence": 2,
+                    "event_seq": 2,
                     "node_states": (
                         type(
                             "State",
@@ -824,7 +853,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
@@ -861,7 +890,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                     TaskStatus.RUNNING,
                 ),
             )
-            return Page(tuple(value for value in values if value.sequence > after_sequence))
+            return Page(tuple(value for value in values if value.event_seq > after_event_seq))
 
     class ReplayExecutionService:
         async def inspect(self, execution_id: str, *, principal: Principal):
@@ -875,7 +904,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                 None,
                 "execution",
                 None,
-                event_sequence=2,
+                event_seq=2,
             )
 
         async def list_children(
@@ -894,17 +923,17 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
             assert execution_id == "execution"
             values = (
-                ExecutionEvent(execution_id, 1, "EXECUTION_STARTED", {"raw": "one"}),
+                ExecutionEvent(execution_id, 1, "TOOL_CALL_STARTED", {"call_id": "call", "tool_name": "tool", "arguments": "secret"}),
                 ExecutionEvent(execution_id, 2, "EXECUTION_SUCCEEDED", {"raw": "two"}),
                 ExecutionEvent(execution_id, 3, "LATE_EVENT", {"raw": "late"}),
             )
-            return Page(tuple(value for value in values if value.sequence > after_sequence))
+            return Page(tuple(value for value in values if value.event_seq > after_event_seq))
 
     replay_execution = ReplayExecutionService()
     replay_events = ReplayEventService()
@@ -935,7 +964,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
 
     assert result.status is TaskStatus.WAITING
     assert [
-        event.event.sequence
+        event.event.event_seq
         for event in observed
         if isinstance(event.event, TaskEvent)
     ] == [1, 2]
@@ -944,8 +973,9 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
         for event in observed
         if isinstance(event.event, ExecutionTreeEvent)
     ]
-    assert [event.durable_sequence for event in execution_events] == [1, 2]
-    assert all(event.payload == {} for event in execution_events)
+    assert [event.durable_seq for event in execution_events] == [1, 2]
+    assert execution_events[0].payload == {"call_id": "call", "tool_name": "tool"}
+    assert execution_events[1].payload == {}
     assert all(event.cursor is not None for event in observed)
     assert all(
         item.event.cursor is not None
@@ -956,7 +986,8 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
+@pytest.mark.parametrize("root_id", ["root", "child"])
+async def test_task_graph_replay_captures_recursive_members_with_relative_depth(root_id: str) -> None:
     now = datetime.now(timezone.utc)
 
     class GraphService:
@@ -968,8 +999,9 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
                 (),
                 {
                     "graph_id": graph_id,
+                    "wait_status": property(lambda state: TaskGraphResult(state.graph_id, state.status, state.node_states).wait_status),
                     "status": TaskStatus.RUNNING,
-                    "event_sequence": 1,
+                    "event_seq": 1,
                     "node_states": (
                         type(
                             "State",
@@ -978,7 +1010,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
                                 "node_id": "node",
                                 "status": TaskStatus.RUNNING,
                                 "result_digest": None,
-                                "execution_id": "root",
+                                "execution_id": root_id,
                                 "error_code": None,
                                 "error_digest": None,
                             },
@@ -995,7 +1027,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
@@ -1009,7 +1041,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
                     TaskStatus.PENDING,
                 ),
             )
-            return Page(tuple(value for value in values if value.sequence > after_sequence))
+            return Page(tuple(value for value in values if value.event_seq > after_event_seq))
 
     views = {
         "root": ExecutionView(
@@ -1020,7 +1052,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
             None,
             "root",
             None,
-            event_sequence=1,
+            event_seq=1,
         ),
         "child": ExecutionView(
             "child",
@@ -1030,7 +1062,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
             "root",
             "root",
             "call-child",
-            event_sequence=1,
+            event_seq=1,
         ),
         "grandchild": ExecutionView(
             "grandchild",
@@ -1040,7 +1072,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
             "child",
             "root",
             "call-grandchild",
-            event_sequence=1,
+            event_seq=1,
         ),
     }
 
@@ -1056,8 +1088,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
             principal: Principal,
         ):
             del principal
-            assert execution_id == "root"
-            return (views["child"],)
+            return tuple(view for view in views.values() if view.parent_execution_id == execution_id)
 
     class EventService:
         async def list(
@@ -1065,7 +1096,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
             execution_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
             limit: int = 100,
         ):
             del principal, limit
@@ -1073,7 +1104,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
                 ExecutionEvent(execution_id, 1, "EXECUTION_STARTED", {"raw": "one"}),
                 ExecutionEvent(execution_id, 2, "LATE_EVENT", {"raw": "late"}),
             )
-            return Page(tuple(value for value in values if value.sequence > after_sequence))
+            return Page(tuple(value for value in values if value.event_seq > after_event_seq))
 
     replay_execution = ExecutionService()
     replay_events = EventService()
@@ -1108,12 +1139,12 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
         if isinstance(event.event, ExecutionTreeEvent)
     ]
     assert [
-        (event.execution_id, event.depth, event.event.durable_sequence)
+        (event.execution_id, event.depth, event.event.durable_seq)
         for event in execution_events
-    ] == [
-        ("root", 0, 1),
-        ("child", 1, 1),
-    ]
+    ] == (
+        [("root", 0, 1), ("child", 1, 1), ("grandchild", 2, 1)]
+        if root_id == "root" else [("child", 0, 1), ("grandchild", 1, 1)]
+    )
     assert all(event.event.payload == {} for event in execution_events)
 
 
@@ -1127,16 +1158,16 @@ class _WaitGraphService:
     async def state(self, graph_id: str, *, principal: Principal):
         del principal
         assert graph_id == "graph"
-        return type("Snapshot", (), {"node_states": (), "nodes": ()})()
+        return type("Snapshot", (), {"event_seq": 4, "node_states": (), "nodes": ()})()
 
     def stream_events(
         self,
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ):
-        del principal, after_sequence
+        del principal, after_event_seq
 
         async def values():
             if self.mode == "observer_error":
@@ -1171,14 +1202,14 @@ class _WaitGraphService:
         *,
         principal: Principal,
         timeout_seconds: float | None = None,
-    ) -> TaskGraphResult:
+    ) -> TaskGraphState:
         del principal, timeout_seconds
         assert graph_id == "graph"
         self.wait_started.set()
         if self.mode == "waiting":
-            return TaskGraphResult(graph_id, TaskStatus.WAITING, ())
+            return TaskGraphState(graph_id, TaskStatus.WAITING, (), ())
         if self.mode == "recovery":
-            return TaskGraphResult(graph_id, TaskStatus.RECOVERY_REQUIRED, ())
+            return TaskGraphState(graph_id, TaskStatus.RECOVERY_REQUIRED, (), ())
         if self.mode == "timeout":
             raise AIError(
                 ErrorCode.TASK_WAIT_TIMEOUT,
@@ -1193,15 +1224,9 @@ class _WaitGraphService:
 
 
 def _wait_runtime(service: _WaitGraphService):
-    return type(
-        "WaitRuntime",
-        (),
-        {
-            "namespace": "watch-test",
-            "graph": service,
-            "execution": _ExecutionService(),
-        },
-    )()
+    runtime = _Runtime()
+    runtime.graph = service
+    return runtime
 
 
 async def _assert_no_graph_observer_tasks() -> None:
@@ -1228,12 +1253,12 @@ async def test_task_graph_wait_does_not_start_observer_on_stable_waiting() -> No
 
     result = await run.wait()
 
-    assert result.status is TaskStatus.WAITING
+    assert result.result.wait_status is TaskStatus.WAITING
     await _assert_no_graph_observer_tasks()
 
 
 @pytest.mark.asyncio
-async def test_task_graph_wait_and_observe_are_independent_at_recovery_boundary() -> None:
+async def test_task_graph_wait_and_watch_are_independent_at_recovery_boundary() -> None:
     service = _WaitGraphService("recovery")
     run = _task_graph_run(
         _wait_runtime(service),
@@ -1248,9 +1273,10 @@ async def test_task_graph_wait_and_observe_are_independent_at_recovery_boundary(
 
     result = await run.wait()
 
-    assert result.status is TaskStatus.RECOVERY_REQUIRED
+    assert result.result.wait_status is TaskStatus.RECOVERY_REQUIRED
     assert not observed
-    await run.observe(observer)
+    async for event in run.watch():
+        await observer(event)
     assert len(observed) == 1
     assert isinstance(observed[0].event, TaskEvent)
     assert observed[0].event.status is TaskStatus.RECOVERY_REQUIRED
@@ -1288,11 +1314,13 @@ async def test_task_graph_observer_error_does_not_start_graph_wait() -> None:
     async def observer(_event: TaskGraphRunEvent) -> None:
         raise RuntimeError("observer failed")
 
-    with pytest.raises(AIError) as raised:
-        await run.observe(observer)
-    assert isinstance(raised.value, TaskObservationError)
-    assert raised.value.origin == "callback"
-    assert raised.value.code is ErrorCode.TASK_OBSERVER_FAILED
+    stream = run.watch()
+    try:
+        with pytest.raises(RuntimeError, match="observer failed"):
+            async for event in stream:
+                await observer(event)
+    finally:
+        await stream.aclose()
 
     assert not service.wait_started.is_set()
     assert not service.wait_cancelled.is_set()
@@ -1301,21 +1329,23 @@ async def test_task_graph_observer_error_does_not_start_graph_wait() -> None:
 
 @pytest.mark.asyncio
 async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -> None:
-    cause = AIError(
-        ErrorCode.STORAGE_INTEGRITY_ERROR,
-        safe_details={"execution_id": "execution"},
-    )
+    cause = RuntimeError("optional broker is unavailable")
+    delivered_first = asyncio.Event()
 
     def failed_watch_tree(
         execution_id,
         *,
         principal,
-        after_sequences=None,
+        after_event_seqs=None,
         include_content=False,
+        ready: asyncio.Event | None = None,
     ):
-        del execution_id, principal, after_sequences, include_content
+        if ready is not None:
+            ready.set()
+        del execution_id, principal, after_event_seqs, include_content
 
         async def values():
+            await delivered_first.wait()
             if False:
                 yield None
             raise _ExecutionStreamFailure(cause)
@@ -1330,13 +1360,14 @@ async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -
     )
     stream = run.watch()
     delivered: list[TaskGraphRunEvent] = []
-    with pytest.raises(TaskObservationError) as raised:
+    with pytest.raises(ObservationError) as raised:
         while True:
             delivered.append(await anext(stream))
+            delivered_first.set()
 
     assert raised.value.origin == "stream"
-    assert raised.value.cause_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
-    assert raised.value.safe_details == {"execution_id": "execution"}
+    assert raised.value.cause_code is None
+    assert raised.value.safe_details == {"cause_type": "RuntimeError"}
     assert delivered
     assert raised.value.cursor == delivered[-1].cursor
     assert raised.value.__cause__ is cause
@@ -1350,9 +1381,9 @@ async def test_task_graph_durable_stream_integrity_error_remains_raw() -> None:
             graph_id: str,
             *,
             principal: Principal,
-            after_sequence: int = 0,
+            after_event_seq: int = 0,
         ):
-            del graph_id, principal, after_sequence
+            del graph_id, principal, after_event_seq
 
             async def values():
                 if False:
@@ -1374,7 +1405,7 @@ async def test_task_graph_durable_stream_integrity_error_remains_raw() -> None:
         await anext(run.watch())
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert not isinstance(raised.value, TaskObservationError)
+    assert not isinstance(raised.value, ObservationError)
 
 
 @pytest.mark.asyncio
@@ -1468,3 +1499,211 @@ def test_task_run_event_rejects_execution_without_node() -> None:
     )
     with pytest.raises(ValueError):
         TaskGraphRunEvent("graph", None, event)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["initial_state", "dynamic_state", "inspect"])
+@pytest.mark.parametrize("typed", [False, True])
+async def test_task_graph_watch_preserves_authoritative_read_failures(
+    boundary: str,
+    typed: bool,
+) -> None:
+    cause = AIError(ErrorCode.STORAGE_UNAVAILABLE) if typed else OSError("read failed")
+
+    class BrokenGraphService(_TaskGraphService):
+        async def state(self, graph_id: str, *, principal: Principal):
+            if boundary == "initial_state":
+                raise cause
+            snapshot = await super().state(graph_id, principal=principal)
+            if boundary == "dynamic_state":
+                if getattr(self, "read", False):
+                    raise cause
+                self.read = True
+                snapshot.nodes = ()
+            return snapshot
+
+    class BrokenExecutions(_ExecutionService):
+        async def inspect(self, execution_id: str, *, principal: Principal):
+            if boundary == "inspect":
+                raise cause
+            return await super().inspect(execution_id, principal=principal)
+
+    runtime = _Runtime()
+    runtime.graph = BrokenGraphService()
+    runtime.executions = BrokenExecutions()
+    run = _task_graph_run(runtime, "graph", Principal("owner", "tenant"), _watch_tree)
+
+    with pytest.raises(type(cause)) as raised:
+        async for _event in run.watch():
+            pass
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["encode_graph_watch_cursor", "encode_execution_watch_cursor"])
+async def test_task_graph_watch_preserves_cursor_protocol_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    encoding: str,
+) -> None:
+    cause = ValueError("invalid cursor identity")
+
+    def fail(*args, **kwargs):
+        raise cause
+
+    monkeypatch.setattr(f"linktools.ai.runtime._task.{encoding}", fail)
+    run = _task_graph_run(_Runtime(), "graph", Principal("owner", "tenant"), _watch_tree)
+
+    with pytest.raises(ValueError) as raised:
+        async for _event in run.watch():
+            pass
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["sync", "async", "cancel"])
+async def test_task_graph_observer_preserves_cause_and_last_acknowledged_cursor(
+    failure: str,
+) -> None:
+    cause = (
+        asyncio.CancelledError("callback cancelled")
+        if failure == "cancel"
+        else AIError(ErrorCode.STORAGE_UNAVAILABLE, safe_details={"source": "callback"})
+    )
+    run = _task_graph_run(_Runtime(), "graph", Principal("owner", "tenant"), _watch_tree)
+    delivered: list[TaskGraphRunEvent] = []
+
+    async def callback(event: TaskGraphRunEvent) -> None:
+        await asyncio.sleep(0)
+        if delivered:
+            raise cause
+        delivered.append(event)
+
+    def observer(event: TaskGraphRunEvent):
+        if delivered and failure == "sync":
+            raise cause
+        return callback(event)
+
+    with pytest.raises(asyncio.CancelledError if failure == "cancel" else ObservationError) as raised:
+        await run.wait(on_event=observer)
+
+    assert len(delivered) == 1
+    if failure == "cancel":
+        assert raised.value is cause
+    else:
+        assert raised.value.origin == "callback"
+        assert raised.value.__cause__ is cause
+        assert raised.value.cursor == delivered[0].cursor
+        assert raised.value.cause_code == ErrorCode.STORAGE_UNAVAILABLE.value
+        assert raised.value.safe_details == {"source": "callback"}
+
+
+@pytest.mark.asyncio
+async def test_task_graph_watch_preserves_same_round_durable_failure() -> None:
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    class BrokenGraphService(_TaskGraphService):
+        def stream_events(self, *args, **kwargs):
+            async def values():
+                raise cause
+                yield
+            return values()
+
+    def broken_tree(*args, **kwargs):
+        async def values():
+            raise _ExecutionStreamFailure(OSError("broker failed"))
+            yield
+        return values()
+
+    runtime = _Runtime()
+    runtime.graph = BrokenGraphService()
+    run = _task_graph_run(runtime, "graph", Principal("owner", "tenant"), broken_tree)
+
+    with pytest.raises(AIError) as raised:
+        await anext(run.watch(cursor=encode_graph_watch_cursor(
+            "watch-test", "tenant", "graph", include_content=False,
+            graph_event_seq=1, execution_event_seqs={},
+        )))
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+async def test_task_graph_watch_preserves_authoritative_failure_during_cleanup() -> None:
+    cause = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    started = asyncio.Event()
+
+    class BrokenGraphService(_TaskGraphService):
+        def stream_events(self, *args, **kwargs):
+            async def values():
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    raise cause
+                yield
+            return values()
+
+    def broken_tree(*args, **kwargs):
+        async def values():
+            await started.wait()
+            raise _ExecutionStreamFailure(OSError("broker failed"))
+            yield
+        return values()
+
+    runtime = _Runtime()
+    runtime.graph = BrokenGraphService()
+    run = _task_graph_run(runtime, "graph", Principal("owner", "tenant"), broken_tree)
+
+    with pytest.raises(AIError) as raised:
+        await anext(run.watch(cursor=encode_graph_watch_cursor(
+            "watch-test", "tenant", "graph", include_content=False,
+            graph_event_seq=1, execution_event_seqs={},
+        )))
+
+    assert raised.value is cause
+
+
+@pytest.mark.asyncio
+async def test_graph_live_subagent_root_cursor_binds_selected_execution():
+    from types import SimpleNamespace
+    from linktools.ai.runtime._watch_cursor import decode_execution_watch_cursor
+    from linktools.ai.task import TaskNode, TaskNodeView
+
+    principal = Principal("owner", "tenant")
+    node = TaskNode("node")
+    state = TaskGraphState("graph", TaskStatus.SUCCEEDED, (node,), (
+        TaskNodeView("graph", "node", (), TaskStatus.SUCCEEDED, None, 1, None, None, None, None,
+                     execution_id="selected"),
+    ), 1)
+    class Graph:
+        async def state(self, graph_id, *, principal):
+            return state
+        async def stream_events(self, graph_id, *, principal, after_event_seq=0):
+            if after_event_seq < 1:
+                yield TaskEvent(1, "graph", 1, TaskEventType.GRAPH_ADMITTED,
+                                datetime.now(timezone.utc), TaskStatus.PENDING)
+    async def inspect(execution_id, *, principal):
+        assert execution_id == "selected"
+        return SimpleNamespace(binding_kind="agent")
+    async def tree(execution_id, *, principal, after_event_seqs=None, include_content=False, ready=None):
+        assert execution_id == "selected"
+        if ready is not None:
+            ready.set()
+        yield ExecutionTreeEvent(
+            "selected", "agent", ExecutionLineageKind.SUBAGENT,
+            "parent", "lineage-root", "invocation", 0,
+            ExecutionStreamEvent("selected", 1, ExecutionEventType.EXECUTION_SUCCEEDED.value, {}),
+        )
+    runtime = SimpleNamespace(namespace="selected-subtree", executions=SimpleNamespace(inspect=inspect))
+    handle = TaskGraphRun(runtime, Graph(), "graph", principal, tree)
+    items = [item async for item in handle.watch()]
+    nested = next(item.event for item in items if isinstance(item.event, ExecutionTreeEvent))
+    assert nested.root_execution_id == "lineage-root" and nested.depth == 0
+    assert decode_execution_watch_cursor("selected-subtree", "tenant", "selected", nested.cursor,
+                                         include_content=False) == {"selected": 1}
+    with pytest.raises(AIError) as error:
+        decode_execution_watch_cursor("selected-subtree", "tenant", "lineage-root", nested.cursor,
+                                      include_content=False)
+    assert error.value.code is ErrorCode.CURSOR_INVALID

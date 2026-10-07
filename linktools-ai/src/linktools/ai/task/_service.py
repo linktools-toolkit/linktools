@@ -85,7 +85,7 @@ class TaskGraphQueryService(Protocol):
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
         limit: int = 100,
     ) -> Page[TaskEvent]: ...
 
@@ -94,7 +94,7 @@ class TaskGraphQueryService(Protocol):
         graph_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ) -> AsyncIterator[TaskEvent]: ...
 
     async def wait(
@@ -103,7 +103,13 @@ class TaskGraphQueryService(Protocol):
         *,
         principal: Principal,
         timeout_seconds: "float | None" = None,
-    ) -> TaskGraphResult: ...
+    ) -> TaskGraphState:
+        """Return the stop-condition read, retaining its raw status and node set.
+
+        Terminal, recovery-required, and stable waiting states can satisfy the
+        wait. The graph can change again after this state is read.
+        """
+        ...
 
 
 class TaskGraphService(TaskGraphQueryService, Protocol):

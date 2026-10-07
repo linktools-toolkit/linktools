@@ -37,7 +37,7 @@ from linktools.ai.core import (
     canonical_sha256,
     idempotency_key_digest,
 )
-from linktools.ai.errors import AIError, ErrorCode, TaskObservationError
+from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import (
     AgentTaskInput,
     AgentTaskInputContext,
@@ -207,9 +207,9 @@ async def test_graph_freezes_attachments_before_dependencies_finish(
             )
         assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
         gate.set()
-        completed = await run.wait(timeout_seconds=10)
-        assert completed.status is TaskStatus.SUCCEEDED
-        consumer = next(n for n in completed.node_results if n.node_id == "consumer")
+        completed = (await run.wait(timeout_seconds=10)).result
+        assert completed.wait_status is TaskStatus.SUCCEEDED
+        consumer = next(n for n in completed.node_states if n.node_id == "consumer")
         assert consumer.status is TaskStatus.SUCCEEDED
         record = await state.execution.executions.get(
             consumer.execution_id, tenant_id=runtime.tenant_id,
@@ -628,7 +628,7 @@ async def test_execution_cancel_winning_during_output_store_projects_cancelled_n
         finally:
             release_store.set()
 
-        result = await graph_run.wait(timeout_seconds=5)
+        result = (await graph_run.wait(timeout_seconds=5)).result
         execution = await runtime._execution_service.inspect(
             runner.execution_id,
             principal=runtime.default_principal,
@@ -638,7 +638,7 @@ async def test_execution_cancel_winning_during_output_store_projects_cancelled_n
             tenant_id=runtime.tenant_id,
         )
 
-        assert result.status is TaskStatus.CANCELLED
+        assert result.wait_status is TaskStatus.CANCELLED
         assert execution.status.value == "CANCELLED"
         assert graph_state is not None
         assert graph_state.node_states[0].status is TaskStatus.CANCELLED
@@ -704,7 +704,7 @@ async def test_function_task_cancel_winning_during_output_store_projects_cancell
         finally:
             release_store.set()
 
-        result = await graph_run.wait(timeout_seconds=5)
+        result = (await graph_run.wait(timeout_seconds=5)).result
         execution = await runtime._execution_service.inspect(
             execution_id,
             principal=runtime.default_principal,
@@ -714,7 +714,7 @@ async def test_function_task_cancel_winning_during_output_store_projects_cancell
             tenant_id=runtime.tenant_id,
         )
 
-        assert result.status is TaskStatus.CANCELLED
+        assert result.wait_status is TaskStatus.CANCELLED
         assert execution.status.value == "CANCELLED"
         assert graph_state is not None
         assert graph_state.node_states[0].status is TaskStatus.CANCELLED
@@ -845,12 +845,12 @@ async def test_pending_node_cancel_recovery_keeps_running_sibling_alive(
         assert settled_cancel.status.value == "SUCCEEDED"
 
         release_sibling.set()
-        completed = await graph_run.wait(timeout_seconds=5)
+        completed = (await graph_run.wait(timeout_seconds=5)).result
         final_state = await graph_run.state(include_content=True)
         completed_sibling = next(
             item for item in final_state.node_states if item.node_id == "sibling"
         )
-        assert completed.status is TaskStatus.CANCELLED
+        assert completed.wait_status is TaskStatus.CANCELLED
         assert completed_sibling.status is TaskStatus.SUCCEEDED
         assert sibling_calls == 1
 
@@ -1012,17 +1012,17 @@ async def test_task_observer_exception_is_visible_without_changing_graph_state()
             observed += 1
             raise RuntimeError("observer callback failed")
 
-        with pytest.raises(TaskObservationError) as observer_error:
-            await graph_run.observe(observer)  # type: ignore[arg-type]
+        with pytest.raises(ObservationError) as observer_error:
+            await graph_run.wait(on_event=observer, timeout_seconds=5)
         current = await graph_run.state(include_content=True)
-        assert observer_error.value.code is ErrorCode.TASK_OBSERVER_FAILED
+        assert observer_error.value.code is ErrorCode.OBSERVER_FAILED
         assert observer_error.value.origin == "callback"
         assert observed == 1
         assert current.status is TaskStatus.RUNNING
 
         release.set()
-        completed = await graph_run.wait(timeout_seconds=5)
-        assert completed.status is TaskStatus.SUCCEEDED
+        completed = (await graph_run.wait(timeout_seconds=5)).result
+        assert completed.wait_status is TaskStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
@@ -1068,11 +1068,11 @@ async def test_task_execution_cancel_invokes_cancel_callback_once() -> None:
         replay = await execution.cancel(
             idempotency_key="cancel-callback-once-operation-0001"
         )
-        result = await graph_run.wait(timeout_seconds=5)
+        result = (await graph_run.wait(timeout_seconds=5)).result
 
         assert first.cancelled
         assert replay.cancelled
-        assert result.status is TaskStatus.CANCELLED
+        assert result.wait_status is TaskStatus.CANCELLED
         assert cancel_calls == 1
 
 
@@ -1104,8 +1104,8 @@ async def test_cancel_recovery_required_execution_preserves_recovery_boundary() 
             idempotency_key="cancel-recovery-required-graph-0001",
         )
         await asyncio.wait_for(started.wait(), 3)
-        initial = await graph_run.wait(timeout_seconds=5)
-        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        initial = (await graph_run.wait(timeout_seconds=5)).result
+        assert initial.wait_status is TaskStatus.RECOVERY_REQUIRED
 
         execution = await graph_run.execution("node")
         with pytest.raises(AIError) as raised:
@@ -1243,10 +1243,10 @@ async def test_task_execution_cancel_persists_node_intent_before_execution_io(
             idempotency_key="task-execution-cancel-order-cancel-0001"
         )
 
-        result = await graph_run.wait(timeout_seconds=5)
+        result = (await graph_run.wait(timeout_seconds=5)).result
         assert cancelled.cancelled
         assert observed_intent.is_set()
-        assert result.status is TaskStatus.CANCELLED
+        assert result.wait_status is TaskStatus.CANCELLED
 
 
 @pytest.mark.asyncio
@@ -1603,10 +1603,10 @@ async def test_runtime_runner_cannot_commit_unreadable_success() -> None:
             ),
             idempotency_key="unreadable-runner-run-0001",
         )
-        completed = await run.wait(timeout_seconds=10)
+        completed = (await run.wait(timeout_seconds=10)).result
 
-        assert completed.status is TaskStatus.FAILED
-        assert completed.node_results[0].error_code == (
+        assert completed.wait_status is TaskStatus.FAILED
+        assert completed.node_states[0].error_code == (
             ErrorCode.STORAGE_INTEGRITY_ERROR.value
         )
         with pytest.raises(AIError) as result_error:
@@ -1791,8 +1791,8 @@ async def test_recovery_preflight_preserves_unknown_agent_input_version(
         assert unsupported.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
         release.set()
-        result = await run.wait(timeout_seconds=10)
-        assert result.status is TaskStatus.SUCCEEDED
+        result = (await run.wait(timeout_seconds=10)).result
+        assert result.wait_status is TaskStatus.SUCCEEDED
 
 
 def test_agent_task_input_identity_excludes_additive_fields() -> None:
@@ -1946,8 +1946,8 @@ async def test_task_results_page_reads_only_page_states_and_preserves_null(
             graph,
             idempotency_key="bounded-task-results-run-0001",
         )
-        completed = await run.wait(timeout_seconds=10)
-        assert completed.status is TaskStatus.SUCCEEDED
+        completed = (await run.wait(timeout_seconds=10)).result
+        assert completed.wait_status is TaskStatus.SUCCEEDED
 
         repository = state.task.tasks
         original_get_node_states = repository.get_node_states
@@ -2027,16 +2027,16 @@ async def test_agent_task_thinking_false_and_none_resolve_before_model_calls() -
             graph,
             idempotency_key="agent-task-thinking-run-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
 
-        assert result.status is TaskStatus.SUCCEEDED, result.node_results
+        assert result.wait_status is TaskStatus.SUCCEEDED, result.node_states
         state_view = await run.state(include_content=True)
         inputs = {node.node_id: node.input for node in state_view.nodes}
         assert inputs["explicit-false"]["thinking"] is False
         assert inputs["default-thinking"]["thinking"] == "high"
 
         for node_id, expected in (("explicit-false", False), ("default-thinking", "high")):
-            node_result = next(item for item in result.node_results if item.node_id == node_id)
+            node_result = next(item for item in result.node_states if item.node_id == node_id)
             assert node_result.execution_id is not None
             execution = await state.execution.executions.get(
                 node_result.execution_id,
@@ -2435,9 +2435,9 @@ async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() ->
             ),
             idempotency_key="terminal-dependencies",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
     assert observed == {"failed": TaskStatus.FAILED, "blocked": TaskStatus.BLOCKED}
-    assert {node.node_id: node.status for node in result.node_results} == {
+    assert {node.node_id: node.status for node in result.node_states} == {
         "failed": TaskStatus.FAILED,
         "blocked": TaskStatus.BLOCKED,
         "collect": TaskStatus.SUCCEEDED,
@@ -2541,10 +2541,10 @@ async def test_any_succeeded_waits_for_all_terminal_dependencies_and_filters_res
         assert blocked_calls == 0
 
         release_held.set()
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
         final_state = await run.state(include_content=True)
 
-    assert result.status is TaskStatus.SUCCEEDED
+    assert result.wait_status is TaskStatus.SUCCEEDED
     assert observed == {
         "states": {
             "held-failure": TaskStatus.FAILED,
@@ -2554,7 +2554,7 @@ async def test_any_succeeded_waits_for_all_terminal_dependencies_and_filters_res
     }
     assert blocked_calls == 0
     assert {
-        node.node_id: node.status for node in result.node_results
+        node.node_id: node.status for node in result.node_states
     } == {
         "held-failure": TaskStatus.FAILED,
         "failed-fast": TaskStatus.FAILED,
@@ -2627,7 +2627,7 @@ async def test_task_policy_matrix_persists_in_each_runtime_backend(
             graph,
             idempotency_key=f"persist-policy-{backend}-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
         state = await run.state()
 
     restored_state = None
@@ -2639,9 +2639,9 @@ async def test_task_policy_matrix_persists_in_each_runtime_backend(
             capabilities=(application,),
         ) as runtime:
             restored_run = await runtime.tasks.bind(task).get(graph.graph_id)
-            restored_result = await restored_run.wait(timeout_seconds=10)
+            restored_result = (await restored_run.wait(timeout_seconds=10)).result
             restored_state = await restored_run.state()
-        assert restored_result.status is result.status
+        assert restored_result.wait_status is result.wait_status
 
     expected_policies = {
         f"{dependency_policy}-{failure_policy}": (
@@ -2668,10 +2668,10 @@ async def test_task_policy_matrix_persists_in_each_runtime_backend(
         "all_terminal-propagate",
         "all_terminal-isolate",
     }
-    statuses = {node.node_id: node.status for node in result.node_results}
+    statuses = {node.node_id: node.status for node in result.node_states}
     assert statuses["any_succeeded-propagate"] is TaskStatus.BLOCKED
     assert statuses["any_succeeded-isolate"] is TaskStatus.BLOCKED
-    assert result.status is TaskStatus.BLOCKED
+    assert result.wait_status is TaskStatus.BLOCKED
 
 
 class _TestTaskExpander:
@@ -2822,10 +2822,10 @@ async def test_expansion_applies_dependency_policies_to_each_new_node() -> None:
             graph,
             idempotency_key="expansion-dependency-policies-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
         state = await run.state()
 
-    assert result.status is TaskStatus.SUCCEEDED
+    assert result.wait_status is TaskStatus.SUCCEEDED
     assert set(ran) == {
         "expansion-source",
         "success-root",
@@ -2836,7 +2836,7 @@ async def test_expansion_applies_dependency_policies_to_each_new_node() -> None:
         "terminal-after-failures",
         "nested-any",
     }
-    result_statuses = {node.node_id: node.status for node in result.node_results}
+    result_statuses = {node.node_id: node.status for node in result.node_states}
     assert result_statuses["on-source"] is TaskStatus.SUCCEEDED
     assert result_statuses["on-mixed"] is TaskStatus.SUCCEEDED
     assert result_statuses["empty-terminal"] is TaskStatus.SUCCEEDED
@@ -2938,13 +2938,13 @@ async def test_expanded_join_failure_propagates_after_isolated_candidate_failure
             graph,
             idempotency_key="expanded-join-failure-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
 
-    assert result.status is TaskStatus.FAILED
+    assert result.wait_status is TaskStatus.FAILED
     assert set(ran) == {"candidate", "join"}
     assert join_dependencies == {"candidate": TaskStatus.FAILED}
     assert {
-        node.node_id: node.status for node in result.node_results
+        node.node_id: node.status for node in result.node_states
     } == {
         "source": TaskStatus.SUCCEEDED,
         "candidate": TaskStatus.FAILED,
@@ -3024,11 +3024,11 @@ async def test_nested_expander_source_does_not_implicitly_wait_for_its_child() -
         finally:
             release_grandchild.set()
 
-        result = await run_handle.wait(timeout_seconds=10)
+        result = (await run_handle.wait(timeout_seconds=10)).result
 
-    assert result.status is TaskStatus.SUCCEEDED
+    assert result.wait_status is TaskStatus.SUCCEEDED
     assert {
-        node.node_id: node.status for node in result.node_results
+        node.node_id: node.status for node in result.node_states
     } == {
         "root": TaskStatus.SUCCEEDED,
         "branch": TaskStatus.SUCCEEDED,
@@ -3140,10 +3140,10 @@ async def test_graph_nodes_store_only_the_exact_task_reference() -> None:
             TaskGraph("frozen-task-identity", (node,)),
             idempotency_key="frozen-task-identity-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
         assert await run.result("node") == {"value": None}
 
-    assert result.status is TaskStatus.SUCCEEDED
+    assert result.wait_status is TaskStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
@@ -3170,10 +3170,10 @@ async def test_runtime_accepts_multiple_task_handler_revisions() -> None:
             ),
             idempotency_key="task-revisions-run-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
 
-    assert result.status is TaskStatus.SUCCEEDED
-    assert {item.node_id for item in result.node_results} == {"v1", "v2"}
+    assert result.wait_status is TaskStatus.SUCCEEDED
+    assert {item.node_id for item in result.node_states} == {"v1", "v2"}
 
 
 @pytest.mark.asyncio
@@ -3263,8 +3263,8 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
             timeout_seconds=10,
         )
 
-        assert result.status is TaskStatus.SUCCEEDED
-        assert all(node.status is TaskStatus.SUCCEEDED for node in result.node_results)
+        assert result.wait_status is TaskStatus.SUCCEEDED
+        assert all(node.status is TaskStatus.SUCCEEDED for node in result.node_states)
         first_output = await task_result(runtime, graph.graph_id, "custom-first")
         agent_output = await task_result(runtime, graph.graph_id, "agent")
         last_output = await task_result(runtime, graph.graph_id, "custom-last")
@@ -3333,9 +3333,9 @@ async def test_projected_agent_input_persists_only_declared_source_and_final_inp
             graph,
             idempotency_key="projected-input-run-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
 
-        assert result.status is TaskStatus.SUCCEEDED, result.node_results
+        assert result.wait_status is TaskStatus.SUCCEEDED, result.node_states
         assert calls == ["consumer"]
         prepared = await state.task.tasks.get_prepared_input(
             graph.graph_id,
@@ -3353,7 +3353,7 @@ async def test_projected_agent_input_persists_only_declared_source_and_final_inp
         )
         assert source_ref.result_digest == source_record["source"].result_digest
         consumer_result = next(
-            node for node in result.node_results if node.node_id == "consumer"
+            node for node in result.node_states if node.node_id == "consumer"
         )
         execution = await state.execution.executions.get(
             consumer_result.execution_id,
@@ -3414,10 +3414,10 @@ async def test_invalid_graph_request_does_not_reserve_task_definitions() -> None
             valid_graph,
             idempotency_key="task-admission-owner-valid-0001",
         )
-        completed = await result.wait(timeout_seconds=10)
+        completed = (await result.wait(timeout_seconds=10)).result
 
-    assert completed.status is TaskStatus.SUCCEEDED
-    assert completed.node_results[0].status is TaskStatus.SUCCEEDED
+    assert completed.wait_status is TaskStatus.SUCCEEDED
+    assert completed.node_states[0].status is TaskStatus.SUCCEEDED
 
 
 @pytest.mark.asyncio
@@ -3459,11 +3459,11 @@ async def test_duplicate_graph_start_keeps_the_original_task_definition_owner() 
             idempotency_key="concurrent-owner-graph-0001",
         )
         release.set()
-        first_result = await first_run.wait(timeout_seconds=10)
-        repeated_result = await repeated.wait(timeout_seconds=10)
+        first_result = (await first_run.wait(timeout_seconds=10)).result
+        repeated_result = (await repeated.wait(timeout_seconds=10)).result
 
-    assert first_result.status is TaskStatus.SUCCEEDED
-    assert repeated_result.status is TaskStatus.SUCCEEDED
+    assert first_result.wait_status is TaskStatus.SUCCEEDED
+    assert repeated_result.wait_status is TaskStatus.SUCCEEDED
     assert calls == ["first"]
 
 
@@ -3516,9 +3516,9 @@ async def test_projected_agent_input_reads_json_null_dependency() -> None:
             graph,
             idempotency_key="projected-null-input-run-0001",
         )
-        completed = await run.wait(timeout_seconds=10)
+        completed = (await run.wait(timeout_seconds=10)).result
 
-        assert completed.status is TaskStatus.SUCCEEDED
+        assert completed.wait_status is TaskStatus.SUCCEEDED
         assert await run.result("source") is None
 
     assert projected_values == [None]
@@ -3632,7 +3632,7 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
                 "runner-contract-input-0001",
             ),
         )
-        completed = await resumed.wait(timeout_seconds=10)
+        completed = (await resumed.wait(timeout_seconds=10)).result
         assert await resumed.result("runner") == {"value": "accepted"}
         result_ref = await resumed.result_ref("runner")
         assert result_ref.result_digest == canonical_sha256({"value": "accepted"})
@@ -3652,7 +3652,7 @@ async def test_runner_task_contract_is_persisted_and_validated_after_reopen(
         assert runner_node.reconcile is False
         assert runner.calls == 1
 
-    assert completed.status is TaskStatus.SUCCEEDED
+    assert completed.wait_status is TaskStatus.SUCCEEDED
     assert expanded_outputs == [{"value": "accepted"}]
 
 
@@ -3741,9 +3741,9 @@ async def test_projected_workers_issue_distinct_requests_and_persist_history(
             graph,
             idempotency_key="dual-projected-workers-run-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
 
-        assert result.status is TaskStatus.SUCCEEDED, result.node_results
+        assert result.wait_status is TaskStatus.SUCCEEDED, result.node_states
 
         source_record = (
             await state.task.tasks.get_results(
@@ -3752,7 +3752,7 @@ async def test_projected_workers_issue_distinct_requests_and_persist_history(
                 tenant_id=runtime.tenant_id,
             )
         )["source"]
-        node_results = {node.node_id: node for node in result.node_results}
+        node_results = {node.node_id: node for node in result.node_states}
         for node_id, marker in (
             ("left", "Harbor-ALPHA"),
             ("right", "Queue-BETA"),
@@ -3916,12 +3916,12 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
         engine = runtime.tasks.bind(source, worker)
         await engine.recover_pending()
         recovered_run = await engine.get(graph.graph_id)
-        completed = await recovered_run.wait(timeout_seconds=10)
+        completed = (await recovered_run.wait(timeout_seconds=10)).result
 
-        assert completed.status is TaskStatus.SUCCEEDED, completed.node_results
+        assert completed.wait_status is TaskStatus.SUCCEEDED, completed.node_states
         assert builds == ["consumer"]
         consumer_result = next(
-            node for node in completed.node_results if node.node_id == "consumer"
+            node for node in completed.node_states if node.node_id == "consumer"
         )
         assert consumer_result.execution_id is not None
         interactions = await runtime.history.model_interactions(
@@ -4012,12 +4012,12 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
             timeout_seconds=10,
         )
 
-        assert result.status is TaskStatus.SUCCEEDED, result.node_results
+        assert result.wait_status is TaskStatus.SUCCEEDED, result.node_states
         assert await task_result(runtime,
             graph.graph_id,
             "agent-child",
         ) is not None
-        assert {node.node_id for node in result.node_results} == {
+        assert {node.node_id for node in result.node_states} == {
             "agent-child",
             "agent-root",
             "application-root",
@@ -4079,7 +4079,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         events = await state.task.tasks.list_events(
             graph.graph_id,
             tenant_id="default",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
         expanded = {
@@ -4196,8 +4196,8 @@ async def test_reopened_expansion_uses_captured_candidates_and_supports_nesting(
             timeout_seconds=10,
         )
 
-    assert result.status is TaskStatus.SUCCEEDED
-    assert {node.node_id for node in result.node_results} == {
+    assert result.wait_status is TaskStatus.SUCCEEDED
+    assert {node.node_id for node in result.node_states} == {
         "input",
         "root",
         "child",
@@ -4260,12 +4260,12 @@ async def test_reopened_expansion_rejects_a_new_runtime_task_candidate(
                 "reopened-added-candidate-input-0001",
             ),
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
 
-    root = next(node for node in result.node_results if node.node_id == "root")
-    assert result.status is TaskStatus.FAILED
+    root = next(node for node in result.node_states if node.node_id == "root")
+    assert result.wait_status is TaskStatus.FAILED
     assert root.error_code == ErrorCode.BINDING_NOT_REGISTERED.value
-    assert all(node.node_id != "added" for node in result.node_results)
+    assert all(node.node_id != "added" for node in result.node_states)
 
 
 
@@ -4453,7 +4453,7 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
             principal=runtime.default_principal,
             timeout_seconds=10,
         )
-        assert result.status is TaskStatus.SUCCEEDED
+        assert result.wait_status is TaskStatus.SUCCEEDED
         output = await task_result(runtime,
             "typed-contract-reopen",
             "typed-agent",
@@ -4477,10 +4477,10 @@ async def test_persisted_node_output_contracts_survive_runtime_reopen(
 
     invalid_custom = next(
         node
-        for node in invalid_custom_result.node_results
+        for node in invalid_custom_result.node_states
         if node.node_id == "typed-custom-invalid"
     )
-    assert invalid_custom_result.status is TaskStatus.FAILED
+    assert invalid_custom_result.wait_status is TaskStatus.FAILED
     assert invalid_custom.error_code == ErrorCode.OUTPUT_VALIDATION_FAILED.value
 
 
@@ -4522,8 +4522,8 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
             TaskGraph("effect-applied", (handler.node("node"),)),
             idempotency_key="effect-applied-run-0001",
         )
-        initial = await run.wait(timeout_seconds=10)
-        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        initial = (await run.wait(timeout_seconds=10)).result
+        assert initial.wait_status is TaskStatus.RECOVERY_REQUIRED
 
         snapshot = await task_graph_state(runtime,
             run.graph_id,
@@ -4550,7 +4550,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
         events = await state.execution.events.list(
             node_state.execution_id,
             tenant_id="default",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
         assert events.items[-1].payload["task_effect"] == "applied"
@@ -4591,8 +4591,8 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
             TaskGraph("effect-invalid", (handler.node("node"),)),
             idempotency_key="effect-invalid-run-0001",
         )
-        initial = await run.wait(timeout_seconds=10)
-        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        initial = (await run.wait(timeout_seconds=10)).result
+        assert initial.wait_status is TaskStatus.RECOVERY_REQUIRED
         snapshot = await task_graph_state(runtime,
             run.graph_id,
             principal=runtime.default_principal,
@@ -4660,8 +4660,8 @@ async def test_not_applied_retries_same_execution_once(
             ),
             idempotency_key="effect-retry-run-0001",
         )
-        initial = await run.wait(timeout_seconds=10)
-        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        initial = (await run.wait(timeout_seconds=10)).result
+        assert initial.wait_status is TaskStatus.RECOVERY_REQUIRED
         before = await task_graph_state(runtime,
             run.graph_id,
             principal=runtime.default_principal,
@@ -4676,9 +4676,9 @@ async def test_not_applied_retries_same_execution_once(
             idempotency_key="effect-retry-resolution-0001",
         )
         assert resumed.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
-        final = await run.wait(timeout_seconds=10)
+        final = (await run.wait(timeout_seconds=10)).result
 
-        assert final.status is TaskStatus.SUCCEEDED
+        assert final.wait_status is TaskStatus.SUCCEEDED
         assert calls == 2
         after = await task_graph_state(runtime,
             run.graph_id,
@@ -4738,8 +4738,8 @@ async def test_runtime_reconcile_unknown_exception_and_invalid_stay_recoverable(
             graph,
             idempotency_key=f"reconcile-{reconcile_case}-graph-0001",
         )
-        initial = await graph_run.wait(timeout_seconds=10)
-        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        initial = (await graph_run.wait(timeout_seconds=10)).result
+        assert initial.wait_status is TaskStatus.RECOVERY_REQUIRED
         initial_state = await graph_run.state(include_content=True)
         initial_node = initial_state.node_states[0]
         assert initial_node.execution_id is not None
@@ -4748,7 +4748,7 @@ async def test_runtime_reconcile_unknown_exception_and_invalid_stay_recoverable(
         await graph_run.recover(
             idempotency_key=f"reconcile-{reconcile_case}-recover-0001",
         )
-        recovered = await graph_run.wait(timeout_seconds=10)
+        recovered = (await graph_run.wait(timeout_seconds=10)).result
         recovered_state = await graph_run.state(include_content=True)
         recovered_node = recovered_state.node_states[0]
         execution = await runtime.executions.inspect(
@@ -4756,7 +4756,7 @@ async def test_runtime_reconcile_unknown_exception_and_invalid_stay_recoverable(
             principal=runtime.default_principal,
         )
 
-        assert recovered.status is TaskStatus.RECOVERY_REQUIRED
+        assert recovered.wait_status is TaskStatus.RECOVERY_REQUIRED
         assert recovered_node.status is TaskStatus.RECOVERY_REQUIRED
         assert recovered_node.execution_id == initial_node.execution_id
         assert recovered_node.error_code == ErrorCode.TASK_EFFECT_UNKNOWN.value
@@ -4833,8 +4833,8 @@ async def test_not_applied_after_attempt_budget_exhaustion_fails_execution_and_n
             ),
             idempotency_key="effect-attempt-budget-run-0001",
         )
-        initial = await run.wait(timeout_seconds=10)
-        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        initial = (await run.wait(timeout_seconds=10)).result
+        assert initial.wait_status is TaskStatus.RECOVERY_REQUIRED
         before = await task_graph_state(
             runtime,
             run.graph_id,
@@ -4910,8 +4910,8 @@ async def test_not_applied_after_deadline_expires_fails_execution_and_node(
             idempotency_key="effect-deadline-budget-run-0001",
         )
         await asyncio.wait_for(entered.wait(), 3)
-        initial = await run.wait(timeout_seconds=10)
-        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        initial = (await run.wait(timeout_seconds=10)).result
+        assert initial.wait_status is TaskStatus.RECOVERY_REQUIRED
         before = await task_graph_state(
             runtime,
             run.graph_id,
@@ -5007,8 +5007,8 @@ async def test_retry_beyond_task_deadline_fails_execution_instead_of_leaving_sta
             ),
             idempotency_key="retry-after-deadline-run-0001",
         )
-        result = await run.wait(timeout_seconds=10)
-        node = result.node_results[0]
+        result = (await run.wait(timeout_seconds=10)).result
+        node = result.node_states[0]
         assert node.execution_id is not None
         execution = await runtime._execution_service.result(
             node.execution_id,
@@ -5021,7 +5021,7 @@ async def test_retry_beyond_task_deadline_fails_execution_instead_of_leaving_sta
 
         assert retry_requested.is_set()
         assert calls == 1
-        assert result.status is TaskStatus.FAILED
+        assert result.wait_status is TaskStatus.FAILED
         assert node.status is TaskStatus.FAILED
         assert node.error_code == ErrorCode.EXECUTION_WAIT_TIMEOUT.value
         assert execution.status.value == "FAILED"
@@ -5060,8 +5060,8 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
             ),
             idempotency_key="deferred-input-run-0001",
         )
-        waiting = await run.wait(timeout_seconds=10)
-        node_result = waiting.node_results[0]
+        waiting = (await run.wait(timeout_seconds=10)).result
+        node_result = waiting.node_states[0]
         assert node_result.status is TaskStatus.WAITING
         assert node_result.execution_id is not None
 
@@ -5738,10 +5738,10 @@ async def test_any_succeeded_barrier_survives_runtime_restart(
         bound_tasks = runtime.tasks.bind(success, held, joiner)
         await bound_tasks.recover_pending()
         recovered_run = await bound_tasks.get(graph.graph_id)
-        result = await recovered_run.wait(timeout_seconds=10)
+        result = (await recovered_run.wait(timeout_seconds=10)).result
         final_state = await recovered_run.state()
 
-    assert result.status is TaskStatus.RECOVERY_REQUIRED
+    assert result.wait_status is TaskStatus.RECOVERY_REQUIRED
     assert success_calls == 1
     assert held_calls == 1
     assert join_calls == 0

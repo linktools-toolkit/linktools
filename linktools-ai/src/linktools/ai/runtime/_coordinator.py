@@ -30,14 +30,14 @@ class _LocalRuntimeCoordinator:
         execution_id: str,
         *,
         principal: Principal,
-        after_sequence: int = 0,
+        after_event_seq: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         terminal_yielded = False
         try:
             async for event in self._event.stream(
                 execution_id,
                 principal=principal,
-                after_sequence=after_sequence,
+                after_event_seq=after_event_seq,
             ):
                 if event.event_type in {
                     ExecutionEventType.EXECUTION_SUCCEEDED.value,

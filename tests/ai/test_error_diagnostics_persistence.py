@@ -100,8 +100,8 @@ def _started_execution(now: datetime) -> ExecutionRecord:
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=0,
+        event_seq=0,
+        agent_run_seq=0,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -124,7 +124,7 @@ def _failed_terminal(
         started,
         status=ExecutionStatus.FAILED,
         revision=1,
-        event_sequence=1,
+        event_seq=1,
         error_code=ErrorCode.INTERNAL_ERROR.value,
         safe_error_details=details,
         error_diagnostics=diagnostics,
@@ -143,7 +143,7 @@ def _failed_terminal(
     }
     commit = ExecutionTerminalCommit(
         expected_revision=0,
-        expected_event_sequence=0,
+        expected_event_seq=0,
         execution=terminal,
         result=result,
         terminal_event_type=ExecutionEventType.EXECUTION_FAILED,

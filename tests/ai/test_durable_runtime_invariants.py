@@ -324,7 +324,7 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
 
     async def execution_get(execution_id: str, *, tenant_id: str) -> object:
         calls.append(f"execution:{execution_id}:{tenant_id}")
-        return SimpleNamespace(session_id=None, agent_run_sequence=0)
+        return SimpleNamespace(session_id=None, agent_run_seq=0)
 
     async def release_staging_many(
         *,
@@ -647,10 +647,10 @@ class _RunningTaskRepository:
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]:
-        del graph_id, tenant_id, after_sequence, limit
+        del graph_id, tenant_id, after_event_seq, limit
         return Page(())
 
 
@@ -752,14 +752,14 @@ class _TransitionTaskRepository(_TerminalTaskRepository):
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]:
         del graph_id, tenant_id, limit
         self.event_reads += 1
         if self.event_reads == 1:
             return Page(())
-        return Page((_terminal_task_event(after_sequence + 1),))
+        return Page((_terminal_task_event(after_event_seq + 1),))
 
     async def graph_state(
         self,

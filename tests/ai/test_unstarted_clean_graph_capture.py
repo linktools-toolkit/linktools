@@ -70,7 +70,7 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
                 files=("input.txt",),
                 input_context=context)),
         )), principal=principal, idempotency_key="source")
-        assert (await source.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await source.wait()).result).status is TaskStatus.SUCCEEDED
         execution = await source.execution("agent")
         capture = await runtime.executions.capture_input(
             execution.execution_id, CaptureInputRequest(principal, "source-input"))
@@ -81,7 +81,7 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
             TaskNode("gate", task=gate_task),
             TaskNode("agent", ("gate",), task=agent_task, input_capture=task_capture),
         )), principal=principal, idempotency_key="blocked")
-        assert (await blocked.wait()).status is TaskStatus.FAILED
+        assert ((await blocked.wait()).result).status is TaskStatus.FAILED
         with pytest.raises(AIError) as unavailable:
             await blocked.execution("agent")
         assert unavailable.value.code is ErrorCode.EXECUTION_NOT_READY
@@ -118,7 +118,7 @@ async def test_clean_unstarted_graph_preserves_captured_input_semantics(
         ready = True
         replay = await engine.start(TaskGraph("replay", template.nodes), principal=principal,
                                     idempotency_key="replay")
-        assert (await replay.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await replay.wait()).result).status is TaskStatus.SUCCEEDED
         assert projected_graphs == (["source"] if task_mode == "projected" else [])
         replay_execution = await replay.execution("agent")
         interactions = await replay_execution.model_interactions(include_content=True)

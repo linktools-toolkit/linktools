@@ -4,10 +4,11 @@
 
 import pytest
 
-from linktools.ai.capability import SkillCapability, SkillDefinition
+from linktools.ai.capability import SkillCapability, SkillDefinition, SubagentCapability
 from linktools.ai.capability._skill_source import SkillSourceRegistry
+from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.spec import AgentSpec, AgentSpecCodec, SkillSpec
+from linktools.ai.spec import AgentSpec, AgentSpecCodec, SkillSpec, SubagentRef
 
 
 def _skill(identity: str, content: str) -> SkillDefinition:
@@ -71,7 +72,7 @@ def test_preloaded_skills_are_eager_instructions_on_the_skill_capability() -> No
         preloaded_skill_ids=("z", "a"),
         max_preloaded_bytes=1024,
     )
-    instructions = capability.instructions()
+    instructions = capability.get_instructions()
     assert instructions is not None
     assert "<preloaded-skills>" not in instructions
     assert instructions.index("[skill: a]\na-content") < instructions.index(
@@ -87,7 +88,7 @@ def test_preloaded_skill_instructions_reject_unpaired_surrogates() -> None:
         preloaded_skill_ids=(definition.id,),
     )
     with pytest.raises(AIError) as error:
-        capability.instructions()
+        capability.get_instructions()
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     with pytest.raises(ValueError):
@@ -104,9 +105,34 @@ def test_preloaded_skill_instructions_enforce_total_byte_limit() -> None:
         max_preloaded_bytes=content_size - 1,
     )
     with pytest.raises(AIError) as error:
-        capability.instructions()
+        capability.get_instructions()
     assert error.value.code is ErrorCode.PROMPT_TOO_LARGE
 
 
 def test_skill_capability_without_skills_has_no_instructions() -> None:
-    assert SkillCapability((), SkillSourceRegistry()).instructions() is None
+    assert SkillCapability((), SkillSourceRegistry()).get_instructions() is None
+
+
+@pytest.mark.parametrize("available", (False, True))
+def test_subagent_capability_hook_exposes_delegation_instructions(available: bool) -> None:
+    async def delegate(
+        ref: SubagentRef,
+        task: str,
+        *,
+        files: tuple[str, ...],
+        invocation_id: str,
+    ) -> dict[str, JsonValue]:
+        raise AssertionError("Reading instructions must not delegate a task")
+
+    capability = SubagentCapability(
+        (SubagentRef("agent", "reviewer"),) if available else (),
+        delegate,
+        {"reviewer": "Review the proposed changes"} if available else {},
+    )
+    instructions = capability.get_instructions()
+    if available:
+        assert instructions is not None
+        assert "delegate_task" in instructions
+        assert "- reviewer: Review the proposed changes" in instructions
+    else:
+        assert instructions is None

@@ -53,8 +53,8 @@ def _execution(now: datetime) -> ExecutionRecord:
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=1,
+        event_seq=0,
+        agent_run_seq=1,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -150,7 +150,7 @@ async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> No
         events = await state.execution.events.list(
             execution.execution_id,
             tenant_id=state.execution.events.tenant_id,
-            after_sequence=0,
+            after_event_seq=0,
             limit=10,
         )
         assert tuple(value.event_type for value in events.items) == (
@@ -199,7 +199,7 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
         assert fresh is not None
         assert fresh.status is ExecutionStatus.RECOVERY_REQUIRED
         assert fresh.revision == recovery.revision + 1
-        assert fresh.event_sequence == recovery.event_sequence + 1
+        assert fresh.event_seq == recovery.event_seq + 1
 
         with pytest.raises(AIError) as stale:
             await commands.commit_resumed(recovery)
@@ -207,12 +207,12 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
 
         cancelling = await commands.commit_cancel_claim(fresh)
         assert cancelling.status is ExecutionStatus.CANCELLING
-        assert cancelling.event_sequence == fresh.event_sequence
+        assert cancelling.event_seq == fresh.event_seq
 
         events = await state.execution.events.list(
             "execution",
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=10,
         )
         assert tuple(value.event_type for value in events.items) == (
@@ -279,7 +279,7 @@ async def test_recovery_cancel_claim_reports_concurrent_intent_as_conflict(
         )
         assert current is not None
         assert current.status is ExecutionStatus.RECOVERY_REQUIRED
-        assert current.event_sequence == recovery.event_sequence + 1
+        assert current.event_seq == recovery.event_seq + 1
     finally:
         await state.close()
 

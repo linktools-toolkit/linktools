@@ -1152,15 +1152,15 @@ class TaskRepositoryImpl(RepositoryBase):
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]:
         if tenant_id != self._tenant_id:
             return Page(())
         if (
-            isinstance(after_sequence, bool)
-            or not isinstance(after_sequence, int)
-            or after_sequence < 0
+            isinstance(after_event_seq, bool)
+            or not isinstance(after_event_seq, int)
+            or after_event_seq < 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if (
@@ -1184,7 +1184,7 @@ class TaskRepositoryImpl(RepositoryBase):
             values = await transaction.list_facts(
                 FactQuery(
                     stream,
-                    after_sequence=after_sequence,
+                    after_sequence=after_event_seq,
                     limit=query_limit,
                 )
             )
@@ -1202,14 +1202,14 @@ class TaskRepositoryImpl(RepositoryBase):
 
         values, has_more = await self.state_store.read(read)
         items: list[TaskEvent] = []
-        expected_sequence = after_sequence
+        expected_event_seq = after_event_seq
         for value in values[:limit]:
-            expected_sequence += 1
+            expected_event_seq += 1
             if (
                 value.stream_digest != stream
                 or value.owner_key_digest != owner
                 or value.subject_digest is not None
-                or value.sequence != expected_sequence
+                or value.sequence != expected_event_seq
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             event = _decode_task_event(graph_id, value)
@@ -1219,7 +1219,7 @@ class TaskRepositoryImpl(RepositoryBase):
         page_items = tuple(items)
         return Page(
             page_items,
-            str(page_items[-1].sequence) if has_more and page_items else None,
+            str(page_items[-1].event_seq) if has_more and page_items else None,
         )
 
     async def latest_event(

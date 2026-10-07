@@ -67,8 +67,8 @@ def _execution(*, binding: AgentBindingContract | None = None) -> ExecutionRecor
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.PENDING_START,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=0,
+        event_seq=0,
+        agent_run_seq=0,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -216,10 +216,10 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
         storage=RuntimeStorage.in_memory(),
         capabilities=(application,),
     ) as runtime:
-        result = await runtime.agents.get("default").run(
+        result = (await runtime.agents.get("default").run(
             "hello",
             timeout_seconds=10,
-        )
+        )).result
         assert result.status is ExecutionStatus.SUCCEEDED
 
         history = await runtime.executions.history(

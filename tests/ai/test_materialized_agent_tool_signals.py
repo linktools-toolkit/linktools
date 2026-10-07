@@ -117,10 +117,10 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
         metrics=metrics,
     ) as runtime:
-        result = await runtime.agents.get("default").run(
+        result = (await runtime.agents.get("default").run(
             "prompt",
             timeout_seconds=10,
-        )
+        )).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert result.output == {"text": "done"}
 

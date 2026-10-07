@@ -378,7 +378,7 @@ async def test_runtime_start_admits_resolved_binding() -> None:
             execution,  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
+            SimpleNamespace(_bind_observation=lambda *args: None),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
@@ -621,8 +621,8 @@ async def test_runtime_storage_snapshot_preserves_asset_version_refs(
                 lineage_kind=ExecutionLineageKind.RUN,
                 status=ExecutionStatus.PENDING_START,
                 revision=0,
-                event_sequence=0,
-                agent_run_sequence=0,
+                event_seq=0,
+                agent_run_seq=0,
                 error_code=None,
                 safe_error_details={},
                 created_at=now,

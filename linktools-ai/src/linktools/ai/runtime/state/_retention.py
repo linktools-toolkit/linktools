@@ -69,9 +69,9 @@ class RuntimeRetentionController:
                     namespace=self._namespace,
                     tenant_id=tenant_id,
                     execution_id=execution_id,
-                    agent_run_sequence=sequence,
+                    agent_run_seq=sequence,
                 )
-                for sequence in range(1, execution.agent_run_sequence + 1)
+                for sequence in range(1, execution.agent_run_seq + 1)
             )
             await self._run_store.release_staging_many(
                 candidate_agent_run_ids=agent_run_ids,

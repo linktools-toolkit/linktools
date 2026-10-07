@@ -284,12 +284,6 @@ class VersionedStorage(Protocol[KeyT, ValueT]):
         entry_revision: StorageEntryRevision,
     ) -> 'ValueT | None': ...
 
-    async def get_at_version(
-        self,
-        key: KeyT,
-        version: int,
-    ) -> 'ValueT | None': ...
-
 
 @runtime_checkable
 class InitializableStorage(Protocol):

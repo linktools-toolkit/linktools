@@ -39,7 +39,7 @@ from ._harness_memory import (
 )
 from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
-from ._journal import DURATION_NS_METADATA_KEY, REQUEST_SEQUENCE_METADATA_KEY
+from ._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
@@ -144,7 +144,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         transcript = self.recorder.transcript_messages()
         self._last_checkpoint_transcript_count = len(transcript)
         self._replay_request_captured = bool(transcript and isinstance(transcript[-1], ModelRequest))
-        await self.recorder.record_event("run_started", ctx.run_step)
+        await self.recorder.record_event("AGENT_RUN_STARTED", ctx.run_step)
 
     async def before_model_request(
         self,
@@ -177,8 +177,8 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             elif ctx.messages and isinstance(ctx.messages[-1], ModelResponse):
                 response = ctx.messages[-1]
             if response is not None:
-                self.recorder.append_transcript_message(response)
-                # The exact response must be recoverable before any tool effect.
+                # The recorder captured this response with its request identity.
+                # It must be recoverable before any tool effect.
                 await self._save_checkpoint(ctx, messages=ctx.messages, state="complete")
         if isinstance(node, CallToolsNode):
             pending = result.request if isinstance(result, ModelRequestNode) else None
@@ -197,6 +197,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         result: AgentRunResult[Any],
     ) -> AgentRunResult[Any]:
         self._live_messages = result.all_messages()
+        self.recorder.finish_transcript()
         interrupted = isinstance(result.output, DeferredToolRequests)
         if interrupted:
             if self._last_observed_step_index is None:
@@ -210,7 +211,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             state="interrupted" if interrupted else "complete",
         )
         await self.recorder.record_event(
-            "run_interrupted" if interrupted else "run_completed",
+            "AGENT_RUN_INTERRUPTED" if interrupted else "AGENT_RUN_SUCCEEDED",
             ctx.run_step,
         )
         return result
@@ -222,24 +223,25 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         error: BaseException,
     ) -> AgentRunResult[Any]:
         messages = self._live_messages or ctx.messages
+        self.recorder.finish_transcript(interrupted=True)
         await self._save_checkpoint(
             ctx,
             messages=messages,
             state="interrupted",
         )
         await self.recorder.record_event(
-            "run_failed",
+            "AGENT_RUN_FAILED",
             ctx.run_step,
             error=repr(error),
         )
         raise error
 
     def _tool_request_metadata(self, tool_call_id: str) -> dict[str, str]:
-        sequence = self.recorder.request_sequence_for_tool_call(tool_call_id)
+        sequence = self.recorder.model_request_seq_for_tool_call(tool_call_id)
         return (
             {}
             if sequence is None
-            else {REQUEST_SEQUENCE_METADATA_KEY: str(sequence)}
+            else {MODEL_REQUEST_SEQ_METADATA_KEY: str(sequence)}
         )
 
     async def before_tool_execute(
@@ -253,13 +255,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         if call.tool_call_id in self._tool_started_ns:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._tool_started_ns[call.tool_call_id] = monotonic_ns()
-        await self.recorder.record_event(
-            "tool_call_started",
-            ctx.run_step,
-            tool_call_id=call.tool_call_id,
-            tool_name=tool_def.name,
-            metadata=self._tool_request_metadata(call.tool_call_id),
-        )
+        await self.recorder.record_tool_start(call, ctx.run_step)
         return args
 
     async def after_tool_execute(
@@ -278,7 +274,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
         await self.recorder.record_event(
-            "tool_call_completed",
+            "TOOL_CALL_SUCCEEDED",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
@@ -302,7 +298,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
         await self.recorder.record_event(
-            "tool_call_failed",
+            "TOOL_CALL_FAILED",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
@@ -364,7 +360,7 @@ async def compose_platform_capabilities(
     agent_id: str,
     agent_run_id: str,
     execution_id: str | None = None,
-    agent_run_sequence: int | None,
+    agent_run_seq: int | None,
     history_id: str | None,
     memory_scope: str | None,
     run_store: AgentRunStore,
@@ -397,8 +393,8 @@ async def compose_platform_capabilities(
             **({} if history_id is None else {"history_id": history_id}),
             **(
                 {}
-                if agent_run_sequence is None
-                else {"agent_run_sequence": str(agent_run_sequence)}
+                if agent_run_seq is None
+                else {"agent_run_seq": str(agent_run_seq)}
             ),
         },
         deferred_pause_sink=deferred_pause_sink,

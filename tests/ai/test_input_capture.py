@@ -36,7 +36,7 @@ async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Pat
             TaskNode("target", ("source",), task=consumer, input={"original": True},
                      input_refs={"alias": TaskNodeResultRef("source")}),
         )), idempotency_key="capture-source-graph-0001", principal=principal)
-        result = await source_run.wait()
+        result = (await source_run.wait()).result
         assert result.status is TaskStatus.SUCCEEDED
         execution = await source_run.execution("target")
         if extra_invocation_fields:
@@ -60,7 +60,7 @@ async def test_captured_task_dependencies_outlive_source_execution(tmp_path: Pat
         rerun = await engine.start(TaskGraph("rerun-graph", (
             TaskNode("target", task=consumer, input_capture=capture),
         )), idempotency_key="capture-rerun-graph-0001", principal=principal)
-        assert (await rerun.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await rerun.wait()).result).status is TaskStatus.SUCCEEDED
         assert await rerun.result("target") == {"value": 17, "input": {"original": True}}
         assert await source_run.result("target") == await rerun.result("target")
 
@@ -92,22 +92,22 @@ async def test_agent_capture_fixed_and_reproject_inputs(tmp_path: Path) -> None:
         engine = runtime.tasks.bind(task)
         run = await engine.start(TaskGraph("agent-source", (TaskNode("a", task=task,
             input=AgentTaskInput(parameters={"name": "Ada"})),)), principal=principal, idempotency_key="agent-capture-source-0001")
-        assert (await run.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await run.wait()).result).status is TaskStatus.SUCCEEDED
         execution = await run.execution("a")
         capture = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "agent-capture-input-0001", "clean"))
         assert (await runtime._input_captures.read_agent(capture, principal=principal)).prompt == "Hello Ada"
         fixed = await runtime._input_captures.task_input(capture, principal=principal)
         rerun = await engine.start(TaskGraph("agent-fixed", (TaskNode("a", task=task, input_capture=fixed),)), principal=principal, idempotency_key="agent-capture-fixed-0001")
-        assert (await rerun.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await rerun.wait()).result).status is TaskStatus.SUCCEEDED
         assert calls == ["Ada"]
         reproject = await runtime._input_captures.task_input(capture, principal=principal, input_mode="reproject_input")
         rerun = await engine.start(TaskGraph("agent-reproject", (TaskNode("a", task=task, input_capture=reproject),)), principal=principal, idempotency_key="agent-capture-reproject-0001")
-        assert (await rerun.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await rerun.wait()).result).status is TaskStatus.SUCCEEDED
         assert calls == ["Ada", "Ada"]
         restored = await runtime.tasks.from_agent_capture("capture.restored", capture, principal=principal)
         restored_run = await runtime.tasks.bind(restored).start(TaskGraph("agent-restored", (TaskNode("a", task=restored,
             input=AgentTaskInput("different case")),)), principal=principal, idempotency_key="agent-capture-restored-0001")
-        assert (await restored_run.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await restored_run.wait()).result).status is TaskStatus.SUCCEEDED
         restored_execution = await restored_run.execution("a")
         restored_capture = await runtime.executions.capture_input(restored_execution.execution_id, CaptureInputRequest(principal, "agent-capture-restored-input-0001", "clean"))
         assert (await runtime._input_captures.read_agent(restored_capture, principal=principal)).prompt == "different case"
@@ -132,20 +132,20 @@ async def test_graph_capture_keeps_frozen_results_across_restart(tmp_path: Path)
             TaskNode("value", task=producer),
             TaskNode("read", ("value",), task=consumer, input_refs={"frozen": TaskNodeResultRef("value")}),
         )), principal=principal, idempotency_key="capture-external-0001")
-        assert (await first.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await first.wait()).result).status is TaskStatus.SUCCEEDED
         source_execution = await first.execution("read")
         input_ref = await runtime.executions.capture_input(source_execution.execution_id,
             CaptureInputRequest(principal, "frozen-case-0001", "clean"))
         capture_service = runtime._input_captures
         second = await engine.start(TaskGraph("consumer", (TaskNode("read", task=consumer, input_capture=input_ref),)), principal=principal, idempotency_key="capture-consumer-0001")
-        assert (await second.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await second.wait()).result).status is TaskStatus.SUCCEEDED
         graph_capture = await runtime.tasks.capture_graph("consumer", CaptureGraphRequest(principal, "capture-graph-0001"))
         template = await capture_service.read_graph(graph_capture, principal=principal)
         assert template.task_contracts
     async with Runtime.open("graph-capture", models=_TaskTestModels(), storage=RuntimeStorage.filesystem(tmp_path)) as runtime:
         template = await runtime._input_captures.read_graph(graph_capture, principal=principal)
         replay = await runtime.tasks.bind(consumer).start(TaskGraph("consumer-replay", template.nodes), principal=principal, idempotency_key="capture-consumer-replay-0001")
-        assert (await replay.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await replay.wait()).result).status is TaskStatus.SUCCEEDED
         assert await replay.result("read") == "frozen value"
 
 
@@ -176,7 +176,7 @@ async def test_capture_preserves_failed_dependency_states(tmp_path: Path) -> Non
             CaptureInputRequest(principal, "failed-input-0001", "clean"))
         replay = await engine.start(TaskGraph("failed-replay", (TaskNode("collect", task=collector, input_capture=reference),)),
             principal=principal, idempotency_key="failed-replay-0001")
-        assert (await replay.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await replay.wait()).result).status is TaskStatus.SUCCEEDED
         assert await replay.result("collect") == {"failed": "FAILED", "blocked": "BLOCKED"}
 
 
@@ -210,7 +210,7 @@ async def test_subagent_capture_runs_as_independent_execution(tmp_path: Path) ->
         run = await runtime.tasks.bind(restored).start(TaskGraph("child-standalone", (
             TaskNode("child", task=restored, input=AgentTaskInput(value.prompt, input_context=value.input_context)),
         )), principal=principal, idempotency_key="child-standalone-0001")
-        assert (await run.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await run.wait()).result).status is TaskStatus.SUCCEEDED
         execution = await run.execution("child")
         fresh = await runtime.executions.inspect(execution.execution_id, principal=principal)
         source = await runtime.executions.inspect(child.execution_id, principal=principal)
@@ -248,7 +248,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
         capture = await runtime.executions.capture_input(source.execution_id, CaptureInputRequest(principal, "snapshot-capture-0001", "clean"))
         second = await engine.start(TaskGraph("captured", (TaskNode("use", task=use, input_capture=capture),)),
             principal=principal, idempotency_key="snapshot-captured-0001")
-        assert (await second.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await second.wait()).result).status is TaskStatus.SUCCEEDED
     archive = InMemoryObjectStore("capture-archive")
     storage = RuntimeStorage.filesystem(root)
     await storage.initialize(namespace="snapshot-capture", tenant_id="default", read_only=True)
@@ -262,7 +262,7 @@ async def test_snapshot_copies_capture_closure_and_rejects_missing_body(tmp_path
     async with Runtime.open("snapshot-capture", models=_TaskTestModels(), storage=RuntimeStorage.from_root(restored_root)) as runtime:
         replay = await runtime.tasks.bind(use).start(TaskGraph("fresh", (TaskNode("use", task=use, input_capture=capture),)),
             principal=principal, idempotency_key="snapshot-fresh-0001")
-        assert (await replay.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await replay.wait()).result).status is TaskStatus.SUCCEEDED
         assert await replay.result("use") == "owned result"
     chunks = [chunk async for chunk in archive.open(snapshot.key)]
     manifest = json.loads(b"".join(chunks))
@@ -302,7 +302,7 @@ async def test_task_capture_preserves_raw_input_and_projects_only_when_requested
         engine = runtime.tasks.bind(source, target)
         run = await engine.start(TaskGraph("raw-source", (TaskNode("node", task=source, input={"value": 1}),)),
             principal=principal, idempotency_key="raw-source-0001")
-        assert (await run.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await run.wait()).result).status is TaskStatus.SUCCEEDED
         execution = await run.execution("node")
         capture = await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(principal, "raw-capture-0001", "clean"))
         contract = await runtime._input_captures.read_task(capture, principal=principal)
@@ -310,13 +310,13 @@ async def test_task_capture_preserves_raw_input_and_projects_only_when_requested
         assert dict(contract.input) == {"value": 2}
         fixed = await engine.start(TaskGraph("raw-fixed", (TaskNode("node", task=target, input_capture=capture),)),
             principal=principal, idempotency_key="raw-fixed-0001")
-        assert (await fixed.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await fixed.wait()).result).status is TaskStatus.SUCCEEDED
         assert await fixed.result("node") == {"value": 2}
         assert counts["candidate"] == 0
         reproject = await runtime._input_captures.task_input(capture, principal=principal, input_mode="reproject_input")
         rerun = await engine.start(TaskGraph("raw-reproject", (TaskNode("node", task=target, input_capture=reproject),)),
             principal=principal, idempotency_key="raw-reproject-0001")
-        assert (await rerun.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await rerun.wait()).result).status is TaskStatus.SUCCEEDED
         assert await rerun.result("node") == {"value": 11}
         assert counts["candidate"] == 1
 
@@ -346,7 +346,7 @@ async def test_graph_capture_authorizes_admitted_owner_before_copying_inputs() -
         other = Principal("other", runtime.tenant_id)
         run = await runtime.tasks.bind(task).start(TaskGraph("private-source", (TaskNode("input", task=task, input={"secret": "owner input"}),)),
                                                   principal=owner, idempotency_key="private-source-0001")
-        assert (await run.wait()).status is TaskStatus.SUCCEEDED
+        assert ((await run.wait()).result).status is TaskStatus.SUCCEEDED
         execution = await run.execution("input")
         with pytest.raises(AIError) as raised:
             await runtime.executions.capture_input(execution.execution_id, CaptureInputRequest(other, "steal-input-0001", "clean"))

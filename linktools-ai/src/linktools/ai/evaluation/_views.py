@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Read-only projections of evaluation plans, executions, and scores."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -66,6 +67,23 @@ class TrialView:
     disposition: SlotDispositionView | None = None
     evidence_ref: EvidenceRef | None = None
     error_code: str | None = None
+    graph_status: TaskStatus | None = None
+
+    @property
+    def terminal(self) -> bool:
+        return (
+            self.disposition is not None and self.disposition.terminal
+            or self.execution_status is not None
+            and self.execution_status.value in {"SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED"}
+        )
+
+    @property
+    def needs_attention(self) -> bool:
+        return (
+            self.graph_status is TaskStatus.RECOVERY_REQUIRED
+            or self.execution_status in {TaskStatus.RECOVERY_REQUIRED, ExecutionStatus.RECOVERY_REQUIRED}
+            or self.disposition is not None and not self.disposition.terminal
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +101,20 @@ class ScoreAttemptView:
     evidence_ref: EvidenceRef | None = None
     decision_id: str | None = None
     reason: str | None = None
+
+
+def evaluation_completion(
+    trials: Sequence[TrialView], scores: Sequence[ScoreAttemptView], *,
+    pending_launches: bool = False, blocked: bool = False,
+    cancellation_requested: bool = False, budget_stopped: bool = False,
+) -> Literal["running", "cancelling", "complete", "cancelled", "needs_attention"]:
+    """Project completion without masking recovery behind terminal execution facts."""
+    if blocked or any(trial.needs_attention for trial in trials):
+        return "needs_attention"
+    if (all(trial.terminal for trial in trials)
+            and all(score.status != "pending" for score in scores) and not pending_launches):
+        return "cancelled" if cancellation_requested or budget_stopped else "complete"
+    return "cancelling" if cancellation_requested else "running"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,4 +143,4 @@ class EvaluationPurgeResult:
 
 
 __all__ = ["EvaluationPurgeResult", "EvaluationIssue", "EvaluationProgress", "EvaluationView", "ScoreAttemptView", "ScoreFilter",
-           "SlotDispositionView", "TrialFilter", "TrialView"]
+           "SlotDispositionView", "TrialFilter", "TrialView", "evaluation_completion"]

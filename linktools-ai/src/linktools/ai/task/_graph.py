@@ -812,6 +812,10 @@ class TaskGraphResult:
     status: TaskStatus
     node_results: "tuple[TaskNodeResult, ...]" = ()
 
+    @property
+    def wait_status(self) -> TaskStatus:
+        return _wait_status(self.status, self.node_results)
+
 
 @dataclass(frozen=True, slots=True)
 class TaskNodeResult:
@@ -946,7 +950,12 @@ class TaskGraphInfo:
     status: TaskStatus
     nodes: tuple[TaskNodeInfo, ...]
     node_states: tuple[TaskNodeView, ...]
-    event_sequence: int = 0
+    event_seq: int = 0
+
+    @property
+    def wait_status(self) -> TaskStatus:
+        return _wait_status(self.status, self.node_states)
+
 
     @classmethod
     def from_state(cls, state: "TaskGraphState") -> "TaskGraphInfo":
@@ -955,7 +964,7 @@ class TaskGraphInfo:
             state.status,
             tuple(TaskNodeInfo.from_node(node) for node in state.nodes),
             state.node_states,
-            state.event_sequence,
+            state.event_seq,
         )
 
 
@@ -965,7 +974,12 @@ class TaskGraphState:
     status: TaskStatus
     nodes: "tuple[TaskNode, ...]"
     node_states: "tuple[TaskNodeView, ...]"
-    event_sequence: int = 0
+    event_seq: int = 0
+
+    @property
+    def wait_status(self) -> TaskStatus:
+        return _wait_status(self.status, self.node_states)
+
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -973,9 +987,9 @@ class TaskGraphState:
         if not isinstance(self.status, TaskStatus):
             raise ValueError("task graph state status is invalid")
         if (
-            isinstance(self.event_sequence, bool)
-            or not isinstance(self.event_sequence, int)
-            or self.event_sequence < 0
+            isinstance(self.event_seq, bool)
+            or not isinstance(self.event_seq, int)
+            or self.event_seq < 0
         ):
             raise ValueError("task graph state event sequence is invalid")
         nodes = tuple(self.nodes)
@@ -1055,3 +1069,32 @@ __all__ = [
     "TaskStatus",
     "TaskTerminalRecord",
 ]
+
+
+def _wait_status(
+    status: TaskStatus,
+    states: tuple[TaskNodeView | TaskNodeResult, ...] = (),
+) -> TaskStatus:
+    if status is not TaskStatus.RUNNING:
+        return status
+    unfinished = tuple(
+        state
+        for state in states
+        if state.status
+        not in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }
+    )
+    if unfinished and any(
+        state.status is TaskStatus.WAITING
+        for state in unfinished
+    ) and all(
+        state.status
+        not in {TaskStatus.READY, TaskStatus.RUNNING}
+        for state in unfinished
+    ):
+        return TaskStatus.WAITING
+    return status

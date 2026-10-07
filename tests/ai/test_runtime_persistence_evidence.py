@@ -70,8 +70,8 @@ def _execution() -> ExecutionRecord:
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=1,
-        event_sequence=0,
-        agent_run_sequence=1,
+        event_seq=0,
+        agent_run_seq=1,
         error_code=None,
         safe_error_details={},
         created_at=now,
@@ -319,12 +319,12 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             )
             assert loaded.session_id == created.session_id
 
-            result = await runtime.agents.get("default").run(
+            result = (await runtime.agents.get("default").run(
                 "hello",
                 output=_PersistenceNestedOutput,
                 session_id=created.session_id,
                 timeout_seconds=10,
-            )
+            )).result
             assert result.status is ExecutionStatus.SUCCEEDED
 
             session_record = await state.conversation.sessions.get(
@@ -366,10 +366,10 @@ async def test_session_runtime_persists_and_reads_terminal_result(
                 result.execution_id,
                 principal=runtime.default_principal,
             )
-            waited = await runtime.executions.wait(
+            waited = (await runtime.executions.wait(
                 result.execution_id,
                 principal=runtime.default_principal,
-            )
+            )).result
             assert inspected.status is ExecutionStatus.SUCCEEDED
             assert waited.status is ExecutionStatus.SUCCEEDED
             assert waited.output == persisted_result.output.value

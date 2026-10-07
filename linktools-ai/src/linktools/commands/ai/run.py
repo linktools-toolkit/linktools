@@ -99,7 +99,7 @@ async def _emit_result(
     )
     try:
         if as_json:
-            result = await execution.wait()
+            result = (await execution.wait()).result
             print(json.dumps(_result_payload(result), ensure_ascii=False, sort_keys=True))
             _raise_for_failure(result)
             return 0

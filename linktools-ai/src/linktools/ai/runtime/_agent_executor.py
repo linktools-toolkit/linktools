@@ -20,18 +20,6 @@ from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, Protocol
 
 from linktools.core import environ
-from openai import (
-    APIConnectionError as OpenAIAPIConnectionError,
-)
-from openai import (
-    APIError as OpenAIAPIError,
-)
-from openai import (
-    APIStatusError as OpenAIAPIStatusError,
-)
-from openai import (
-    APITimeoutError as OpenAIAPITimeoutError,
-)
 from pydantic import ValidationError
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import TextOutput, Tool
@@ -48,14 +36,13 @@ from pydantic_ai.capabilities import (
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
     ContentFilterError,
-    ModelAPIError,
-    ModelHTTPError,
     RunCancelled,
     UnexpectedModelBehavior,
     UserError,
 )
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    BaseToolCallPart,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
@@ -110,6 +97,7 @@ from ..core import (
     normalize_json_value,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ..model import model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ..spec import MCPServerSpecCodec, RepositoryInstructions
 from ..workspace import (
@@ -161,13 +149,13 @@ _PLAN_SAFE_FRAMEWORK_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 
 @dataclass(frozen=True, slots=True)
 class LiveDelta:
-    kind: ExecutionDeltaType
+    event_type: ExecutionDeltaType
     content: str
 
 
 @dataclass(frozen=True, slots=True)
 class DurableBoundary:
-    kind: ExecutionEventType
+    event_type: ExecutionEventType
     payload: JsonValue
 
 
@@ -203,7 +191,7 @@ class _AgentRunScope:
     agent_conversation_id: str
     run_store: AgentRunStore
     agent_run_id: str
-    agent_run_sequence: int
+    agent_run_seq: int
     initial_attachments: tuple[Mapping[str, JsonValue], ...] = ()
     history_id: str | None = None
     memory_store: MemoryStore | None = None
@@ -549,7 +537,7 @@ class AgentExecutor:
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
             agent_run_id=scope.agent_run_id,
-            next_sequence=interaction_high_water + 1,
+            next_model_request_seq=interaction_high_water + 1,
         )
         agent, capabilities = await _materialize_agent(
             scope,
@@ -568,10 +556,6 @@ class AgentExecutor:
                     replace_existing=True, id="linktools.ai.reinject-system-prompt"
                 ),
             )
-        capabilities = (
-            *capabilities,
-            _event_stream_capability(scope.event_sink),
-        )
         _logger.debug(
             "agent execution started: agent=%s revision=%s step=%s "
             "mode=%s planning=%s thinking=%s selected_tools=%s",
@@ -1019,7 +1003,7 @@ async def _materialize_agent(
         source_namespace=scope.context.namespace,
         tenant_id=scope.context.principal.tenant_id,
         execution_id=scope.context.execution_id,
-        agent_run_sequence=scope.agent_run_sequence,
+        agent_run_seq=scope.agent_run_seq,
         session_id=scope.context.session_id,
         agent_run_id=scope.agent_run_id,
         agent_id=compiled_agent.spec.id,
@@ -1032,7 +1016,7 @@ async def _materialize_agent(
         agent_id=compiled_agent.spec.id,
         agent_run_id=scope.agent_run_id,
         execution_id=scope.context.execution_id,
-        agent_run_sequence=scope.agent_run_sequence,
+        agent_run_seq=scope.agent_run_seq,
         history_id=scope.history_id,
         memory_scope=scope.context.memory_scope,
         run_store=scope.run_store,
@@ -1073,6 +1057,11 @@ async def _materialize_agent(
             "output": compiled_agent.spec.output_retries,
         },
         toolsets=tuple(raw_toolsets),
+    )
+    capabilities.append(
+        _event_stream_capability(
+            scope.event_sink, run_recorder, scope.agent_run_seq
+        )
     )
     return agent, tuple(capabilities)
 
@@ -1160,13 +1149,34 @@ def _assistant_text_output(value: str) -> AssistantTextOutput:
 
 def _event_stream_capability(
     sink: EventSink,
+    recorder: AgentRunRecorder,
+    agent_run_seq: int,
 ) -> ProcessEventStream[AgentContext[object]]:
     async def forward(
         _ctx: PydanticRunContext[AgentContext[object]],
         events: AsyncIterable[AgentStreamEvent],
     ) -> None:
         async for event in events:
+            position: dict[str, JsonValue] = {"agent_run_seq": agent_run_seq}
+            if isinstance(event, PartStartEvent) and not isinstance(
+                event.part, (TextPart, ThinkingPart, BaseToolCallPart)
+            ):
+                recorder.stage_response_part(event.part, event.index)
+            if isinstance(event, PartEndEvent):
+                position["message_seq"] = recorder.stage_response_part(
+                    event.part, event.index
+                )
+                position["part_index"] = event.index
+            elif isinstance(event, FunctionToolCallEvent):
+                await recorder.record_tool_start(event.part, _ctx.run_step)
+            elif isinstance(event, FunctionToolResultEvent):
+                recorder.stage_tool_result(event.part)
+                await recorder.record_tool_result_boundary(event.part, _ctx.run_step)
             emission = _map_event(event)
+            if isinstance(emission, DurableBoundary):
+                emission = DurableBoundary(
+                    emission.event_type, {**emission.payload, **position}
+                )
             if emission is None:
                 event_type = type(event)
                 _logger.debug(
@@ -1304,7 +1314,7 @@ def _map_event(event: object) -> "AgentEmission | None":
                     "tool_name": part.tool_name or "unknown",
                     "result_digest": None,
                     "status": "FAILED",
-                    "safe_error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
+                    "error_code": ErrorCode.TOOL_RETRY_REQUIRED.value,
                 },
             )
     return None
@@ -1340,24 +1350,15 @@ def _with_cleanup_diagnostic(error: AIError, source: BaseException) -> AIError:
     )
 
 
-def _model_http_error_code(status_code: int) -> ErrorCode:
-    if status_code == 408:
-        return ErrorCode.MODEL_TIMEOUT
-    if status_code == 429:
-        return ErrorCode.MODEL_RATE_LIMITED
-    if status_code >= 500:
-        return ErrorCode.MODEL_UNAVAILABLE
-    if 400 <= status_code < 500:
-        return ErrorCode.MODEL_REQUEST_REJECTED
-    return ErrorCode.MODEL_API_ERROR
-
-
 def _execution_error(
     error: Exception,
     *,
     usage_limits: UsageLimits,
     run_usage: RunUsage,
 ) -> AIError:
+    provider_error = model_binding_error(error)
+    if provider_error is not None:
+        return provider_error
     diagnostics = ErrorDiagnostics.from_exception(error)
     if isinstance(error, UsageLimitExceeded):
         return AIError(
@@ -1384,52 +1385,6 @@ def _execution_error(
     if isinstance(error, ContentFilterError):
         return AIError(
             ErrorCode.MODEL_CONTENT_FILTERED,
-            retryable=False,
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, ModelHTTPError):
-        details: dict[str, JsonValue] = {
-            "model_name": error.model_name,
-            "status_code": error.status_code,
-        }
-        retry_after = error.retry_after
-        if isinstance(retry_after, (int, float, str)) and not isinstance(
-            retry_after, bool
-        ):
-            details["retry_after"] = retry_after
-        return AIError(
-            _model_http_error_code(error.status_code),
-            safe_details=details,
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, ModelAPIError):
-        return AIError(
-            ErrorCode.MODEL_API_ERROR,
-            retryable=False,
-            safe_details={"model_name": error.model_name},
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, OpenAIAPITimeoutError):
-        return AIError(
-            ErrorCode.MODEL_TIMEOUT,
-            retryable=True,
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, OpenAIAPIConnectionError):
-        return AIError(
-            ErrorCode.MODEL_UNAVAILABLE,
-            retryable=True,
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, OpenAIAPIStatusError):
-        return AIError(
-            _model_http_error_code(error.status_code),
-            safe_details={"status_code": error.status_code},
-            diagnostics=diagnostics,
-        )
-    if isinstance(error, OpenAIAPIError):
-        return AIError(
-            ErrorCode.MODEL_API_ERROR,
             retryable=False,
             diagnostics=diagnostics,
         )

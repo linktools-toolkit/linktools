@@ -142,7 +142,7 @@ async def test_imported_request_records_prepared_provider_input_while_running(
                 await execution.cancel()
         finally:
             release.set()
-            result = await execution.wait()
+            result = (await execution.wait()).result
         assert result.status is {
             "success": ExecutionStatus.SUCCEEDED,
             "failure": ExecutionStatus.FAILED,

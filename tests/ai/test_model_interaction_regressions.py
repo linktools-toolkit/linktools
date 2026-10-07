@@ -49,7 +49,7 @@ def _interaction(sequence: int) -> StagedModelInteraction:
     return StagedModelInteraction(
         agent_run_id="run",
         step_index=1,
-        request_sequence=sequence,
+        model_request_seq=sequence,
         purpose="agent",
         output_retry_index=None,
         model={"route_id": "default"},
@@ -109,10 +109,10 @@ async def test_base_run_store_applies_interaction_page_contract(
         for interaction in interactions:
             store.stage_model_interaction(interaction)
         assert await store.list_model_interactions(
-            agent_run_id="run", after_request_sequence=1, limit=1,
+            agent_run_id="run", after_model_request_seq=1, limit=1,
         ) == [interactions[1]]
         assert await store.list_model_interactions(
-            agent_run_id="run", after_request_sequence=3, limit=1,
+            agent_run_id="run", after_model_request_seq=3, limit=1,
         ) == []
         assert await store.list_model_interactions(agent_run_id="run") == list(interactions)
         with pytest.raises(ValueError):
@@ -141,7 +141,7 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
         for value in values:
             store.stage_model_interaction(value)
         assert await store.list_model_interactions(
-            agent_run_id="run", after_request_sequence=1, limit=1,
+            agent_run_id="run", after_model_request_seq=1, limit=1,
         ) == [values[1]]
     finally:
         await store.preflight_close()
@@ -211,7 +211,7 @@ async def test_interaction_prepare_resolves_explicit_local_span() -> None:
         interaction = StagedModelInteraction(
             agent_run_id="run",
             step_index=1,
-            request_sequence=1,
+            model_request_seq=1,
             purpose="agent",
             output_retry_index=None,
             model={"route_id": "default"},

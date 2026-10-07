@@ -150,8 +150,8 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         commits = await state.conversation.sessions.list_timeline_commits(
             "session",
             tenant_id="tenant",
-            start_sequence=1,
-            end_sequence=2,
+            start_turn_seq=1,
+            end_turn_seq=2,
         )
         assert len(commits) == 1
         assert commits[0].execution_id == "execution"

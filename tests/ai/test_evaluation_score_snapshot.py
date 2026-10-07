@@ -68,11 +68,11 @@ async def test_evaluation_score_dimensions_survive_snapshot_export_and_restore(t
             StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("target", task=target.ref),), (declared,)),
                 PRINCIPAL, "start-score-snapshot"), engine=runtime.tasks.bind(target, scorer))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete"
         assert view.progress.valid_scores == 1
         assert (await run.scores()).items[0].score == expected
-        report = await run.report()
+        report = await run.create_report()
         assert {item.dimension for item in report.scores} == set(expected.dimensions)
         experiment_id = run.experiment_id
 
@@ -94,4 +94,4 @@ async def test_evaluation_score_dimensions_survive_snapshot_export_and_restore(t
         scores = (await run.scores()).items
         assert len(scores) == 1
         assert scores[0].score == expected
-        assert (await run.report()).scores == report.scores
+        assert (await run.create_report()).scores == report.scores

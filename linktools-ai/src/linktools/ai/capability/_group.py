@@ -298,7 +298,7 @@ class CapabilityGroup(Generic[AppT]):
                     else:
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     contributions.append(item)
-            await context.verify()
+            await context.verify_source_revision()
             source_revision = context.source_revision
             asset_reader = context.asset_reader
         elif loaders:

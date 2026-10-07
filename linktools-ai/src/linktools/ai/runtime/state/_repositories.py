@@ -9,7 +9,7 @@ from ._recovery_repositories import (
     ApprovalRepositoryImpl, ExternalCallRepositoryImpl, RecoveryCheckpointRepositoryImpl, ToolRepositoryImpl,
 )
 from ._repository_common import (
-    OperationLedgerRepository, RepositoryBase, append_operation, decode_operation, decode_record_cursor,
+    OperationLedgerRepositoryImpl, RepositoryBase, append_operation, decode_operation, decode_record_cursor,
     projected_record, record_cursor, replace_checked, require_repository_tenant,
 )
 from ._evaluation_repository import EvaluationRepositoryImpl
@@ -22,7 +22,7 @@ def build_repository_bundle(
 ) -> dict[str, RepositoryBase]:
     """Build the one semantic repository implementation for a domain."""
     values: dict[str, RepositoryBase] = {
-        "operations": OperationLedgerRepository(store, namespace=namespace, tenant_id=tenant_id, domain=domain)
+        "operations": OperationLedgerRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=domain)
     }
     if domain is RuntimeDomain.CONVERSATION:
         values.update(
@@ -57,7 +57,7 @@ def build_repository_bundle(
 __all__ = [
     "ApprovalRepositoryImpl", "ArtifactRepositoryImpl", "EvaluationRepositoryImpl", "EventRepositoryImpl",
     "ExecutionRepositoryImpl", "ExternalCallRepositoryImpl", "IdempotencyRepositoryImpl", "MemoryRepositoryImpl",
-    "OperationLedgerRepository", "SessionRepositoryImpl", "ToolRepositoryImpl", "RepositoryBase",
+    "OperationLedgerRepositoryImpl", "SessionRepositoryImpl", "ToolRepositoryImpl", "RepositoryBase",
     "append_operation", "build_repository_bundle", "decode_operation", "decode_record_cursor",
     "projected_record", "record_cursor", "replace_checked", "require_repository_tenant",
 ]

@@ -105,3 +105,12 @@ async def test_batch_replay_refreshes_metadata_after_unobserved_commit() -> None
         assert await storage.get(key) == b"value"
     finally:
         await storage.close()
+
+
+def test_overlay_does_not_expose_layer_ambiguous_numeric_history() -> None:
+    from linktools.ai.storage import VersionedStorage
+
+    backend = InMemoryAssetBackend()
+    storage = StorageOverlay(backend, writer=backend)
+    assert isinstance(backend, VersionedStorage)
+    assert not isinstance(storage, VersionedStorage)

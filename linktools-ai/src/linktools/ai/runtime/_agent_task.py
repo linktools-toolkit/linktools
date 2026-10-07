@@ -321,7 +321,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
             thinking=thinking,
             idempotency_key=request_identity,
         )
-        result = await execution.wait()
+        result = (await execution.wait()).result
         return _agent_task_result(result, execution_id)
 
     async def _establish_execution(
@@ -438,7 +438,7 @@ class RuntimeAgentTaskRunner(Generic[AppT]):
         execution_id: str,
     ) -> TaskNodeRunResult:
         execution = await self._get_execution(execution_id, invocation.principal)
-        result = await execution.wait()
+        result = (await execution.wait()).result
         await self._capture_invocation(execution, execution_id, invocation)
         return _agent_task_result(result, execution_id)
 

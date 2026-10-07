@@ -298,7 +298,7 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
         ) as runtime:
             session = runtime.agents.get("default").session("session")
             same = await session.start("inspect", idempotency_key="turn-1")
-            result = await same.wait(timeout_seconds=15)
+            result = (await same.wait(timeout_seconds=15)).result
             assert same.execution_id == execution_id
             assert result.status is ExecutionStatus.SUCCEEDED, result
             assert calls == []
@@ -334,11 +334,11 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
             repeated = await session.start("inspect", idempotency_key="turn-1")
             assert repeated.execution_id == execution_id
             assert (
-                await repeated.wait(timeout_seconds=15)
+                (await repeated.wait(timeout_seconds=15)).result
             ).status is ExecutionStatus.SUCCEEDED
-            following = await session.run(
+            following = (await session.run(
                 "continue", idempotency_key="turn-2", timeout_seconds=15
-            )
+            )).result
             assert following.status is ExecutionStatus.SUCCEEDED
             assert effect_log.read_text().splitlines() == committed_effects
             if backend == "split_sqlite":

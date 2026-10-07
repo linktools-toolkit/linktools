@@ -15,6 +15,7 @@ from linktools.ai.asset import (
 from linktools.ai.errors import AIError
 from linktools.ai.runtime.state._filesystem import FilesystemStateStore
 from linktools.ai.runtime.state._store import StoredRecord
+from linktools.ai.storage import StorageEntryRevision
 
 
 def _record(value: str) -> StoredRecord:
@@ -87,5 +88,6 @@ async def test_directory_assets_are_limited_to_registered_kinds(tmp_path: Path) 
     assert await backend.get_many((AssetKey("agent", "default.json"),)) == {
         AssetKey("agent", "default.json"): b"agent"
     }
+    assert await backend.get_at_revision(AssetKey("agent", "default.json"), StorageEntryRevision(99)) == b"agent"
     with pytest.raises(AIError):
         await backend.get(AssetKey("runtime", "state.json"))

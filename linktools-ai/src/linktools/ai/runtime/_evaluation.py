@@ -4,9 +4,10 @@
 
 import asyncio
 import json
+import sys
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, TypeVar
@@ -24,7 +25,7 @@ from ..core import (
     idempotency_key_digest, normalize_json_value, principal_identity_payload, validate_idempotency_key,
     validate_page_limit,
 )
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ObservationError
 from ..evaluation import (
     EvaluationPurgeResult,
     CaseContract, CaseRef, CaseSpec, ComparisonReadCutoff,
@@ -37,7 +38,7 @@ from ..evaluation import (
     ModelUsage, PriceTable, estimate_model_budget,
     ScorerContract, ScoringInput, SlotDispositionView, StartEvaluationRequest,
     TargetTrialRef, TrialFilter, TrialPlan, TrialView, build_comparison_report,
-    build_evaluation_report, capture_mapping,
+    build_evaluation_report, capture_mapping, evaluation_completion,
 )
 from ..task import (
     Task, TaskGraph, TaskGraphService, TaskGraphState, TaskInputSupplyRequest,
@@ -49,7 +50,15 @@ from ._evaluation_retention import EvaluationRetention, require_evaluation_conte
 from ._input import input_intent
 from ._input_capture import CaptureInputRequest
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from .service_api import ExecutionService, UsageSummary
+from .service_api import ExecutionService, UsageSummary, TaskGraphRunEvent
+from ._wait import WaitResult
+from ._observation import (
+    _ObservationSession, _wait, _validate_wait, _await_stream_cleanup,
+    _drain_stream_tasks, _is_observation_cleanup, _report_observation_error,
+)
+from ._watch_cursor import (
+    decode_evaluation_watch_cursor, encode_evaluation_watch_cursor, decode_graph_watch_cursor,
+)
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage, SnapshotExclusiveGuard
 from .state._contracts import IdempotencyRecord
 from .state._evaluation_records import (
@@ -80,27 +89,18 @@ def _score_slot(trial: TargetTrialRef, scorer: str) -> str:
     return f"score:{trial.trial_id}:{scorer}"
 
 
-def _terminal(trial: TrialView) -> bool:
-    return (trial.disposition is not None and trial.disposition.terminal or
-            trial.execution_status is not None and trial.execution_status.value in
-            {"SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED"})
-
-
 def _completion(
     record: EvaluationRecord, trials: tuple[TrialView, ...], scores: tuple[ScoreAttemptView, ...],
     *, blocked: bool = False,
 ) -> str:
-    complete = (all(_terminal(item) for item in trials) and
-                all(item.status in _RECORDED for item in scores) and
-                all(item.released for item in record.intents))
-    if complete:
-        budget_stopped = record.gate == "closed_budget" and any(
-            item.disposition.reason_code == "closed_budget" for item in record.dispositions)
-        return "cancelled" if record.gate == "closed_cancel" or budget_stopped else "complete"
-    if blocked or any(not item.disposition.terminal for item in record.dispositions) or any(
-            item.execution_status in {TaskStatus.RECOVERY_REQUIRED, ExecutionStatus.RECOVERY_REQUIRED} for item in trials):
-        return "needs_attention"
-    return "cancelling" if record.gate == "closed_cancel" else "running"
+    budget_stopped = record.gate == "closed_budget" and any(
+        item.disposition.reason_code == "closed_budget" for item in record.dispositions)
+    return evaluation_completion(
+        trials if record.manifest.kind == "experiment" else (), scores,
+        pending_launches=any(not item.released for item in record.intents),
+        blocked=blocked or any(not item.disposition.terminal for item in record.dispositions),
+        cancellation_requested=record.gate == "closed_cancel", budget_stopped=budget_stopped,
+    )
 
 
 class RuntimeEvaluations:
@@ -131,6 +131,18 @@ class RuntimeEvaluations:
         self._watchers: dict[str, asyncio.Task[None]] = {}
         self._closed = False
         self._recorder = Task("evaluation.record.v1", self._record_score, effect_policy="replay_safe")
+
+    def _bind_observation(
+        self,
+        watch_graph: Callable[[str, Principal, str | None, bool, asyncio.Event | None], AsyncIterator[TaskGraphRunEvent]],
+        replay_graph: Callable[[str, Principal, str | None, bool], Awaitable[AsyncIterator[TaskGraphRunEvent]]],
+        register: Callable[[_ObservationSession], None],
+        release: Callable[[_ObservationSession], None],
+    ) -> None:
+        self._watch_graph = watch_graph
+        self._replay_graph = replay_graph
+        self._register_observation = register
+        self._release_observation = release
 
     async def purge_expired(
         self, *, principal: Principal, now: datetime,
@@ -173,9 +185,9 @@ class RuntimeEvaluations:
         seen: set[str] = set()
         now = _now()
         while True:
-            if record.evaluation_id in seen:
+            if record.experiment_id in seen:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            seen.add(record.evaluation_id)
+            seen.add(record.experiment_id)
             require_evaluation_content(record, now=now)
             source = record.manifest.source_experiment_id
             if source is None:
@@ -315,8 +327,8 @@ class RuntimeEvaluations:
             content_expires_at=min(deadlines) if deadlines else None,
             metadata_expires_at=None if spec.policy.metadata_retention_seconds is None else now + timedelta(seconds=spec.policy.metadata_retention_seconds),
             owned_input_captures=tuple(dict.fromkeys(owned_captures))))
-        self._watch(record.evaluation_id, bound, principal)
-        return EvaluationRun(self, record.evaluation_id, principal)
+        self._watch(record.experiment_id, bound, principal)
+        return EvaluationRun(self, record.experiment_id, principal)
 
     async def get(self, experiment_id: str, *, principal: Principal) -> "EvaluationRun":
         await self._record(experiment_id, principal)
@@ -473,9 +485,9 @@ class RuntimeEvaluations:
         evidence = {item.trial: item.evidence_ref for item in record.evidence}
         candidates = {item.slot_id: item for item in record.manifest.candidates}
         result = []
-        revisions = {f"evaluation:{record.evaluation_id}": record.revision}
+        revisions = {f"evaluation:{record.experiment_id}": record.revision}
         for plan in record.manifest.trials:
-            trial = TargetTrialRef(record.evaluation_id, plan.trial_id)
+            trial = TargetTrialRef(record.experiment_id, plan.trial_id)
             slot = _target_slot(trial)
             item = TrialView(trial, plan.case_ref, plan.candidate_slot_id, plan.repetition,
                              disposition=dispositions.get(slot), evidence_ref=evidence.get(trial))
@@ -484,7 +496,7 @@ class RuntimeEvaluations:
                 state = await self._graph_state(intent, principal)
                 if state is not None:
                     graph_ref = GraphSubjectRef(self._namespace, principal.tenant_id, state.graph_id)
-                    revisions[f"graph:{state.graph_id}"] = state.event_sequence
+                    revisions[f"graph:{state.graph_id}"] = state.event_seq
                     if candidates[plan.candidate_slot_id].task is not None:
                         node = state.node_states[0]
                         subject = (None if node.execution_id is None else ExecutionSubjectRef(
@@ -493,11 +505,12 @@ class RuntimeEvaluations:
                         if subject is not None:
                             execution = await self._execution.inspect(subject.execution_id, principal=principal)
                             status = execution.status
-                            revisions[f"execution:{subject.execution_id}"] = execution.event_sequence
-                        item = replace(item, graph_ref=graph_ref, subject=subject,
+                            revisions[f"execution:{subject.execution_id}"] = execution.event_seq
+                        item = replace(item, graph_ref=graph_ref, graph_status=state.status, subject=subject,
                                        execution_status=status or state.status, error_code=node.error_code)
                     else:
-                        item = replace(item, graph_ref=graph_ref, subject=graph_ref, execution_status=state.status)
+                        item = replace(item, graph_ref=graph_ref, graph_status=state.status,
+                                       subject=graph_ref, execution_status=state.status)
             result.append(item)
         return tuple(result), revisions
 
@@ -523,13 +536,13 @@ class RuntimeEvaluations:
                     state = await self._graph_state(intent, record.manifest.principal)
                     if state is not None:
                         if revisions is not None:
-                            revisions[f"graph:{state.graph_id}"] = state.event_sequence
+                            revisions[f"graph:{state.graph_id}"] = state.event_seq
                         node = next(item for item in state.node_states if item.node_id == "score")
                     reference = intent.submission.graph.nodes[-1].input["evidence_ref"]
                     evidence_ref = EvidenceRef(reference["namespace"], reference["tenant_id"],
                                                reference["evidence_id"], reference["digest"])
-                results.append(ScoreAttemptView(record.evaluation_id,
-                    None if node is None or node.execution_id is None else canonical_sha256({"experiment": record.evaluation_id, "slot": slot}),
+                results.append(ScoreAttemptView(record.experiment_id,
+                    None if node is None or node.execution_id is None else canonical_sha256({"experiment": record.experiment_id, "slot": slot}),
                     trial.trial, scorer.slot_id, scorer.task, status,
                     scorer_execution=None if node is None or node.execution_id is None else ExecutionSubjectRef(
                         self._namespace, record.manifest.principal.tenant_id, node.execution_id),
@@ -545,8 +558,9 @@ class RuntimeEvaluations:
         issues = [EvaluationIssue(item.disposition.reason_code, item.disposition.reason_code,
                                  retryable=item.disposition.retryable)
                   for item in record.dispositions if not item.disposition.terminal]
-        for trial in trials:
-            if trial.execution_status in {TaskStatus.RECOVERY_REQUIRED, ExecutionStatus.RECOVERY_REQUIRED}:
+        for trial in trials if record.manifest.kind == "experiment" else ():
+            if (trial.graph_status is TaskStatus.RECOVERY_REQUIRED
+                    or trial.execution_status in {TaskStatus.RECOVERY_REQUIRED, ExecutionStatus.RECOVERY_REQUIRED}):
                 issues.append(EvaluationIssue("recovery_required", "native graph requires recovery", trial.trial, retryable=True))
         for intent in record.intents:
             if intent.scorer_slot_id is not None and not intent.released:
@@ -554,7 +568,7 @@ class RuntimeEvaluations:
                 if state is not None and state.status is TaskStatus.RECOVERY_REQUIRED:
                     issues.append(EvaluationIssue("recovery_required", "scorer graph requires recovery",
                                                  intent.trial, intent.scorer_slot_id, True))
-        terminal_trials = sum(_terminal(item) for item in trials)
+        terminal_trials = sum(item.terminal for item in trials)
         terminal_scores = sum(item.status in _RECORDED for item in scores)
         completion = _completion(record, trials, scores, blocked=bool(issues))
         return EvaluationView(experiment_id, record.manifest.kind, record.manifest.source_experiment_id,
@@ -599,7 +613,7 @@ class RuntimeEvaluations:
             if intent.scorer_slot_id is not None:
                 state = await self._graph_state(intent, principal)
                 if state is not None:
-                    revisions[f"graph:{state.graph_id}"] = state.event_sequence
+                    revisions[f"graph:{state.graph_id}"] = state.event_seq
                     blocked |= state.status is TaskStatus.RECOVERY_REQUIRED
                     summary = await self._history.graph_usage(state.graph_id, principal=principal)
                     _, complete = await self._model_usage(summary, principal)
@@ -629,7 +643,7 @@ class RuntimeEvaluations:
             await self._require_content(source, principal)
         return report
 
-    async def compare(self, spec: ComparisonSpec, *, principal: Principal) -> ComparisonReport:
+    async def create_comparison_report(self, spec: ComparisonSpec, *, principal: Principal) -> ComparisonReport:
         await self._record(spec.baseline.experiment_id, principal, AuthorizationAction.EVALUATION_COMPARE)
         await self._record(spec.candidate.experiment_id, principal, AuthorizationAction.EVALUATION_COMPARE)
         ids = tuple(dict.fromkeys((spec.baseline.experiment_id, spec.candidate.experiment_id, *(
@@ -655,7 +669,7 @@ class RuntimeEvaluations:
         left, left_report = snapshots[spec.baseline.experiment_id]
         right, right_report = snapshots[spec.candidate.experiment_id]
         scoring = tuple(report.cutoff for identity, (_, report) in snapshots.items()
-                        if identity not in {left.evaluation_id, right.evaluation_id})
+                        if identity not in {left.experiment_id, right.experiment_id})
         cutoff = ComparisonReadCutoff(left_report.cutoff, right_report.cutoff, scoring)
         if spec.cutoff is not None and spec.cutoff != cutoff:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "requested cutoff is no longer current")
@@ -727,7 +741,7 @@ class RuntimeEvaluations:
             values = tuple(item for item in report.trials if
                 (not filters.candidate_slot_ids or item.candidate_slot_id in filters.candidate_slot_ids) and
                 (not filters.case_refs or item.case_ref in filters.case_refs) and
-                (filters.terminal is None or _terminal(item) == filters.terminal))
+                (filters.terminal is None or item.terminal == filters.terminal))
         else:
             values = tuple(item for item in report.score_attempts if
                 (not filters.scorer_slot_ids or item.scorer_slot_id in filters.scorer_slot_ids) and
@@ -811,7 +825,7 @@ class RuntimeEvaluations:
                 try:
                     graph = await self._compiler.graph(candidates[trial.candidate_slot_id], cases[trial.case_ref],
                         graph_id=canonical_sha256({"experiment": experiment_id, "slot": slot}),
-                        principal=record.manifest.principal, input_mode=record.manifest.input_mode, owner_id=record.evaluation_id,
+                        principal=record.manifest.principal, input_mode=record.manifest.input_mode, owner_id=record.experiment_id,
                         owned_captures=list(record.owned_input_captures))
                     candidate = candidates[trial.candidate_slot_id]
                     limits = (record.manifest.policy.target_graph_limits if candidate.graph_template is None
@@ -862,21 +876,21 @@ class RuntimeEvaluations:
         policy = record.manifest.policy
         slot = _target_slot(trial) if scorer is None else _score_slot(trial, scorer.slot_id)
         capacity = policy.target_concurrency if scorer is None else policy.scorer_concurrency
-        current = await self._record(record.evaluation_id, record.manifest.principal)
+        current = await self._record(record.experiment_id, record.manifest.principal)
         if current.gate != "open" or sum(not item.released and (item.scorer_slot_id is None) == (scorer is None)
                                           for item in current.intents) >= capacity:
             return
         if scorer is not None:
             engine = engine.with_definitions(self._recorder)
         submission = await engine.describe_submission(graph, principal=record.manifest.principal,
-            idempotency_key=f"evaluation:{record.evaluation_id}:{slot}", limits=limits,
-            correlation={"evaluation_experiment": record.evaluation_id, "evaluation_trial": trial.trial_id,
+            idempotency_key=f"evaluation:{record.experiment_id}:{slot}", limits=limits,
+            correlation={"evaluation_experiment": record.experiment_id, "evaluation_trial": trial.trial_id,
                          "evaluation_slot": slot})
         timeout = (policy.trial_timeout_seconds if scorer is None else
                    policy.human_timeout_seconds if scorer.task == TaskRef.deferred_input() else policy.scorer_timeout_seconds)
         intent = EvaluationLaunchIntent(slot, trial, None if scorer is None else scorer.slot_id,
                                         submission, None if timeout is None else _now() + timedelta(seconds=timeout))
-        registered = await self._state.register_launch_intent(record.evaluation_id, intent, capacity=capacity)
+        registered = await self._state.register_launch_intent(record.experiment_id, intent, capacity=capacity)
         selected = next((item for item in registered.intents if item.slot_id == slot), None)
         if selected is None:
             return
@@ -884,20 +898,20 @@ class RuntimeEvaluations:
             await self._cancel_intent(registered, selected, record.manifest.principal)
             return
         result = await engine.start_prepared(selected.submission)
-        await self._state.settle_intent(record.evaluation_id, slot,
+        await self._state.settle_intent(record.experiment_id, slot,
                                        confirmed=result.admitted, released=not result.admitted)
         if not result.admitted:
-            await self._disposition(record.evaluation_id, slot, "submission_cancelled", cancelled=True)
+            await self._disposition(record.experiment_id, slot, "submission_cancelled", cancelled=True)
 
     async def _cancel_intent(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, principal: Principal,
     ) -> None:
         result = await self._graph.cancel_submission(intent.submission.ref, principal=principal,
-            idempotency_key=f"evaluation-cancel:{record.evaluation_id}:{intent.slot_id}")
-        await self._state.settle_intent(record.evaluation_id, intent.slot_id,
+            idempotency_key=f"evaluation-cancel:{record.experiment_id}:{intent.slot_id}")
+        await self._state.settle_intent(record.experiment_id, intent.slot_id,
                                        confirmed=result.admitted, released=result.status in _TERMINAL)
         if not result.admitted:
-            await self._disposition(record.evaluation_id, intent.slot_id, "submission_cancelled", cancelled=True)
+            await self._disposition(record.experiment_id, intent.slot_id, "submission_cancelled", cancelled=True)
 
     async def _capture_evidence(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
@@ -911,7 +925,7 @@ class RuntimeEvaluations:
         if candidate.task is not None:
             node = nodes["target"]
             if node.execution_id is None:
-                await self._disposition(record.evaluation_id, intent.slot_id, node.error_code or "execution_unavailable")
+                await self._disposition(record.experiment_id, intent.slot_id, node.error_code or "execution_unavailable")
                 return
             value = (InlineValue.from_value(await self._history.task_result(state.graph_id, "target", principal=principal))
                      if node.status is TaskStatus.SUCCEEDED else None)
@@ -946,8 +960,8 @@ class RuntimeEvaluations:
                     page = await self._history.trace(execution_id, principal=principal, cursor=cursor,
                                                      include_content=True, limit=100)
                     for item in page.items:
-                        trace[(item.execution_id, item.sequence)] = {"execution_id": item.execution_id,
-                            "sequence": item.sequence, "payload": item.payload}
+                        trace[(item.execution_id, item.step_event_seq)] = {"execution_id": item.execution_id,
+                            "step_event_seq": item.step_event_seq, "payload": item.payload}
                     cursor = page.next_cursor
                     if cursor is None:
                         break
@@ -964,16 +978,16 @@ class RuntimeEvaluations:
             UsageMetrics(usage.logical_requests, 0, usage.input_tokens, usage.output_tokens,
                          usage.cache_read_tokens, usage.cache_write_tokens),
             usage_complete,
-            {"graph_sequence": state.event_sequence, "include_trace": include_trace,
+            {"graph_event_seq": state.event_seq, "include_trace": include_trace,
              "include_input": include_input and not input_issues, "input_issues": list(input_issues),
              "include_output": include_output,
              "include_attachments": include_attachments and not attachment_issues,
              "attachment_issues": list(attachment_issues), "attachment_sources": attachment_sources, "usage": [{"execution_id": item.execution_id,
-                "agent_run_sequence": item.agent_run_sequence, "request_sequence": item.request_sequence}
+                "agent_run_seq": item.agent_run_seq, "model_request_seq": item.model_request_seq}
                 for item in usage.cutoffs]}, model_usage=model_usage)
         bundle = replace(bundle, ref=replace(bundle.ref, digest=bundle.digest))
         await self._state.publish_evidence(bundle)
-        await self._state.publish_trial_evidence(record.evaluation_id, EvaluationTrialEvidence(intent.trial, bundle.ref))
+        await self._state.publish_trial_evidence(record.experiment_id, EvaluationTrialEvidence(intent.trial, bundle.ref))
 
     async def _capture_target_input(
         self, state: TaskGraphState, principal: Principal, *, graph_target: bool,
@@ -1096,10 +1110,10 @@ class RuntimeEvaluations:
         elif scorer.input_projection["kind"] == "agent_literal":
             data = dict(AgentTaskInput(scorer.input_projection["instructions"] + "\nDATA\n" +
                                        canonical_json_bytes(data).decode("utf-8")))
-        return TaskGraph(canonical_sha256({"experiment": record.evaluation_id, "slot": slot}), (
+        return TaskGraph(canonical_sha256({"experiment": record.experiment_id, "slot": slot}), (
             TaskNode("score", task=scorer.task, input=data, output_type=ScoreBundle, failure_policy="isolate"),
             TaskNode("record", task=self._recorder.ref, dependencies=("score",),
-                input={"experiment_id": record.evaluation_id, "slot_id": slot, "evidence_ref": sample.evidence_ref.to_mapping()},
+                input={"experiment_id": record.experiment_id, "slot_id": slot, "evidence_ref": sample.evidence_ref.to_mapping()},
                 dependency_policy="all_terminal", failure_policy="isolate", max_attempts=3),
         ))
 
@@ -1116,7 +1130,7 @@ class RuntimeEvaluations:
     async def _collect_score(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
     ) -> None:
-        record = await self._record(record.evaluation_id, record.manifest.principal, allow_expired=True)
+        record = await self._record(record.experiment_id, record.manifest.principal, allow_expired=True)
         if any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in record.scores):
             return
         node = next(item for item in state.node_states if item.node_id == "score")
@@ -1150,8 +1164,8 @@ class RuntimeEvaluations:
         decision = next((item for item in record.human_decisions if item.slot_id == intent.slot_id), None)
         if node.execution_id is None:
             status = "not_attempted"
-        result = ScoreAttemptView(record.evaluation_id,
-            None if node.execution_id is None else canonical_sha256({"experiment": record.evaluation_id, "slot": intent.slot_id}),
+        result = ScoreAttemptView(record.experiment_id,
+            None if node.execution_id is None else canonical_sha256({"experiment": record.experiment_id, "slot": intent.slot_id}),
             intent.trial, scorer.slot_id, scorer.task, status, score,
             None if node.execution_id is None else ExecutionSubjectRef(self._namespace, record.manifest.principal.tenant_id, node.execution_id),
             GraphSubjectRef(self._namespace, record.manifest.principal.tenant_id, state.graph_id),
@@ -1163,7 +1177,7 @@ class RuntimeEvaluations:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return value
             return replace(value, scores=(*value.scores, result))
-        await self._state.update(record.evaluation_id, append)
+        await self._state.update(record.experiment_id, append)
 
     async def _model_usage(
         self, summary: UsageSummary, principal: Principal,
@@ -1263,8 +1277,8 @@ class RuntimeEvaluations:
             content_expires_at=min(source_deadlines) if source_deadlines else None,
             metadata_expires_at=None if source.manifest.policy.metadata_retention_seconds is None else
             now + timedelta(seconds=source.manifest.policy.metadata_retention_seconds)))
-        self._watch(record.evaluation_id, bound, principal)
-        return EvaluationRun(self, record.evaluation_id, principal)
+        self._watch(record.experiment_id, bound, principal)
+        return EvaluationRun(self, record.experiment_id, principal)
 
     async def _human_score(
         self, experiment_id: str, principal: Principal, request: HumanScoreRequest,
@@ -1339,16 +1353,215 @@ class EvaluationRun:
     async def inspect(self) -> EvaluationView:
         return await self._evaluations._inspect(self.experiment_id, self._principal)
 
-    async def wait(self, *, timeout_seconds: float | None = None) -> EvaluationView:
-        if timeout_seconds is not None and timeout_seconds < 0:
-            raise ValueError("timeout_seconds must be nonnegative")
-        async def wait_for_completion() -> EvaluationView:
+    async def wait(
+        self, *, on_event: Callable[[TaskGraphRunEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+    ) -> WaitResult[EvaluationView]:
+        _validate_wait(on_event, cursor, include_content, timeout_seconds, close_timeout_seconds)
+
+        async def authoritative() -> EvaluationView:
             while True:
                 view = await self.inspect()
                 if view.completion in {"complete", "cancelled", "needs_attention"}:
                     return view
                 await asyncio.sleep(0.05)
-        return await asyncio.wait_for(wait_for_completion(), timeout_seconds)
+
+        return await _wait(
+            scope="evaluation", resource_id=self.experiment_id, waiter=authoritative,
+            watch=lambda ready: self._watch_prepared(cursor, include_content, ready),
+            on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
+            close_timeout_seconds=close_timeout_seconds,
+            register=self._evaluations._register_observation,
+            release=self._evaluations._release_observation,
+        )
+
+    def watch(
+        self, *, cursor: str | None = None, include_content: bool = False,
+    ) -> AsyncIterator[TaskGraphRunEvent]:
+        return self._watch_prepared(cursor, include_content, None)
+
+    def _watch_prepared(
+        self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,
+    ) -> AsyncIterator[TaskGraphRunEvent]:
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        cursors = {} if cursor is None else decode_evaluation_watch_cursor(
+            self._evaluations._namespace, self._principal.tenant_id, self.experiment_id,
+            cursor, include_content=include_content,
+        )
+        return self._watch(cursors, include_content, ready, cursor)
+
+    async def _watch(
+        self, cursors: dict[str, str], include_content: bool,
+        ready: asyncio.Event | None, initial_cursor: str | None,
+    ) -> AsyncIterator[TaskGraphRunEvent]:
+        owner = self._evaluations
+        streams: dict[str, AsyncIterator[TaskGraphRunEvent]] = {}
+        tasks: dict[str, asyncio.Task[TaskGraphRunEvent]] = {}
+        cancelled_by_owner: set[asyncio.Task[TaskGraphRunEvent]] = set()
+        known: set[str] = set()
+        inactive_sequences: dict[str, int] = {}
+        last_cursor = initial_cursor
+        finite = False
+
+        def scoped_error(error: BaseException) -> BaseException:
+            if not isinstance(error, ObservationError):
+                return error
+            scoped = ObservationError(
+                error.origin, cursor=last_cursor, cause_code=error.cause_code,
+                safe_details=error.safe_details, diagnostics=error.diagnostics,
+            )
+            scoped.__cause__ = error.__cause__
+            return scoped
+
+        async def close_streams() -> None:
+            errors = await _drain_stream_tasks(
+                tasks.values(), cancelled_by_owner=cancelled_by_owner,
+                map_error=lambda task, error: scoped_error(error),
+            )
+            for stream in streams.values():
+                try:
+                    await stream.aclose()
+                except BaseException as error:
+                    if not _is_observation_cleanup(error):
+                        error = scoped_error(error)
+                        errors.append(error)
+                        _report_observation_error(error)
+            tasks.clear()
+            streams.clear()
+            if errors:
+                fatal = next((error for error in errors if not isinstance(error, ObservationError)), errors[0])
+                raise fatal
+
+        async def start(graph_id: str, stream: AsyncIterator[TaskGraphRunEvent], prepared: asyncio.Event | None) -> None:
+            streams[graph_id] = stream
+            task = asyncio.create_task(stream.__anext__(), name=f"evaluation-graph-{graph_id}")
+            tasks[graph_id] = task
+            if prepared is None:
+                # A finite reader validates its starting watermark before its first item/EOF.
+                try:
+                    await asyncio.shield(task)
+                except StopAsyncIteration:
+                    pass
+                return
+            waiting = asyncio.create_task(prepared.wait())
+            try:
+                await asyncio.wait({waiting, task}, return_when=asyncio.FIRST_COMPLETED)
+                if task.done():
+                    try:
+                        task.result()
+                    except StopAsyncIteration:
+                        pass
+            finally:
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
+
+        try:
+            while True:
+                if not finite:
+                    record = await owner._record(self.experiment_id, self._principal)
+                    members = {intent.submission.graph.graph_id for intent in record.intents if intent.confirmed}
+                    if set(cursors) - members:
+                        raise AIError(ErrorCode.CURSOR_INVALID)
+                    view = await self.inspect()
+                    finite = view.completion in {"complete", "cancelled", "needs_attention"}
+                    if finite:
+                        record = await owner._record(self.experiment_id, self._principal)
+                        members = {intent.submission.graph.graph_id for intent in record.intents if intent.confirmed}
+                        # Freeze every graph's durable vector before delivering the final drain.
+                        snapshots = {
+                            graph_id: await owner._replay_graph(
+                                graph_id, self._principal, cursors.get(graph_id), include_content,
+                            ) for graph_id in sorted(members)
+                        }
+                        await close_streams()
+                        for graph_id, stream in snapshots.items():
+                            await start(graph_id, stream, None)
+                    else:
+                        pending_members = members - known
+                        for graph_id, sequence in tuple(inactive_sequences.items()):
+                            state = await owner._graph.state(graph_id, principal=self._principal)
+                            if state.event_seq > sequence:
+                                pending_members.add(graph_id)
+                                inactive_sequences.pop(graph_id)
+                        preparation_failure: ObservationError | None = None
+                        for graph_id in sorted(pending_members):
+                            prepared = asyncio.Event()
+                            stream = owner._watch_graph(
+                                graph_id, self._principal, cursors.get(graph_id), include_content, prepared,
+                            )
+                            try:
+                                await start(graph_id, stream, prepared)
+                            except ObservationError as error:
+                                if error.origin != "stream" or error.safe_details.get("phase") == "cleanup":
+                                    raise
+                                if preparation_failure is None:
+                                    preparation_failure = error
+                        if preparation_failure is not None:
+                            if ready is not None:
+                                ready.set()
+                            raise preparation_failure
+                    known.update(members)
+                    if ready is not None:
+                        ready.set()
+                if not tasks:
+                    if finite:
+                        return
+                    await asyncio.sleep(0.05)
+                    continue
+                done, _ = await asyncio.wait(
+                    set(tasks.values()), timeout=None if finite else 0.05,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    if task.cancelled():
+                        task.result()
+                    error = task.exception()
+                    if error is not None and not isinstance(error, (StopAsyncIteration, ObservationError)):
+                        raise error
+                for graph_id in sorted(tuple(tasks)):
+                    task = tasks[graph_id]
+                    if task not in done:
+                        continue
+                    try:
+                        item = task.result()
+                    except StopAsyncIteration:
+                        tasks.pop(graph_id)
+                        await streams.pop(graph_id).aclose()
+                        if not finite:
+                            graph_cursor = cursors.get(graph_id)
+                            inactive_sequences[graph_id] = 0 if graph_cursor is None else decode_graph_watch_cursor(
+                                owner._namespace, self._principal.tenant_id, graph_id,
+                                graph_cursor, include_content=include_content,
+                            )[0]
+                        continue
+                    if item.cursor is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    next_cursors = {**cursors, graph_id: item.cursor}
+                    next_cursor = encode_evaluation_watch_cursor(
+                        owner._namespace, self._principal.tenant_id, self.experiment_id,
+                        include_content=include_content, graph_cursors=next_cursors,
+                    )
+                    cursors = next_cursors
+                    last_cursor = next_cursor
+                    yield replace(item, cursor=next_cursor)
+                    tasks[graph_id] = asyncio.create_task(streams[graph_id].__anext__())
+        except ObservationError as error:
+            scoped = ObservationError(
+                error.origin, cursor=last_cursor, cause_code=error.cause_code,
+                safe_details=error.safe_details, diagnostics=error.diagnostics,
+            )
+            raise scoped from error.__cause__
+        finally:
+            active_error = sys.exc_info()[1]
+            try:
+                await _await_stream_cleanup(close_streams(), active_error)
+            except BaseException as error:
+                if (isinstance(error, asyncio.CancelledError) or active_error is None
+                        or isinstance(active_error, GeneratorExit) or _is_observation_cleanup(active_error)
+                        or isinstance(active_error, ObservationError) and active_error.origin == "stream"):
+                    raise scoped_error(error)
 
     async def trials(
         self, *, filters: TrialFilter | None = None, cursor: str | None = None, limit: int = 100,
@@ -1360,7 +1573,7 @@ class EvaluationRun:
     ) -> Page[ScoreAttemptView]:
         return await self._evaluations._page(self.experiment_id, self._principal, filters or ScoreFilter(), cursor, limit)
 
-    async def report(self) -> EvaluationReport:
+    async def create_report(self) -> EvaluationReport:
         return (await self._evaluations._snapshot(self.experiment_id, self._principal))[1]
 
     async def cancel(self, *, idempotency_key: str) -> EvaluationView:

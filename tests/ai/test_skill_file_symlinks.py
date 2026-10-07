@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Local declaration aliases support symlinks without weakening resource containment."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -15,20 +17,39 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AssetSkillSource,
     CapabilityGroup,
-    LocalSkillSource,
     SkillDefinition,
     SkillSourceRef,
 )
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.spec import (
-    AgentSpec,
-    AgentSpecCodec,
-    MCPServerSpec,
-    MCPServerSpecCodec,
-)
-from linktools.ai.storage import StorageOverlay
+from linktools.ai.storage import StorageLayer, StorageOverlay
 from linktools.ai.workspace import SandboxResource
+
+
+_DECLARATION = "---\nname: review\ndescription: Review files\n---\nReview.\n"
+
+
+@asynccontextmanager
+async def _captured_local_skill(
+    skills_root: Path,
+) -> AsyncIterator[tuple[AssetSkillSource, SkillSourceRef]]:
+    store = AssetStore(StorageOverlay(DirectoryAssetBackend(
+        str(skills_root.parent),
+        path_adapter=PrefixAssetPathAdapter({"skill": skills_root.name}),
+        kinds=("skill",),
+        follow_external_symlinks=True,
+        ignore_paths=DEFAULT_DISCOVERY_POLICY.ignores,
+    )))
+    await store.initialize()
+    try:
+        capture = await CapabilityGroup("local", assets=store).capture()
+        definition = capture.contributions[0].value
+        assert isinstance(definition, SkillDefinition)
+        assert definition.source_ref is not None
+        assert capture.asset_reader is not None
+        yield AssetSkillSource("local", capture.asset_reader), definition.source_ref
+    finally:
+        await store.close()
 
 
 def _symlink(target: Path, link: Path, *, directory: bool = False) -> None:
@@ -49,13 +70,11 @@ async def test_local_skill_resource_file_symlink_is_discovered_and_read(tmp_path
     target.write_text("shared guide", encoding="utf-8")
     _symlink(target, package / "guide.md")
 
-    source = LocalSkillSource("local", skills_root)
-    source_ref = SkillSourceRef("local", "review")
-
-    view = await source.inspect(source_ref)
-
-    assert view.resources == ("guide.md", "shared/guide.md")
-    assert await source.read(source_ref, "guide.md") == b"shared guide"
+    (package / "SKILL.md").write_text(_DECLARATION, encoding="utf-8")
+    async with _captured_local_skill(skills_root) as (source, source_ref):
+        view = await source.inspect(source_ref)
+        assert view.resources == ("guide.md", "shared/guide.md")
+        assert await source.read(source_ref, "guide.md") == b"shared guide"
 
 
 @pytest.mark.asyncio
@@ -124,16 +143,14 @@ async def test_local_skill_contained_directory_symlink_is_discovered(tmp_path: P
     hidden = package / ".shared"
     package.mkdir(parents=True)
     hidden.mkdir()
-    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    (package / "SKILL.md").write_text(_DECLARATION, encoding="utf-8")
     (hidden / "guide.md").write_text("guide", encoding="utf-8")
     _symlink(hidden, package / "references", directory=True)
 
-    source = LocalSkillSource("local", skills_root)
-    source_ref = SkillSourceRef("local", "review")
-    view = await source.inspect(source_ref)
-
-    assert view.resources == ("references/guide.md",)
-    assert await source.read(source_ref, "references/guide.md") == b"guide"
+    async with _captured_local_skill(skills_root) as (source, source_ref):
+        view = await source.inspect(source_ref)
+        assert view.resources == ("references/guide.md",)
+        assert await source.read(source_ref, "references/guide.md") == b"guide"
 
 
 @pytest.mark.asyncio
@@ -144,7 +161,7 @@ async def test_local_skill_package_directory_symlink_can_target_outside_source_r
     external_package = tmp_path / "ccswitch" / "skills" / "review"
     skills_root.mkdir(parents=True)
     external_package.mkdir(parents=True)
-    (external_package / "SKILL.md").write_text("skill", encoding="utf-8")
+    (external_package / "SKILL.md").write_text(_DECLARATION, encoding="utf-8")
     (external_package / "guide.md").write_text("guide", encoding="utf-8")
     outside = tmp_path / "outside.txt"
     outside.write_text("outside", encoding="utf-8")
@@ -155,19 +172,15 @@ async def test_local_skill_package_directory_symlink_can_target_outside_source_r
     _symlink(outside_dir, external_package / "outside-dir-link", directory=True)
     _symlink(external_package, skills_root / "review", directory=True)
 
-    source = LocalSkillSource("local", skills_root)
-    source_ref = SkillSourceRef("local", "review")
-    view = await source.inspect(source_ref)
-
-    assert Path(view.location.path) == external_package.resolve()
-    assert view.resources == ("guide.md",)
-    assert await source.read(source_ref, "guide.md") == b"guide"
-    with pytest.raises(AIError) as file_error:
-        await source.read(source_ref, "outside-link")
-    assert file_error.value.code is ErrorCode.ASSET_PATH_OUTSIDE_ROOT
-    with pytest.raises(AIError) as directory_error:
-        await source.read(source_ref, "outside-dir-link/nested.md")
-    assert directory_error.value.code is ErrorCode.ASSET_PATH_OUTSIDE_ROOT
+    async with _captured_local_skill(skills_root) as (source, source_ref):
+        view = await source.inspect(source_ref)
+        assert Path(view.location.path) == external_package.resolve()
+        assert view.resources == ("guide.md",)
+        assert await source.read(source_ref, "guide.md") == b"guide"
+        for relative in ("outside-link", "outside-dir-link/nested.md"):
+            with pytest.raises(AIError) as error:
+                await source.read(source_ref, relative)
+            assert error.value.code is ErrorCode.ASSET_NOT_FOUND
 
 
 @pytest.mark.asyncio
@@ -177,24 +190,19 @@ async def test_local_skill_symlink_loops_use_stable_errors(tmp_path: Path) -> No
     _symlink(Path("b"), skills_root / "a", directory=True)
     _symlink(Path("a"), skills_root / "b", directory=True)
 
-    source = LocalSkillSource("local", skills_root)
-    with pytest.raises(AIError) as package_error:
-        await source.inspect(SkillSourceRef("local", "a"))
-    assert package_error.value.code is ErrorCode.ASSET_NOT_FOUND
-
     package = skills_root / "review"
     package.mkdir()
-    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    (package / "SKILL.md").write_text(_DECLARATION, encoding="utf-8")
     _symlink(Path("loop-b"), package / "loop-a")
     _symlink(Path("loop-a"), package / "loop-b")
     _symlink(package, package / "loop-dir", directory=True)
 
-    source_ref = SkillSourceRef("local", "review")
-    view = await source.inspect(source_ref)
-    assert view.resources == ()
-    with pytest.raises(AIError) as resource_error:
-        await source.read(source_ref, "loop-a")
-    assert resource_error.value.code is ErrorCode.ASSET_NOT_FOUND
+    async with _captured_local_skill(skills_root) as (source, source_ref):
+        view = await source.inspect(source_ref)
+        assert view.resources == ()
+        with pytest.raises(AIError) as resource_error:
+            await source.read(source_ref, "loop-a")
+        assert resource_error.value.code is ErrorCode.ASSET_NOT_FOUND
 
 
 @pytest.mark.asyncio
@@ -359,3 +367,54 @@ async def test_directory_asset_kind_root_symlinks_follow_explicit_policy(
         )
     finally:
         await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_local_skill_capture_does_not_rescan_resource_membership(tmp_path: Path) -> None:
+    skills_root = tmp_path / "skills"
+    package = skills_root / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text(_DECLARATION, encoding="utf-8")
+    guide = package / "guide.md"
+    guide.write_bytes(b"captured")
+    async with _captured_local_skill(skills_root) as (source, source_ref):
+        (package / "added.md").write_bytes(b"later")
+        assert (await source.inspect(source_ref)).resources == ("guide.md",)
+        with pytest.raises(AIError) as missing:
+            await source.read(source_ref, "added.md")
+        assert missing.value.code is ErrorCode.ASSET_NOT_FOUND
+        guide.write_bytes(b"changed")
+        with pytest.raises(AIError) as changed:
+            await source.read(source_ref, "guide.md")
+        assert changed.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_captured_local_skill_keeps_resources_from_distinct_overlay_roots(tmp_path: Path) -> None:
+    primary_root = tmp_path / "primary"
+    fallback_root = tmp_path / "fallback"
+    for root in (primary_root, fallback_root):
+        (root / "skill" / "review").mkdir(parents=True)
+    (fallback_root / "skill" / "review" / "SKILL.md").write_text(_DECLARATION, encoding="utf-8")
+    (fallback_root / "skill" / "review" / "guide.md").write_bytes(b"fallback guide")
+    (primary_root / "skill" / "review" / "run.py").write_bytes(b"primary script")
+    store = AssetStore(StorageOverlay(
+        DirectoryAssetBackend(str(primary_root), kinds=("skill",)),
+        layers=(StorageLayer(
+            "fallback", DirectoryAssetBackend(str(fallback_root), kinds=("skill",)),
+        ),),
+    ))
+    await store.initialize()
+    try:
+        capture = await CapabilityGroup("local", assets=store).capture()
+        definition = capture.contributions[0].value
+        assert isinstance(definition, SkillDefinition)
+        assert definition.source_ref is not None
+        assert capture.asset_reader is not None
+        source = AssetSkillSource("local", capture.asset_reader)
+        view = await source.inspect(definition.source_ref)
+        assert view.resources == ("guide.md", "run.py")
+        assert view.location.kind == "virtual"
+        assert await source.read(definition.source_ref, "run.py") == b"primary script"
+    finally:
+        await store.close()

@@ -11,7 +11,8 @@ from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectRef, ObjectStore, StoredPayload, read_object, runtime_object_key
+from ...storage import ObjectRef, ObjectStore, StoredPayload, read_object
+from .._storage_keys import runtime_object_key
 from .._message import decode_model_messages, encode_model_messages
 from ._codec import (
     _decode_enveloped_domain,

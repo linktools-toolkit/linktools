@@ -158,8 +158,8 @@ class ExecutionStateCommands:
             if execution is None or head is None or seal is None:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
             expected_revision = commit.expected_revision + len(audit_events) + 1
-            expected_event_sequence = (
-                commit.expected_event_sequence + len(audit_events) + 1
+            expected_event_seq = (
+                commit.expected_event_seq + len(audit_events) + 1
             )
             if (
                 head.state is ExecutionHistoryState.SEALED
@@ -168,7 +168,7 @@ class ExecutionStateCommands:
                 and execution.result == commit.result
                 and execution.error_code == commit.execution.error_code
                 and execution.revision == expected_revision
-                and execution.event_sequence == expected_event_sequence
+                and execution.event_seq == expected_event_seq
             ):
                 return CommitObservation(
                     DurableCommitState.COMMITTED,
@@ -244,7 +244,7 @@ def _execution_history_seal(
         )
     ordered_heads = tuple(sorted(heads, key=lambda head: head.agent_run_id))
     execution_event_high_water = (
-        commit.expected_event_sequence + len(audit_events) + 1
+        commit.expected_event_seq + len(audit_events) + 1
     )
     return ExecutionHistorySealRecord(
         execution_id=commit.execution.execution_id,

@@ -98,10 +98,10 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
                 capabilities=(_agent_group(),),
                 metrics=metrics,
             ) as runtime:
-                result = await runtime.agents.get("default").run(
+                result = (await runtime.agents.get("default").run(
                     f"hello-{label}",
                     timeout_seconds=10,
-                )
+                )).result
                 assert result.status is ExecutionStatus.SUCCEEDED
 
         end = datetime.now(timezone.utc) + timedelta(seconds=1)

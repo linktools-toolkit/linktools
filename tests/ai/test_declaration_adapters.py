@@ -683,7 +683,12 @@ async def test_capture_reports_directory_file_change_as_snapshot_conflict(
     await store.initialize()
     try:
         context = await CapabilityLoadContext.capture("application", store)
+        await context.verify_source_revision()
         target.write_bytes(b"second")
+
+        with pytest.raises(AIError) as verification_error:
+            await context.verify_source_revision()
+        assert verification_error.value.code is ErrorCode.SNAPSHOT_CONFLICT
 
         with pytest.raises(AIError) as error:
             await context.read(AssetKey("worker", "team"))

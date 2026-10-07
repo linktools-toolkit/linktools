@@ -204,7 +204,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
-        result = await runtime.agents.get("default").run(secret, timeout_seconds=10)
+        result = (await runtime.agents.get("default").run(secret, timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 
     end = datetime.now(timezone.utc) + timedelta(seconds=1)
@@ -252,7 +252,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
         capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
-        result = await runtime.agents.get("default").run("hello", timeout_seconds=10)
+        result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
         assert result.status is ExecutionStatus.SUCCEEDED
 
 
@@ -297,7 +297,7 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
             graph,
             idempotency_key="isolated-task-failure-0001",
         )
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
         state = await run.state()
 
         async def observe(event: object) -> None:
@@ -312,7 +312,7 @@ async def test_isolated_task_failure_keeps_results_events_and_metrics_consistent
     assert result.status is TaskStatus.SUCCEEDED
     assert replayed.status is TaskStatus.SUCCEEDED
     assert state.status is TaskStatus.SUCCEEDED
-    result_statuses = {node.node_id: node.status for node in result.node_results}
+    result_statuses = {node.node_id: node.status for node in result.node_states}
     assert result_statuses == {
         "failed": TaskStatus.FAILED,
         "succeeded": TaskStatus.SUCCEEDED,
@@ -454,7 +454,7 @@ class _CommitUnknownTaskRepository:
             TaskEvent(
                 version=1,
                 graph_id="graph",
-                sequence=1,
+                event_seq=1,
                 event_type=TaskEventType.GRAPH_ADMITTED,
                 occurred_at=self.terminal_time - timedelta(seconds=3),
                 status=TaskStatus.PENDING,
@@ -539,7 +539,7 @@ class _CommitUnknownTaskRepository:
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]:
         assert graph_id == "graph"
@@ -547,7 +547,7 @@ class _CommitUnknownTaskRepository:
         assert limit in {1, 1000}
         self.list_event_calls += 1
         selected = tuple(
-            event for event in self.events if event.sequence > after_sequence
+            event for event in self.events if event.event_seq > after_event_seq
         )
         items = selected[:limit]
         return Page(items, "more" if len(selected) > limit else None)
@@ -581,7 +581,7 @@ class _CommitUnknownTaskRepository:
             TaskEvent(
                 version=1,
                 graph_id="graph",
-                sequence=2,
+                event_seq=2,
                 event_type=TaskEventType.NODE_CHANGED,
                 occurred_at=self.terminal_time - timedelta(seconds=2),
                 status=TaskStatus.RUNNING,
@@ -648,7 +648,7 @@ class _CommitUnknownTaskRepository:
                 TaskEvent(
                     version=1,
                     graph_id="graph",
-                    sequence=3,
+                    event_seq=3,
                     event_type=TaskEventType.NODE_CHANGED,
                     occurred_at=self.terminal_time,
                     status=TaskStatus.SUCCEEDED,
@@ -661,7 +661,7 @@ class _CommitUnknownTaskRepository:
                 TaskEvent(
                     version=1,
                     graph_id="graph",
-                    sequence=4,
+                    event_seq=4,
                     event_type=TaskEventType.GRAPH_CHANGED,
                     occurred_at=self.terminal_time + timedelta(seconds=1),
                     status=TaskStatus.SUCCEEDED,

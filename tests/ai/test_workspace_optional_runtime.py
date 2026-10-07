@@ -51,7 +51,7 @@ async def test_workspace_less_runtime_runs_session_and_history() -> None:
     ) as runtime:
         assert runtime.namespace == "web-chat"
         session = await runtime.agents.get("default").create_session("chat")
-        result = await session.run("hello", timeout_seconds=10)
+        result = (await session.run("hello", timeout_seconds=10)).result
 
         assert result.status is ExecutionStatus.SUCCEEDED
         history = await session.history()
@@ -128,7 +128,7 @@ async def test_sandbox_group_can_be_composed_without_workspace() -> None:
         storage=RuntimeStorage.in_memory(),
         capabilities=(group,),
     ) as runtime:
-        result = await runtime.agents.get("default").run("hello", timeout_seconds=10)
+        result = (await runtime.agents.get("default").run("hello", timeout_seconds=10)).result
     assert result.status is ExecutionStatus.SUCCEEDED
 
 
@@ -168,10 +168,10 @@ async def test_sandbox_without_workspace_exposes_local_skill_resources(
                 CapabilityGroup("sandbox", sandbox=sandbox),
             ),
         ) as runtime:
-            result = await runtime.agents.get("default").run(
+            result = (await runtime.agents.get("default").run(
                 "review",
                 timeout_seconds=10,
-            )
+            )).result
         assert result.status is ExecutionStatus.SUCCEEDED
         assert len(sandbox.opened) == 1
         root, resources = sandbox.opened[0]

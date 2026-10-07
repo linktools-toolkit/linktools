@@ -675,9 +675,6 @@ class SqlAssetBackend:
             else await _read_asset_object(self._object_store, self._namespace_digest, key, info)
         )
 
-    async def get_at_version(self, key: AssetKey, version: int) -> bytes | None:
-        return await self.get_at_revision(key, StorageEntryRevision(version))
-
     async def _head(self) -> int:
         heads = self._metadata.tables["ai_asset_heads"]
         session = self._context.sessions()

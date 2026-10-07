@@ -179,8 +179,8 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
             (ScorerSpec("score", tasks[1].ref, dimensions=(DimensionContract("quality", "number", "higher"),), rubric="private rubric"),),
             policy=policy), principal, "start")
         run = await runtime.evaluations.start(request, engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
-        report = await run.report()
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
+        report = await run.create_report()
         trial = (await run.trials()).items[0]
         evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=principal)
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id="tenant")
@@ -204,7 +204,7 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
         with pytest.raises(AIError) as unavailable:
             await runtime.evaluations.read_evidence(copied.ref, principal=principal)
         assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
-        for read in (run.report, run.scores, run.trials):
+        for read in (run.create_report, run.scores, run.trials):
             with pytest.raises(AIError) as unavailable:
                 await read()
             assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
@@ -216,7 +216,7 @@ async def test_public_expiry_purge_and_reopen_do_not_revive_private_evidence(bac
             (ScoreComparisonSelection(ScoreSelection("score", "quality"), ScoreSelection("score", "quality")),),
             cutoff=ComparisonReadCutoff(report.cutoff, report.cutoff))
         with pytest.raises(AIError) as unavailable:
-            await runtime.evaluations.compare(comparison, principal=principal)
+            await runtime.evaluations.create_comparison_report(comparison, principal=principal)
         assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
         with pytest.raises(AIError) as unavailable:
             await runtime.evaluations.reconcile(run.experiment_id, engine=engine, principal=principal, idempotency_key="expired-resume")
@@ -443,7 +443,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
         await storage.evaluation.records.reserve_experiment(record)
         reference = await put(objects, "private-evidence", "private content")
         bundle = EvidenceBundle(EvidenceRef("evaluation", "tenant", "bundle", "0" * 64),
-            TargetTrialRef(record.evaluation_id, "trial"),
+            TargetTrialRef(record.experiment_id, "trial"),
             ExecutionTargetEvidence(ExecutionSubjectRef("evaluation", "tenant", "source"), "succeeded"),
             attachments=(EvidenceAttachmentRef("raw", "text/plain", reference),))
         bundle = replace(bundle, ref=replace(bundle.ref, digest=bundle.digest))
@@ -459,7 +459,7 @@ async def test_cleanup_receipt_survives_failed_physical_delete_and_retry(tmp_pat
             await retention.purge_expired(principal=service_principal("tenant", "owner"),
                 now=now + timedelta(seconds=120), exclusive=guard)
         with pytest.raises(AIError) as unavailable:
-            await storage.evaluation.records.get(record.evaluation_id, tenant_id="tenant")
+            await storage.evaluation.records.get(record.experiment_id, tenant_id="tenant")
         assert unavailable.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
         assert await objects.stat(reference.key) is not None
         assert await storage.evaluation.records.pending_cleanup(owner_principal_id="owner", limit=100)

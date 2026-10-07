@@ -46,7 +46,9 @@ async def test_asset_batch_replay_keeps_original_revision_precondition(asset_sto
     changes = (StorageChange(StorageOperation.PUT, key, b"one", None),)
     revision = await asset_store.current_revision()
     committed = await asset_store.apply_batch(changes, expected_revision=revision, idempotency_key="batch")
+    first = (await asset_store.resolve_versions((key,)))[0]
     await asset_store.put(key, b"two")
+    second = (await asset_store.resolve_versions((key,)))[0]
     current = await asset_store.current_revision()
 
     assert await asset_store.apply_batch(
@@ -54,7 +56,8 @@ async def test_asset_batch_replay_keeps_original_revision_precondition(asset_sto
     ) == committed
     assert await asset_store.current_revision() == current
     assert await asset_store.get(key) == b"two"
-    assert len(await asset_store.list_versions(key)) == 2
+    assert len(await asset_store._storage.primary.list_versions(key)) == 2
+    assert await asset_store.read_versions((first, second)) == (b"one", b"two")
     with pytest.raises(AIError) as conflict:
         await asset_store.apply_batch(
             (StorageChange(StorageOperation.PUT, key, b"different", None),),
@@ -78,7 +81,7 @@ async def test_asset_metadata_reads_cannot_mutate_stored_versions(asset_store: A
     current = await asset_store.stat(key)
     assert current is not None
     assert current.metadata == {"nested": {"mode": 1}}
-    assert (await asset_store.list_versions(key))[0].metadata == {"nested": {"mode": 1}}
+    assert (await asset_store._storage.primary.list_versions(key))[0].metadata == {"nested": {"mode": 1}}
     assert await asset_store.current_revision() == revision
 
 
@@ -102,7 +105,7 @@ async def test_asset_mixed_batch_only_records_changed_entries(asset_store: Asset
     assert result.results[1].changed is True
     assert result.results[2].deleted is False
     assert result.results[3].reset is False
-    assert len(await asset_store.list_versions(stable)) == 1
+    assert len(await asset_store._storage.primary.list_versions(stable)) == 1
     assert await asset_store.stat(missing_delete) is None
     assert await asset_store.stat(missing_reset) is None
 
@@ -121,5 +124,8 @@ async def test_empty_asset_bytes_round_trip_through_versions_and_snapshot(asset_
     await restored.initialize()
     try:
         assert await restored.get(key) == b""
+        restored_versions = await restored.resolve_versions((key,))
+        assert restored_versions[0].revision == info.revision
+        assert await restored.read_versions(restored_versions) == (b"",)
     finally:
         await restored.close()

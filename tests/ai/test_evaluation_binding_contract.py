@@ -32,7 +32,7 @@ async def test_historical_agent_capture_restores_original_structured_output_bind
                             context=CONTEXT, capabilities=(group,)) as runtime:
         source = await runtime.agents.get().start("the original question", output=ScoreBundle,
             principal=PRINCIPAL, idempotency_key="historical-source")
-        source_result = await source.wait(timeout_seconds=10)
+        source_result = (await source.wait(timeout_seconds=10)).result
         assert source_result.status is ExecutionStatus.SUCCEEDED
         capture = await runtime.executions.capture_input(source.execution_id,
             CaptureInputRequest(PRINCIPAL, "capture-historical-source", "clean"))
@@ -45,9 +45,9 @@ async def test_historical_agent_capture_restores_original_structured_output_bind
             (CandidateSpec("historical", task=historical.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start-historical"),
             engine=runtime.tasks.bind(historical, scorer))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        report = await run.report()
+        report = await run.create_report()
         assert report.scores[0].valid == 1 and report.scores[0].mean == 1.0
         trial = (await run.trials()).items[0]
         assert trial.subject.execution_id != source.execution_id
@@ -55,7 +55,7 @@ async def test_historical_agent_capture_restores_original_structured_output_bind
         assert evidence.target.output.value == source_result.output
         assert models.prompts == ["the original question", "the original question"]
         assert models.schemas[0] == models.schemas[1]
-        assert (await source.wait()).output == source_result.output
+        assert (await source.wait()).result.output == source_result.output
 
 
 @pytest.mark.asyncio
@@ -79,7 +79,7 @@ async def test_reconcile_rejects_same_revision_task_contract_drift_before_rerunn
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("current", task=original.ref),), (rule_scorer(scorer),)), PRINCIPAL, "start-drift"),
             engine=runtime.tasks.bind(original, scorer))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         with pytest.raises(AIError) as raised:
             await runtime.evaluations.reconcile(run.experiment_id, engine=runtime.tasks.bind(changed, scorer),
@@ -102,12 +102,12 @@ async def test_strict_comparison_cannot_mix_datasets_even_when_both_scores_pass(
             )), principal=PRINCIPAL, idempotency_key=f"publish-{name}")
             run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
                 (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, f"start-{name}"), engine=engine)
-            view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+            view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
             assert view.completion == "complete", view.needs_attention
-            assert (await run.report()).scores[0].mean == 1.0
+            assert (await run.create_report()).scores[0].mean == 1.0
             runs.append(run)
         selection = ScoreComparisonSelection(ScoreSelection("exact", "exact_match"), ScoreSelection("exact", "exact_match"))
-        comparison = await runtime.evaluations.compare(ComparisonSpec(
+        comparison = await runtime.evaluations.create_comparison_report(ComparisonSpec(
             CandidateSlotRef(runs[0].experiment_id, "current"), CandidateSlotRef(runs[1].experiment_id, "current"),
             (selection,), allowed_changes=("task_definition",), gate_policy=GatePolicy()), principal=PRINCIPAL)
         assert comparison.compatibility == "incompatible" and comparison.gate == "inconclusive"
@@ -139,7 +139,7 @@ async def test_two_graph_cases_keep_frozen_or_rerun_dependency_values_separate(t
                 TaskNode("A", task=producer, input={"value": f"old-{name}"}),
                 TaskNode("B", ("A",), task=consumer, input_refs={"prepared": TaskNodeResultRef("A")}),
             )), principal=PRINCIPAL, idempotency_key=f"original-graph-{name}")
-            assert (await original.wait()).status is TaskStatus.SUCCEEDED
+            assert (await original.wait()).result.wait_status is TaskStatus.SUCCEEDED
             capture = await runtime.executions.capture_input((await original.execution("B")).execution_id,
                 CaptureInputRequest(PRINCIPAL, f"capture-{name}", "clean"))
             cases.append(CaseSpec.graph(CaseRef("captured-graphs", name, 1), inputs={
@@ -155,11 +155,11 @@ async def test_two_graph_cases_keep_frozen_or_rerun_dependency_values_separate(t
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("workflow", graph_template=GraphTargetSpec(template=template, outputs={"answer": "B"})),),
             (rule_scorer(scorer),)), PRINCIPAL, "start-captured-graphs"), engine=engine)
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         trials = (await run.trials()).items
         assert all(trial.execution_status is TaskStatus.SUCCEEDED for trial in trials), [(trial.case_ref.case_id, trial.execution_status, trial.disposition.reason_code if trial.disposition else trial.error_code) for trial in trials]
-        summary = (await run.report()).scores[0]
+        summary = (await run.create_report()).scores[0]
         assert summary.planned == summary.valid == 2 and summary.mean == 1.0
         observed = {}
         for trial in trials:
@@ -202,7 +202,7 @@ async def test_rerun_dependency_failure_never_falls_back_to_captured_success(tmp
             TaskNode("A", task=producer, input={"fail": False}),
             TaskNode("B", ("A",), task=consumer, input_refs={"prepared": TaskNodeResultRef("A")}),
         )), principal=PRINCIPAL, idempotency_key="original-successful-source")
-        assert (await original.wait()).status is TaskStatus.SUCCEEDED
+        assert (await original.wait()).result.wait_status is TaskStatus.SUCCEEDED
         capture = await runtime.executions.capture_input((await original.execution("B")).execution_id,
             CaptureInputRequest(PRINCIPAL, "capture-successful-consumer", "clean"))
         dataset = await runtime.evaluations.publish_dataset(DatasetSpec(DatasetRef("rerun-failure", 1), cases=(
@@ -217,9 +217,9 @@ async def test_rerun_dependency_failure_never_falls_back_to_captured_success(tmp
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("workflow", graph_template=GraphTargetSpec(template=template, outputs={"answer": "B"})),),
             (rule_scorer(scorer),)), PRINCIPAL, "start-rerun-failure"), engine=engine)
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         assert observed == [TaskStatus.SUCCEEDED, TaskStatus.FAILED]
-        report = await run.report()
+        report = await run.create_report()
         assert report.candidates[0].succeeded == 1
         assert report.scores[0].valid == 1 and report.scores[0].mean == 1.0

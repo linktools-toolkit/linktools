@@ -57,7 +57,7 @@ def _interaction(
     return ModelInteractionRecord(
         agent_run_id=agent_run_id,
         step_index=sequence,
-        request_sequence=sequence,
+        model_request_seq=sequence,
         purpose="agent",
         output_retry_index=None,
         model={"route_id": "default"},
@@ -109,16 +109,16 @@ class _Store:
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int | None = None,
+        after_model_request_seq: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
         assert agent_run_id == self.run.agent_run_id
-        self.interaction_reads.append((after_request_sequence, limit))
+        self.interaction_reads.append((after_model_request_seq, limit))
         values = [
             value
             for value in self.interactions
-            if after_request_sequence is None
-            or value.request_sequence > after_request_sequence
+            if after_model_request_seq is None
+            or value.model_request_seq > after_model_request_seq
         ]
         return values if limit is None else values[:limit]
 
@@ -132,7 +132,7 @@ async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:
         namespace=namespace,
         tenant_id=tenant_id,
         execution_id=execution_id,
-        agent_run_sequence=1,
+        agent_run_seq=1,
     )
     stored_input = StoredUserInput(
         "user-content-v1",
@@ -148,7 +148,7 @@ async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:
         execution_id=execution_id,
         status=ExecutionStatus.STARTED,
         binding_kind="agent",
-        agent_run_sequence=1,
+        agent_run_seq=1,
         stored_user_input=stored_input,
     )
     run = AgentRunRecord(
@@ -158,7 +158,7 @@ async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:
             tenant_id=tenant_id,
             execution_id=execution_id,
         ),
-        metadata={"agent_run_sequence": "1", "agent_id": "default"},
+        metadata={"agent_run_seq": "1", "agent_id": "default"},
     )
     interactions = [
         _interaction(
@@ -207,7 +207,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
         namespace=namespace,
         tenant_id=tenant_id,
         execution_id=execution_id,
-        agent_run_sequence=1,
+        agent_run_seq=1,
     )
     initial_id = "a" * 64
     initial_digest = "b" * 64
@@ -238,7 +238,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
         execution_id=execution_id,
         status=ExecutionStatus.STARTED,
         binding_kind="agent",
-        agent_run_sequence=1,
+        agent_run_seq=1,
         stored_user_input=stored_input,
     )
     run = AgentRunRecord(
@@ -248,7 +248,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
             tenant_id=tenant_id,
             execution_id=execution_id,
         ),
-        metadata={"agent_run_sequence": "1", "agent_id": "default"},
+        metadata={"agent_run_seq": "1", "agent_id": "default"},
     )
     interactions = [
         _interaction(
@@ -350,11 +350,11 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
         ("included_in_request", tool_id),
     ]
     assert second.next_cursor is None
-    assert second.items[0].request_sequence is None
+    assert second.items[0].model_request_seq is None
     assert second.items[0].step_index is None
     assert second.items[0].call_id == "call-1"
     assert second.items[0].input_identifier is None
-    assert second.items[1].request_sequence == 2
+    assert second.items[1].model_request_seq == 2
     assert second.items[1].step_index == 2
     assert second.items[1].processing_status == "unknown"
 
@@ -366,4 +366,4 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
     )
     assert len(fresh.items) == 6
     assert fresh.items[-1].attachment_id == late_id
-    assert fresh.items[-1].request_sequence == 3
+    assert fresh.items[-1].model_request_seq == 3

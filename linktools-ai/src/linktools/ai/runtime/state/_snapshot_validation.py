@@ -330,7 +330,7 @@ def _decode_session_turn_commit(value: object) -> Mapping[str, object]:
     expected = {
         "version",
         "session_id",
-        "sequence",
+        "turn_seq",
         "execution_id",
         "start_message_index",
         "end_message_index",
@@ -345,13 +345,13 @@ def _decode_session_turn_commit(value: object) -> Mapping[str, object]:
         for name in ("session_id", "execution_id")
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    sequence = value["sequence"]
+    turn_seq = value["turn_seq"]
     start = value["start_message_index"]
     end = value["end_message_index"]
     if (
-        isinstance(sequence, bool)
-        or not isinstance(sequence, int)
-        or sequence < 1
+        isinstance(turn_seq, bool)
+        or not isinstance(turn_seq, int)
+        or turn_seq < 1
         or isinstance(start, bool)
         or not isinstance(start, int)
         or start < 0
@@ -670,11 +670,11 @@ def _expected_session_turn_commit(
 ) -> StoredRecord:
     fields = cast(Mapping[str, object], value)
     session_id = cast(str, fields["session_id"])
-    sequence = cast(int, fields["sequence"])
+    turn_seq = cast(int, fields["turn_seq"])
     _require_anchor(
         namespace, tenant_id, domain, records, "session", session_id
     )
-    identity = [session_id, sequence]
+    identity = [session_id, turn_seq]
     return StoredRecord(
         record_key_digest(
             namespace,
@@ -773,14 +773,14 @@ def _validate_facts(
     for owner_key, owner in values.items():
         if owner_key in fact_owners:
             continue
-        if isinstance(owner, ExecutionRecord) and owner.event_sequence != 0:
+        if isinstance(owner, ExecutionRecord) and owner.event_seq != 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(owner, TranscriptHeadRecord) and owner.chunk_count != 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _validate_fact_high_water(owner: object, sequence: int) -> None:
-    if isinstance(owner, ExecutionRecord) and owner.event_sequence != sequence:
+    if isinstance(owner, ExecutionRecord) and owner.event_seq != sequence:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if isinstance(owner, TranscriptHeadRecord) and owner.chunk_count != sequence:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

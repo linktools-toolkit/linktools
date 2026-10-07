@@ -79,6 +79,7 @@ from ..task import (
 from ._agent import Agent, Execution, Session
 from ._agent_binding_resolver import _AgentBindingResolver
 from ._task import TaskGraphRun
+from ._observation import _ObservationSession
 from ._tasks import RuntimeTasks, TaskEngine
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
 from ._agent_task import RuntimeAgentTaskRunner
@@ -238,8 +239,9 @@ class _ExecutionTreeStreamer(Protocol):
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences: Mapping[str, int] | None = None,
+        after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -338,8 +340,19 @@ class Runtime(Generic[AppT]):
         self._binding_resolver = _binding_resolver
         self._closed = False
         self._closing = False
+        self._observation_sessions: set[_ObservationSession] = set()
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
+        if evaluation is not None:
+            evaluation._bind_observation(
+                lambda graph_id, principal, cursor, content, ready: TaskGraphRun(
+                    self, graph, graph_id, principal, self._watch_execution_tree,
+                )._watch_prepared(cursor, content, ready),
+                lambda graph_id, principal, cursor, content: TaskGraphRun(
+                    self, graph, graph_id, principal, self._watch_execution_tree,
+                )._finite_events(cursor, content),
+                self._register_observation, self._release_observation,
+            )
 
     @classmethod
     @overload
@@ -413,16 +426,17 @@ class Runtime(Generic[AppT]):
         execution_id: str,
         *,
         principal: Principal,
-        after_sequences: Mapping[str, int] | None = None,
+        after_event_seqs: Mapping[str, int] | None = None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         if self._tree_streamer is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._tree_streamer.stream(
             execution_id,
             principal=principal,
-            after_sequences=after_sequences,
-            include_content=include_content,
+            after_event_seqs=after_event_seqs,
+            include_content=include_content, ready=ready,
         )
 
     @property
@@ -1235,6 +1249,8 @@ class Runtime(Generic[AppT]):
                 return
             if not self._closing:
                 self._closing = True
+                for session in tuple(self._observation_sessions):
+                    session.stop()
                 _logger.info("runtime close started: tenant=%s", self.tenant_id)
             task = self._close_task
             retry = task is None
@@ -1279,7 +1295,22 @@ class Runtime(Generic[AppT]):
         except BaseException as error:  # noqa: BLE001
             _log_secondary_cleanup("runtime.close", error)
 
+    def _register_observation(self, session: _ObservationSession) -> None:
+        self._ensure_open()
+        self._observation_sessions.add(session)
+
+    def _release_observation(self, session: _ObservationSession) -> None:
+        self._observation_sessions.discard(session)
+
     async def _cleanup(self) -> None:
+        sessions = tuple(self._observation_sessions)
+        for session in sessions:
+            session.stop()
+        deadline = asyncio.get_running_loop().time() + max(
+            (session.close_timeout for session in sessions), default=0.0,
+        )
+        for session in sessions:
+            await session.close(deadline=deadline)
         if self._close_callback is not None:
             await self._close_callback()
         async with self._close_lock:

@@ -359,17 +359,6 @@ class FilesystemJournal:
                 raise AIError(self._error_code)
 
 
-def atomic_write_bytes(path: "str | Path", value: bytes) -> None:
-    write_bytes_atomic(Path(path), value)
-
-
-def atomic_write_json(path: "str | Path", value: JsonValue) -> None:
-    atomic_write_bytes(
-        path,
-        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
-    )
-
-
 _STORAGE_ID = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -442,8 +431,6 @@ __all__ = [
     "Sha256Digest",
     "StorageId",
     "StoragePath",
-    "atomic_write_bytes",
-    "atomic_write_json",
     "read_bytes",
     "read_json",
     "safe_child",

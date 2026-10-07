@@ -58,11 +58,11 @@ class _Catalog:
 
 
 class _History:
-    async def history(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[object]:
+    async def history(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int, agent_run_seq: int | None = None, model_request_seq: int | None = None, step_index: int | None = None, tool_call_id: str | None = None, message_seq: int | None = None, part_index: int | None = None) -> Page[object]:
         del execution_id, tenant_id, cursor, limit
         return Page((), None)
 
-    async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[object]:
+    async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int, agent_run_seq: int | None = None, model_request_seq: int | None = None, step_index: int | None = None, tool_call_id: str | None = None) -> Page[object]:
         del execution_id, tenant_id, cursor, limit
         return Page((), None)
 
@@ -151,8 +151,8 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
         lineage_kind=ExecutionLineageKind.RUN,
         status=ExecutionStatus.STARTED,
         revision=0,
-        event_sequence=0,
-        agent_run_sequence=1,
+        event_seq=0,
+        agent_run_seq=1,
         error_code=None,
         safe_error_details={},
         created_at=now,

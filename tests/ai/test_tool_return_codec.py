@@ -194,7 +194,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
         agent_conversation_id="conversation",
         run_store=_AgentRunStore(),  # type: ignore[arg-type]
         agent_run_id="agent-run",
-        agent_run_sequence=1,
+        agent_run_seq=1,
         event_sink=sink,
         deferred_tool_results=DeferredToolResults(calls={"success": portable}),
     )

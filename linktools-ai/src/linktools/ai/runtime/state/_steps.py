@@ -13,6 +13,7 @@ from pydantic_ai.messages import ModelMessage
 
 from ...errors import AIError, ErrorCode
 from .._message import decode_model_messages
+from .._transcript_staging import StagedTranscript
 from .._model_interaction import (
     StagedContextInline,
     StagedContextSpan,
@@ -244,7 +245,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     )
                     staged = await self._terminal_staged_interactions(
                         agent_run_id=target_agent_run.agent_run_id,
-                        after_request_sequence=high_water,
+                        after_model_request_seq=high_water,
                     )
                     prepared_interactions = await target_recovery.prepare_interactions(
                         target_agent_run,
@@ -283,7 +284,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                         if checkpoint_visible and prepared_interactions:
                             observed_interactions = await target_recovery.list_model_interactions(
                                 agent_run_id=target_agent_run.agent_run_id,
-                                after_request_sequence=prepared_interactions[0].request_sequence - 1,
+                                after_model_request_seq=prepared_interactions[0].model_request_seq - 1,
                                 limit=len(prepared_interactions),
                             )
                             checkpoint_visible = tuple(observed_interactions) == prepared_interactions
@@ -309,6 +310,12 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def latest_checkpoint(self, *, agent_run_id: str, include_interrupted: bool = False) -> AgentRunCheckpoint | None:
         await self._ensure_business()
         return await self._staging.latest_checkpoint(agent_run_id=agent_run_id, include_interrupted=include_interrupted)
+
+    def stage_transcript(self, agent_run_id: str, transcript: StagedTranscript) -> None:
+        self._staging.stage_transcript(agent_run_id, transcript)
+
+    def staged_transcript(self, agent_run_id: str) -> StagedTranscript | None:
+        return self._staging.staged_transcript(agent_run_id)
 
     def intern_payload(self, agent_run_id: str, payload: bytes) -> tuple[str, int]:
         return self._staging.intern_payload(agent_run_id, payload)
@@ -348,7 +355,7 @@ class RuntimeAgentRunStore(AgentRunStore):
             archived,
             max(
                 (
-                    item.request_sequence
+                    item.model_request_seq
                     for item in staged
                     if isinstance(item, StagedModelInteraction)
                 ),
@@ -360,21 +367,21 @@ class RuntimeAgentRunStore(AgentRunStore):
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int,
+        after_model_request_seq: int,
         limit: int,
     ) -> tuple[list[object], list[StagedModelInteraction]]:
         """Capture staged identities before reading their durable handoff."""
         await self._ensure_business()
         staged = await self._staging.list_model_interactions(
             agent_run_id=agent_run_id,
-            after_request_sequence=after_request_sequence,
+            after_model_request_seq=after_model_request_seq,
             limit=limit,
         )
         if any(not isinstance(item, StagedModelInteraction) for item in staged):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         archived = await self.read_store(RuntimeDomain.EXECUTION).list_model_interactions(
             agent_run_id=agent_run_id,
-            after_request_sequence=after_request_sequence,
+            after_model_request_seq=after_model_request_seq,
             limit=limit,
         )
         return archived, [
@@ -385,20 +392,20 @@ class RuntimeAgentRunStore(AgentRunStore):
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int | None = None,
+        after_model_request_seq: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
         await self._ensure_business()
         return await self._staging.list_model_interactions(
             agent_run_id=agent_run_id,
-            after_request_sequence=after_request_sequence,
+            after_model_request_seq=after_model_request_seq,
             limit=limit,
         )
 
     async def model_interaction_count(self, *, agent_run_id: str) -> int:
         await self._ensure_business()
         terminal = await self._terminal_staged_interactions(agent_run_id=agent_run_id)
-        staged_sequences = tuple(value.request_sequence for value in terminal)
+        staged_sequences = tuple(value.model_request_seq for value in terminal)
         staged_high_water = staged_sequences[-1] if staged_sequences else 0
         recovery = self._archives.get(RuntimeDomain.RECOVERY)
         durable_high_water = (
@@ -414,11 +421,11 @@ class RuntimeAgentRunStore(AgentRunStore):
         self,
         *,
         agent_run_id: str,
-        after_request_sequence: int | None = None,
+        after_model_request_seq: int | None = None,
     ) -> tuple[StagedModelInteraction, ...]:
         staged = await self._staging.list_model_interactions(
             agent_run_id=agent_run_id,
-            after_request_sequence=after_request_sequence,
+            after_model_request_seq=after_model_request_seq,
         )
         terminal: list[StagedModelInteraction] = []
         running_seen = False
@@ -426,9 +433,9 @@ class RuntimeAgentRunStore(AgentRunStore):
         for value in staged:
             if not isinstance(value, StagedModelInteraction):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if previous_sequence is not None and value.request_sequence != previous_sequence + 1:
+            if previous_sequence is not None and value.model_request_seq != previous_sequence + 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            previous_sequence = value.request_sequence
+            previous_sequence = value.model_request_seq
             if value.status == "RUNNING":
                 running_seen = True
             elif running_seen:
@@ -521,7 +528,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 archive = self.read_store(RuntimeDomain.EXECUTION)
                 archived = await archive.list_model_interactions(
                     agent_run_id=agent_run_id,
-                    after_request_sequence=staged[0].request_sequence - 1,
+                    after_model_request_seq=staged[0].model_request_seq - 1,
                     limit=len(staged),
                 )
                 if (
@@ -529,7 +536,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     or any(
                         not isinstance(record, ModelInteractionRecord)
                         or record.agent_run_id != agent_run_id
-                        or record.request_sequence != staged_value.request_sequence
+                        or record.model_request_seq != staged_value.model_request_seq
                         for record, staged_value in zip(archived, staged, strict=True)
                     )
                 ):
@@ -896,10 +903,10 @@ class RuntimeAgentRunStore(AgentRunStore):
                 if len(existing_interactions) != len(existing_values):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 existing_by_sequence = {
-                    value.request_sequence: value for value in existing_interactions
+                    value.model_request_seq: value for value in existing_interactions
                 }
                 source_by_sequence = {
-                    value.request_sequence: (value, resolved)
+                    value.model_request_seq: (value, resolved)
                     for value, resolved in zip(
                         source_interactions,
                         source_resolved,
@@ -914,13 +921,13 @@ class RuntimeAgentRunStore(AgentRunStore):
                 missing_relocated: list[ModelInteractionRecord] = []
                 for value in relocated:
                     existing_value = existing_by_sequence.get(
-                        value.request_sequence
+                        value.model_request_seq
                     )
                     if existing_value is None:
                         missing_relocated.append(value)
                         continue
                     source_value, source_projection = source_by_sequence[
-                        value.request_sequence
+                        value.model_request_seq
                     ]
                     if (
                         _interaction_semantic_header(existing_value)
@@ -2013,7 +2020,7 @@ def _interaction_semantic_header(
     return (
         interaction.agent_run_id,
         interaction.step_index,
-        interaction.request_sequence,
+        interaction.model_request_seq,
         interaction.purpose,
         interaction.output_retry_index,
         tuple(sorted(interaction.model.items())),

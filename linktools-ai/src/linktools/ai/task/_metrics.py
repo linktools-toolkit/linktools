@@ -38,7 +38,7 @@ class _TaskMetricRepository(Protocol):
         graph_id: str,
         *,
         tenant_id: str,
-        after_sequence: int,
+        after_event_seq: int,
         limit: int,
     ) -> Page[TaskEvent]: ...
 
@@ -188,7 +188,7 @@ class _TaskMetricProjector:
             page = await self._repository.list_events(
                 graph_id,
                 tenant_id=tenant_id,
-                after_sequence=cursor,
+                after_event_seq=cursor,
                 limit=_EVENT_PAGE_SIZE,
             )
             if not page.items:
@@ -196,9 +196,9 @@ class _TaskMetricProjector:
                     raise ValueError("task event page cursor is invalid")
                 break
             for event in page.items:
-                if event.graph_id != graph_id or event.sequence != cursor + 1:
+                if event.graph_id != graph_id or event.event_seq != cursor + 1:
                     raise ValueError("task event sequence is invalid")
-                cursor = event.sequence
+                cursor = event.event_seq
                 event_count += 1
                 if event_count > _MAX_PROJECTION_EVENTS:
                     _logger.warning(
@@ -207,7 +207,7 @@ class _TaskMetricProjector:
                         event_count,
                     )
                     return False
-                if event.sequence == 1:
+                if event.event_seq == 1:
                     if (
                         event.event_type is not TaskEventType.GRAPH_ADMITTED
                         or event.node_id is not None

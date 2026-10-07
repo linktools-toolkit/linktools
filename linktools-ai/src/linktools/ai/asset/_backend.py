@@ -305,9 +305,6 @@ class InMemoryAssetBackend:
                     return None if info.status is not StorageEntryStatus.NORMAL else value
             return None
 
-    async def get_at_version(self, key: AssetKey, version: int) -> "bytes | None":
-        return await self.get_at_revision(key, StorageEntryRevision(version))
-
     def export_state(self) -> "dict[str, object]":
         return {
             "store_revision": self._revision,

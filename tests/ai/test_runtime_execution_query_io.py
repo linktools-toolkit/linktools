@@ -49,7 +49,7 @@ class _Candidates:
             task_attempt=0,
             task_deadline_at=None,
             task_next_attempt_at=None,
-            event_sequence=1,
+            event_seq=1,
         )
         return ExecutionCandidatePage(
             (ExecutionCandidate(record, "cursor-1"),),  # type: ignore[arg-type]

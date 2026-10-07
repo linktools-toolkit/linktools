@@ -140,7 +140,7 @@ async def test_graph_access_rechecks_authorization_before_returning_data() -> No
 @pytest.mark.parametrize("call,code", [
     pytest.param(lambda s, p: s.list_events(_GRAPH_ID, principal=p, limit=0),
                  ErrorCode.PAGE_LIMIT_INVALID, id="list_events"),
-    pytest.param(lambda s, p: s.stream_events(_GRAPH_ID, principal=p, after_sequence=-1).__anext__(),
+    pytest.param(lambda s, p: s.stream_events(_GRAPH_ID, principal=p, after_event_seq=-1).__anext__(),
                  ErrorCode.REQUEST_FIELD_INVALID, id="stream_events"),
     pytest.param(lambda s, p: s.wait(_GRAPH_ID, principal=p, timeout_seconds=-1),
                  ErrorCode.REQUEST_FIELD_INVALID, id="wait"),

@@ -335,7 +335,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         return tuple(values)
 
 
-class OperationLedgerRepository(_RepositoryBase):
+class OperationLedgerRepositoryImpl(_RepositoryBase):
     def _stream(self, value: OperationLedgerInput | OperationLedgerRecord) -> bytes:
         return stream_digest(
             self._namespace,
@@ -727,7 +727,9 @@ def _canonical_record_identity(kind: str, value: object) -> object:
         return value.memory_id
     if isinstance(value, ArtifactRecord):
         return value.artifact_id
-    if isinstance(value, (EvaluationRecord, EvaluationTombstone, EvaluationCleanupRecord)):
+    if isinstance(value, EvaluationRecord):
+        return value.experiment_id
+    if isinstance(value, (EvaluationTombstone, EvaluationCleanupRecord)):
         return value.evaluation_id
     if isinstance(value, EvaluationContentTombstone):
         return [value.kind, value.identity]
@@ -1084,7 +1086,7 @@ validate_page_limit = _validate_page_limit
 
 
 __all__ = [
-    "OperationLedgerRepository",
+    "OperationLedgerRepositoryImpl",
     "RepositoryBase",
     "ResourceRepository",
     "append_operation",

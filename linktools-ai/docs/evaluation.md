@@ -73,9 +73,9 @@ async def main() -> None:
             "evaluate-echo-cases-v1",
         )
         run = await runtime.evaluations.start(request, engine=engine)
-        view = await run.wait(timeout_seconds=10)
+        view = (await run.wait(timeout_seconds=10)).result
         assert view.completion == "complete", view.needs_attention
-        report = await run.report()
+        report = await run.create_report()
         assert report.scores[0].valid == report.scores[0].planned == 2
         assert report.scores[0].mean == report.scores[0].coverage == 1.0
         print(export_report(report, format="markdown"))
@@ -90,6 +90,11 @@ if __name__ == "__main__":
 
 `completion == "complete"` means orchestration finished, not that quality passed.
 Read the report's failures and coverage, or configure a comparison gate.
+`TrialView.execution_status` preserves the native execution outcome, while
+`graph_status` separately reports its target graph. A successful execution can
+still have a graph that requires recovery; the evaluation then needs attention.
+The pure `evaluation_completion()` projection is shared by Runtime and report
+builders, with orchestration supplying its pending launches and control facts.
 
 The same idempotency key and request return the same resource; changed request
 semantics under that key raise `IDEMPOTENCY_CONFLICT`. Dataset/case identities
@@ -353,7 +358,7 @@ rescored = await run.rescore(
     RescoreRequest((revised_scorer,), "rescore-v2"),
     engine=runtime.tasks.bind(revised_judge),
 )
-view = await rescored.wait(timeout_seconds=10)
+view = (await rescored.wait(timeout_seconds=10)).result
 assert view.kind == "score_only"
 assert view.source_experiment_id == run.experiment_id
 ```
@@ -361,7 +366,8 @@ assert view.source_experiment_id == run.experiment_id
 `trial_ids=(...)` optionally selects a nonempty set of original trial IDs.
 The new run has no new target trials, reuses fixed source evidence, and leaves
 initial scores and saved reports unchanged. Cancelling it cancels its scoring,
-not the original targets. `RescoreRequest` has no implicit “latest” or round
+not the original targets. Its completion follows its own scoring work, not
+subsequent changes to the source graph lifecycle. `RescoreRequest` has no implicit “latest” or round
 selection; a score-only run cannot itself be the source of another rescore.
 
 ## Compare and gate with explicit score selections
@@ -379,7 +385,7 @@ selection = ScoreComparisonSelection(
     ScoreSelection("exact", "exact_match"),
     ScoreSelection("exact", "exact_match"),
 )
-comparison = await runtime.evaluations.compare(
+comparison = await runtime.evaluations.create_comparison_report(
     ComparisonSpec(
         CandidateSlotRef(run.experiment_id, "baseline"),
         CandidateSlotRef(run.experiment_id, "candidate"),
@@ -415,7 +421,7 @@ work, or incompatibility makes a configured gate `inconclusive`.
 including score-only runs. Usage completeness is fixed in the report cutoff,
 so replaying a comparison does not substitute later usage observations.
 
-`report()` and `compare()` publish immutable snapshots. Their typed cutoffs pin
+`create_report()` and `create_comparison_report()` publish immutable snapshots. Their typed cutoffs pin
 manifest/evidence references and observed revisions, not a cross-store atomic
 instant. Save `report_id` and retrieve it with `get_report(...)` while retained.
 `export_report(..., format="json" | "csv" | "markdown")` exports that snapshot

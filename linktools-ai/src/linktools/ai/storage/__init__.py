@@ -84,8 +84,6 @@ from ._files import (
     Sha256Digest,
     StorageId,
     StoragePath,
-    atomic_write_bytes,
-    atomic_write_json,
     read_bytes,
     read_json,
     safe_child,
@@ -110,7 +108,6 @@ from ._object import (
     ObjectStoreInspection,
     ObjectStoreMaintenance,
     read_object,
-    runtime_object_key,
 )
 from ._object_filesystem import FilesystemObjectStore
 from ._object_memory import InMemoryObjectStore, TransientObjectStore
@@ -190,8 +187,6 @@ __all__ = [
     "TransientObjectStore",
     "VersionSummary",
     "VersionedStorage",
-    "atomic_write_bytes",
-    "atomic_write_json",
     "build_object_sql_metadata",
     "classify_integrity_error_by_message",
     "classify_sql_error",
@@ -206,7 +201,6 @@ __all__ = [
     "read_json",
     "read_object",
     "resolve_dialect",
-    "runtime_object_key",
     "safe_child",
     "sql_audit_columns",
     "sql_audit_indexes",

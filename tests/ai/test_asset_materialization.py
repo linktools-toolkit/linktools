@@ -5,6 +5,7 @@
 import asyncio
 import os
 import threading
+import warnings
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -16,10 +17,13 @@ from linktools.ai.asset import (
     AssetMaterializer,
     AssetStore,
     AssetVersionRef,
+    DirectoryAssetBackend,
     FilesystemAssetBackend,
     InMemoryAssetBackend,
+    validate_materialized_path,
 )
 from linktools.ai.asset import _materialization
+from linktools.ai.capability import CapabilityGroup, SkillResource, validate_resource_path
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 
@@ -114,6 +118,7 @@ async def test_empty_package_and_independent_owners_have_usable_roots(tmp_path: 
 @pytest.mark.parametrize("path", (
     "../escape", "/absolute", "a/../escape", "a\\escape", "", ".",
     "a//b", "a/", "./a", "C:/escape", "a:stream", "a\x00b", "\ud800",
+    "run:dev.py", "CON", "aux.txt", "script.", "script ", "a?b", "a\x01b",
 ))
 async def test_materialization_rejects_unsafe_paths_before_creating_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str,
@@ -123,6 +128,12 @@ async def test_materialization_rejects_unsafe_paths_before_creating_files(
     store = await _store(tmp_path)
     try:
         ref = await _file(store)
+        with pytest.raises(AIError) as declaration_error:
+            validate_resource_path(path)
+        assert declaration_error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+        with pytest.raises(AIError) as resource_error:
+            SkillResource(path, ref)
+        assert resource_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
         async with AssetMaterializer() as materializer:
             with pytest.raises(ValueError):
                 await materializer.materialize(store, {path: ref})
@@ -360,3 +371,53 @@ async def test_failed_cleanup_preserves_primary_and_can_be_retried(
         monkeypatch.setattr(_materialization.shutil, "rmtree", remove_tree)
         await materializer.close()
         await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ("skill", "mcp"))
+@pytest.mark.parametrize("backend_name", ("memory", "directory"))
+async def test_capability_capture_rejects_unmaterializable_resource_paths(
+    tmp_path: Path, kind: str, backend_name: str,
+) -> None:
+    declaration_name, declaration = (
+        ("SKILL.md", b"---\nname: review\ndescription: Review files\n---\nReview.")
+        if kind == "skill"
+        else ("mcp.json", b'{"command":"python"}')
+    )
+    files = {
+        AssetKey(kind, f"review/{declaration_name}"): declaration,
+        AssetKey(kind, "review/run:dev.py"): b"print('ready')",
+    }
+    if backend_name == "directory":
+        if os.name == "nt":
+            pytest.skip("Windows cannot create a colon-containing fixture filename")
+        for key, value in files.items():
+            path = tmp_path / key.kind / key.id
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(value)
+        backend = DirectoryAssetBackend(str(tmp_path), kinds=(kind,))
+    else:
+        backend = InMemoryAssetBackend()
+        for key, value in files.items():
+            await backend.put(key, value)
+    store = AssetStore(StorageOverlay(backend))
+    await store.initialize()
+    try:
+        with pytest.raises(AIError) as error:
+            await CapabilityGroup("application", assets=store).capture()
+        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("path,reserved", (
+    ("scripts/run.py", False), ("AUX.txt", True), ("COM¹.txt", True), ("folder/NUL", True),
+))
+def test_portable_reserved_path_validation_uses_supported_stdlib_api(path: str, reserved: bool) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        if reserved:
+            with pytest.raises(ValueError):
+                validate_materialized_path(path)
+        else:
+            validate_materialized_path(path)

@@ -43,7 +43,7 @@ from ._plan import (
     runtime_domain_uses_object_store,
 )
 from ._recovery_repositories import build_recovery_repository_bundle
-from ._repositories import OperationLedgerRepository, build_repository_bundle
+from ._repositories import OperationLedgerRepositoryImpl, build_repository_bundle
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._step_materializer import build_runtime_agent_run_store
@@ -284,7 +284,7 @@ async def materialize_runtime_storage(
         )
         task_store = stores[RuntimeDomain.TASK]
         bundles[RuntimeDomain.TASK] = {
-            "operations": OperationLedgerRepository(
+            "operations": OperationLedgerRepositoryImpl(
                 task_store,
                 namespace=namespace,
                 tenant_id=tenant_id,

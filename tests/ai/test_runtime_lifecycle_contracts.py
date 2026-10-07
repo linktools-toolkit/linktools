@@ -4,6 +4,7 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,7 +22,7 @@ class _Components:
     execution = object()
     session = object()
     graph = object()
-    evaluation = object()
+    evaluation = SimpleNamespace(_bind_observation=lambda *args: None)
     approval = object()
     external = object()
     event = object()

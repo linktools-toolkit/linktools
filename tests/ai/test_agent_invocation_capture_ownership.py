@@ -84,8 +84,8 @@ async def test_invocation_capture_failure_cancels_the_bound_execution(
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
         )), principal=principal, idempotency_key="source")
         try:
-            result = await run.wait(timeout_seconds=5)
-            assert result.status is TaskStatus.FAILED
+            result = (await run.wait(timeout_seconds=5)).result
+            assert result.wait_status is TaskStatus.FAILED
             state = await run.state()
             assert state.node_states[0].execution_id is not None
             assert state.node_states[0].error_code == ErrorCode.STORAGE_UNAVAILABLE.value
@@ -138,7 +138,7 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
         )), principal=principal, idempotency_key="source")
         try:
-            assert (await run.wait(timeout_seconds=5)).status is TaskStatus.RECOVERY_REQUIRED
+            assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.RECOVERY_REQUIRED
             state = await run.state()
             assert state.node_states[0].execution_id is not None
             assert state.node_states[0].safe_error_details["phase"] == "task_invocation_capture_cancel"
@@ -152,7 +152,7 @@ async def test_capture_cleanup_failure_recovers_the_same_execution_and_capture(
             monkeypatch.setattr(runtime._execution_service, "cancel", original_cancel)
             models.release.set()
             await run.recover(idempotency_key="recover")
-            assert (await run.wait(timeout_seconds=5)).status is TaskStatus.SUCCEEDED
+            assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.SUCCEEDED
             assert (await run.execution("agent")).execution_id == execution.execution_id
             assert await run.result("agent") == {"text": "completed"}
             captured = await runtime.executions.capture_input(execution.execution_id,
@@ -219,7 +219,7 @@ async def test_terminal_agent_task_keeps_its_invocation_capture(
         run = await runtime.tasks.bind(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("question")),
         )), principal=principal, idempotency_key="source")
-        assert (await run.wait(timeout_seconds=5)).status is (TaskStatus.FAILED if model_failure else TaskStatus.SUCCEEDED)
+        assert (await run.wait(timeout_seconds=5)).result.wait_status is (TaskStatus.FAILED if model_failure else TaskStatus.SUCCEEDED)
         execution = await run.execution("agent")
         captured = await runtime.executions.capture_input(execution.execution_id,
             CaptureInputRequest(principal, "terminal-input"))
@@ -319,12 +319,12 @@ async def test_invocation_capture_holds_terminal_execution_until_handoff_finishe
         try:
             await asyncio.wait_for(capture_started.wait(), 5)
             execution = await run.execution("agent")
-            assert (await runtime.executions.wait(execution.execution_id, principal=principal)).status is ExecutionStatus.SUCCEEDED
+            assert (await runtime.executions.wait(execution.execution_id, principal=principal)).result.status is ExecutionStatus.SUCCEEDED
             assert (await runtime.executions.inspect(execution.execution_id, principal=principal)).status is ExecutionStatus.SUCCEEDED
             record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
             assert record.dependency_hold_ids
             capture_release.set()
-            assert (await run.wait(timeout_seconds=5)).status is TaskStatus.SUCCEEDED
+            assert (await run.wait(timeout_seconds=5)).result.wait_status is TaskStatus.SUCCEEDED
             assert await run.result("agent") == {"text": "completed"}
             record = await storage.execution.executions.get(execution.execution_id, tenant_id=principal.tenant_id)
             assert record.dependency_hold_ids == ()
@@ -384,7 +384,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
         try:
             await asyncio.wait_for(entered.wait(), 30)
             execution = await run.execution("agent")
-            assert (await asyncio.wait_for(execution.wait(), 30)).status is ExecutionStatus.SUCCEEDED
+            assert (await asyncio.wait_for(execution.wait(), 30)).result.status is ExecutionStatus.SUCCEEDED
             if invocation_written:
                 early = await runtime.executions.capture_input(execution.execution_id, request)
             else:
@@ -394,7 +394,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
                     assert pending.value.code is ErrorCode.INPUT_CAPTURE_UNAVAILABLE
         finally:
             release.set()
-        assert (await run.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+        assert (await run.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
         monkeypatch.setattr(objects, "put", original_put)
         capture = await runtime.executions.capture_input(execution.execution_id, request)
         assert await runtime.executions.capture_input(execution.execution_id, request) == capture
@@ -409,7 +409,7 @@ async def test_pending_invocation_capture_preserves_complete_replay_input(
             assert await runtime._input_captures.read_dependency(captured, "greeting", principal=principal) == "Hello"
             replay = await engine.start(TaskGraph(mode, (TaskNode("agent", task=task, input_capture=captured),)),
                 principal=principal, idempotency_key=mode)
-            assert (await replay.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+            assert (await replay.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
             assert projections == [("Ada", "Hello")] * (1 if mode == "fixed_input" else 2)
 
 
@@ -427,7 +427,7 @@ async def test_standalone_agent_capture_accepts_unrelated_execution_holds(tmp_pa
                 tenant_id=principal.tenant_id, hold_id=hold_id)
         try:
             models.release.set()
-            assert (await asyncio.wait_for(execution.wait(), 30)).status is ExecutionStatus.SUCCEEDED
+            assert (await asyncio.wait_for(execution.wait(), 30)).result.status is ExecutionStatus.SUCCEEDED
             capture = await runtime.executions.capture_input(execution.execution_id,
                 CaptureInputRequest(principal, "standalone-input"))
             value = await runtime._input_captures.read_agent(capture, principal=principal)
@@ -489,7 +489,7 @@ async def test_invocation_capture_requirement_is_durable_and_idempotent(
             assert changed.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
             if agent_execution:
                 assert (await runtime.executions.wait(execution_id, principal=principal,
-                    timeout_seconds=30)).status is ExecutionStatus.SUCCEEDED
+                    timeout_seconds=30)).result.status is ExecutionStatus.SUCCEEDED
             elif not reopened:
                 await runtime._execution_service.complete_task(execution_id, principal=principal, output="completed")
             record = await storage.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
@@ -520,11 +520,11 @@ async def test_agent_task_retry_and_fork_capture_their_independent_input(tmp_pat
         source = await runtime.tasks.bind(task).start(TaskGraph("source", (
             TaskNode("agent", task=task, input=AgentTaskInput("source input")),
         )), principal=principal, idempotency_key="source")
-        assert (await source.wait(timeout_seconds=30)).status is TaskStatus.SUCCEEDED
+        assert (await source.wait(timeout_seconds=30)).result.wait_status is TaskStatus.SUCCEEDED
         execution = await source.execution("agent")
         for name, start in (("retry", execution.retry), ("fork", execution.fork)):
             independent = await start(name + " input", idempotency_key=name)
-            assert (await asyncio.wait_for(independent.wait(), 30)).status is ExecutionStatus.SUCCEEDED
+            assert (await asyncio.wait_for(independent.wait(), 30)).result.status is ExecutionStatus.SUCCEEDED
             captured = await runtime.executions.capture_input(independent.execution_id,
                 CaptureInputRequest(principal, name, "clean"))
             value = await runtime._input_captures.read_agent(captured, principal=principal)

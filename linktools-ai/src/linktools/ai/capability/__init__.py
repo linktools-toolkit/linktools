@@ -15,7 +15,6 @@ from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoad
 from ._skill import SkillCapability, SkillDefinition
 from ._skill_source import (
     AssetSkillSource,
-    LocalSkillSource,
     SkillLocation,
     SkillSource,
     SkillResource,
@@ -68,7 +67,6 @@ __all__ = [
     "AssetSkillSource",
     "SkillCapability",
     "SubagentCapability",
-    "LocalSkillSource",
     "TOOL_CLASS_METADATA_KEY",
     "TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY",
     "TOOL_CONTEXT_DEDUPE_METADATA_KEY",

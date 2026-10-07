@@ -117,7 +117,7 @@ async def test_dataset_task_report_and_idempotency_use_one_public_case_declarati
         run = await runtime.evaluations.start(request, engine=engine)
         repeated = await runtime.evaluations.start(request, engine=engine)
         assert repeated.experiment_id == run.experiment_id
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete"
         assert view.progress.planned_trials == view.progress.terminal_trials == 2
         assert view.progress.planned_scores == view.progress.valid_scores == 2
@@ -131,7 +131,7 @@ async def test_dataset_task_report_and_idempotency_use_one_public_case_declarati
         with pytest.raises(AIError) as raised:
             await run.trials(cursor=page.next_cursor, filters=TrialFilter(case_refs=(contract.ordered_case_refs[0],)))
         assert raised.value.code is ErrorCode.CURSOR_INVALID
-        report = await run.report()
+        report = await run.create_report()
         assert report.scores[0].planned == report.scores[0].valid == 2
         assert report.scores[0].mean == report.scores[0].coverage == 1.0
         assert await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL) == report
@@ -179,9 +179,9 @@ async def test_native_graph_named_outputs_preserve_dependencies_and_successful_n
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("workflow", graph_template=GraphTargetSpec(template=graph, outputs={"answer": "finish", "optional": "empty"})),),
             (rule_scorer(scorer),)), PRINCIPAL, "start-graphs"), engine=runtime.tasks.bind(prepare_task, answer_task, empty_task, scorer))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        assert (await run.report()).scores[0].mean == 1.0
+        assert (await run.create_report()).scores[0].mean == 1.0
         assert {sample.target_output["answer"]["value"] for sample in received} == {"hello", "bye"}
         trials = (await run.trials()).items
         assert len({trial.graph_ref.graph_id for trial in trials}) == 2
@@ -212,7 +212,7 @@ async def test_model_judge_receives_fixed_scoring_data_and_structured_output(tmp
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("current", task=target.ref),), (scorer,), policy=EvaluationPolicy(model_fixtures=(models.contract,))),
             PRINCIPAL, "start-judge"), engine=runtime.tasks.bind(target, judge))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
         scores = (await run.scores()).items
         assert len(scores) == 1 and scores[0].status == "valid"
@@ -260,16 +260,16 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("baseline", task=old.ref), CandidateSpec("candidate", task=new.ref)), (rule_scorer(scorer),)),
             PRINCIPAL, "start-paired"), engine=runtime.tasks.bind(old, new, scorer))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        original_report = await run.report()
+        original_report = await run.create_report()
         initial_trials = (await run.trials()).items
         selected = tuple(trial.trial.trial_id for trial in initial_trials if trial.case_ref.case_id == "first")
         request = RescoreRequest((rule_scorer(revised_task, slot="revised"),), "rescore-first-case", trial_ids=selected)
         scoring_engine = runtime.tasks.bind(revised_task)
         rescored = await run.rescore(request, engine=scoring_engine)
         assert (await run.rescore(request, engine=scoring_engine)).experiment_id == rescored.experiment_id
-        view = await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete" and view.kind == "score_only"
         assert view.source_experiment_id == run.experiment_id
         assert view.progress.planned_trials == 0 and view.progress.source_trial_count == 2
@@ -282,7 +282,7 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
                                              ScoreSelection("revised", "exact_match", rescored.experiment_id))
         spec = ComparisonSpec(CandidateSlotRef(run.experiment_id, "baseline"), CandidateSlotRef(run.experiment_id, "candidate"),
                               (selection,), allowed_changes=("task_definition",), gate_policy=GatePolicy())
-        comparison = await runtime.evaluations.compare(spec, principal=PRINCIPAL)
+        comparison = await runtime.evaluations.create_comparison_report(spec, principal=PRINCIPAL)
         assert comparison.compatibility == "compatible"
         paired = comparison.dimensions[0]
         assert paired.planned_pairs == 2 and paired.complete_pairs == 1 and paired.both_missing == 1
@@ -291,7 +291,7 @@ async def test_partial_rescore_preserves_targets_initial_scores_and_pair_denomin
         assert comparison.gate == "inconclusive"
         assert await runtime.evaluations.get_report(comparison.report_id, principal=PRINCIPAL) == comparison
         initial_selection = ScoreComparisonSelection(ScoreSelection("exact", "exact_match"), ScoreSelection("exact", "exact_match"))
-        initial = await runtime.evaluations.compare(replace(spec, scores=(initial_selection,)), principal=PRINCIPAL)
+        initial = await runtime.evaluations.create_comparison_report(replace(spec, scores=(initial_selection,)), principal=PRINCIPAL)
         assert initial.dimensions[0].planned_pairs == initial.dimensions[0].complete_pairs == 2
         assert initial.dimensions[0].mean_difference == 1.0 and initial.gate == "pass"
 
@@ -320,9 +320,9 @@ async def test_target_failure_invalid_score_and_na_remain_in_the_report_denomina
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("current", task=target_task.ref),), (rule_scorer(scorer_task),)), PRINCIPAL, "start-failures"),
             engine=runtime.tasks.bind(target_task, scorer_task))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        report = await run.report()
+        report = await run.create_report()
         candidate = report.candidates[0]
         assert candidate.planned == 4 and candidate.succeeded == 3 and candidate.failed == 1
         summary = report.scores[0]
@@ -391,13 +391,14 @@ async def test_cancel_fences_unstarted_trials_and_reconcile_after_reopen_is_idem
             (rule_scorer(scorer),), policy=EvaluationPolicy(target_concurrency=1)), PRINCIPAL, "start-cancel")
         run = await runtime.evaluations.start(request, engine=runtime.tasks.bind(target, scorer))
         await asyncio.wait_for(entered.wait(), 10)
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(AIError) as timeout_error:
             await run.wait(timeout_seconds=0.01)
+        assert timeout_error.value.code is ErrorCode.WAIT_TIMEOUT
         assert (await run.inspect()).completion == "running"
         await run.cancel(idempotency_key="cancel-once")
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "cancelled"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
         assert (await run.cancel(idempotency_key="cancel-once")).completion == "cancelled"
-        report = await run.report()
+        report = await run.create_report()
         assert report.candidates[0].planned == 2 and report.candidates[0].cancelled == 2
         assert report.scores[0].planned == report.scores[0].not_attempted == 2
         experiment_id = run.experiment_id
@@ -409,7 +410,7 @@ async def test_cancel_fences_unstarted_trials_and_reconcile_after_reopen_is_idem
         assert (await reopened.inspect()).completion == "cancelled"
         reconciled = await runtime.evaluations.reconcile(experiment_id, engine=engine, principal=PRINCIPAL, idempotency_key="recover-cancelled")
         assert reconciled.experiment_id == experiment_id
-        assert (await reconciled.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "cancelled"
+        assert (await reconciled.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "cancelled"
         repeated = await runtime.evaluations.start(request, engine=engine)
         assert repeated.experiment_id == experiment_id
         assert await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL) == report
@@ -449,12 +450,13 @@ async def test_human_score_waits_for_one_decision_and_rescore_keeps_prior_result
                 await asyncio.sleep(0.02)
 
         pending = await asyncio.wait_for(wait_for_human(run), 10)
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(AIError) as timeout_error:
             await run.wait(timeout_seconds=0.01)
+        assert timeout_error.value.code is ErrorCode.WAIT_TIMEOUT
         request = HumanScoreRequest(pending.trial.trial_id, "human", pending.evidence_ref,
                                     ScoreBundle(dimensions={"exact_match": 1.0}), "human-decision")
         await run.submit_human_score(request)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         accepted = (await run.scores()).items[0]
         assert accepted.status == "valid" and accepted.decision_id is not None
         repeated = await run.submit_human_score(request)
@@ -462,12 +464,12 @@ async def test_human_score_waits_for_one_decision_and_rescore_keeps_prior_result
         with pytest.raises(AIError) as raised:
             await run.submit_human_score(replace(request, score=ScoreBundle(dimensions={"exact_match": 0.0})))
         assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-        original_report = await run.report()
+        original_report = await run.create_report()
         rescored = await run.rescore(RescoreRequest((scorer,), "human-rescore"), engine=engine)
         pending_again = await asyncio.wait_for(wait_for_human(rescored), 10)
         await rescored.submit_human_score(HumanScoreRequest(pending_again.trial.trial_id, "human", pending_again.evidence_ref,
             ScoreBundle(dimensions={"exact_match": 0.0}), "human-second-decision"))
-        assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await rescored.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         second = (await rescored.scores()).items[0]
         assert second.decision_id != accepted.decision_id
         assert second.score.dimensions["exact_match"] == 0.0
@@ -499,9 +501,9 @@ async def test_volatile_evaluation_requires_explicit_opt_in_before_any_target_ru
         assert calls == []
         permitted = replace(request, spec=replace(request.spec, policy=EvaluationPolicy(allow_volatile=True)))
         run = await runtime.evaluations.start(permitted, engine=engine)
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        assert (await run.report()).scores[0].valid == 1
+        assert (await run.create_report()).scores[0].valid == 1
         assert calls == ["yes"]
 
 
@@ -530,9 +532,9 @@ async def test_trial_deadline_cancels_slow_target_and_next_target_gets_its_own_d
             (CandidateSpec("current", task=task.ref),), (rule_scorer(scorer),),
             policy=EvaluationPolicy(allow_volatile=True, target_concurrency=1, trial_timeout_seconds=0.05)),
             PRINCIPAL, "start-deadline"), engine=runtime.tasks.bind(task, scorer))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        report = await run.report()
+        report = await run.create_report()
         assert report.candidates[0].planned == 2
         assert report.candidates[0].cancelled == report.candidates[0].succeeded == 1
         assert report.scores[0].valid == report.scores[0].not_attempted == 1
@@ -566,9 +568,9 @@ async def test_binary_agent_input_reaches_scorer_as_authorized_retained_evidence
             (CandidateSpec("current", task=target.ref),),
             (replace(rule_scorer(scorer), evidence_policy=EvidencePolicy(include_attachments=True)),),
             policy=EvaluationPolicy(model_fixtures=(models.contract,))), PRINCIPAL, "start-attachment"), engine=runtime.tasks.bind(target, scorer))
-        view = await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)
+        view = (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result
         assert view.completion == "complete", view.needs_attention
-        assert (await run.report()).scores[0].valid == 1
+        assert (await run.create_report()).scores[0].valid == 1
         assert received == models.attachments == [body]
         score_view = (await run.scores()).items[0]
         bundle = await runtime.evaluations.read_evidence(score_view.evidence_ref, principal=PRINCIPAL)

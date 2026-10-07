@@ -107,7 +107,7 @@ async def test_graph_case_merges_preserve_captured_parameters_and_dependencies(t
         spec = EvaluationSpec(dataset, (CandidateSpec("candidate", graph_template=GraphTargetSpec(capture=template, outputs={"answer": "consume"})),),
             (ScorerSpec("score", scorer.ref, (DIMENSION,)),))
         run = await runtime.evaluations.start(StartEvaluationRequest(spec, PRINCIPAL, "evaluate"), engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         for trial in (await run.trials()).items:
             evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
             output = evidence.target.outputs["answer"].value.value
@@ -221,7 +221,7 @@ async def test_unmaterialized_capture_reservation_survives_snapshot_and_reconcil
     async with Runtime.open("snapshot", models=ModelRegistry(), storage=restored_storage, context=CONTEXT) as runtime:
         run = await runtime.evaluations.reconcile(experiment_id, engine=runtime.tasks.bind(task, scorer),
             principal=PRINCIPAL, idempotency_key="resume")
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         record = await restored_storage.evaluation.records.get(experiment_id, tenant_id=PRINCIPAL.tenant_id)
         assert record.owned_input_captures == (owned,)
         assert await restored_storage.object_store(RuntimeDomain.TASK).stat(key) is not None
@@ -263,7 +263,7 @@ async def test_content_purge_redacts_inline_template_and_keeps_admission_identit
         with pytest.raises(ValueError):
             replace(deleted, content_deleted_at=None)
         with pytest.raises(AIError) as expired:
-            await run.report()
+            await run.create_report()
         assert expired.value.code is ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE
 
 
@@ -290,7 +290,7 @@ async def test_evaluation_purge_preserves_native_owners_of_derived_captures(tmp_
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset,
             (CandidateSpec("candidate", task=task.ref),), (ScorerSpec("score", scorer.ref, (DIMENSION,)),),
             policy=EvaluationPolicy(content_retention_seconds=60)), PRINCIPAL, "start"), engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         trial = (await run.trials()).items[0]
         record = await storage.evaluation.records.get(run.experiment_id, tenant_id=PRINCIPAL.tenant_id)
         owned = record.owned_input_captures[0]
@@ -339,7 +339,7 @@ async def test_function_task_capture_keeps_agent_shaped_business_json(tmp_path: 
         for mode in ("fixed_input", "reproject_input"):
             run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (candidate,),
                 (ScorerSpec("score", scorer.ref, (DIMENSION,)),), input_mode=mode), PRINCIPAL, mode), engine=engine)
-            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+            assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
             trial = (await run.trials()).items[0]
             evidence = await runtime.evaluations.read_evidence(trial.evidence_ref, principal=PRINCIPAL)
             actual = evidence.target.output.value if route == "input" else evidence.target.outputs["answer"].value.value
@@ -389,7 +389,7 @@ async def test_captured_inputs_preserve_merged_fields_and_original_parameters(
         candidate = CandidateSpec("candidate", graph_template=graph_target)
         run = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(dataset, (candidate,), (scorer,),
             input_mode=input_mode), PRINCIPAL, "evaluate"), engine=engine)
-        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         trial = (await run.trials()).items[0]
         graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
         assert await graph.result("target") == {"number": 2, "added": "template"}
@@ -401,7 +401,7 @@ async def test_captured_inputs_preserve_merged_fields_and_original_parameters(
         replay = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(replay_dataset,
             (CandidateSpec("candidate", task=target.ref),), (scorer,), input_mode="reproject_input"),
             PRINCIPAL, "reproject"), engine=engine)
-        assert (await replay.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+        assert (await replay.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
         evidence = await runtime.evaluations.read_evidence((await replay.trials()).items[0].evidence_ref, principal=PRINCIPAL)
         assert evidence.target.output.value == {"number": 2, "added": "template"}
         conflicting = CandidateSpec("conflicting", graph_template=GraphTargetSpec(
@@ -441,7 +441,7 @@ async def test_graph_input_capture_has_one_owner(tmp_path: Path) -> None:
                 assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
             else:
                 run = await runtime.evaluations.start(request, engine=engine)
-                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
                 evidence = await runtime.evaluations.read_evidence((await run.trials()).items[0].evidence_ref, principal=PRINCIPAL)
                 assert evidence.target.outputs["answer"].value.value == {"first": True}
 
@@ -478,7 +478,7 @@ async def test_agent_graph_case_preserves_template_options_and_checks_prompt_own
                 assert rejected.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
             else:
                 run = await runtime.evaluations.start(request, engine=engine)
-                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).completion == "complete"
+                assert (await run.wait(timeout_seconds=EVALUATION_COMPLETION_TIMEOUT_SECONDS)).result.completion == "complete"
                 trial = (await run.trials()).items[0]
                 graph = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
                 assert (await graph.state(include_content=True)).nodes[0].input["parameters"] == {"suffix": "template"}

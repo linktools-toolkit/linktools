@@ -141,14 +141,14 @@ async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
     ) as runtime:
         run = await runtime.tasks.bind(handler).get(graph.graph_id)
         await run.recover(idempotency_key="recover-expired-lease")
-        result = await run.wait(timeout_seconds=10)
+        result = (await run.wait(timeout_seconds=10)).result
         page = await reopened.task.admissions.list_recoverable_page(
             cursor=None,
             limit=128,
         )
 
     assert result.status is TaskStatus.SUCCEEDED
-    assert tuple(node.status for node in result.node_results) == (
+    assert tuple(node.status for node in result.node_states) == (
         TaskStatus.SUCCEEDED,
     )
     assert page.items == ()

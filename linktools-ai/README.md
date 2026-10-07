@@ -68,11 +68,11 @@ async with Runtime.open(
     storage=storage,
     capabilities=(CapabilityGroup("workspace", workspace=workspace),),
 ) as runtime:
-    result = await runtime.agents.get("default").run(
+    result = (await runtime.agents.get("default").run(
         "review this change",
         memory_scope="default",
         planning=True,
-    )
+    )).result
 ```
 
 `Runtime.open()` is the public composition root. The Runtime composition is immutable for the lifetime of the context; registrations are completed before it opens.
@@ -120,7 +120,7 @@ async with Runtime.open(
     storage=storage,
     capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
 ) as runtime:
-    result = await runtime.agents.get("audit").run("inspect ticket SEC-123")
+    result = (await runtime.agents.get("audit").run("inspect ticket SEC-123")).result
 ```
 
 Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `CapabilityGroup.tool()` and `CapabilityGroup.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
@@ -195,6 +195,11 @@ Spec values, while the corresponding `*SpecCodec` classes own durable
 serialization and contract projections. Custom source kinds such as `worker`
 can use `AgentDeclarationLoader("worker", defaults=...)`; explicit Agent
 fields still override validated defaults.
+
+Captured resource paths must also be portable: use relative POSIX paths with
+filenames valid on Windows as well as Unix. Colons, Windows reserved names,
+and trailing dots or spaces are rejected consistently during capture and
+materialization, including for in-memory assets.
 
 Skill filenames accept the two spellings supported by the Agent Skills
 [reference parser](https://github.com/agentskills/agentskills/blob/69ef37e9424c0a7ea9dd2293b559e43ec8176379/skills-ref/src/skills_ref/parser.py).
@@ -550,10 +555,10 @@ class Finding(BaseModel):
     severity: str
 
 agent = runtime.agents.get("audit")
-result = await agent.run(
+result = (await agent.run(
     "inspect the patch",
     output=Finding,
-)
+)).result
 ```
 
 The exact durable binding stores:
@@ -574,12 +579,12 @@ The binding contract does not persist Python output import paths or duplicate id
 agent = runtime.agents.get("audit")
 session = await agent.create_session("chat-1")
 
-first = await session.run("inspect the first change")
-second = await session.run(
+first = (await session.run("inspect the first change")).result
+second = (await session.run(
     "return a structured summary",
     output=Finding,
     planning=True,
-)
+)).result
 
 history = await session.history()
 ```
@@ -605,10 +610,10 @@ LinkTools does not infer image support from model names, endpoints, or probes.
 Execution file input uses the same durable boundary:
 
 ```python
-result = await agent.run(
+result = (await agent.run(
     "分析这些截图",
     files=("screenshots/overview.png", "screenshots/details.png"),
-)
+)).result
 ```
 
 When a file must be captured as part of the accepted prompt, use the pure
@@ -618,13 +623,13 @@ preserves its order and optional opaque identifier:
 ```python
 from linktools.ai.core import WorkspaceFileInput
 
-result = await agent.run(
+result = (await agent.run(
     ("Review this evidence:", WorkspaceFileInput(
         "evidence/report.txt",
         media_type="text/plain",
         identifier="report-1",
     )),
-)
+)).result
 ```
 
 The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime storage rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
@@ -695,7 +700,8 @@ history projections without loading a ModelRegistry or compiling Agents.
 `inspect_execution()` returns safe durable summaries for binding, input,
 output, timestamps, usage, and errors; it does not return prompt/output bodies
 or raw error diagnostics. `result()`, `history()/trace()`,
-`transcript()/model_interactions()`, `task_graph()`, `list_events()`,
+`transcript()/model_interactions()`, `task_graph()`,
+`list_execution_events()/list_task_events()`,
 `usage()/graph_usage()`, `attachment_facts()`,
 `task_result()/task_result_ref()`, and `artifacts()` are owned by the same
 authorized query composition. Execution list and detail cursors are opaque namespace-bound continuations;
@@ -723,7 +729,9 @@ only for successful dependencies. `failure_policy="propagate"` is the default
 and includes node failures and dependency blocks in the graph's final status.
 `failure_policy="isolate"` keeps those node outcomes visible but excludes them
 from the graph's failed/blocked aggregate. It does not change scheduling,
-cancellation, recovery, or retry behavior; cancellation remains part of the
+cancellation, recovery, or retry behavior. An isolated graph can therefore
+finish `SUCCEEDED` while individual nodes failed; inspect node outcomes when
+all-success matters. Cancellation remains part of the
 normal node aggregate and is never isolated by `failure_policy`.
 
 Whole-graph cancellation is a separate durable control intent. If cancellation
@@ -732,12 +740,12 @@ wins before the business graph reaches a terminal state, the graph converges to
 terminal outcome; `RECOVERY_REQUIRED` still takes precedence. Task cancel
 callbacks and `TaskNodeRunner.cancel()` are replay-safe control cleanup hooks:
 a `RUNNING` or `EFFECT_UNKNOWN` cancel may invoke them again after process
-loss. Observer callback failures are reported as `TASK_OBSERVER_FAILED` and do
+loss. Observer callback failures are reported as `OBSERVER_FAILED` and do
 not fail the graph or retry nodes.
 
 Execution and TaskGraph observation streams also expose
 `MODEL_REQUEST_STARTED` and `MODEL_REQUEST_FINISHED`. The request key is
-`(execution_id, agent_run_sequence, request_sequence)`; a started event means
+`(execution_id, agent_run_seq, model_request_seq)`; a started event means
 the Runtime accepted a logical handler call, not that a provider received
 network traffic. Default lightweight observation keeps only request identity,
 purpose, retry index, status, timestamps, duration, safe error code, and
@@ -745,13 +753,18 @@ request-level usage. It never includes prompts or response text. A successful
 handler call that later fails output validation remains successful, and the
 retry is a separate request.
 
-An uncursored `model_interactions(include_content=False)` query is a fixed
-lifecycle page: it includes RUNNING requests and terminal requests visible when
+An uncursored `model_interactions(include_content=False)` query captures a fixed
+set of request identities: it includes RUNNING requests and terminal requests visible when
 the query starts. RUNNING items have known `started_at`; `finished_at`,
 `duration_ns`, `usage`, and `error_code` are `None`. Usage is never shown as
-zero before it is known. Passing explicit `cutoffs` fixes the same lifecycle view to those request
-high-water marks; it does not switch to a second query mode. `cutoffs=()`
-selects an empty snapshot. Cursors retain their captured high-water marks.
+zero before it is known. Passing explicit `cutoffs` fixes request identities to
+those high-water marks; it does not switch to a second query mode. `cutoffs=()`
+selects an empty snapshot. Cursors retain their captured high-water marks but
+do not freeze lifecycle state: a captured RUNNING request may be terminal when
+read later. Root queries include recursive descendants; selecting a SUBAGENT
+reads only that execution. Model interactions can read process-local staging,
+while aggregate `usage()` reads archived usage and may lag. See the
+[history guide](docs/runtime-history.md) for query scopes and content budgets.
 
 The live event buffer can fall back to durable replay before an uncommitted
 start event is delivered. Clients that need to show every active request should
@@ -816,7 +829,7 @@ Asset-version-pinned Skill resources. A separate `Runtime.restore()` migration s
 `execution-error-diagnostics-v1` extends failed execution results with durable diagnostic context while keeping the existing safe error contract unchanged:
 
 ```python
-result = await execution.wait()
+result = (await execution.wait()).result
 
 result.error_code
 result.safe_error_details
@@ -862,3 +875,19 @@ optional stdio sandbox protocols. `ErrorDiagnostics` is available from
 `linktools.ai.errors`.
 
 Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.
+
+### Watch and wait for operations
+
+Execution, TaskGraphRun and EvaluationRun expose `watch()` and
+`wait(on_event=...)`. All SDK waits and Agent/Session run/plan return
+`WaitResult` with `result`, the acknowledged `cursor`, and optional
+`observation_error`. See [operation observation and migration](docs/task-observation.md)
+for recursive execution trees, evaluation graphs, cleanup guarantees, and the
+breaking SDK and StepEvent durable-wire changes. Existing development data is
+not automatically migrated or deleted.
+
+`Agent.plan()` and `Session.plan()` start real planner executions and wait for
+an observation boundary. They are not dry-run previews and can invoke models
+and authorized tools. Evaluation `completion="complete"` means planned work
+has settled; it does not assert that every target succeeded or every score is
+valid. Inspect trial outcomes, score statuses, and report gates separately.

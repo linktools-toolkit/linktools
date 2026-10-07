@@ -14,7 +14,7 @@ def _model_observation_id(
     tenant_id: str,
     execution_id: str,
     agent_run_id: str,
-    request_sequence: int,
+    model_request_seq: int,
     purpose: str,
 ) -> str:
     return _stable_observation_id(
@@ -23,7 +23,7 @@ def _model_observation_id(
         tenant_id,
         execution_id,
         agent_run_id,
-        str(request_sequence),
+        str(model_request_seq),
         purpose,
     )
 

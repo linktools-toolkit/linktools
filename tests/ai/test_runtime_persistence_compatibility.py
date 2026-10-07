@@ -97,7 +97,7 @@ def test_persisted_session_v1_field_set_is_stable() -> None:
         "history_quality",
         "history_id",
         "timeline_parent_session_id",
-        "timeline_parent_turn_sequence",
+        "timeline_parent_turn_seq",
     }
 
 
@@ -204,7 +204,7 @@ def test_persisted_model_interaction_accepts_legacy_attachment_without_identifie
     interaction = ModelInteractionRecord(
         agent_run_id="run",
         step_index=1,
-        request_sequence=1,
+        model_request_seq=1,
         purpose="agent",
         output_retry_index=None,
         model={"route_id": "default"},
@@ -256,7 +256,7 @@ def test_persisted_model_interaction_requires_current_fields(field_name: str) ->
     interaction = ModelInteractionRecord(
         agent_run_id="run",
         step_index=1,
-        request_sequence=1,
+        model_request_seq=1,
         purpose="agent",
         output_retry_index=None,
         model={"route_id": "default"},

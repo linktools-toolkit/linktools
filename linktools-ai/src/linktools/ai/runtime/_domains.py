@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from ..core import Principal
+from ._wait import WaitResult
 from ._input_capture import CaptureInputRequest, ExecutionInputCaptureRef, RuntimeInputCaptures
 from .recovery import (
     ExecutionRecoveryEffect,
@@ -104,8 +105,17 @@ class RuntimeExecutions(Generic[AppT]):
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         return await self._service.result(execution_id, principal=principal)
 
-    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: float | None = None) -> ExecutionResult:
-        return await self._service.wait(execution_id, principal=principal, timeout_seconds=timeout_seconds)
+    async def wait(
+        self, execution_id: str, *, principal: Principal,
+        on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+    ) -> WaitResult[ExecutionResult]:
+        execution = await self.get(execution_id, principal=principal)
+        return await execution.wait(
+            on_event=on_event, cursor=cursor, include_content=include_content,
+            timeout_seconds=timeout_seconds, close_timeout_seconds=close_timeout_seconds,
+        )
 
     async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
         return await self._service.retry(execution_id, request)
@@ -125,14 +135,62 @@ class RuntimeExecutions(Generic[AppT]):
     async def recover(self, execution_id: str, *, principal: Principal) -> ExecutionHandle:
         return await self._service.recover(execution_id, principal=principal)
 
-    async def trace(self, execution_id: str, *, principal: Principal, cursor: str | None = None, include_content: bool = False, limit: int = 100) -> Page[ExecutionTraceItem]:
-        return await self._service.trace(execution_id, principal=principal, cursor=cursor, include_content=include_content, limit=limit)
+    async def trace(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        include_content: bool = False,
+        limit: int = 100,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
+    ) -> Page[ExecutionTraceItem]:
+        return await self._service.trace(
+            execution_id,
+            principal=principal,
+            cursor=cursor,
+            include_content=include_content,
+            limit=limit,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
+            step_index=step_index,
+            tool_call_id=tool_call_id,
+        )
 
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: str | None = None, include_content: bool = False, limit: int = 100) -> Page[TranscriptItem]:
         return await self._service.transcript(execution_id, principal=principal, cursor=cursor, include_content=include_content, limit=limit)
 
-    async def history(self, execution_id: str, *, principal: Principal, cursor: str | None = None, include_content: bool = False, limit: int = 100) -> Page[ExecutionHistoryItem]:
-        return await self._service.history(execution_id, principal=principal, cursor=cursor, include_content=include_content, limit=limit)
+    async def history(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        include_content: bool = False,
+        limit: int = 100,
+        agent_run_seq: int | None = None,
+        model_request_seq: int | None = None,
+        step_index: int | None = None,
+        tool_call_id: str | None = None,
+        message_seq: int | None = None,
+        part_index: int | None = None,
+    ) -> Page[ExecutionHistoryItem]:
+        return await self._service.history(
+            execution_id,
+            principal=principal,
+            cursor=cursor,
+            include_content=include_content,
+            limit=limit,
+            agent_run_seq=agent_run_seq,
+            model_request_seq=model_request_seq,
+            step_index=step_index,
+            tool_call_id=tool_call_id,
+            message_seq=message_seq,
+            part_index=part_index,
+        )
 
     async def model_interactions(self, execution_id: str, *, principal: Principal, cursor: str | None = None, include_content: bool = False, limit: int = 100, cutoffs: tuple[UsageReadCutoff, ...] | None = None) -> Page[ModelInteractionItem]:
         return await self._service.model_interactions(execution_id, principal=principal, cursor=cursor, include_content=include_content, limit=limit, cutoffs=cutoffs)

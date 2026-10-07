@@ -63,7 +63,7 @@ class _LifecycleRecorder:
         source_messages: object = None,
     ) -> None:
         del model, messages, model_settings, parameters, streaming, model_id, source_messages
-        self.values[fact.request_sequence] = {
+        self.values[fact.model_request_seq] = {
             "status": "RUNNING",
             "started_at": fact.started_at,
             "finished_at": None,
@@ -83,10 +83,10 @@ class _LifecycleRecorder:
         usage: object | None,
     ) -> None:
         del model, response, duration_ns
-        self.finish_calls[fact.request_sequence] = (
-            self.finish_calls.get(fact.request_sequence, 0) + 1
+        self.finish_calls[fact.model_request_seq] = (
+            self.finish_calls.get(fact.model_request_seq, 0) + 1
         )
-        self.values[fact.request_sequence] = {
+        self.values[fact.model_request_seq] = {
             "status": status,
             "started_at": fact.started_at,
             "finished_at": fact.finished_at,
@@ -136,7 +136,7 @@ def _observation_capability(
         source_namespace="workspace",
         tenant_id="tenant",
         execution_id=execution_id,
-        agent_run_sequence=run_sequence,
+        agent_run_seq=run_sequence,
         session_id=None,
         agent_run_id=f"run-{run_sequence}",
         agent_id="agent",
@@ -153,9 +153,9 @@ def test_model_interaction_item_copies_nested_request_and_response_content() -> 
     source_response: JsonValue = {"parts": [{"text": "answer"}]}
     item = ModelInteractionItem(
         execution_id="execution",
-        agent_run_sequence=1,
+        agent_run_seq=1,
         depth=0,
-        request_sequence=1,
+        model_request_seq=1,
         purpose="agent",
         step_index=1,
         output_retry_index=None,
@@ -216,8 +216,8 @@ def test_request_events_and_lifecycle_share_the_same_identity_and_times() -> Non
         assert isinstance(started, Mapping)
         assert isinstance(finished, Mapping)
         assert started["execution_id"] == "execution"
-        assert started["agent_run_sequence"] == finished["agent_run_sequence"] == 1
-        assert started["request_sequence"] == finished["request_sequence"] == 1
+        assert started["agent_run_seq"] == finished["agent_run_seq"] == 1
+        assert started["model_request_seq"] == finished["model_request_seq"] == 1
         assert started["status"] == "RUNNING"
         assert started["finished_at"] is None
         assert started["duration_ns"] is None
@@ -576,7 +576,7 @@ def test_compaction_run_cancelled_is_recorded_as_cancelled() -> None:
         ]
         assert observations[-1][1].status == "CANCELLED"
         with pytest.raises(RuntimeError, match="missing"):
-            journal.current(observations[-1][1].request_sequence)
+            journal.current(observations[-1][1].model_request_seq)
 
     asyncio.run(scenario())
 
@@ -823,7 +823,7 @@ def test_compaction_after_recorder_acceptance_finishes_provider_failure() -> Non
         values = await store.list_model_interactions(
             agent_run_id=agent_run_id
         )
-        assert [(value.request_sequence, value.status) for value in values] == [
+        assert [(value.model_request_seq, value.status) for value in values] == [
             (1, "FAILED")
         ]
         assert [event_type for event_type, _payload in published] == [
@@ -916,7 +916,7 @@ def test_compaction_terminal_handoff_propagates_single_or_repeated_cancel(
     asyncio.run(scenario())
 
 
-def test_agent_run_sequence_separates_local_request_sequences() -> None:
+def test_agent_run_seq_separates_local_model_request_seqs() -> None:
     async def scenario() -> None:
         outputs: list[tuple[ExecutionEventType, JsonValue]] = []
 
@@ -949,7 +949,7 @@ def test_agent_run_sequence_separates_local_request_sequences() -> None:
             for event_type, payload in outputs
             if event_type is ExecutionEventType.MODEL_REQUEST_STARTED
         ]
-        assert [(item["agent_run_sequence"], item["request_sequence"]) for item in starts] == [  # type: ignore[index]
+        assert [(item["agent_run_seq"], item["model_request_seq"]) for item in starts] == [  # type: ignore[index]
             (1, 1),
             (2, 1),
         ]
@@ -957,7 +957,7 @@ def test_agent_run_sequence_separates_local_request_sequences() -> None:
     asyncio.run(scenario())
 
 
-def test_concurrent_execution_ids_separate_the_same_local_request_sequence() -> None:
+def test_concurrent_execution_ids_separate_the_same_local_model_request_seq() -> None:
     async def scenario() -> None:
         outputs: list[tuple[ExecutionEventType, JsonValue]] = []
 
@@ -993,7 +993,7 @@ def test_concurrent_execution_ids_separate_the_same_local_request_sequence() -> 
             if event_type is ExecutionEventType.MODEL_REQUEST_STARTED
         ]
         assert [
-            (item["execution_id"], item["agent_run_sequence"], item["request_sequence"])
+            (item["execution_id"], item["agent_run_seq"], item["model_request_seq"])
             for item in starts
         ] == [
             ("execution-a", 1, 1),
@@ -1041,7 +1041,7 @@ def test_output_retry_uses_new_request_and_keeps_prior_success() -> None:
         assert recorder.values[1]["status"] == "SUCCEEDED"
         assert recorder.values[2]["status"] == "SUCCEEDED"
         assert [
-            (payload["request_sequence"], payload["output_retry_index"])
+            (payload["model_request_seq"], payload["output_retry_index"])
             for event_type, payload in published
             if event_type is ExecutionEventType.MODEL_REQUEST_STARTED
         ] == [(1, None), (2, 1)]  # type: ignore[index]
@@ -1191,7 +1191,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             assert tree_event.execution_id == execution.execution_id  # type: ignore[attr-defined]
             assert isinstance(event.payload, Mapping)
             assert event.payload["status"] == "RUNNING"
-            assert event.payload["request_sequence"] == 1
+            assert event.payload["model_request_seq"] == 1
             assert "TOP_SECRET_PROMPT" not in repr(event.payload)
             page = await execution.model_interactions(include_content=False)
             assert len(page.items) == 1
@@ -1205,10 +1205,10 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             assert running.duration_ns is None
             assert running.usage is None
             assert running.error_code is None
-            assert running.request_sequence == event.payload["request_sequence"]
+            assert running.model_request_seq == event.payload["model_request_seq"]
 
             models.release.set()
-            result = await wait_task
+            result = (await wait_task).result
             assert result.status.value == "SUCCEEDED"
             finished_page = await execution.model_interactions(include_content=True)
             finished = finished_page.items[0]
@@ -1233,7 +1233,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
                     principal=reopened.default_principal,
                     include_content=True,
                 )
-                assert [(item.request_sequence, item.status) for item in page.items] == [
+                assert [(item.model_request_seq, item.status) for item in page.items] == [
                     (1, "SUCCEEDED")
                 ]
                 assert page.items[0].started_at == finished.started_at
@@ -1272,7 +1272,7 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                     limit=1,
                     include_content=True,
                 )
-                assert [(item.request_sequence, item.status) for item in first.items] == [
+                assert [(item.model_request_seq, item.status) for item in first.items] == [
                     (1, "SUCCEEDED")
                 ]
                 assert first.next_cursor is not None
@@ -1286,15 +1286,15 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                 async def delayed_archive_read(
                     *,
                     agent_run_id: str,
-                    after_request_sequence: int | None = None,
+                    after_model_request_seq: int | None = None,
                     limit: int | None = None,
                 ) -> list[object]:
                     values = await original_list(
                         agent_run_id=agent_run_id,
-                        after_request_sequence=after_request_sequence,
+                        after_model_request_seq=after_model_request_seq,
                         limit=limit,
                     )
-                    if after_request_sequence == 1:
+                    if after_model_request_seq == 1:
                         archive_snapshot.extend(values)
                         archive_read_started.set()
                         await allow_archive_read_to_return.wait()
@@ -1312,7 +1312,7 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                 assert archive_snapshot == []
 
                 models.release.set()
-                result = await wait_task
+                result = (await wait_task).result
                 assert result.status.value == "SUCCEEDED"
                 await storage.retention.release_execution_handoff(
                     execution.execution_id,
@@ -1322,7 +1322,7 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
 
                 captured_page = await continuation
                 assert [
-                    (item.request_sequence, item.status)
+                    (item.model_request_seq, item.status)
                     for item in captured_page.items
                 ] == [(2, "RUNNING")]
                 assert captured_page.items[0].request["messages"]
@@ -1334,7 +1334,7 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                     include_content=True,
                 )
                 assert [
-                    (item.request_sequence, item.status)
+                    (item.model_request_seq, item.status)
                     for item in durable_page.items
                 ] == [(2, "SUCCEEDED")]
             finally:
@@ -1375,7 +1375,7 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
                 assert dict(reread_live.items[0].request) == expected_request
 
                 models.release.set()
-                result = await wait_task
+                result = (await wait_task).result
                 assert result.status.value == "SUCCEEDED"
                 terminal = await execution.model_interactions(include_content=True)
                 expected_request = deepcopy(dict(terminal.items[0].request))
@@ -1471,14 +1471,14 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
                     include_content=False
                 )
                 assert [
-                    (item.request_sequence, item.status)
+                    (item.model_request_seq, item.status)
                     for item in running_page.items
                 ] == [(1, "SUCCEEDED"), (2, "RUNNING")]
                 assert running_page.items[1].started_at is not None
                 assert running_page.items[1].finished_at is None
 
                 models.release.set()
-                result = await wait_task
+                result = (await wait_task).result
                 assert result.status.value == "SUCCEEDED"
                 await runtime.metrics.flush()
                 metric_end = datetime.now(timezone.utc) + timedelta(seconds=1)
@@ -1515,15 +1515,15 @@ def test_active_and_reconnected_streams_follow_broker_replay_fallback(
         broker.publish_event(
             "execution",
             ExecutionEventType.MODEL_REQUEST_STARTED.value,
-            {"request_sequence": 1, "status": "RUNNING"},
-            durable_sequence=None,
+            {"model_request_seq": 1, "status": "RUNNING"},
+            durable_seq=None,
         )
         if buffer_limit == "items":
             broker.publish_event(
                 "execution",
                 ExecutionEventType.MODEL_REQUEST_FINISHED.value,
-                {"request_sequence": 1, "status": "SUCCEEDED"},
-                durable_sequence=None,
+                {"model_request_seq": 1, "status": "SUCCEEDED"},
+                durable_seq=None,
             )
 
         active_marker = await anext(active)

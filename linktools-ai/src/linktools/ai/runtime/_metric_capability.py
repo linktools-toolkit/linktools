@@ -11,12 +11,6 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from linktools.core import environ
-from openai import (
-    APIConnectionError as OpenAIAPIConnectionError,
-    APIError as OpenAIAPIError,
-    APIStatusError as OpenAIAPIStatusError,
-    APITimeoutError as OpenAIAPITimeoutError,
-)
 from pydantic import ValidationError
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -26,8 +20,6 @@ from pydantic_ai.capabilities import (
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
     ContentFilterError,
-    ModelAPIError,
-    ModelHTTPError,
     RunCancelled,
     UnexpectedModelBehavior,
     UserError,
@@ -43,6 +35,7 @@ from pydantic_ai.usage import UsageLimitExceeded
 from ..capability import AgentContext
 from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode
+from ..model import model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
 from ._metrics import (
@@ -151,7 +144,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         source_namespace: str,
         tenant_id: str,
         execution_id: str,
-        agent_run_sequence: int = 1,
+        agent_run_seq: int = 1,
         session_id: str | None,
         agent_run_id: str,
         agent_id: str,
@@ -164,7 +157,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         self._source_namespace = source_namespace
         self._tenant_id = tenant_id
         self._execution_id = execution_id
-        self._agent_run_sequence = agent_run_sequence
+        self._agent_run_seq = agent_run_seq
         self._session_id = session_id
         self._agent_run_id = agent_run_id
         self._agent_id = agent_id
@@ -209,7 +202,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             fact = self._journal.latest_for_step(ctx.run_step)
             if fact is None or fact.status is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if fact.request_sequence in self._prepared_models:
+            if fact.model_request_seq in self._prepared_models:
                 return
             self._stage_request(
                 fact,
@@ -221,7 +214,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 model_id=request_context.model_id,
                 prepared=True,
             )
-            self._prepared_models[fact.request_sequence] = model
+            self._prepared_models[fact.model_request_seq] = model
 
         request_context.model = _PreparedRequestModel(model, prepare)
         return request_context
@@ -240,7 +233,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             purpose="agent",
             output_retry_index=None if ctx.retry <= 0 else ctx.retry,
         )
-        request_sequence = fact.request_sequence
+        model_request_seq = fact.model_request_seq
         try:
             self._stage_request(fact, request_context)
             try:
@@ -349,8 +342,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 raise asyncio.CancelledError
             return response
         finally:
-            self._prepared_models.pop(request_sequence, None)
-            self._journal.consume(request_sequence)
+            self._prepared_models.pop(model_request_seq, None)
+            self._journal.consume(model_request_seq)
 
     async def after_model_request(
         self,
@@ -530,8 +523,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload: dict[str, JsonValue] = {
             "execution_id": self._execution_id,
-            "agent_run_sequence": self._agent_run_sequence,
-            "request_sequence": fact.request_sequence,
+            "agent_run_seq": self._agent_run_seq,
+            "model_request_seq": fact.model_request_seq,
             "step_index": fact.step_index,
             "purpose": fact.purpose,
             "output_retry_index": fact.output_retry_index,
@@ -566,8 +559,8 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         usage: object | None,
         phase: str,
     ) -> bool:
-        model = self._prepared_models.get(fact.request_sequence, model)
-        finished = self._journal.finish(fact.request_sequence, status=status)
+        model = self._prepared_models.get(fact.model_request_seq, model)
+        finished = self._journal.finish(fact.model_request_seq, status=status)
         self._finish_request(
             finished,
             model,
@@ -719,7 +712,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                     execution_id=self._execution_id,
                     session_id=self._session_id,
                     agent_run_id=self._agent_run_id,
-                    request_sequence=fact.request_sequence,
+                    model_request_seq=fact.model_request_seq,
                     request_purpose=fact.purpose,
                     output_retry_index=fact.output_retry_index,
                 ),
@@ -786,16 +779,9 @@ def _model_error_code(error: Exception) -> str:
         return ErrorCode.EXECUTION_CONCURRENCY_LIMIT_EXCEEDED.value
     if isinstance(error, ContentFilterError):
         return ErrorCode.MODEL_CONTENT_FILTERED.value
-    if isinstance(error, ModelHTTPError):
-        return _http_error_code(error.status_code).value
-    if isinstance(error, OpenAIAPITimeoutError):
-        return ErrorCode.MODEL_TIMEOUT.value
-    if isinstance(error, OpenAIAPIConnectionError):
-        return ErrorCode.MODEL_UNAVAILABLE.value
-    if isinstance(error, OpenAIAPIStatusError):
-        return _http_error_code(error.status_code).value
-    if isinstance(error, (ModelAPIError, OpenAIAPIError)):
-        return ErrorCode.MODEL_API_ERROR.value
+    provider_error = model_binding_error(error)
+    if provider_error is not None:
+        return provider_error.code.value
     if isinstance(error, UnexpectedModelBehavior):
         return ErrorCode.MODEL_RESPONSE_INVALID.value
     if isinstance(error, ValidationError):
@@ -803,18 +789,6 @@ def _model_error_code(error: Exception) -> str:
     if isinstance(error, UserError):
         return ErrorCode.INTERNAL_ERROR.value
     return ErrorCode.INTERNAL_ERROR.value
-
-
-def _http_error_code(status_code: int) -> ErrorCode:
-    if status_code == 408:
-        return ErrorCode.MODEL_TIMEOUT
-    if status_code == 429:
-        return ErrorCode.MODEL_RATE_LIMITED
-    if status_code >= 500:
-        return ErrorCode.MODEL_UNAVAILABLE
-    if 400 <= status_code < 500:
-        return ErrorCode.MODEL_REQUEST_REJECTED
-    return ErrorCode.MODEL_API_ERROR
 
 
 __all__: list[str] = []

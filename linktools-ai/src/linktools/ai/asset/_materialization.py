@@ -3,9 +3,11 @@
 """Disposable local projections of pinned Asset bytes."""
 
 import asyncio
+import ntpath
 import os
 import shutil
 import stat
+import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -134,6 +136,28 @@ class AssetMaterializer:
             raise AIError(ErrorCode.STORAGE_CLOSED)
 
 
+def validate_materialized_path(path: str) -> None:
+    """Require a canonical relative file path portable across supported hosts."""
+    if not isinstance(path, str) or not path:
+        raise ValueError("materialized file path is invalid")
+    try:
+        path.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ValueError("materialized file path is invalid") from error
+    parts = path.split("/")
+    if (
+        any(character in '\\:<>"|?*' or ord(character) < 32 for character in path)
+        or any(
+            part in {"", ".", ".."}
+            or part.endswith((".", " "))
+            or (ntpath.isreserved(part) if sys.version_info >= (3, 13)
+                else PureWindowsPath(part).is_reserved())
+            for part in parts
+        )
+    ):
+        raise ValueError("materialized file path is invalid")
+
+
 def _validate_files(
     files: Mapping[str, AssetVersionRef],
     executable_bits: Mapping[str, int] | None,
@@ -142,24 +166,8 @@ def _validate_files(
         raise TypeError("files must be a mapping")
     selected = dict(files)
     for relative, ref in selected.items():
-        if not isinstance(relative, str) or not relative:
-            raise ValueError("materialized file path is invalid")
-        try:
-            relative.encode("utf-8", errors="strict")
-        except UnicodeEncodeError as error:
-            raise ValueError("materialized file path is invalid") from error
+        validate_materialized_path(relative)
         parts = relative.split("/")
-        if (
-            "\\" in relative
-            or "\x00" in relative
-            or ":" in relative
-            or any(part in {"", ".", ".."} for part in parts)
-            or (os.name == "nt" and any(
-                part.endswith((".", " ")) or PureWindowsPath(part).is_reserved()
-                for part in parts
-            ))
-        ):
-            raise ValueError("materialized file path is invalid")
         if not isinstance(ref, AssetVersionRef):
             raise TypeError("files must contain AssetVersionRef values")
         if any("/".join(parts[:end]) in selected for end in range(1, len(parts))):
@@ -254,4 +262,4 @@ async def _complete_task(task: "asyncio.Task[_ResultT]") -> _ResultT:
     return task.result()
 
 
-__all__ = ["AssetMaterializer", "MaterializedAssets"]
+__all__ = ["AssetMaterializer", "MaterializedAssets", "validate_materialized_path"]

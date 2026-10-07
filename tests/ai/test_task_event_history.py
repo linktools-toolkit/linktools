@@ -117,11 +117,11 @@ async def test_task_admission_starts_contiguous_durable_event_history() -> None:
         page = await state.task.tasks.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
 
-        assert [event.sequence for event in page.items] == [1]
+        assert [event.event_seq for event in page.items] == [1]
         assert [event.event_type for event in page.items] == [
             TaskEventType.GRAPH_ADMITTED,
         ]
@@ -144,7 +144,7 @@ async def test_task_graph_state_captures_event_high_water_with_state() -> None:
             tenant_id="tenant",
         )
         assert admitted is not None
-        assert admitted.event_sequence == 1
+        assert admitted.event_seq == 1
 
         await repository.claim(
             graph.graph_id,
@@ -159,15 +159,15 @@ async def test_task_graph_state_captures_event_high_water_with_state() -> None:
         )
         assert running is not None
         assert running.node_states[0].status is TaskStatus.RUNNING
-        assert running.event_sequence == 2
+        assert running.event_seq == 2
 
         events = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
-        assert events.items[-1].sequence == running.event_sequence
+        assert events.items[-1].event_seq == running.event_seq
     finally:
         await state.close()
 
@@ -224,7 +224,7 @@ async def test_task_expansion_commits_topology_and_events_atomically() -> None:
         events = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=3,
+            after_event_seq=3,
             limit=100,
         )
         assert [event.event_type for event in events.items] == [
@@ -339,7 +339,7 @@ async def test_expansion_commit_unknown_preserves_atomic_readback_and_replay(
         events = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
         assert sum(
@@ -470,11 +470,11 @@ async def test_task_event_page_accepts_maximum_limit() -> None:
         page = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=1000,
         )
 
-        assert [event.sequence for event in page.items] == [1]
+        assert [event.event_seq for event in page.items] == [1]
         assert page.next_cursor is None
     finally:
         await state.close()
@@ -492,7 +492,7 @@ async def test_empty_graph_create_is_terminal_from_first_event() -> None:
         page = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
 
@@ -539,11 +539,11 @@ async def test_node_event_mutations_do_not_read_full_graph_graph_state(
         page = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=1,
+            after_event_seq=1,
             limit=100,
         )
 
-        assert [event.sequence for event in page.items] == [2, 3, 4]
+        assert [event.event_seq for event in page.items] == [2, 3, 4]
         assert page.items[0].event_type is TaskEventType.NODE_CHANGED
         assert page.items[1].event_type is TaskEventType.NODE_CHANGED
         assert page.items[2].event_type is TaskEventType.GRAPH_CHANGED
@@ -562,10 +562,10 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
         initial = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
-        assert [event.sequence for event in initial.items] == [1]
+        assert [event.event_seq for event in initial.items] == [1]
 
         lease = await repository.claim(
             graph.graph_id,
@@ -577,10 +577,10 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
         claimed = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=initial.items[-1].sequence,
+            after_event_seq=initial.items[-1].event_seq,
             limit=100,
         )
-        assert [event.sequence for event in claimed.items] == [2]
+        assert [event.event_seq for event in claimed.items] == [2]
         assert claimed.items[0].event_type is TaskEventType.NODE_CHANGED
         assert claimed.items[0].previous_status is TaskStatus.READY
         assert claimed.items[0].status is TaskStatus.RUNNING
@@ -591,10 +591,10 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
         running = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=claimed.items[-1].sequence,
+            after_event_seq=claimed.items[-1].event_seq,
             limit=100,
         )
-        assert [event.sequence for event in running.items] == [3]
+        assert [event.event_seq for event in running.items] == [3]
         assert running.items[0].event_type is TaskEventType.GRAPH_CHANGED
         assert running.items[0].previous_status is TaskStatus.PENDING
         assert running.items[0].status is TaskStatus.RUNNING
@@ -607,7 +607,7 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
         after_renew = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=running.items[-1].sequence,
+            after_event_seq=running.items[-1].event_seq,
             limit=100,
         )
         assert after_renew.items == ()
@@ -628,10 +628,10 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
         terminal = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=running.items[-1].sequence,
+            after_event_seq=running.items[-1].event_seq,
             limit=100,
         )
-        assert [event.sequence for event in terminal.items] == [4, 5, 6]
+        assert [event.event_seq for event in terminal.items] == [4, 5, 6]
         assert terminal.items[0].execution_id == "execution-1"
         assert terminal.items[0].status is TaskStatus.WAITING
         assert terminal.items[1].previous_status is TaskStatus.WAITING
@@ -670,7 +670,7 @@ async def test_idempotent_admission_projection_repair_emits_graph_change() -> No
         before = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
         assert before.items[-1].event_type is TaskEventType.GRAPH_CHANGED
@@ -680,7 +680,7 @@ async def test_idempotent_admission_projection_repair_emits_graph_change() -> No
         after = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=before.items[-1].sequence,
+            after_event_seq=before.items[-1].event_seq,
             limit=100,
         )
 
@@ -722,13 +722,13 @@ async def test_task_event_page_reads_latest_only_for_empty_cursor_page(
             graph.graph_id,
             principal=Principal("tester", "tenant"),
         )
-        assert [event.sequence for event in first.items] == [1]
+        assert [event.event_seq for event in first.items] == [1]
         assert latest_calls == 0
 
         tail = await service.list_events(
             graph.graph_id,
             principal=Principal("tester", "tenant"),
-            after_sequence=first.items[-1].sequence,
+            after_event_seq=first.items[-1].event_seq,
         )
         assert tail.items == ()
         assert latest_calls == 1
@@ -737,7 +737,7 @@ async def test_task_event_page_reads_latest_only_for_empty_cursor_page(
 
 
 @pytest.mark.asyncio
-async def test_terminal_event_stream_replays_from_durable_sequence(
+async def test_terminal_event_stream_replays_from_durable_seq(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = RuntimeStorage.in_memory()
@@ -764,7 +764,7 @@ async def test_terminal_event_stream_replays_from_durable_sequence(
         durable = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
         assert durable.items[-1].status is TaskStatus.SUCCEEDED
@@ -779,7 +779,7 @@ async def test_terminal_event_stream_replays_from_durable_sequence(
             graph_id: str,
             *,
             tenant_id: str,
-            after_sequence: int,
+            after_event_seq: int,
             limit: int,
         ):
             nonlocal list_calls
@@ -787,7 +787,7 @@ async def test_terminal_event_stream_replays_from_durable_sequence(
             return await list_events(
                 graph_id,
                 tenant_id=tenant_id,
-                after_sequence=after_sequence,
+                after_event_seq=after_event_seq,
                 limit=limit,
             )
 
@@ -810,13 +810,13 @@ async def test_terminal_event_stream_replays_from_durable_sequence(
         stream = service.stream_events(
             graph.graph_id,
             principal=Principal("tester", "tenant"),
-            after_sequence=2,
+            after_event_seq=2,
         )
         replayed = [event async for event in stream]
 
         assert replayed == list(durable.items[2:])
-        assert [event.sequence for event in replayed] == list(
-            range(3, durable.items[-1].sequence + 1)
+        assert [event.event_seq for event in replayed] == list(
+            range(3, durable.items[-1].event_seq + 1)
         )
         assert list_calls == 1
         assert latest_calls == 0
@@ -861,7 +861,7 @@ async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None
         before = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
     finally:
@@ -876,11 +876,11 @@ async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None
         after = await reopened.task.tasks.list_events(
             graph.graph_id,
             tenant_id="tenant",
-            after_sequence=0,
+            after_event_seq=0,
             limit=100,
         )
         assert after.items == before.items
-        assert [event.sequence for event in after.items] == list(
+        assert [event.event_seq for event in after.items] == list(
             range(1, len(after.items) + 1)
         )
         assert after.items[-1].status is TaskStatus.FAILED
