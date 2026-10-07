@@ -130,23 +130,21 @@ class TaskGraphRun(Generic[AppT]):
         return WaitResult(result, outcome.cursor, outcome.observation_error)
 
     async def recover(self, *, idempotency_key: str | None = None) -> TaskGraphResult:
+        request = RecoverGraphRequest(
+            self._principal,
+            secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
+        )
         await self._activate_for_control()
-        return _public_task_result(await self._graph.recover(
-            self.graph_id,
-            RecoverGraphRequest(
-                self._principal,
-                idempotency_key or secrets.token_urlsafe(32),
-            ),
-        ))
+        return _public_task_result(await self._graph.recover(self.graph_id, request))
 
     async def resume(
         self,
         node_id: str,
         request: "TaskInputSupplyRequest",
     ) -> TaskGraphResult:
-        await self._activate_for_control()
         if request.principal != self._principal:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._activate_for_control()
         state = await self._state()
         node = next(
             (item for item in state.nodes if item.node_id == node_id),
@@ -168,9 +166,10 @@ class TaskGraphRun(Generic[AppT]):
         *,
         idempotency_key: str,
     ) -> TaskGraphResult:
+        request = TaskEffectResolutionRequest(
+            self._principal, expected_fence, resolution, idempotency_key,
+        )
         await self._activate_for_control()
-        if not isinstance(resolution, TaskEffectResolution):
-            raise TypeError("resolution must be TaskEffectResolution")
         state = await self._state()
         node = next(
             (item for item in state.nodes if item.node_id == node_id),
@@ -182,12 +181,7 @@ class TaskGraphRun(Generic[AppT]):
             await self._graph.resolve_effect(
                 self.graph_id,
                 node_id,
-                TaskEffectResolutionRequest(
-                    self._principal,
-                    expected_fence,
-                    resolution,
-                    idempotency_key,
-                ),
+                request,
             )
         )
 
@@ -466,6 +460,15 @@ class TaskGraphRun(Generic[AppT]):
                 last_cursor = event.cursor
         return result
 
+    @overload
+    async def state(self, *, include_content: Literal[False] = False) -> TaskGraphInfo: ...
+
+    @overload
+    async def state(self, *, include_content: Literal[True]) -> TaskGraphState: ...
+
+    @overload
+    async def state(self, *, include_content: bool) -> TaskGraphInfo | TaskGraphState: ...
+
     async def state(
         self,
         *,
@@ -491,18 +494,17 @@ class TaskGraphRun(Generic[AppT]):
         idempotency_key: "str | None" = None,
         force: bool = False,
     ) -> TaskGraphResult:
-        await self._activate_for_control()
-        await self._graph.cancel(
-            self.graph_id,
-            CancelGraphRequest(
-                self._principal,
-                idempotency_key or secrets.token_urlsafe(32),
-                force,
-            ),
+        request = CancelGraphRequest(
+            self._principal,
+            secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
+            force,
         )
+        await self._activate_for_control()
+        await self._graph.cancel(self.graph_id, request)
         return _state_result(await self._state())
 
     async def _activate_for_control(self) -> None:
+        self._runtime._ensure_open()
         engine = self._engine
         if engine is not None:
             await engine._activate_graph(self.graph_id, self._principal)
@@ -515,6 +517,7 @@ class TaskGraphRun(Generic[AppT]):
     def _watch_prepared(
         self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,
     ) -> AsyncIterator[TaskGraphRunEvent]:
+        self._runtime._ensure_open()
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         graph_event_seq, sequences = (0, {}) if cursor is None else decode_graph_watch_cursor(

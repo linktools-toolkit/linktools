@@ -100,6 +100,7 @@ class Execution(Generic[AppT]):
     def _watch_prepared(
         self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
+        self._runtime._ensure_open()
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         sequences = None if cursor is None else decode_execution_watch_cursor(
@@ -171,7 +172,7 @@ class Execution(Generic[AppT]):
             self.execution_id,
             CancelExecutionRequest(
                 self._principal,
-                idempotency_key or secrets.token_urlsafe(32),
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 force,
             ),
         )

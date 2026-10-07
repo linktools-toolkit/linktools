@@ -312,9 +312,11 @@ class Runtime(Generic[AppT]):
         self._task_owner_token = object()
         self._execution_service = execution
         self._input_captures = input_captures
-        self.executions = RuntimeExecutions(execution, self._get_execution, input_captures)
+        self.executions = RuntimeExecutions(
+            execution, self._get_execution, input_captures, ensure_open=self._ensure_open,
+        )
         self._session_service = session
-        self.sessions = RuntimeSessions(session, self._get_session)
+        self.sessions = RuntimeSessions(session, self._get_session, ensure_open=self._ensure_open)
         self._graph_service = graph
         self.evaluations = evaluation
         self.approvals = approval
@@ -625,6 +627,8 @@ class Runtime(Generic[AppT]):
         input_context: ExecutionInputContext | None = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
+        key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
+        validate_idempotency_key(key)
         if input_context is not None and session_id is not None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_requires_new_execution"})
         resolved_principal = self._resolve_principal(principal)
@@ -640,13 +644,10 @@ class Runtime(Generic[AppT]):
             planning=planning,
             thinking=thinking,
         )
-        binding = await self._resolve_agent_binding(
-            self._compiler.bind(compiled_agent, output=output)
-        )
         request = ExecutionRequest(
             user_prompt=user_prompt,
             principal=resolved_principal,
-            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            idempotency_key=key,
             memory_scope=_validate_memory_scope(memory_scope),
             mode=resolved_mode,
             planning=resolved_planning,
@@ -654,6 +655,11 @@ class Runtime(Generic[AppT]):
             correlation=effective_correlation,
             files=resolved_files,
             input_context=input_context,
+        )
+        if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        binding = await self._resolve_agent_binding(
+            self._compiler.bind(compiled_agent, output=output)
         )
         if session_id is None:
             handle = await self._execution_service.start(
@@ -664,8 +670,6 @@ class Runtime(Generic[AppT]):
                 binding_contract=binding.binding_contract,
             )
         else:
-            if not isinstance(session_id, str) or not session_id.strip():
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             await self._ensure_session(compiled_agent, session_id, resolved_principal)
             resume_request = ResumeSessionRequest(
                 principal=resolved_principal,
@@ -718,7 +722,7 @@ class Runtime(Generic[AppT]):
         request = RetryExecutionRequest(
             user_prompt=user_prompt,
             principal=principal,
-            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            idempotency_key=secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
             correlation=_request_correlation(correlation),
             files=normalize_input_files(files),
         )
@@ -744,7 +748,7 @@ class Runtime(Generic[AppT]):
         request = ForkExecutionRequest(
             user_prompt=user_prompt,
             principal=principal,
-            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            idempotency_key=secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
             correlation=_request_correlation(correlation),
             files=normalize_input_files(files),
         )
@@ -776,7 +780,7 @@ class Runtime(Generic[AppT]):
             CreateSessionRequest(
                 resolved_principal,
                 session_id,
-                idempotency_key or secrets.token_urlsafe(32),
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 cwd,
                 values,
             ),
@@ -801,7 +805,7 @@ class Runtime(Generic[AppT]):
             ForkSessionRequest(
                 resolved_principal,
                 new_session_id,
-                idempotency_key or secrets.token_urlsafe(32),
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 cwd,
             ),
         )
@@ -832,7 +836,7 @@ class Runtime(Generic[AppT]):
             UpdateSessionRequest(
                 resolved_principal,
                 expected_revision,
-                idempotency_key or secrets.token_urlsafe(32),
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 metadata,
                 cwd,
             ),
@@ -852,7 +856,7 @@ class Runtime(Generic[AppT]):
             session_id,
             CloseSessionRequest(
                 resolved_principal,
-                idempotency_key or secrets.token_urlsafe(32),
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 force,
                 wait_timeout_seconds,
             ),
@@ -1038,12 +1042,13 @@ class Runtime(Generic[AppT]):
         idempotency_key: str | None,
         force: bool,
     ) -> CancelExecutionResult:
+        self._ensure_open()
+        key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
+        request = CancelGraphRequest(principal, key, force)
         view = await self.executions.inspect(
             execution_id,
             principal=principal,
         )
-        key = idempotency_key or secrets.token_urlsafe(32)
-        request = CancelGraphRequest(principal, key, force)
         if view.binding_kind == "task":
             await self._graph_service.settle_execution_cancellation(
                 graph_id,
@@ -1172,7 +1177,7 @@ class Runtime(Generic[AppT]):
 
     def _ensure_open(self) -> None:
         if self._closed or self._closing:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, retryable=False)
 
     def _validate_task_bindings(self, tasks: Sequence[Task[AppT]]) -> None:
         self._ensure_open()
