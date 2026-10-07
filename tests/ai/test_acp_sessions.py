@@ -17,9 +17,11 @@ def _schema_object(**values: object) -> dict[str, object]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sdk", (False, True))
+@pytest.mark.parametrize("cwd", (None, "/selected"))
 async def test_acp_session_listing_advertises_and_preserves_pagination(
     monkeypatch: pytest.MonkeyPatch,
     sdk: bool,
+    cwd: str | None,
 ) -> None:
     if sdk:
         acp = pytest.importorskip("acp")
@@ -46,7 +48,10 @@ async def test_acp_session_listing_advertises_and_preserves_pagination(
                 "opaque-next-page",
             )
         assert request.cursor == "opaque-next-page"
-        return Page((SessionView("second", "agent", SessionStatus.OPEN),), None)
+        return Page((
+            SessionView("second", "agent", SessionStatus.OPEN, cwd="/selected"),
+            SessionView("unknown", "agent", SessionStatus.OPEN),
+        ), None)
 
     agent = ACPAgent(
         SimpleNamespace(sessions=SimpleNamespace(list=list_sessions)),
@@ -59,19 +64,19 @@ async def test_acp_session_listing_advertises_and_preserves_pagination(
     assert capabilities["loadSession"] is True
     assert capabilities["sessionCapabilities"]["list"] is not None
 
-    first = await agent.list_sessions(cwd="/fallback")
+    first = await agent.list_sessions(cwd=cwd)
     first_payload = first.model_dump(by_alias=True) if sdk else first
     assert first_payload["nextCursor"] == "opaque-next-page"
-    assert first_payload["sessions"][0]["sessionId"] == "first"
-    assert first_payload["sessions"][0]["cwd"] == "/first"
-
-    second = await agent.list_sessions(
-        cwd="/fallback", cursor=first_payload["nextCursor"],
+    assert [(item["sessionId"], item["cwd"]) for item in first_payload["sessions"]] == (
+        [("first", "/first")] if cwd is None else []
     )
+
+    second = await agent.list_sessions(cwd=cwd, cursor=first_payload["nextCursor"])
     second_payload = second.model_dump(by_alias=True) if sdk else second
     assert second_payload["nextCursor"] is None
-    assert second_payload["sessions"][0]["sessionId"] == "second"
-    assert second_payload["sessions"][0]["cwd"] == "/fallback"
+    assert [(item["sessionId"], item["cwd"]) for item in second_payload["sessions"]] == (
+        [("second", "/selected"), ("unknown", "")] if cwd is None else [("second", "/selected")]
+    )
     assert requests == [
         ListSessionRequest(principal, cursor=None, limit=200),
         ListSessionRequest(principal, cursor="opaque-next-page", limit=200),

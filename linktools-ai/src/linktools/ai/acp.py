@@ -109,8 +109,9 @@ class ACPAgent:
         )
         return schema.ListSessionsResponse(
             sessions=[
-                schema.SessionInfo(sessionId=item.session_id, cwd=item.cwd or cwd or "")
+                schema.SessionInfo(sessionId=item.session_id, cwd=item.cwd or "")
                 for item in page.items
+                if cwd is None or item.cwd == cwd
             ],
             nextCursor=page.next_cursor,
         )
