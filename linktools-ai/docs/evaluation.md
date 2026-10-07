@@ -90,6 +90,11 @@ if __name__ == "__main__":
 
 `completion == "complete"` means orchestration finished, not that quality passed.
 Read the report's failures and coverage, or configure a comparison gate.
+`TrialView.execution_status` preserves the native execution outcome, while
+`graph_status` separately reports its target graph. A successful execution can
+still have a graph that requires recovery; the evaluation then needs attention.
+The pure `evaluation_completion()` projection is shared by Runtime and report
+builders, with orchestration supplying its pending launches and control facts.
 
 The same idempotency key and request return the same resource; changed request
 semantics under that key raise `IDEMPOTENCY_CONFLICT`. Dataset/case identities
@@ -361,7 +366,8 @@ assert view.source_experiment_id == run.experiment_id
 `trial_ids=(...)` optionally selects a nonempty set of original trial IDs.
 The new run has no new target trials, reuses fixed source evidence, and leaves
 initial scores and saved reports unchanged. Cancelling it cancels its scoring,
-not the original targets. `RescoreRequest` has no implicit “latest” or round
+not the original targets. Its completion follows its own scoring work, not
+subsequent changes to the source graph lifecycle. `RescoreRequest` has no implicit “latest” or round
 selection; a score-only run cannot itself be the source of another rescore.
 
 ## Compare and gate with explicit score selections

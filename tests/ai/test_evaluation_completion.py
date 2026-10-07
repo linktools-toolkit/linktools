@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.core import ExecutionStatus, TaskStatus
 from linktools.ai.evaluation import (
     CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec,
-    StartEvaluationRequest, evaluation_completion,
+    RescoreRequest, StartEvaluationRequest, evaluation_completion,
 )
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.task import Task
@@ -34,6 +34,9 @@ async def test_target_graph_recovery_does_not_hide_successful_execution(
             (CandidateSpec("candidate", task=target.ref),), (rule_scorer(scorer),)), PRINCIPAL, "start"),
             engine=runtime.tasks.bind(target, scorer))
         assert (await run.wait(timeout_seconds=30)).result.completion == "complete"
+        rescored = await run.rescore(RescoreRequest((rule_scorer(scorer),), "rescore"),
+                                     engine=runtime.tasks.bind(scorer))
+        assert (await rescored.wait(timeout_seconds=30)).result.completion == "complete"
         owner = runtime.evaluations
         read_state = owner._graph_state
 
@@ -55,6 +58,10 @@ async def test_target_graph_recovery_does_not_hide_successful_execution(
         assert report.completion == "needs_attention"
         assert report.candidates[0].succeeded == 1
         assert (await runtime.evaluations.get_report(report.report_id, principal=PRINCIPAL)).trials == trials
+        rescored_view = await rescored.inspect()
+        assert rescored_view.completion == "complete"
+        assert rescored_view.needs_attention == ()
+        assert (await rescored.create_report()).completion == "complete"
 
 
 @pytest.mark.parametrize("cancellation_requested,budget_stopped,pending,expected", (

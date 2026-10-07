@@ -96,7 +96,7 @@ def _completion(
     budget_stopped = record.gate == "closed_budget" and any(
         item.disposition.reason_code == "closed_budget" for item in record.dispositions)
     return evaluation_completion(
-        trials, scores,
+        trials if record.manifest.kind == "experiment" else (), scores,
         pending_launches=any(not item.released for item in record.intents),
         blocked=blocked or any(not item.disposition.terminal for item in record.dispositions),
         cancellation_requested=record.gate == "closed_cancel", budget_stopped=budget_stopped,
@@ -558,7 +558,7 @@ class RuntimeEvaluations:
         issues = [EvaluationIssue(item.disposition.reason_code, item.disposition.reason_code,
                                  retryable=item.disposition.retryable)
                   for item in record.dispositions if not item.disposition.terminal]
-        for trial in trials:
+        for trial in trials if record.manifest.kind == "experiment" else ():
             if (trial.graph_status is TaskStatus.RECOVERY_REQUIRED
                     or trial.execution_status in {TaskStatus.RECOVERY_REQUIRED, ExecutionStatus.RECOVERY_REQUIRED}):
                 issues.append(EvaluationIssue("recovery_required", "native graph requires recovery", trial.trial, retryable=True))
