@@ -247,3 +247,84 @@ async def test_evaluation_real_task_graphs_watch_and_wait_share_resumable_events
         assert len(identities) == len(set(identities))
         assert len({item.graph_id for item in all_items}) == 2
         assert [item async for item in handle.watch(cursor=all_items[-1].cursor)] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True], ids=["owned-cancellation", "contract-error"])
+async def test_evaluation_wait_preserves_outcome_when_live_stream_cleanup_is_interrupted(
+    cleanup_fails: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from collections.abc import AsyncIterator
+
+    from linktools.ai.runtime._observation import _ObservationSession
+
+    owner = Evaluations([intent("first"), intent("second")])
+    cancelled = {graph_id: asyncio.Event() for graph_id in ("first", "second")}
+    release = asyncio.Event()
+    pending = asyncio.Event()
+    completed = SimpleNamespace(completion="complete")
+    contract_error = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    observer = None
+
+    async def inspect(experiment_id: str, principal: Principal) -> SimpleNamespace:
+        nonlocal observer
+        current = asyncio.current_task()
+        if observer is None:
+            observer = current
+            return SimpleNamespace(completion="running")
+        if current is not observer:
+            await cancelled["first"].wait()
+            await cancelled["second"].wait()
+        return completed
+
+    async def watch_graph(
+        graph_id: str, principal: Principal, cursor: str | None,
+        content: bool, ready: asyncio.Event | None,
+    ) -> AsyncIterator[TaskGraphRunEvent]:
+        assert ready is not None
+        ready.set()
+        try:
+            await pending.wait()
+        except asyncio.CancelledError:
+            cancelled[graph_id].set()
+            if graph_id == "second":
+                await release.wait()
+                if cleanup_fails:
+                    raise contract_error
+            # Python 3.10 can discard the cancellation message after a result read.
+            raise asyncio.CancelledError from None
+        yield event(graph_id, 1, content)
+
+    register = owner._register_observation
+
+    def register_observation(session: _ObservationSession) -> None:
+        register(session)
+        stop = session.stop
+
+        def stop_and_release() -> None:
+            stop()
+            # Let observer cancellation re-enter cleanup before this child resumes.
+            asyncio.get_running_loop().call_soon(release.set)
+
+        monkeypatch.setattr(session, "stop", stop_and_release)
+
+    monkeypatch.setattr(owner, "_inspect", inspect)
+    monkeypatch.setattr(owner, "_watch_graph", watch_graph)
+    monkeypatch.setattr(owner, "_register_observation", register_observation)
+    seen = []
+
+    async def consume(item: TaskGraphRunEvent) -> None:
+        seen.append(item)
+
+    if cleanup_fails:
+        with pytest.raises(AIError) as error:
+            await run(owner).wait(on_event=consume, timeout_seconds=1, close_timeout_seconds=1)
+        assert error.value is contract_error
+    else:
+        outcome = await run(owner).wait(on_event=consume, timeout_seconds=1, close_timeout_seconds=1)
+        assert outcome.result is completed
+        assert outcome.cursor is None
+        assert outcome.observation_error is None
+    assert all(barrier.is_set() for barrier in cancelled.values())
+    assert seen == []
+    assert not owner.sessions

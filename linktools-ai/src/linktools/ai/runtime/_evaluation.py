@@ -1406,6 +1406,7 @@ class EvaluationRun:
         owner = self._evaluations
         streams: dict[str, AsyncIterator[TaskGraphRunEvent]] = {}
         tasks: dict[str, asyncio.Task[TaskGraphRunEvent]] = {}
+        cancelled_by_owner: set[asyncio.Task[TaskGraphRunEvent]] = set()
         known: set[str] = set()
         inactive_sequences: dict[str, int] = {}
         last_cursor = initial_cursor
@@ -1423,9 +1424,8 @@ class EvaluationRun:
 
         async def close_streams() -> None:
             errors: list[BaseException] = []
-            cancelled_by_owner: set[asyncio.Task[TaskGraphRunEvent]] = set()
             for task in tasks.values():
-                if not task.done():
+                if not task.done() and task not in cancelled_by_owner:
                     cancelled_by_owner.add(task)
                     _cancel_stream_task(task)
             pending = set(tasks.values())
