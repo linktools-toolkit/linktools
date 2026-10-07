@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Derived live event projection over one root execution and its direct children."""
+"""Derived live event projection over one execution and all its descendants."""
 
 import asyncio
 import sys
+from collections import deque
 from collections.abc import AsyncIterator, Mapping
 from typing import Protocol
 
@@ -19,6 +20,8 @@ from .service_api import (
 
 _DISCOVERY_BACKOFF_INITIAL = 1.0
 _DISCOVERY_BACKOFF_MAX = 30.0
+
+
 class _ExecutionTreeReader(Protocol):
     async def inspect(
         self,
@@ -114,7 +117,7 @@ class ExecutionTreeBroker:
 
 
 class ExecutionTreeStreamer:
-    """Merge one root stream with its direct subagent streams on demand."""
+    """Merge an execution subtree with relative depths and per-stream ordering."""
 
     def __init__(
         self,
@@ -133,6 +136,7 @@ class ExecutionTreeStreamer:
         principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -141,6 +145,7 @@ class ExecutionTreeStreamer:
             principal=principal,
             after_sequences=_normalize_after_sequences(after_sequences),
             include_content=include_content,
+            ready=ready,
         )
 
     async def _stream(
@@ -150,29 +155,19 @@ class ExecutionTreeStreamer:
         principal: Principal,
         after_sequences: Mapping[str, int],
         include_content: bool,
+        ready: asyncio.Event | None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        root = await self._executions.inspect(
-            execution_id,
-            principal=principal,
-        )
+        root = await self._executions.inspect(execution_id, principal=principal)
         _validate_root(root, execution_id)
 
-        try:
-            subscription = self._broker.subscribe(execution_id)
-        except AIError:
-            raise
-        except Exception as error:
-            raise _ExecutionStreamFailure(error) from error
-        views: dict[str, ExecutionView] = {execution_id: root}
+        views: dict[str, ExecutionView] = {}
+        depths: dict[str, int] = {}
+        subscriptions: dict[str, _ExecutionTreeSubscription] = {}
+        child_waits: dict[str, asyncio.Task[tuple[str, ...]]] = {}
         streams: dict[str, AsyncIterator[ExecutionStreamEvent]] = {}
         pending: dict[str, asyncio.Task[ExecutionStreamEvent]] = {}
-
-        def add_child(child: ExecutionView) -> bool:
-            if child.execution_id in views:
-                return False
-            _validate_child(root, child)
-            views[child.execution_id] = child
-            return True
+        discovery_wait: asyncio.Task[None] | None = None
+        observing = False
 
         def start(view: ExecutionView) -> None:
             stream = self._events.stream(
@@ -183,161 +178,214 @@ class ExecutionTreeStreamer:
             streams[view.execution_id] = stream
             pending[view.execution_id] = _next_event_task(stream, view.execution_id)
 
-        async def discover_child(child_id: str) -> None:
-            if child_id in views:
-                return
-            child = await self._executions.inspect(
-                child_id,
-                principal=principal,
+        def wait_for_children(parent_id: str) -> None:
+            child_waits[parent_id] = asyncio.create_task(
+                subscriptions[parent_id].wait(),
+                name=f"execution-tree-children-{parent_id}",
             )
-            if add_child(child):
-                start(child)
 
-        async def discover_persisted_children() -> bool:
+        def add_view(view: ExecutionView, depth: int) -> bool:
+            existing = views.get(view.execution_id)
+            if existing is not None:
+                if (
+                    existing.parent_execution_id != view.parent_execution_id
+                    or existing.root_execution_id != view.root_execution_id
+                    or existing.lineage_kind != view.lineage_kind
+                    or existing.parent_invocation_id != view.parent_invocation_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return False
+            try:
+                subscription = self._broker.subscribe(view.execution_id)
+            except AIError:
+                raise
+            except Exception as error:
+                raise _ExecutionStreamFailure(error) from error
+            # Subscribe before reading children, including at every new depth.
+            subscriptions[view.execution_id] = subscription
+            views[view.execution_id] = view
+            depths[view.execution_id] = depth
+            if observing:
+                start(view)
+                wait_for_children(view.execution_id)
+            return True
+
+        def add_child(parent_id: str, child: ExecutionView) -> bool:
+            _validate_child(views[parent_id], child)
+            return add_view(child, depths[parent_id] + 1)
+
+        async def discover_persisted_children(parent_ids: tuple[str, ...]) -> bool:
             added = False
-            for child in await self._executions.list_children(
-                execution_id,
-                principal=principal,
-            ):
-                if add_child(child):
-                    start(child)
-                    added = True
+            remaining = deque(parent_ids)
+            scanned: set[str] = set()
+            while remaining:
+                parent_id = remaining.popleft()
+                if parent_id in scanned:
+                    continue
+                scanned.add(parent_id)
+                for child in await self._executions.list_children(
+                    parent_id, principal=principal,
+                ):
+                    if add_child(parent_id, child):
+                        added = True
+                        remaining.append(child.execution_id)
             return added
 
-        child_wait: asyncio.Task[tuple[str, ...]] | None = None
-        discovery_wait: asyncio.Task[None] | None = None
-        try:
-            for child in await self._executions.list_children(
-                execution_id,
-                principal=principal,
-            ):
-                add_child(child)
+        async def discover_child(parent_id: str, child_id: str) -> None:
+            if child_id in views:
+                _validate_child(views[parent_id], views[child_id])
+                return
+            child = await self._executions.inspect(child_id, principal=principal)
+            if child.execution_id != child_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if add_child(parent_id, child):
+                await discover_persisted_children((child_id,))
 
-            if set(after_sequences) - set(views):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        async def validate_cursor_member(member_id: str) -> None:
+            # A durable cursor may name a member whose index is not visible yet.
+            # Read back its parent chain instead of rejecting an authorized resume.
+            chain: list[ExecutionView] = []
+            seen: set[str] = set()
+            current_id = member_id
+            while current_id not in views:
+                if current_id in seen:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                seen.add(current_id)
+                view = await self._executions.inspect(current_id, principal=principal)
+                if view.execution_id != current_id:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                if (
+                    view.lineage_kind is not ExecutionLineageKind.SUBAGENT
+                    or not view.parent_execution_id
+                    or view.root_execution_id != root.root_execution_id
+                ):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                chain.append(view)
+                current_id = view.parent_execution_id
+            for view in reversed(chain):
+                add_child(current_id, view)
+                current_id = view.execution_id
+            if chain:
+                await discover_persisted_children(tuple(view.execution_id for view in chain))
+
+        def broker_result(task: asyncio.Task[tuple[str, ...]]) -> tuple[str, ...]:
+            try:
+                return task.result()
+            except AIError:
+                raise
+            except Exception as error:
+                raise _ExecutionStreamFailure(error) from error
+
+        try:
+            add_view(root, 0)
+            await discover_persisted_children((execution_id,))
+            for member_id in after_sequences:
+                await validate_cursor_member(member_id)
 
             for view in tuple(views.values()):
                 start(view)
+                wait_for_children(view.execution_id)
+            observing = True
+            if ready is not None:
+                ready.set()
 
-            child_wait = asyncio.create_task(
-                subscription.wait(),
-                name=f"execution-tree-children-{execution_id}",
-            )
             discovery_backoff = _DISCOVERY_BACKOFF_INITIAL
             discovery_wait = asyncio.create_task(
                 asyncio.sleep(discovery_backoff),
                 name=f"execution-tree-discovery-{execution_id}",
             )
+            final_discovery = False
             while True:
                 if not pending:
-                    try:
-                        child_ids = subscription.drain()
-                    except AIError:
-                        raise
-                    except Exception as error:
-                        raise _ExecutionStreamFailure(error) from error
-                    for child_id in child_ids:
-                        await discover_child(child_id)
-                    if pending:
-                        continue
-                    if await discover_persisted_children():
-                        continue
-                    return
+                    if final_discovery:
+                        return
+                    # This is a finite observation phase, not permanent subtree
+                    # closure. Later admissions belong to the next watch call.
+                    final_discovery = True
+                    for parent_id, subscription in tuple(subscriptions.items()):
+                        task = child_waits.get(parent_id)
+                        child_ids = broker_result(task) if task is not None and task.done() else ()
+                        try:
+                            child_ids += subscription.drain()
+                        except AIError:
+                            raise
+                        except Exception as error:
+                            raise _ExecutionStreamFailure(error) from error
+                        for child_id in child_ids:
+                            await discover_child(parent_id, child_id)
+                    await discover_persisted_children(tuple(views))
+                    if not pending:
+                        return
 
-                if child_wait is None or discovery_wait is None:
-                    raise RuntimeError("execution tree waiters are unavailable")
-                done, _ = await asyncio.wait(
-                    (*pending.values(), child_wait, discovery_wait),
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                wait_tasks = tuple(pending.values())
+                if not final_discovery:
+                    wait_tasks += tuple(child_waits.values())
+                    if discovery_wait is not None:
+                        wait_tasks += (discovery_wait,)
+                done, _ = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
 
-                # Durable stream failures and cancellation take priority
-                # over optional broker notifications from the same round.
+                # Contract failures and cancellation outrank optional transport
+                # failures from any parent notification in the same round.
                 for task in done:
                     if task.cancelled():
                         task.result()
-                for task in (*pending.values(), child_wait):
+                broker_tasks = set(child_waits.values())
+                for task in (*pending.values(), *child_waits.values()):
                     if task not in done:
                         continue
                     error = task.exception()
                     if error is not None and not isinstance(
                         error, (StopAsyncIteration, _ExecutionStreamFailure)
-                    ) and (task is not child_wait or isinstance(error, AIError)):
+                    ) and (task not in broker_tasks or isinstance(error, AIError)):
                         raise error
-                if child_wait in done:
-                    try:
-                        child_ids = child_wait.result()
-                    except AIError:
-                        raise
-                    except Exception as error:
-                        raise _ExecutionStreamFailure(error) from error
-                    for child_id in child_ids:
-                        await discover_child(child_id)
-                    child_wait = asyncio.create_task(
-                        subscription.wait(),
-                        name=f"execution-tree-children-{execution_id}",
-                    )
+                if not final_discovery:
+                    for parent_id, task in tuple(child_waits.items()):
+                        if task in done:
+                            for child_id in broker_result(task):
+                                await discover_child(parent_id, child_id)
+                            wait_for_children(parent_id)
 
-                if discovery_wait in done:
-                    added = await discover_persisted_children()
-                    discovery_backoff = (
-                        _DISCOVERY_BACKOFF_INITIAL
-                        if added
-                        else min(
-                            _DISCOVERY_BACKOFF_MAX,
-                            discovery_backoff * 2,
+                    if discovery_wait in done:
+                        added = await discover_persisted_children(tuple(views))
+                        discovery_backoff = (
+                            _DISCOVERY_BACKOFF_INITIAL if added
+                            else min(_DISCOVERY_BACKOFF_MAX, discovery_backoff * 2)
                         )
-                    )
-                    discovery_wait = asyncio.create_task(
-                        asyncio.sleep(discovery_backoff),
-                        name=f"execution-tree-discovery-{execution_id}",
-                    )
+                        discovery_wait = asyncio.create_task(
+                            asyncio.sleep(discovery_backoff),
+                            name=f"execution-tree-discovery-{execution_id}",
+                        )
 
-                ready = sorted(
-                    (
-                        execution_key,
-                        task,
-                    )
-                    for execution_key, task in pending.items()
-                    if task in done
+                completed = sorted(
+                    (key, task) for key, task in pending.items() if task in done
                 )
-                for execution_key, task in ready:
-                    pending.pop(execution_key, None)
+                for key, task in completed:
+                    pending.pop(key, None)
                     try:
                         event = task.result()
                     except StopAsyncIteration:
-                        streams.pop(execution_key, None)
+                        streams.pop(key, None)
                         continue
-
-                    view = views[execution_key]
-                    projected_event = _project_stream_event(
-                        event,
-                        include_content,
-                    )
-                    tree_event = ExecutionTreeEvent(
+                    view = views[key]
+                    yield ExecutionTreeEvent(
                         view.execution_id,
                         view.agent_id,
                         view.lineage_kind,
                         view.parent_execution_id,
                         view.root_execution_id,
                         view.parent_invocation_id,
-                        0 if execution_key == execution_id else 1,
-                        projected_event,
+                        depths[key],
+                        _project_stream_event(event, include_content),
                     )
-                    yield tree_event
-                    pending[execution_key] = _next_event_task(
-                        streams[execution_key],
-                        execution_key,
-                    )
+                    pending[key] = _next_event_task(streams[key], key)
         finally:
             active_error = sys.exc_info()[1]
 
             async def cleanup() -> None:
                 errors: list[BaseException] = []
-                wait_tasks = tuple(
-                    task for task in (child_wait, discovery_wait, *pending.values())
-                    if task is not None
-                )
+                wait_tasks = tuple(child_waits.values()) + tuple(pending.values())
+                if discovery_wait is not None:
+                    wait_tasks += (discovery_wait,)
                 for task in wait_tasks:
                     if task.cancelled():
                         try:
@@ -352,11 +400,12 @@ class ExecutionTreeStreamer:
                     done, pending_tasks = await asyncio.wait(
                         pending_tasks, return_when=asyncio.FIRST_COMPLETED,
                     )
-                    completed_errors = _completed_errors(tuple(done), child_wait)
+                    completed_errors = _completed_errors(tuple(done), set(child_waits.values()))
                     for error in completed_errors:
                         _report_observation_error(error)
                     errors.extend(completed_errors)
-                for stream in tuple(streams.values()):
+
+                async def close_stream(stream: AsyncIterator[ExecutionStreamEvent]) -> None:
                     close = getattr(stream, "aclose", None)
                     if close is not None:
                         try:
@@ -364,13 +413,20 @@ class ExecutionTreeStreamer:
                         except BaseException as error:
                             _report_observation_error(error)
                             errors.append(error)
-                try:
-                    await subscription.close()
-                except AIError as error:
-                    _report_observation_error(error)
-                    errors.append(error)
-                except Exception as error:
-                    errors.append(_ExecutionStreamFailure(error))
+
+                async def close_subscription(subscription: _ExecutionTreeSubscription) -> None:
+                    try:
+                        await subscription.close()
+                    except AIError as error:
+                        _report_observation_error(error)
+                        errors.append(error)
+                    except Exception as error:
+                        errors.append(_ExecutionStreamFailure(error))
+
+                await asyncio.gather(
+                    *(close_stream(stream) for stream in tuple(streams.values())),
+                    *(close_subscription(subscription) for subscription in tuple(subscriptions.values())),
+                )
                 failure = _cleanup_failure(active_error, errors)
                 if failure is not None:
                     raise failure
@@ -378,10 +434,9 @@ class ExecutionTreeStreamer:
             await _await_stream_cleanup(cleanup(), active_error)
 
 
-
 def _completed_errors(
     tasks: tuple[asyncio.Task, ...],
-    broker_task: asyncio.Task | None,
+    broker_tasks: set[asyncio.Task],
 ) -> list[BaseException]:
     errors: list[BaseException] = []
     for task in tasks:
@@ -390,7 +445,7 @@ def _completed_errors(
         error = task.exception()
         if error is None or isinstance(error, StopAsyncIteration):
             continue
-        if task is broker_task and isinstance(error, Exception) and not isinstance(
+        if task in broker_tasks and isinstance(error, Exception) and not isinstance(
             error, (AIError, _ExecutionStreamFailure)
         ):
             error = _ExecutionStreamFailure(error)
@@ -427,12 +482,17 @@ def _next_event_task(
 
 
 def _validate_root(view: ExecutionView, execution_id: str) -> None:
-    if (
-        view.execution_id != execution_id
-        or view.parent_execution_id is not None
-        or view.parent_invocation_id is not None
-        or view.lineage_kind is ExecutionLineageKind.SUBAGENT
-    ):
+    if view.execution_id != execution_id:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    if view.lineage_kind is ExecutionLineageKind.SUBAGENT:
+        if (
+            not view.parent_execution_id
+            or view.parent_execution_id == execution_id
+            or not view.parent_invocation_id
+            or view.root_execution_id == execution_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    elif view.parent_execution_id is not None or view.parent_invocation_id is not None:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
@@ -445,7 +505,6 @@ def _validate_child(root: ExecutionView, child: ExecutionView) -> None:
         or not child.parent_invocation_id
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
 
 
 def _project_stream_event(
@@ -472,6 +531,7 @@ def _project_stream_event(
         event.event_type,
         {},
     )
+
 
 def _normalize_after_sequences(
     value: Mapping[str, int] | None,

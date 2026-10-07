@@ -879,6 +879,8 @@ class ExecutionStreamEvent:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionTreeEvent:
+    """Preserve real lineage with depth relative to the selected watch root."""
+
     execution_id: str
     agent_id: str | None
     lineage_kind: ExecutionLineageKind
@@ -906,9 +908,9 @@ class ExecutionTreeEvent:
         if (
             isinstance(self.depth, bool)
             or not isinstance(self.depth, int)
-            or self.depth not in (0, 1)
+            or self.depth < 0
         ):
-            raise ValueError("execution tree event depth must be zero or one")
+            raise ValueError("execution tree event depth must be nonnegative")
         if not isinstance(self.event, ExecutionStreamEvent):
             raise TypeError("execution tree event requires an execution event")
         if self.cursor is not None and (
@@ -917,19 +919,22 @@ class ExecutionTreeEvent:
             raise ValueError("execution tree event cursor is invalid")
         if self.execution_id != self.event.execution_id:
             raise ValueError("execution tree event identity does not match execution")
-        if self.depth == 0:
+        if self.lineage_kind is ExecutionLineageKind.SUBAGENT:
             if (
-                self.parent_execution_id is not None
-                or self.parent_invocation_id is not None
-                or self.lineage_kind is ExecutionLineageKind.SUBAGENT
+                not isinstance(self.parent_execution_id, str)
+                or not self.parent_execution_id
+                or self.parent_execution_id == self.execution_id
+                or not isinstance(self.parent_invocation_id, str)
+                or not self.parent_invocation_id
+                or self.root_execution_id == self.execution_id
             ):
-                raise ValueError("root execution tree event lineage is invalid")
+                raise ValueError("subagent execution tree event lineage is invalid")
         elif (
-            self.lineage_kind is not ExecutionLineageKind.SUBAGENT
-            or not self.parent_execution_id
-            or not self.parent_invocation_id
+            self.depth != 0
+            or self.parent_execution_id is not None
+            or self.parent_invocation_id is not None
         ):
-            raise ValueError("child execution tree event lineage is invalid")
+            raise ValueError("root execution tree event lineage is invalid")
 
 
 @dataclass(frozen=True, slots=True)

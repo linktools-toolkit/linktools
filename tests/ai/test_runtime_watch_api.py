@@ -14,9 +14,10 @@ from linktools.ai.core import (
     Principal,
     TaskStatus,
 )
-from linktools.ai.errors import AIError, ErrorCode, TaskObservationError
+from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
 from linktools.ai.runtime._domains import RuntimeExecutions, RuntimeSessions
+from linktools.ai.runtime._watch_cursor import encode_graph_watch_cursor
 from linktools.ai.runtime.service_api import (
     ExecutionEvent,
     ExecutionStreamEvent,
@@ -40,7 +41,10 @@ class _ExecutionService:
         principal: Principal,
         after_sequences=None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ):
+        if ready is not None:
+            ready.set()
         del principal, include_content
         after = 0 if after_sequences is None else after_sequences.get(execution_id, 0)
 
@@ -67,6 +71,9 @@ class _ExecutionService:
 
 
 class _TaskGraphService:
+    async def wait(self, graph_id: str, *, principal: Principal, timeout_seconds=None):
+        await asyncio.Event().wait()
+
     async def state(self, graph_id: str, *, principal: Principal):
         del principal
 
@@ -75,6 +82,7 @@ class _TaskGraphService:
             execution_id = "execution"
 
         class Snapshot:
+            event_sequence = 4
             node_states = (State(),)
             nodes = (type("Node", (), {"node_id": "node", "task": None})(),)
 
@@ -144,7 +152,7 @@ class _TaskGraphService:
 
 
 class _HistoryService:
-    async def list_events(
+    async def list_execution_events(
         self,
         execution_id: str,
         *,
@@ -179,6 +187,13 @@ class _Runtime:
         self.executions = self.execution
         self.graph = _TaskGraphService()
         self.history = _HistoryService()
+        self.observations = set()
+
+    def _register_observation(self, session) -> None:
+        self.observations.add(session)
+
+    def _release_observation(self, session) -> None:
+        self.observations.discard(session)
 
 
 def _task_graph_run(
@@ -202,7 +217,10 @@ def _watch_tree(
     principal,
     after_sequences=None,
     include_content=False,
+    ready: asyncio.Event | None = None,
 ):
+    if ready is not None:
+        ready.set()
     return _ExecutionService().stream(
         execution_id,
         principal=principal,
@@ -257,7 +275,10 @@ async def test_task_graph_watch_forwards_model_request_progress_with_execution_i
         principal: Principal,
         after_sequences=None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ):
+        if ready is not None:
+            ready.set()
         del principal, after_sequences, include_content
 
         async def values():
@@ -316,7 +337,10 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
         principal: Principal,
         after_sequences=None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ):
+        if ready is not None:
+            ready.set()
         del principal, after_sequences, include_content
         started.append(execution_id)
 
@@ -336,9 +360,9 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
     stream = run.watch()
     try:
         await anext(stream)
-        assert started == []
+        assert started == ["execution"]
         await anext(stream)
-        assert started == []
+        assert started == ["execution"]
         binding = await anext(stream)
         assert isinstance(binding.event, TaskEvent)
         assert binding.event.execution_id == "execution"
@@ -371,6 +395,7 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
                 "Snapshot",
                 (),
                 {
+                    "event_sequence": 4,
                     "node_states": tuple(
                         type(
                             "NodeState",
@@ -470,7 +495,10 @@ async def test_task_graph_watch_refreshes_nodes_added_after_subscription() -> No
         principal: Principal,
         after_sequences=None,
         include_content: bool = False,
+        ready: asyncio.Event | None = None,
     ):
+        if ready is not None:
+            ready.set()
         del include_content
         assert principal == principal_arg
         after_sequence = (after_sequences or {}).get(execution_id, 0)
@@ -555,7 +583,7 @@ async def test_task_graph_watch_preserves_missing_dynamic_node_integrity_error()
             return type(
                 "Snapshot",
                 (),
-                {"node_states": (state,), "nodes": (node,)},
+                {"event_sequence": 4, "node_states": (state,), "nodes": (node,)},
             )()
 
         def stream_events(self, graph_id: str, *, principal: Principal, after_sequence: int = 0):
@@ -593,7 +621,7 @@ async def test_task_graph_watch_preserves_missing_dynamic_node_integrity_error()
     with pytest.raises(AIError) as raised:
         await anext(run.watch())
 
-    assert not isinstance(raised.value, TaskObservationError)
+    assert not isinstance(raised.value, ObservationError)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert raised.value.safe_details == cause_details
 
@@ -646,6 +674,7 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
                 "Snapshot",
                 (),
                 {
+                    "event_sequence": 4,
                     "node_states": (state,),
                     "nodes": (
                         type("Node", (), {"node_id": "node", "task": None})(),
@@ -682,9 +711,10 @@ async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() 
         Principal("owner", "tenant"),
         _watch_tree,
     )
-    stream = run.watch(
-        after_execution_sequences={"node": {"execution": 1}},
-    )
+    stream = run.watch(cursor=encode_graph_watch_cursor(
+        "watch-test", "tenant", "graph", include_content=False,
+        graph_sequence=0, execution_sequences={"node": {"execution": 1}},
+    ))
     try:
         with pytest.raises(AIError) as raised:
             await anext(stream)
@@ -953,7 +983,8 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
+@pytest.mark.parametrize("root_id", ["root", "child"])
+async def test_task_graph_replay_captures_recursive_members_with_relative_depth(root_id: str) -> None:
     now = datetime.now(timezone.utc)
 
     class GraphService:
@@ -975,7 +1006,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
                                 "node_id": "node",
                                 "status": TaskStatus.RUNNING,
                                 "result_digest": None,
-                                "execution_id": "root",
+                                "execution_id": root_id,
                                 "error_code": None,
                                 "error_digest": None,
                             },
@@ -1053,8 +1084,7 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
             principal: Principal,
         ):
             del principal
-            assert execution_id == "root"
-            return (views["child"],)
+            return tuple(view for view in views.values() if view.parent_execution_id == execution_id)
 
     class EventService:
         async def list(
@@ -1107,10 +1137,10 @@ async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
     assert [
         (event.execution_id, event.depth, event.event.durable_sequence)
         for event in execution_events
-    ] == [
-        ("root", 0, 1),
-        ("child", 1, 1),
-    ]
+    ] == (
+        [("root", 0, 1), ("child", 1, 1), ("grandchild", 2, 1)]
+        if root_id == "root" else [("child", 0, 1), ("grandchild", 1, 1)]
+    )
     assert all(event.event.payload == {} for event in execution_events)
 
 
@@ -1124,7 +1154,7 @@ class _WaitGraphService:
     async def state(self, graph_id: str, *, principal: Principal):
         del principal
         assert graph_id == "graph"
-        return type("Snapshot", (), {"node_states": (), "nodes": ()})()
+        return type("Snapshot", (), {"event_sequence": 4, "node_states": (), "nodes": ()})()
 
     def stream_events(
         self,
@@ -1190,15 +1220,9 @@ class _WaitGraphService:
 
 
 def _wait_runtime(service: _WaitGraphService):
-    return type(
-        "WaitRuntime",
-        (),
-        {
-            "namespace": "watch-test",
-            "graph": service,
-            "execution": _ExecutionService(),
-        },
-    )()
+    runtime = _Runtime()
+    runtime.graph = service
+    return runtime
 
 
 async def _assert_no_graph_observer_tasks() -> None:
@@ -1225,12 +1249,12 @@ async def test_task_graph_wait_does_not_start_observer_on_stable_waiting() -> No
 
     result = await run.wait()
 
-    assert result.status is TaskStatus.WAITING
+    assert result.result.wait_status is TaskStatus.WAITING
     await _assert_no_graph_observer_tasks()
 
 
 @pytest.mark.asyncio
-async def test_task_graph_wait_and_observe_are_independent_at_recovery_boundary() -> None:
+async def test_task_graph_wait_and_watch_are_independent_at_recovery_boundary() -> None:
     service = _WaitGraphService("recovery")
     run = _task_graph_run(
         _wait_runtime(service),
@@ -1245,9 +1269,10 @@ async def test_task_graph_wait_and_observe_are_independent_at_recovery_boundary(
 
     result = await run.wait()
 
-    assert result.status is TaskStatus.RECOVERY_REQUIRED
+    assert result.result.wait_status is TaskStatus.RECOVERY_REQUIRED
     assert not observed
-    await run.observe(observer)
+    async for event in run.watch():
+        await observer(event)
     assert len(observed) == 1
     assert isinstance(observed[0].event, TaskEvent)
     assert observed[0].event.status is TaskStatus.RECOVERY_REQUIRED
@@ -1285,11 +1310,13 @@ async def test_task_graph_observer_error_does_not_start_graph_wait() -> None:
     async def observer(_event: TaskGraphRunEvent) -> None:
         raise RuntimeError("observer failed")
 
-    with pytest.raises(AIError) as raised:
-        await run.observe(observer)
-    assert isinstance(raised.value, TaskObservationError)
-    assert raised.value.origin == "callback"
-    assert raised.value.code is ErrorCode.TASK_OBSERVER_FAILED
+    stream = run.watch()
+    try:
+        with pytest.raises(RuntimeError, match="observer failed"):
+            async for event in stream:
+                await observer(event)
+    finally:
+        await stream.aclose()
 
     assert not service.wait_started.is_set()
     assert not service.wait_cancelled.is_set()
@@ -1299,6 +1326,7 @@ async def test_task_graph_observer_error_does_not_start_graph_wait() -> None:
 @pytest.mark.asyncio
 async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -> None:
     cause = RuntimeError("optional broker is unavailable")
+    delivered_first = asyncio.Event()
 
     def failed_watch_tree(
         execution_id,
@@ -1306,10 +1334,14 @@ async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -
         principal,
         after_sequences=None,
         include_content=False,
+        ready: asyncio.Event | None = None,
     ):
+        if ready is not None:
+            ready.set()
         del execution_id, principal, after_sequences, include_content
 
         async def values():
+            await delivered_first.wait()
             if False:
                 yield None
             raise _ExecutionStreamFailure(cause)
@@ -1324,9 +1356,10 @@ async def test_task_graph_live_stream_failure_keeps_stream_origin_and_cursor() -
     )
     stream = run.watch()
     delivered: list[TaskGraphRunEvent] = []
-    with pytest.raises(TaskObservationError) as raised:
+    with pytest.raises(ObservationError) as raised:
         while True:
             delivered.append(await anext(stream))
+            delivered_first.set()
 
     assert raised.value.origin == "stream"
     assert raised.value.cause_code is None
@@ -1368,7 +1401,7 @@ async def test_task_graph_durable_stream_integrity_error_remains_raw() -> None:
         await anext(run.watch())
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert not isinstance(raised.value, TaskObservationError)
+    assert not isinstance(raised.value, ObservationError)
 
 
 @pytest.mark.asyncio
@@ -1548,8 +1581,8 @@ async def test_task_graph_observer_preserves_cause_and_last_acknowledged_cursor(
             raise cause
         return callback(event)
 
-    with pytest.raises(asyncio.CancelledError if failure == "cancel" else TaskObservationError) as raised:
-        await run.observe(observer)
+    with pytest.raises(asyncio.CancelledError if failure == "cancel" else ObservationError) as raised:
+        await run.wait(on_event=observer)
 
     assert len(delivered) == 1
     if failure == "cancel":
@@ -1584,7 +1617,10 @@ async def test_task_graph_watch_preserves_same_round_durable_failure() -> None:
     run = _task_graph_run(runtime, "graph", Principal("owner", "tenant"), broken_tree)
 
     with pytest.raises(AIError) as raised:
-        await anext(run.watch(after_graph_sequence=1))
+        await anext(run.watch(cursor=encode_graph_watch_cursor(
+            "watch-test", "tenant", "graph", include_content=False,
+            graph_sequence=1, execution_sequences={},
+        )))
 
     assert raised.value is cause
 
@@ -1617,6 +1653,9 @@ async def test_task_graph_watch_preserves_authoritative_failure_during_cleanup()
     run = _task_graph_run(runtime, "graph", Principal("owner", "tenant"), broken_tree)
 
     with pytest.raises(AIError) as raised:
-        await anext(run.watch(after_graph_sequence=1))
+        await anext(run.watch(cursor=encode_graph_watch_cursor(
+            "watch-test", "tenant", "graph", include_content=False,
+            graph_sequence=1, execution_sequences={},
+        )))
 
     assert raised.value is cause
