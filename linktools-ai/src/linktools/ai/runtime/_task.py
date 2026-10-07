@@ -25,7 +25,6 @@ from ..task import (
     TaskEffectResolutionRequest,
     RecoverGraphRequest,
     TaskNodeResult,
-    TaskNodeView,
     TaskResultRef,
     TaskInputSupplyRequest,
 )
@@ -610,12 +609,16 @@ class TaskGraphRun(Generic[AppT]):
                 and node.task.id == "linktools.ai.input"
                 and node.task.revision == 1
             ):
+                if after_execution_sequences.get(node_id):
+                    raise AIError(ErrorCode.CURSOR_INVALID)
                 return
             execution = await self._runtime.executions.inspect(
                 execution_id,
                 principal=self._principal,
             )
             if execution.binding_kind == "task":
+                if after_execution_sequences.get(node_id):
+                    raise AIError(ErrorCode.CURSOR_INVALID)
                 return
             tree_ready = asyncio.Event()
             stream = self._watch_tree(
@@ -661,11 +664,18 @@ class TaskGraphRun(Generic[AppT]):
                 graph_stream.__anext__(),
                 name=f"task-run-graph-{self.graph_id}",
             )
-            for node_id, state in states.items():
+            preparation_failure: _ExecutionStreamFailure | None = None
+            for node_id, state in tuple(states.items()):
                 if state.execution_id is not None:
-                    await start_execution(node_id, state.execution_id)
+                    try:
+                        await start_execution(node_id, state.execution_id)
+                    except _ExecutionStreamFailure as error:
+                        if preparation_failure is None:
+                            preparation_failure = error
             if ready is not None:
                 ready.set()
+            if preparation_failure is not None:
+                raise preparation_failure
 
             while graph_task is not None or execution_tasks:
                 waiters = list(execution_tasks.values())
@@ -1030,36 +1040,6 @@ class TaskGraphRun(Generic[AppT]):
                             execution_sequences=replay_execution_sequences,
                         ),
                     )
-
-
-def _normalize_execution_sequences(
-    value: "Mapping[str, Mapping[str, int]] | None",
-) -> Mapping[str, Mapping[str, int]]:
-    if value is None:
-        return {}
-    if not isinstance(value, Mapping):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    result: dict[str, Mapping[str, int]] = {}
-    for node_id, sequences in value.items():
-        if (
-            not isinstance(node_id, str)
-            or not node_id
-            or not isinstance(sequences, Mapping)
-        ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        normalized: dict[str, int] = {}
-        for execution_id, sequence in sequences.items():
-            if (
-                not isinstance(execution_id, str)
-                or not execution_id
-                or isinstance(sequence, bool)
-                or not isinstance(sequence, int)
-                or sequence < 0
-            ):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            normalized[execution_id] = sequence
-        result[node_id] = normalized
-    return result
 
 
 def _task_stream_observation_error(

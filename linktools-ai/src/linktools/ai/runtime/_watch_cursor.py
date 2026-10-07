@@ -307,9 +307,11 @@ def _graph_execution_sequences(
 
 
 __all__ = [
+    "decode_evaluation_watch_cursor",
     "decode_task_results_cursor",
     "decode_execution_watch_cursor",
     "decode_graph_watch_cursor",
+    "encode_evaluation_watch_cursor",
     "encode_task_results_cursor",
     "encode_execution_watch_cursor",
     "encode_graph_watch_cursor",

@@ -415,7 +415,7 @@ work, or incompatibility makes a configured gate `inconclusive`.
 including score-only runs. Usage completeness is fixed in the report cutoff,
 so replaying a comparison does not substitute later usage observations.
 
-`report()` and `compare()` publish immutable snapshots. Their typed cutoffs pin
+`create_report()` and `create_comparison_report()` publish immutable snapshots. Their typed cutoffs pin
 manifest/evidence references and observed revisions, not a cross-store atomic
 instant. Save `report_id` and retrieve it with `get_report(...)` while retained.
 `export_report(..., format="json" | "csv" | "markdown")` exports that snapshot

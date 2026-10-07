@@ -254,7 +254,8 @@ def _error_priority(error: BaseException, *, authoritative: bool) -> int:
 
 
 class _CursorEvent(Protocol):
-    cursor: str | None
+    @property
+    def cursor(self) -> str | None: ...
 
 
 EventT = TypeVar("EventT", bound=_CursorEvent)

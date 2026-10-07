@@ -210,3 +210,40 @@ async def test_evaluation_reopens_a_known_graph_after_waiting_stage_resumes():
     assert (await asyncio.wait_for(pending, 1)).event.sequence == 2
     assert owner.streams == ["human-score", "human-score"]
     await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["memory", "filesystem"])
+async def test_evaluation_real_task_graphs_watch_and_wait_share_resumable_events(tmp_path, backend):
+    from linktools.ai.evaluation import (
+        CandidateSpec, CaseRef, CaseSpec, DatasetRef, DatasetSpec, EvaluationSpec, EvaluationPolicy, StartEvaluationRequest,
+    )
+    from linktools.ai.runtime import Runtime, RuntimeStorage
+    from linktools.ai.task import Task
+    from .test_evaluation_consumers import FixtureModels, echo, exact, rule_scorer, CONTEXT, PRINCIPAL as principal
+
+    storage = RuntimeStorage.in_memory() if backend == "memory" else RuntimeStorage.filesystem(tmp_path)
+    target = Task("watch.echo", echo, effect_policy="none")
+    scorer = Task("watch.exact", exact, effect_policy="none")
+    async with Runtime.open("evaluation-watch-real", models=FixtureModels(), storage=storage, context=CONTEXT) as runtime:
+        dataset = await runtime.evaluations.publish_dataset(DatasetSpec(
+            DatasetRef("watch-cases", 1), cases=(CaseSpec.task(
+                CaseRef("watch-cases", "one", 1), input={"answer": "yes"}, expected="yes",
+            ),),
+        ), principal=principal, idempotency_key="publish-watch-cases")
+        handle = await runtime.evaluations.start(StartEvaluationRequest(EvaluationSpec(
+            dataset, (CandidateSpec("current", task=target.ref),), (rule_scorer(scorer),),
+            policy=EvaluationPolicy(allow_volatile=backend == "memory"),
+        ), principal, "start-watch-cases"), engine=runtime.tasks.bind(target, scorer))
+        seen = []
+        async def consume(item):
+            seen.append(item)
+        outcome = await handle.wait(on_event=consume, timeout_seconds=15)
+        assert outcome.result.completion == "complete"
+        assert outcome.observation_error is None
+        remaining = [item async for item in handle.watch(cursor=outcome.cursor)]
+        all_items = seen + remaining
+        identities = [(item.graph_id, item.event.sequence) for item in all_items]
+        assert len(identities) == len(set(identities))
+        assert len({item.graph_id for item in all_items}) == 2
+        assert [item async for item in handle.watch(cursor=all_items[-1].cursor)] == []

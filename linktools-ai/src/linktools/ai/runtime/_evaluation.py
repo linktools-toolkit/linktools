@@ -1423,13 +1423,17 @@ class EvaluationRun:
 
         async def close_streams() -> None:
             errors: list[BaseException] = []
+            cancelled_by_owner: set[asyncio.Task[TaskGraphRunEvent]] = set()
             for task in tasks.values():
                 if not task.done():
+                    cancelled_by_owner.add(task)
                     _cancel_stream_task(task)
             pending = set(tasks.values())
             while pending:
                 done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
                 for task in done:
+                    if task.cancelled() and task in cancelled_by_owner:
+                        continue
                     try:
                         task.result()
                     except StopAsyncIteration:
@@ -1504,12 +1508,23 @@ class EvaluationRun:
                             if state.event_sequence > sequence:
                                 pending_members.add(graph_id)
                                 inactive_sequences.pop(graph_id)
+                        preparation_failure: ObservationError | None = None
                         for graph_id in sorted(pending_members):
                             prepared = asyncio.Event()
                             stream = owner._watch_graph(
                                 graph_id, self._principal, cursors.get(graph_id), include_content, prepared,
                             )
-                            await start(graph_id, stream, prepared)
+                            try:
+                                await start(graph_id, stream, prepared)
+                            except ObservationError as error:
+                                if error.origin != "stream" or error.safe_details.get("phase") == "cleanup":
+                                    raise
+                                if preparation_failure is None:
+                                    preparation_failure = error
+                        if preparation_failure is not None:
+                            if ready is not None:
+                                ready.set()
+                            raise preparation_failure
                     known.update(members)
                     if ready is not None:
                         ready.set()

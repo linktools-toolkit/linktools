@@ -705,3 +705,202 @@ def test_unified_observation_surface_has_no_redundant_methods_or_result_state() 
         assert not hasattr(owner, "observe")
         assert not hasattr(owner, "wait_observed")
     assert [field.name for field in fields(WaitResult)] == ["result", "cursor", "observation_error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("member", ["foreign", "denied", "valid"])
+async def test_optional_root_broker_failure_cannot_skip_execution_cursor_validation(member) -> None:
+    bundle = _Bundle()
+    optional = OSError("local child notifications unavailable")
+    denied = AIError(ErrorCode.AUTHORIZATION_DENIED)
+    inspected = []
+    opened = []
+
+    class Broker(ExecutionTreeBroker):
+        def subscribe(self, parent_execution_id: str):
+            if parent_execution_id == "execution":
+                raise optional
+            return super().subscribe(parent_execution_id)
+
+    class Reader:
+        async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
+            inspected.append(execution_id)
+            if execution_id == "member":
+                if member == "denied":
+                    raise denied
+                if member == "valid":
+                    return ExecutionView(
+                        "member", "agent", ExecutionStatus.SUCCEEDED,
+                        ExecutionLineageKind.SUBAGENT, "execution", "execution", "invocation",
+                    )
+            return ExecutionView(
+                execution_id, "agent", ExecutionStatus.SUCCEEDED,
+                ExecutionLineageKind.RUN, None, execution_id, None,
+            )
+
+        async def list_children(self, execution_id: str, *, principal: Principal):
+            return ()
+
+    class Events:
+        async def stream(self, execution_id: str, **kwargs):
+            opened.append(execution_id)
+            if False:
+                yield
+
+    broker = Broker()
+    tree = ExecutionTreeStreamer(Reader(), Events(), broker)
+    run = Execution(bundle.runtime, "execution", _PRINCIPAL, tree.stream)
+    cursor = encode_execution_watch_cursor(
+        _NAMESPACE, "tenant", "execution", include_content=False, sequences={"member": 1},
+    )
+    try:
+        if member == "valid":
+            outcome = await run.wait(on_event=_ignore, cursor=cursor)
+            assert outcome.result is bundle.execution.result
+            assert outcome.cursor == cursor
+            assert outcome.observation_error.origin == "stream"
+            assert outcome.observation_error.__cause__ is optional
+        else:
+            with pytest.raises(AIError) as raised:
+                await run.wait(on_event=_ignore, cursor=cursor)
+            if member == "denied":
+                assert raised.value is denied
+            else:
+                assert raised.value.code in {ErrorCode.REQUEST_FIELD_INVALID, ErrorCode.CURSOR_INVALID}
+            assert bundle.execution.wait_calls == 0
+            assert opened == []
+        assert inspected == ["execution", "member"]
+        assert not broker._subscriptions
+    finally:
+        await bundle.runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", ["cursor", "authorization", "valid"])
+async def test_optional_first_tree_failure_cannot_skip_later_graph_member_validation(second) -> None:
+    from linktools.ai.runtime.service_api import _ExecutionStreamFailure
+    from linktools.ai.task import TaskNode, TaskNodeView
+
+    bundle = _Bundle()
+    optional = OSError("first tree broker unavailable")
+    cause = AIError(ErrorCode.CURSOR_INVALID if second == "cursor" else ErrorCode.AUTHORIZATION_DENIED)
+    checked = []
+    closed = []
+    nodes = (TaskNode("a"), TaskNode("b"))
+    states = tuple(TaskNodeView(
+        "graph", node.node_id, (), TaskStatus.SUCCEEDED, None, 1, None, None, None, None,
+        execution_id=f"execution-{node.node_id}",
+    ) for node in nodes)
+    bundle.graph.result = TaskGraphState("graph", TaskStatus.SUCCEEDED, nodes, states, 0)
+
+    async def inspect_execution(execution_id: str, *, principal: Principal) -> ExecutionView:
+        return ExecutionView(
+            execution_id, "agent", ExecutionStatus.SUCCEEDED,
+            ExecutionLineageKind.RUN, None, execution_id, None,
+        )
+
+    async def tree(execution_id: str, *, after_sequences=None, ready=None, **kwargs):
+        checked.append(execution_id)
+        try:
+            if execution_id == "execution-a":
+                raise _ExecutionStreamFailure(optional)
+            assert after_sequences == {"member-b": 1}
+            if second != "valid":
+                raise cause
+            if ready is not None:
+                ready.set()
+            if False:
+                yield
+        finally:
+            closed.append(execution_id)
+
+    bundle.execution.inspect = inspect_execution
+    run = TaskGraphRun(bundle.runtime, bundle.graph, "graph", _PRINCIPAL, tree)
+    cursor = encode_graph_watch_cursor(
+        _NAMESPACE, "tenant", "graph", include_content=False,
+        graph_sequence=0, execution_sequences={"b": {"member-b": 1}},
+    )
+    try:
+        if second == "valid":
+            outcome = await run.wait(on_event=_ignore, cursor=cursor)
+            assert outcome.result.wait_status is TaskStatus.SUCCEEDED
+            assert outcome.cursor == cursor
+            assert outcome.observation_error.origin == "stream"
+            assert outcome.observation_error.__cause__ is optional
+        else:
+            with pytest.raises(AIError) as raised:
+                await run.wait(on_event=_ignore, cursor=cursor)
+            assert raised.value is cause
+            assert bundle.graph.wait_calls == 0
+        assert checked == ["execution-a", "execution-b"]
+        assert closed == checked
+    finally:
+        await bundle.runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", ["cursor", "authorization", "valid"])
+async def test_optional_first_graph_failure_cannot_skip_later_evaluation_member_validation(second) -> None:
+    from dataclasses import replace
+
+    bundle = _Bundle()
+    optional = OSError("first graph broker unavailable")
+    cause = AIError(ErrorCode.CURSOR_INVALID if second == "cursor" else ErrorCode.AUTHORIZATION_DENIED)
+    checked = []
+    closed = []
+    graph_cursors = {
+        graph_id: encode_graph_watch_cursor(
+            _NAMESPACE, "tenant", graph_id, include_content=False,
+            graph_sequence=0, execution_sequences={"node": {"member": 1}},
+        ) for graph_id in ("graph-a", "graph-b")
+    }
+    cursor = encode_evaluation_watch_cursor(
+        _NAMESPACE, "tenant", "evaluation", include_content=False, graph_cursors=graph_cursors,
+    )
+
+    async def record(experiment_id: str, principal: Principal):
+        return SimpleNamespace(intents=tuple(
+            SimpleNamespace(confirmed=True, submission=SimpleNamespace(graph=SimpleNamespace(graph_id=graph_id)))
+            for graph_id in graph_cursors
+        ))
+
+    async def inspect_evaluation(experiment_id: str, principal: Principal) -> EvaluationView:
+        bundle.evaluations.inspect_calls += 1
+        if bundle.evaluations.inspect_calls == 1:
+            return replace(bundle.evaluations.result, completion="running")
+        return bundle.evaluations.result
+
+    async def watch_graph(graph_id, principal, graph_cursor, include_content, ready):
+        checked.append(graph_id)
+        try:
+            assert graph_cursor == graph_cursors[graph_id]
+            if graph_id == "graph-a":
+                raise ObservationError("stream", cursor=graph_cursor) from optional
+            if second != "valid":
+                raise cause
+            if ready is not None:
+                ready.set()
+            if False:
+                yield
+        finally:
+            closed.append(graph_id)
+
+    bundle.evaluations._record = record
+    bundle.evaluations._inspect = inspect_evaluation
+    bundle.evaluations._watch_graph = watch_graph
+    try:
+        if second == "valid":
+            outcome = await bundle.evaluation_run.wait(on_event=_ignore, cursor=cursor)
+            assert outcome.result is bundle.evaluations.result
+            assert outcome.cursor == cursor
+            assert outcome.observation_error.origin == "stream"
+            assert outcome.observation_error.__cause__ is optional
+        else:
+            with pytest.raises(AIError) as raised:
+                await bundle.evaluation_run.wait(on_event=_ignore, cursor=cursor)
+            assert raised.value is cause
+            assert bundle.evaluations.inspect_calls == 1
+        assert checked == ["graph-a", "graph-b"]
+        assert closed == checked
+    finally:
+        await bundle.runtime.close()

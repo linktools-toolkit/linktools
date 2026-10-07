@@ -168,6 +168,7 @@ class ExecutionTreeStreamer:
         pending: dict[str, asyncio.Task[ExecutionStreamEvent]] = {}
         discovery_wait: asyncio.Task[None] | None = None
         observing = False
+        preparation_failure: _ExecutionStreamFailure | None = None
 
         def start(view: ExecutionView) -> None:
             stream = self._events.stream(
@@ -185,6 +186,7 @@ class ExecutionTreeStreamer:
             )
 
         def add_view(view: ExecutionView, depth: int) -> bool:
+            nonlocal preparation_failure
             existing = views.get(view.execution_id)
             if existing is not None:
                 if (
@@ -200,9 +202,14 @@ class ExecutionTreeStreamer:
             except AIError:
                 raise
             except Exception as error:
-                raise _ExecutionStreamFailure(error) from error
-            # Subscribe before reading children, including at every new depth.
-            subscriptions[view.execution_id] = subscription
+                if observing:
+                    raise _ExecutionStreamFailure(error) from error
+                if preparation_failure is None:
+                    preparation_failure = _ExecutionStreamFailure(error)
+                subscription = None
+            # A missing optional broker must not bypass durable cursor validation.
+            if subscription is not None:
+                subscriptions[view.execution_id] = subscription
             views[view.execution_id] = view
             depths[view.execution_id] = depth
             if observing:
@@ -282,6 +289,10 @@ class ExecutionTreeStreamer:
             for member_id in after_sequences:
                 await validate_cursor_member(member_id)
 
+            if preparation_failure is not None:
+                if ready is not None:
+                    ready.set()
+                raise preparation_failure
             for view in tuple(views.values()):
                 start(view)
                 wait_for_children(view.execution_id)

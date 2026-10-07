@@ -212,7 +212,8 @@ async def test_cancelled_handoff_keeps_hold_until_recovery_rebinds() -> None:
         execution_id = "execution"
 
         async def wait(self) -> object:
-            return Result()
+            from linktools.ai.runtime import WaitResult
+            return WaitResult(Result(), None)
 
     class BlockingControl:
         def __init__(self) -> None:

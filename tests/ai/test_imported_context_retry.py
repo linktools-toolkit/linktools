@@ -36,7 +36,7 @@ async def test_retry_preserves_imported_history_and_metadata(tmp_path: Path, met
         record = await storage.execution.executions.get(source.execution_id, tenant_id=principal.tenant_id)
         assert record.input_context.payload.kind == ("inline" if metadata_size == 16 else "object")
         retry = await source.retry("replacement prompt")
-        assert (await retry.wait()).status is ExecutionStatus.SUCCEEDED
+        assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
         capture = await runtime.executions.capture_input(retry.execution_id, CaptureInputRequest(principal, "retry-context-capture"))
         captured = await runtime._input_captures.read_agent(capture, principal=principal)
         assert captured.input_context.digest == context.digest
@@ -64,7 +64,7 @@ async def test_retry_imported_context_matches_native_fork_history(tmp_path: Path
         await imported.wait()
         for source in (fork, imported):
             retry = await source.retry("replacement question")
-            assert (await retry.wait()).status is ExecutionStatus.SUCCEEDED
+            assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
             interactions = await retry.model_interactions(include_content=True)
             request = str(interactions.items[0].request)
             assert "historical question" in request
@@ -94,7 +94,7 @@ async def test_retry_imported_memory_uses_fresh_isolated_scope(tmp_path: Path) -
         baseline = await source_memory.read("facts.txt", max_chars=1000)
         await source_memory.write("facts.txt", "source execution edit", expected_version=baseline.version)
         retry = await source.retry("replacement question")
-        assert (await retry.wait()).status is ExecutionStatus.SUCCEEDED
+        assert (await retry.wait()).result.status is ExecutionStatus.SUCCEEDED
         retry_record = await storage.execution.executions.get(retry.execution_id, tenant_id=principal.tenant_id)
         assert retry_record.memory_scope != source_record.memory_scope
         retry_memory = RuntimeMemoryStore(storage.memory, object_store=storage.object_store(RuntimeDomain.MEMORY),

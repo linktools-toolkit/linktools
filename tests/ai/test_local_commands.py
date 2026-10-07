@@ -126,3 +126,22 @@ def test_ai_cli_rejects_unknown_commands() -> None:
     )
     assert result.returncode != 0
     assert "invalid choice: 'unknown-command'" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_ai_json_command_uses_authoritative_wait_result(capsys) -> None:
+    import json
+    from linktools.ai.core import ExecutionStatus, UsageMetrics
+    from linktools.ai.runtime import ExecutionResult, WaitResult
+    from linktools.commands.ai.run import _emit_result
+
+    result = ExecutionResult("execution", ExecutionStatus.SUCCEEDED, {"answer": "ready"}, UsageMetrics())
+    class Execution:
+        async def wait(self):
+            return WaitResult(result, None)
+    class Agent:
+        async def start(self, *args, **kwargs):
+            return Execution()
+    runtime = SimpleNamespace(agents=SimpleNamespace(get=lambda: Agent()))
+    assert await _emit_result(runtime, "prompt", "session", "memory", True, False, False) == 0
+    assert json.loads(capsys.readouterr().out)["output"] == {"answer": "ready"}

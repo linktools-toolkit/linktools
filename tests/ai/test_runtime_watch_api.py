@@ -738,6 +738,7 @@ async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -
                 (),
                 {
                     "graph_id": graph_id,
+                    "wait_status": property(lambda state: TaskGraphResult(state.graph_id, state.status, state.node_states).wait_status),
                     "status": TaskStatus.RUNNING,
                     "event_sequence": 2,
                     "node_states": (),
@@ -824,6 +825,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
                 (),
                 {
                     "graph_id": "graph",
+                    "wait_status": property(lambda state: TaskGraphResult(state.graph_id, state.status, state.node_states).wait_status),
                     "status": TaskStatus.RUNNING,
                     "event_sequence": 2,
                     "node_states": (
@@ -996,6 +998,7 @@ async def test_task_graph_replay_captures_recursive_members_with_relative_depth(
                 (),
                 {
                     "graph_id": graph_id,
+                    "wait_status": property(lambda state: TaskGraphResult(state.graph_id, state.status, state.node_states).wait_status),
                     "status": TaskStatus.RUNNING,
                     "event_sequence": 1,
                     "node_states": (
