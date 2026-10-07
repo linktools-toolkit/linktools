@@ -32,7 +32,7 @@ class Container(BaseContainer):
                     server_name=self.get_config_later("PORTAINER_DOMAIN"),
                     proxy="http://portainer:9000",
                     auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
-                    auth_bypass=(r"\\.(css|js)$",),
+                    auth_bypass=(r"\.(css|js)$",),
                     oidc_redirects=("",) if self.get_config("PORTAINER_AUTH_ENABLE") else (),
                 ),
             },
