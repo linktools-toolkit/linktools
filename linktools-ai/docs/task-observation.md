@@ -184,8 +184,12 @@ This is a breaking pre-release change with no compatibility aliases:
   outcome.result.output/status. Graph display status is result.wait_status
 - RuntimeHistory.task_events/list_events become
   list_task_events/list_execution_events
-- CapabilityLoadContext.verify becomes verify_source_revision;
-  AssetStore.get_at_revision uses the entry_revision keyword
+- CapabilityLoadContext.verify becomes verify_source_revision
+- AssetStore and StorageOverlay no longer expose layer-ambiguous numeric history.
+  Capture layer-qualified references with AssetStore.resolve_versions(keys) and
+  read them with read_versions(refs); numeric history remains backend-local
+- Local Skill resources use DirectoryAssetBackend and CapabilityGroup.capture(),
+  then AssetSkillSource with the captured reader and SkillSourceRef
 - EvaluationRun.report becomes create_report; RuntimeEvaluations.compare becomes
   create_comparison_report. These methods create and persist reports
 - Skill/Subagent instructions aliases are removed; use get_instructions.

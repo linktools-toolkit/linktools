@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..core import (
@@ -132,10 +133,12 @@ async def _load_skills(
 ) -> "Sequence[SkillDefinition]":
     entries = context.list(kind="skill")
     declarations = _package_declarations(entries, _DECLARATION_SUFFIXES["skill"])
-    values = await context.read_many(tuple(entry.key for entry in declarations))
+    declaration_keys = tuple(entry.key for entry in declarations)
+    values = await context.read_many(declaration_keys)
+    declaration_paths = await context.asset_reader.local_paths(declaration_keys)
     result: list[SkillDefinition] = []
     adapter = SkillSpecAdapter()
-    for entry, data in zip(declarations, values, strict=True):
+    for entry, data, declaration_path in zip(declarations, values, declaration_paths, strict=True):
         logical_id = entry.key.id.rpartition("/")[0]
         try:
             validate_logical_id(logical_id)
@@ -166,9 +169,11 @@ async def _load_skills(
             mode = 0
             if path is not None:
                 try:
-                    mode = (await asyncio.to_thread(path.stat)).st_mode & 0o111
-                except OSError as error:
+                    mode = await asyncio.to_thread(_local_skill_resource_mode, path, declaration_path)
+                except (OSError, RuntimeError) as error:
                     raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+                if mode is None:
+                    continue
             resources.append(SkillResource(relative, ref, mode))
         result.append(
             SkillDefinition(
@@ -177,6 +182,16 @@ async def _load_skills(
             )
         )
     return result
+
+
+def _local_skill_resource_mode(path: Path, declaration_path: Path | None) -> int | None:
+    if declaration_path is not None and path.is_relative_to(declaration_path.parent):
+        package = declaration_path.parent.resolve(strict=True)
+        try:
+            path.resolve(strict=True).relative_to(package)
+        except ValueError:
+            return None
+    return path.stat().st_mode & 0o111
 
 
 async def _load_mcp(

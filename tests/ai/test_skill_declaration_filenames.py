@@ -17,10 +17,8 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AssetSkillSource,
     CapabilityGroup,
-    LocalSkillSource,
     SkillCapability,
     SkillDefinition,
-    SkillSourceRef,
     SkillSourceRegistry,
 )
 from linktools.ai.errors import AIError, ErrorCode
@@ -133,17 +131,6 @@ async def test_directory_skill_aliases_use_logical_declaration_paths(
         assert await source.read(definition.source_ref, "Guide.md") == b"guide"
     finally:
         await store.close()
-
-
-@pytest.mark.asyncio
-async def test_local_skill_source_excludes_both_root_declaration_names(tmp_path: Path) -> None:
-    package = tmp_path / "review"
-    package.mkdir()
-    for filename in ("SKILL.md", "skill.md", "Guide.md"):
-        (package / filename).write_text("content", encoding="utf-8")
-    source = LocalSkillSource("local", tmp_path)
-    view = await source.inspect(SkillSourceRef("local", "review"))
-    assert view.resources == ("Guide.md",)
 
 
 @pytest.mark.asyncio

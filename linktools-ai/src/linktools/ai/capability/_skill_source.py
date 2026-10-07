@@ -3,7 +3,6 @@
 """Vendor-neutral Skill package resource sources."""
 
 import asyncio
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -16,7 +15,7 @@ from ..core import (
     validate_logical_id,
 )
 from ..errors import AIError, ErrorCode
-from ._resource_path import SKILL_DECLARATION_FILES, require_resource_path
+from ._resource_path import require_resource_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,80 +91,6 @@ class SkillSource(Protocol):
     async def inspect(self, source: SkillSourceRef) -> SkillSourceView: ...
 
     async def read(self, source: SkillSourceRef, path: str) -> bytes: ...
-
-
-class LocalSkillSource:
-    def __init__(self, source_id: str, root: "str | Path") -> None:
-        if not isinstance(source_id, str) or not source_id.strip():
-            raise ValueError("skill source id must be non-empty")
-        self._source_id = source_id
-        self._root = Path(root).expanduser().resolve()
-
-    @property
-    def source_id(self) -> str:
-        return self._source_id
-
-    def _root_ref(self, source: SkillSourceRef) -> str:
-        if (
-            not isinstance(source, SkillSourceRef)
-            or source.source_id != self._source_id
-        ):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return source.root
-
-    async def inspect(self, source: SkillSourceRef) -> SkillSourceView:
-        logical_root = self._root_ref(source)
-        return await asyncio.to_thread(self._inspect_sync, logical_root)
-
-    async def read(self, source: SkillSourceRef, path: str) -> bytes:
-        logical_root = self._root_ref(source)
-        relative = _require_resource_path(path)
-        return await asyncio.to_thread(self._read_sync, logical_root, relative)
-
-    def _inspect_sync(self, root: str) -> SkillSourceView:
-        package = self._package_path(root)
-        resources: list[str] = []
-        for directory, directory_names, file_names in os.walk(package, followlinks=True):
-            base = Path(directory)
-            directory_names[:] = [
-                name
-                for name in directory_names
-                if _skill_directory_is_discoverable(package, base, name)
-            ]
-            for name in file_names:
-                path = base / name
-                relative = path.relative_to(package).as_posix()
-                if relative in SKILL_DECLARATION_FILES or DEFAULT_DISCOVERY_POLICY.ignores(relative):
-                    continue
-                try:
-                    _resolve_contained_file(package, path)
-                except AIError as error:
-                    if error.code in {
-                        ErrorCode.ASSET_NOT_FOUND,
-                        ErrorCode.ASSET_PATH_OUTSIDE_ROOT,
-                    }:
-                        continue
-                    raise
-                resources.append(_require_resource_path(relative))
-        return SkillSourceView(
-            SkillLocation("local", str(package)),
-            tuple(sorted(resources)),
-        )
-
-    def _read_sync(self, root: str, path: str) -> bytes:
-        package = self._package_path(root)
-        candidate = package.joinpath(*PurePosixPath(path).parts)
-        return _resolve_contained_file(package, candidate).read_bytes()
-
-    def _package_path(self, root: str) -> Path:
-        candidate = self._root.joinpath(*PurePosixPath(root).parts)
-        try:
-            resolved = candidate.resolve(strict=True)
-        except (OSError, RuntimeError) as error:
-            raise AIError(ErrorCode.ASSET_NOT_FOUND) from error
-        if not resolved.is_dir():
-            raise AIError(ErrorCode.ASSET_NOT_FOUND)
-        return resolved
 
 
 class AssetSkillSource:
@@ -303,47 +228,8 @@ def _require_resource_path(path: str) -> str:
         ) from error
 
 
-def _skill_directory_is_discoverable(package: Path, base: Path, name: str) -> bool:
-    path = base / name
-    relative = path.relative_to(package).as_posix()
-    if DEFAULT_DISCOVERY_POLICY.ignores(relative):
-        return False
-    try:
-        target = path.resolve(strict=True)
-        target.relative_to(package)
-    except (OSError, RuntimeError, ValueError):
-        return False
-    if not target.is_dir():
-        return False
-    current = base
-    while True:
-        try:
-            if current.resolve(strict=True) == target:
-                return False
-        except (OSError, RuntimeError):
-            return False
-        if current == package:
-            return True
-        current = current.parent
-
-
-def _resolve_contained_file(root: Path, candidate: Path) -> Path:
-    try:
-        resolved = candidate.resolve(strict=True)
-    except (OSError, RuntimeError) as error:
-        raise AIError(ErrorCode.ASSET_NOT_FOUND) from error
-    try:
-        resolved.relative_to(root)
-    except ValueError as error:
-        raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT) from error
-    if not resolved.is_file():
-        raise AIError(ErrorCode.ASSET_NOT_FOUND)
-    return resolved
-
-
 __all__ = [
     "AssetSkillSource",
-    "LocalSkillSource",
     "SkillLocation",
     "SkillSource",
     "SkillResource",
