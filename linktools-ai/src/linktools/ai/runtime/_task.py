@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, overload
 
 from linktools.core import environ
 
-from ..core import ExecutionStatus, JsonValue, Page, Principal, TaskStatus, canonical_json_bytes
+from ..core import BudgetUsage, ExecutionStatus, JsonValue, Page, Principal, TaskStatus, canonical_json_bytes
 from ..errors import AIError, ErrorCode, ObservationError
 from ..task import (
     CancelGraphRequest,
@@ -82,6 +82,12 @@ class TaskGraphRun(Generic[AppT]):
     _principal: Principal
     _watch_tree: _ExecutionTreeWatcher
     _engine: "TaskEngine[AppT] | None" = field(default=None, repr=False, compare=False)
+
+    async def budget_usage(self) -> BudgetUsage | None:
+        """Read the budget shared by all graph nodes and their descendants."""
+        return await self._runtime.tasks.budget_usage(
+            self.graph_id, principal=self._principal,
+        )
 
     @overload
     async def wait(

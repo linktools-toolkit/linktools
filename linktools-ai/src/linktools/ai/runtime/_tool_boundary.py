@@ -34,6 +34,7 @@ from ..capability import (
 from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..workspace import SandboxSession, ToolPermissionPolicy
+from ._budget import RunBudgetContext
 from ._attachment import bind_tool_return_attachments
 from ._tool import TOOL_OPERATION_LEASE_SECONDS, ToolOperationBridge
 from ._tool_metrics import (
@@ -117,6 +118,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         sandbox_session: SandboxSession | None = None,
         tool_operations: ToolOperationBridge | None = None,
         tool_metrics: _ToolMetricContext | None = None,
+        budget: RunBudgetContext | None = None,
         repository_boundary: RepositoryInstructionBoundary | None = None,
     ) -> None:
         if not isinstance(id, str) or not id:
@@ -129,6 +131,7 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._sandbox_session = sandbox_session
         self._tool_operations = tool_operations
         self._tool_metrics = tool_metrics
+        self._budget = budget
         self._repository_boundary = repository_boundary
         self._raw_tools: dict[
             str,
@@ -285,6 +288,8 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             )
             raise
         if descriptor.effect_owner == "none":
+            if self._budget is not None:
+                await self._budget.admit_tool(call_id)
             result = await self._invoke(
                 call,
                 tool.tool_def,
@@ -307,6 +312,17 @@ class BoundaryToolset(AbstractToolset[AgentContext[object]]):
             raise decision.cached_error
         if decision.has_cached_result:
             return decision.cached_result
+
+        if self._budget is not None:
+            try:
+                await self._budget.admit_tool(
+                    call_id, operation_id=decision.operation_id, fence=decision.fence,
+                )
+            except BaseException:
+                cancelled = await bridge.defer(decision)
+                if cancelled:
+                    raise asyncio.CancelledError
+                raise
 
         async def invoke(args: dict[str, Any]) -> Any:
             return await raw_toolset.call_tool(name, args, ctx, raw_tool)

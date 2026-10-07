@@ -27,6 +27,8 @@ from ._evaluation_records import (
     EvaluationLaunchIntent, EvaluationRecord, EvaluationTrialEvidence, EvaluationSlotDisposition, EvaluationCleanupRecord,
 )
 from ...core import (
+    BudgetUsage,
+    RunBudget,
     ApprovalDecision,
     ApprovalStatus,
     ExecutionEventType,
@@ -729,8 +731,13 @@ class ExecutionRecord:
     requires_task_invocation_capture: bool = False
     retention_closed: bool = False
     started_at: datetime | None = None
+    budget_scope_id: str | None = None
 
     def __post_init__(self) -> None:
+        if self.budget_scope_id is not None and (
+            not isinstance(self.budget_scope_id, str) or not self.budget_scope_id.strip()
+        ):
+            raise ValueError("execution budget scope is invalid")
         if not isinstance(self.context_imported, bool) or (self.input_context is not None and not isinstance(self.input_context, RuntimePayloadRef)):
             raise TypeError("execution input context is invalid")
         if self.context_imported and (self.input_context is None or self.session_id is not None):
@@ -2387,12 +2394,25 @@ class ConversationRepositories:
     operations: OperationLedgerRepository
 
 
+class BudgetRepository(Protocol):
+    async def close(self) -> None: ...
+    async def ensure(self, scope_id: str, limits: RunBudget) -> BudgetUsage: ...
+    async def read(self, scope_id: str) -> BudgetUsage: ...
+    async def check(self, scope_id: str) -> BudgetUsage: ...
+    async def admit_model(self, scope_id: str, request_id: str) -> BudgetUsage: ...
+    async def settle_model(
+        self, scope_id: str, request_id: str, total_tokens: int | None,
+    ) -> BudgetUsage: ...
+    async def admit_tool(self, scope_id: str, call_id: str) -> BudgetUsage: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionRepositories:
     executions: ExecutionRepository
     events: EventRepository
     idempotency: IdempotencyRepository
     operations: OperationLedgerRepository
+    budgets: BudgetRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -2431,6 +2451,7 @@ class RecoveryRepositories:
 
 
 __all__ = [
+    "BudgetRepository",
     "AgentAttemptClaim",
     "ApprovalRecord",
     "ApprovalRepository",

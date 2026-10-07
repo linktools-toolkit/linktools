@@ -194,6 +194,7 @@ class _CaptureSessionExecution:
         binding_contract: object | None = None,
         dependency_hold_id: str | None = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
         self.agent_id = agent_id
         self.binding_digest = binding_digest
@@ -202,6 +203,7 @@ class _CaptureSessionExecution:
         self.binding_contract = binding_contract
         self.dependency_hold_id = dependency_hold_id
         self.requires_task_invocation_capture = requires_task_invocation_capture
+        self.budget_scope_id = budget_scope_id
         return ExecutionHandle("execution")
 
 

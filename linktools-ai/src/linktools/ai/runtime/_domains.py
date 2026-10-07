@@ -5,7 +5,7 @@
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from ..core import Principal
+from ..core import BudgetUsage, Principal
 from ._wait import WaitResult
 from ._input_capture import CaptureInputRequest, ExecutionInputCaptureRef, RuntimeInputCaptures
 from .recovery import (
@@ -96,6 +96,10 @@ class RuntimeExecutions(Generic[AppT]):
             from ..errors import AIError, ErrorCode
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._input_captures.capture_input(execution_id, request)
+
+    async def budget_usage(self, execution_id: str, *, principal: Principal) -> BudgetUsage | None:
+        self._ensure_open()
+        return await self._service.budget_usage(execution_id, principal=principal)
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         return await self._service.inspect(execution_id, principal=principal)

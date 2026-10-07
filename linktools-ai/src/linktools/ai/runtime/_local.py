@@ -95,6 +95,7 @@ from .recovery import (
     ResolveToolEffectRequest,
     ToolEffectResolutionResult,
 )
+from ._budget import RunBudgetContext
 from .service_api import ExecutionRequest
 from .state import RuntimeDomain
 from .state._commands import RuntimeStateCommands
@@ -3134,6 +3135,10 @@ class LocalExecutionBackend:
                             execution_id, usage
                         ),
                         tool_operations=tool_operations,
+                        budget=(None if current.budget_scope_id is None else RunBudgetContext(
+                            self._execution.budgets, current.budget_scope_id,
+                            current.execution_id, agent_run_id,
+                        )),
                         replace_history_system_prompt=(
                             session_history_start and not exact_recovery_context
                         ),

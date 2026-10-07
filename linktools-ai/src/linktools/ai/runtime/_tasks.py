@@ -7,7 +7,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from ..agent import AgentInputCaptureRef
-from ..core import Page, Principal
+from ..core import BudgetUsage, RunBudget, Page, Principal
 from ..errors import AIError, ErrorCode
 from ..task import (
     Task,
@@ -45,6 +45,28 @@ class RuntimeTasks(Generic[AppT]):
     ) -> None:
         self._runtime = runtime
         self._graph_service = graph_service
+
+    async def budget_usage(
+        self, graph_id: str, *, principal: Principal | None = None,
+    ) -> BudgetUsage | None:
+        self._runtime._ensure_open()
+        resolved = self._runtime._resolve_principal(principal)
+        await self._graph_service.inspect(graph_id, principal=resolved)
+        admissions = self._runtime._task_admissions
+        if admissions is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        admission = await admissions.get(graph_id, tenant_id=resolved.tenant_id)
+        if admission is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if admission.budget_scope_id is None:
+            return None
+        budgets = self._runtime._budgets
+        if budgets is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        usage = await budgets.read(admission.budget_scope_id)
+        if usage.limits != admission.budget:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return usage
 
     def from_agent(
         self,
@@ -150,11 +172,12 @@ class TaskEngine(Generic[AppT]):
         idempotency_key: str,
         principal: Principal | None = None,
         limits: TaskGraphLimits | None = None,
+        budget: RunBudget | None = None,
         correlation: Mapping[str, object] | None = None,
     ) -> TaskGraphRun[AppT]:
         submission = await self.prepare_submission(
             graph, principal=principal, idempotency_key=idempotency_key,
-            limits=limits, correlation=correlation,
+            limits=limits, budget=budget, correlation=correlation,
         )
         result = await self.start_prepared(submission)
         if not result.admitted:
@@ -171,10 +194,11 @@ class TaskEngine(Generic[AppT]):
         idempotency_key: str,
         principal: Principal | None = None,
         limits: TaskGraphLimits | None = None,
+        budget: RunBudget | None = None,
         correlation: Mapping[str, object] | None = None,
     ) -> TaskGraphSubmission:
         return await self._prepare_submission(graph, idempotency_key=idempotency_key,
-            principal=principal, limits=limits, correlation=correlation, describe=False)
+            principal=principal, limits=limits, budget=budget, correlation=correlation, describe=False)
 
     async def describe_submission(
         self,
@@ -183,11 +207,12 @@ class TaskEngine(Generic[AppT]):
         idempotency_key: str,
         principal: Principal | None = None,
         limits: TaskGraphLimits | None = None,
+        budget: RunBudget | None = None,
         correlation: Mapping[str, object] | None = None,
     ) -> TaskGraphSubmission:
         """Resolve submission identity without storing input or launching work."""
         return await self._prepare_submission(graph, idempotency_key=idempotency_key,
-            principal=principal, limits=limits, correlation=correlation, describe=True)
+            principal=principal, limits=limits, budget=budget, correlation=correlation, describe=True)
 
     async def _prepare_submission(
         self,
@@ -196,13 +221,14 @@ class TaskEngine(Generic[AppT]):
         idempotency_key: str,
         principal: Principal | None = None,
         limits: TaskGraphLimits | None = None,
+        budget: RunBudget | None = None,
         correlation: Mapping[str, object] | None = None,
         describe: bool,
     ) -> TaskGraphSubmission:
         runtime = self._runtime
         request = await runtime._admit_graph(
             graph, principal=principal, idempotency_key=idempotency_key,
-            limits=limits, correlation=correlation,
+            limits=limits, budget=budget, correlation=correlation,
         )
         task_runtime = runtime._require_task_node_runtime()
         activation = await task_runtime.activate_graph(

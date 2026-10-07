@@ -1400,6 +1400,7 @@ def test_runtime_domain_facades_match_the_supported_method_sets() -> None:
         "history",
         "model_interactions",
         "capture_input",
+        "budget_usage",
     }
     assert session_methods == {
         "get",

@@ -37,6 +37,7 @@ from ..core import ExecutionEventType, JsonValue
 from ..errors import AIError, ErrorCode
 from ..model import model_binding_error
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
 from ._metrics import (
     _bind_metric_execution_context,
@@ -151,6 +152,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         journal: ModelRequestJournal | None = None,
         interaction_recorder: ModelInteractionRecorder | None = None,
         event_sink: ModelRequestEventSink | None = None,
+        budget: RunBudgetContext | None = None,
     ) -> None:
         self.id = "linktools.ai.model-observation"
         self._recorder = recorder
@@ -169,6 +171,7 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
         )
         self._interaction_recorder = interaction_recorder
         self._event_sink = event_sink
+        self._budget = budget
         self._prepared_models: dict[int, Model] = {}
 
     def get_ordering(self) -> CapabilityOrdering:
@@ -286,7 +289,12 @@ class ModelObservationCapability(AbstractCapability[AgentContext[object]]):
                 ) from error
 
             try:
-                response = await handler(request_context)
+                response = (
+                    await handler(request_context) if self._budget is None else
+                    await self._budget.run_model(
+                        fact.observation_id, lambda: handler(request_context),
+                    )
+                )
             except asyncio.CancelledError:
                 await self._complete_request(
                     fact,

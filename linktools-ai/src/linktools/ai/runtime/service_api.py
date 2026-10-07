@@ -10,6 +10,8 @@ from typing import Literal, Protocol, cast
 
 from ..agent import AgentBindingContract
 from ..core import (
+    BudgetUsage,
+    RunBudget,
     ApprovalDecision,
     ApprovalStatus,
     CorrelationData,
@@ -85,8 +87,11 @@ class ExecutionRequest:
     correlation: CorrelationData = field(default_factory=dict)
     files: tuple[str, ...] = ()
     input_context: ExecutionInputContext | None = None
+    budget: RunBudget | None = None
 
     def __post_init__(self) -> None:
+        if self.budget is not None and not isinstance(self.budget, RunBudget):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.input_context is not None and not isinstance(self.input_context, ExecutionInputContext):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.input_context is not None and self.input_context.unavailable_reason is not None:
@@ -131,8 +136,11 @@ class ForkExecutionRequest:
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
     files: tuple[str, ...] = ()
+    budget: RunBudget | None = None
 
     def __post_init__(self) -> None:
+        if self.budget is not None and not isinstance(self.budget, RunBudget):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
         files = normalize_input_files(self.files)
         validate_idempotency_key(self.idempotency_key)
@@ -748,8 +756,11 @@ class ResumeSessionRequest:
     thinking: ThinkingValue
     correlation: CorrelationData = field(default_factory=dict)
     files: tuple[str, ...] = ()
+    budget: RunBudget | None = None
 
     def __post_init__(self) -> None:
+        if self.budget is not None and not isinstance(self.budget, RunBudget):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
         files = normalize_input_files(self.files)
         validate_idempotency_key(self.idempotency_key)
@@ -1235,6 +1246,7 @@ class ExecutionService(Protocol):
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle: ...
     async def start_task(
         self,
@@ -1245,6 +1257,7 @@ class ExecutionService(Protocol):
         idempotency_key: str,
         correlation: Mapping[str, str | int],
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle: ...
 
     async def claim_task_attempt(
@@ -1335,7 +1348,12 @@ class ExecutionService(Protocol):
         *,
         binding_contract: "AgentBindingContract | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> "ExecutionHandle | None": ...
+    async def budget_usage(
+        self, execution_id: str, *, principal: Principal,
+    ) -> BudgetUsage | None: ...
+
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView: ...
@@ -1482,6 +1500,7 @@ class SessionService(Protocol):
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle: ...
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest

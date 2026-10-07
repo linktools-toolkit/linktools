@@ -86,6 +86,7 @@ from ._task_graph_binding_capture import (
 from .service_api import ExecutionService, ExecutionView
 from .service_api import ExecutionResult
 from .state import ArtifactRecord, ArtifactRepositories, RuntimeDomain
+from .state._contracts import BudgetRepository
 
 _logger = environ.get_logger("ai.runtime.planner")
 AppT = TypeVar("AppT")
@@ -338,6 +339,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         authorization: AuthorizationPolicy,
         task_state: _TaskStateReader,
         task_admissions: TaskAdmissionRepository,
+        budgets: BudgetRepository | None = None,
         task_objects: ObjectStore,
         artifact_state: ArtifactRepositories | None = None,
         artifact_objects: ObjectStore | None = None,
@@ -357,6 +359,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._execution = execution
         self._task_state = task_state
         self._task_admissions = task_admissions
+        self._budgets = budgets
+        self._budget_scopes: dict[str, str] = {}
         self._task_objects = task_objects
         self._input_materializer = input_materializer
         self._input_captures = input_captures
@@ -554,6 +558,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             ):
                 self._active_definitions.pop(graph_id, None)
                 self._admitted_binding_captures.pop(graph_id, None)
+                self._budget_scopes.pop(graph_id, None)
 
     def _definitions_for(
         self,
@@ -616,6 +621,18 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     if {item.name for item in contract.dependencies}.intersection((*node.dependencies, *node.input_refs)):
                         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             await self._input_captures.record_graph(resolved, admission)
+        if admission.budget_scope_id is not None:
+            if self._budgets is None or admission.budget is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            existing = await self._task_admissions.get(
+                admission.graph_id, tenant_id=admission.principal.tenant_id,
+            )
+            if existing is None:
+                await self._budgets.ensure(admission.budget_scope_id, admission.budget)
+            else:
+                usage = await self._budgets.read(admission.budget_scope_id)
+                if usage.limits != admission.budget:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return resolved
 
     async def _materialize_node_input(
@@ -797,8 +814,25 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self,
         admission: TaskGraphAdmission,
     ) -> None:
+        if admission.budget_scope_id is not None:
+            if self._budgets is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            usage = await self._budgets.read(admission.budget_scope_id)
+            if usage.limits != admission.budget:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         binding_capture = await self._binding_capture_store.load(admission)
         self._admitted_binding_captures[admission.graph_id] = binding_capture
+        if admission.budget_scope_id is None:
+            self._budget_scopes.pop(admission.graph_id, None)
+        else:
+            self._budget_scopes[admission.graph_id] = admission.budget_scope_id
+
+    async def _check_graph_budget(self, graph_id: str) -> None:
+        scope_id = self._budget_scopes.get(graph_id)
+        if scope_id is not None:
+            if self._budgets is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            await self._budgets.check(scope_id)
 
     def _require_binding_capture(
         self,
@@ -1443,6 +1477,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if invocation.input_capture is not None:
                 contract = await self._input_captures.read_task(invocation.input_capture, principal=principal)
                 invocation = replace(invocation, dependency_states={**invocation.dependency_states, **{item.name: item.state for item in contract.dependencies}})
+            if not isinstance(handler.runner, RuntimeAgentTaskRunner):
+                await self._check_graph_budget(graph_id)
             runner_result = await handler.runner.run(invocation, control=control)
             return await self._complete_runner_result(invocation, runner_result)
         dependencies = await self._dependencies(
@@ -1478,6 +1514,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             idempotency_key=idempotency_key,
             correlation=correlation,
             requires_task_invocation_capture=True,
+            budget_scope_id=self._budget_scopes.get(graph_id),
         )
         execution_id = handle.execution_id
         if control.execution_id is None:
@@ -1729,6 +1766,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             ),
             dependency_states=dependency_states,
         )
+        try:
+            await self._check_graph_budget(graph_id)
+        except AIError as error:
+            return await self._settle_custom_failure(
+                node, execution_id, principal, error,
+                unknown_effect=False, attempt=claimed,
+            )
         try:
             timeout = None
             if claimed.task_deadline_at is not None:
@@ -2659,6 +2703,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         normalized = normalize_json_value(output)
         _validate_task_output(node, normalized)
         digest = canonical_sha256(normalized)
+        if node.expander is not None:
+            await self._check_graph_budget(graph_id)
         expanded_nodes = self._expand_nodes(
             node,
             normalized,

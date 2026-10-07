@@ -72,7 +72,7 @@ from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
-from .state._contracts import TaskAdmissionRepository
+from .state._contracts import BudgetRepository, TaskAdmissionRepository
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -98,6 +98,7 @@ class _RuntimeComponents:
     binding_resolver: _AgentBindingResolver
     history: object
     task_admissions: TaskAdmissionRepository
+    budgets: BudgetRepository
     input_captures: RuntimeInputCaptures
 
 
@@ -520,6 +521,7 @@ async def _build_local_components(
             storage.object_store(RuntimeDomain.EXECUTION),
             authorization,
             sessions=storage.conversation.sessions,
+            task_admissions=storage.task.admissions,
             catalog=catalog,
             compiler=compiler,
             runtime_bridge=runtime_bridge,
@@ -655,6 +657,7 @@ async def _build_local_components(
             task_state=storage.task.tasks,
             input_captures=input_captures,
             task_admissions=storage.task.admissions,
+            budgets=storage.execution.budgets,
             task_objects=storage.object_store(RuntimeDomain.TASK),
             artifact_state=storage.artifact,
             artifact_objects=storage.object_store(RuntimeDomain.ARTIFACT),
@@ -795,6 +798,7 @@ async def _build_local_components(
         binding_resolver=binding_resolver,
         history=history,
         task_admissions=storage.task.admissions,
+        budgets=storage.execution.budgets,
         input_captures=input_captures,
     )
 

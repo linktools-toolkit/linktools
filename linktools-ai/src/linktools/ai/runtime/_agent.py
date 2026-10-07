@@ -10,7 +10,7 @@ import sys
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
-from ..core import JsonValue, Page, Principal, ThinkingValue
+from ..core import BudgetUsage, RunBudget, JsonValue, Page, Principal, ThinkingValue
 from ..errors import AIError, ErrorCode, ObservationError
 from ._wait import WaitResult
 from ._observation import _wait, _validate_wait, _await_stream_cleanup, _is_observation_cleanup
@@ -195,6 +195,12 @@ class Execution(Generic[AppT]):
             ),
         )
 
+    async def budget_usage(self) -> BudgetUsage | None:
+        """Read the shared scope totals, including related executions."""
+        return await self._runtime.executions.budget_usage(
+            self.execution_id, principal=self._principal,
+        )
+
     async def recovery_effects(self) -> tuple[ExecutionRecoveryEffect, ...]:
         return await self._runtime.executions.recovery_effects(
             self.execution_id,
@@ -249,13 +255,16 @@ class Execution(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        budget: RunBudget | None = None,
         idempotency_key: "str | None" = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
+        """Fork with the existing shared budget unless an explicit new budget is supplied."""
         return await self._runtime._fork_execution(
             self.execution_id,
             validate_user_input(user_prompt),
             files=files,
+            budget=budget,
             principal=self._principal,
             idempotency_key=idempotency_key,
             correlation=correlation,
@@ -378,6 +387,7 @@ class Session(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
@@ -391,6 +401,7 @@ class Session(Generic[AppT]):
             return await self._runtime.agents.get(self.agent_id).start(
                 user_prompt,
                 files=files,
+                budget=budget,
                 output=output,
                 principal=principal or self._principal,
                 session_id=self.session_id,
@@ -405,6 +416,7 @@ class Session(Generic[AppT]):
             self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
+            budget=budget,
             output=output,
             principal=principal or self._principal,
             session_id=self.session_id,
@@ -422,6 +434,7 @@ class Session(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
@@ -439,6 +452,7 @@ class Session(Generic[AppT]):
         execution = await self.start(
             user_prompt,
             files=files,
+            budget=budget,
             output=output,
             principal=principal,
             idempotency_key=idempotency_key,
@@ -457,6 +471,7 @@ class Session(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
@@ -474,6 +489,7 @@ class Session(Generic[AppT]):
             return await self._runtime.agents.get(self.agent_id).plan(
                 user_prompt,
                 files=files,
+                budget=budget,
                 output=output,
                 principal=principal or self._principal,
                 session_id=self.session_id,
@@ -489,6 +505,7 @@ class Session(Generic[AppT]):
             self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
+            budget=budget,
             output=output,
             principal=principal or self._principal,
             session_id=self.session_id,
@@ -643,6 +660,7 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
@@ -659,6 +677,7 @@ class Agent(Generic[AppT]):
             self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
+            budget=budget,
             output=output,
             principal=principal,
             session_id=session_id,
@@ -677,6 +696,7 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
@@ -696,6 +716,7 @@ class Agent(Generic[AppT]):
         execution = await self.start(
             user_prompt,
             files=files,
+            budget=budget,
             output=output,
             principal=principal,
             session_id=session_id,
@@ -716,6 +737,7 @@ class Agent(Generic[AppT]):
         user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
+        budget: RunBudget | None = None,
         output: "type[BaseModel] | None" = None,
         principal: "Principal | None" = None,
         session_id: "str | None" = None,
@@ -735,6 +757,7 @@ class Agent(Generic[AppT]):
             self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
+            budget=budget,
             output=output,
             principal=principal,
             session_id=session_id,

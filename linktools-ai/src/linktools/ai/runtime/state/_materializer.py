@@ -335,6 +335,7 @@ async def materialize_runtime_storage(
             objects.preflight_close,
             retention.close,
             run_store.close,
+            repositories.execution.budgets.close,
         ]
         actions.extend(cleanups)
         _logger.info(
@@ -469,6 +470,7 @@ def _repositories(
                 bundles[RuntimeDomain.EXECUTION]["events"],
                 bundles[RuntimeDomain.EXECUTION]["idempotency"],
                 bundles[RuntimeDomain.EXECUTION]["operations"],
+                bundles[RuntimeDomain.EXECUTION]["budgets"],
             ),
             memory=MemoryRepositories(
                 bundles[RuntimeDomain.MEMORY]["records"],

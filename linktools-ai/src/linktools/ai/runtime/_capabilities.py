@@ -26,6 +26,7 @@ from pydantic_ai.tools import RunContext as PydanticRunContext
 
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
+from ._budget import RunBudgetContext
 from ._compaction import (
     ExternalModelRequestRecorder,
     CompactionCapability,
@@ -376,6 +377,7 @@ async def compose_platform_capabilities(
     model_journal: "ModelRequestJournal | None" = None,
     model_request_recorder: "ExternalModelRequestRecorder | None" = None,
     recorder: AgentRunRecorder | None = None,
+    budget: RunBudgetContext | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     run_recorder = recorder or AgentRunRecorder(
@@ -432,6 +434,7 @@ async def compose_platform_capabilities(
             journal=model_journal,
             request_recorder=model_request_recorder,
             projection_sink=persistence.remember_context_projection,
+            budget=budget,
         )
     )
     _logger.debug(

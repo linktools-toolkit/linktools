@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 
 from ..core import (
+    RunBudget,
     ImmutableJsonMapping,
     JsonValue,
     Principal,
@@ -705,8 +706,11 @@ class TaskGraphRequest:
     idempotency_key: str = ""
     limits: TaskGraphLimits = field(default_factory=TaskGraphLimits)
     correlation: CorrelationData = field(default_factory=dict)
+    budget: RunBudget | None = None
 
     def __post_init__(self) -> None:
+        if self.budget is not None and not isinstance(self.budget, RunBudget):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
         self.graph.validate_limits(self.limits)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
@@ -716,11 +720,13 @@ def _task_graph_request_digest(
     graph: TaskGraph,
     principal: Principal,
     limits: TaskGraphLimits,
+    budget: RunBudget | None = None,
 ) -> str:
     return canonical_sha256(
         {
             "principal": principal_identity_payload(principal),
             "graph_id": graph.graph_id,
+            **({"budget": budget.digest_payload()} if budget is not None else {}),
             "nodes": [
                 node.to_mapping()
                 for node in sorted(graph.nodes, key=lambda item: item.node_id)
@@ -741,8 +747,11 @@ class TaskGraphLaunch:
     principal: Principal
     limits: TaskGraphLimits
     correlation: CorrelationData = field(default_factory=dict)
+    budget: RunBudget | None = None
 
     def __post_init__(self) -> None:
+        if self.budget is not None and not isinstance(self.budget, RunBudget):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
             raise ValueError("task graph id is required")
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
@@ -757,8 +766,12 @@ class TaskGraphAdmission:
     operation_id: str
     initial_request_digest: str
     correlation: CorrelationData = field(default_factory=dict)
+    budget: RunBudget | None = None
+    budget_scope_id: str | None = None
 
     def __post_init__(self) -> None:
+        if self.budget is not None and not isinstance(self.budget, RunBudget):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if (
             not isinstance(self.version, int)
             or isinstance(self.version, bool)
@@ -769,6 +782,9 @@ class TaskGraphAdmission:
             or re.fullmatch(r"[0-9a-f]{64}", self.initial_request_digest) is None
         ):
             raise ValueError("task graph admission is invalid")
+        expected_scope = None if self.budget is None else "graph:" + self.graph_id
+        if self.budget_scope_id != expected_scope:
+            raise ValueError("task graph budget scope is invalid")
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
     @classmethod
@@ -780,9 +796,11 @@ class TaskGraphAdmission:
             request.limits,
             idempotency_key_digest(request.idempotency_key),
             _task_graph_request_digest(
-                request.graph, request.principal, request.limits
+                request.graph, request.principal, request.limits, request.budget
             ),
             request.correlation,
+            request.budget,
+            None if request.budget is None else "graph:" + request.graph.graph_id,
         )
 
     def launch(self) -> TaskGraphLaunch:
@@ -793,6 +811,7 @@ class TaskGraphAdmission:
             self.principal,
             self.limits,
             self.correlation,
+            self.budget,
         )
 
     def validate_graph(self, graph: TaskGraph) -> None:
@@ -800,7 +819,7 @@ class TaskGraphAdmission:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         graph.validate_limits(self.limits)
         if (
-            _task_graph_request_digest(graph, self.principal, self.limits)
+            _task_graph_request_digest(graph, self.principal, self.limits, self.budget)
             != self.initial_request_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

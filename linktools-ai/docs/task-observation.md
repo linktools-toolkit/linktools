@@ -258,7 +258,8 @@ For immediate same-Runtime content readback and event locators, see
 
 Unified observation does not add shared actual-consumption budgets, selective
 graph reruns, cross-graph resource pools, or declarative result selection.
-Those remain separate future capabilities. Existing `TaskGraphLimits.max_budget`
+Shared actual usage budgets are described in [run budgets](run-budgets.md).
+The other capabilities remain future work. Existing `TaskGraphLimits.max_budget`
 is a static node-cost limit, not a shared model-token or provider-billing budget.
 
 ## Cancellation and results paging

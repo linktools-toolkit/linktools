@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Repository composition and stable implementation exports."""
 
+from ._budget import BudgetRepositoryImpl
 from ._conversation_repositories import ConversationHistoryRepositoryImpl, SessionRepositoryImpl
 from ._execution_repositories import EventRepositoryImpl, ExecutionRepositoryImpl, IdempotencyRepositoryImpl
 from ._plan import RuntimeDomain
@@ -31,6 +32,7 @@ def build_repository_bundle(
         )
     elif domain is RuntimeDomain.EXECUTION:
         values.update(
+            budgets=BudgetRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
             executions=ExecutionRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
             events=EventRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
             idempotency=IdempotencyRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id, domain=domain),
@@ -55,6 +57,7 @@ def build_repository_bundle(
 
 
 __all__ = [
+    "BudgetRepositoryImpl",
     "ApprovalRepositoryImpl", "ArtifactRepositoryImpl", "EvaluationRepositoryImpl", "EventRepositoryImpl",
     "ExecutionRepositoryImpl", "ExternalCallRepositoryImpl", "IdempotencyRepositoryImpl", "MemoryRepositoryImpl",
     "OperationLedgerRepositoryImpl", "SessionRepositoryImpl", "ToolRepositoryImpl", "RepositoryBase",

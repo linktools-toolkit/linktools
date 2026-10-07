@@ -17,6 +17,7 @@ def _replay_values(
     binding_contract = object()
     execution = SimpleNamespace(
         requires_task_invocation_capture=False,
+        budget_scope_id=None,
         binding_digest="a" * 64,
         planning=False,
         thinking=False,
@@ -28,6 +29,7 @@ def _replay_values(
         planning=False,
         thinking=False,
         correlation=request_correlation,
+        budget=None,
     )
     return execution, binding, request
 
@@ -55,6 +57,7 @@ def test_execution_replay_uses_binding_digest() -> None:
     service = object.__new__(DefaultExecutionService)
     execution = SimpleNamespace(
         requires_task_invocation_capture=False,
+        budget_scope_id=None,
         binding_digest=durable.binding_digest,
         planning=False,
         thinking=False,
@@ -64,7 +67,7 @@ def test_execution_replay_uses_binding_digest() -> None:
         binding_digest=replayed.binding_digest,
         binding_contract=replayed,
     )
-    request = SimpleNamespace(planning=False, thinking=False)
+    request = SimpleNamespace(planning=False, thinking=False, budget=None)
 
     service._validate_replayed_execution(execution, binding, request)
 

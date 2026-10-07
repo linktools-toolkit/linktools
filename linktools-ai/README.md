@@ -30,6 +30,13 @@ The main ownership rules are:
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
 - `Session` is bound to `AgentSpec.id`; retry/recovery remain pinned to the exact historical execution binding.
 
+## Shared run budgets
+
+Use `RunBudget` at Agent, Session, or TaskGraph admission to share request/tool
+counts, observed tokens, and an admission deadline across the execution tree.
+See [shared run budgets](docs/run-budgets.md) for concurrency, unknown usage,
+continuation, and durable recovery guarantees.
+
 ## Evaluation
 
 Use `runtime.evaluations` to evaluate Tasks, Agent-backed Tasks, and native TaskGraphs with retained evidence, rule/model/human scorers, rescoring, and paired reports. See the [evaluation guide](docs/evaluation.md) for an offline end-to-end example and the capture, comparison, authorization, and retention contracts.

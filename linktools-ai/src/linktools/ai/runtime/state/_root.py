@@ -55,7 +55,11 @@ from ._snapshot import (
     snapshot_object_ref_from_payload as _object_ref_from_payload,
 )
 from ._object_cleanup import ObjectCleanupResult, purge_unreferenced_objects
-from ._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
+from ._snapshot_validation import (
+    canonical_snapshot_indexes,
+    validate_snapshot_domain,
+    validate_snapshot_references,
+)
 from ._codec import (
     _decode_enveloped_domain,
     iter_runtime_object_dependencies,
@@ -446,6 +450,7 @@ class RuntimeStorage:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
         domains: dict[str, dict[str, list[object]]] = {}
+        snapshot_records: dict[RuntimeDomain, tuple[StoredRecord, ...]] = {}
         objects: list[dict[str, object]] = []
         copied_objects: set[tuple[str, str, str, int]] = set()
         entry_count = 0
@@ -696,7 +701,9 @@ class RuntimeStorage:
                 )
 
             domains[domain.value] = raw_domain
+            snapshot_records[domain] = tuple(domain_records)
 
+        validate_snapshot_references(snapshot_records)
         manifest = {
             "kind": "runtime-storage-snapshot",
             "format_version": 1,
@@ -775,10 +782,10 @@ class RuntimeStorage:
         decoded_domains: dict[
             RuntimeDomain,
             tuple[
-                tuple[object, ...],
+                tuple[StoredRecord, ...],
                 tuple[StoredAlias, ...],
-                tuple[object, ...],
-                tuple[object, ...],
+                tuple[StoredFact, ...],
+                tuple[StoredOperation, ...],
                 Mapping[bytes, int],
             ],
         ] = {}
@@ -892,6 +899,9 @@ class RuntimeStorage:
                         )
                     )
 
+        validate_snapshot_references({
+            domain: values[0] for domain, values in decoded_domains.items()
+        })
         actual_objects: set[tuple[str, str, str, int]] = set()
         decoded_objects: list[tuple[RuntimeDomain, ObjectRef, ObjectRef]] = []
         decoded_by_identity: dict[
