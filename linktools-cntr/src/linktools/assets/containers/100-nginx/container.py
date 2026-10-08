@@ -654,6 +654,24 @@ class Container(BaseContainer):
                 'location = /health { default_type text/plain; return 200 "' + generation_id + '"; }}\n'
                 'server { listen ' + str(self.get_config("NGINX_HTTP_PORT")) + ' default_server; return 503; }\n}\n'}
 
+    def rollback_config(self, context: "EventContext") -> None:
+        previous = getattr(context, "nginx_certificate_previous", MISSING)
+        if previous is MISSING:
+            return
+        live = self.get_app_path("certs", "live")
+        if previous is None:
+            if live.is_symlink():
+                live.unlink()
+        elif not live.is_symlink() or os.readlink(str(live)) != previous:
+            import uuid
+            temporary = live.parent / (".live-" + uuid.uuid4().hex)
+            try:
+                temporary.symlink_to(previous)
+                os.replace(str(temporary), str(live))
+            finally:
+                if temporary.is_symlink():
+                    temporary.unlink()
+
     def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
                      services: "Iterable[str]") -> None:
         if "nginx" not in services:
