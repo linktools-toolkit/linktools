@@ -397,6 +397,14 @@ class ComposeOperations:
             raise
 
     def _publish_candidate(self, container, candidate, context, services, record_applied=True) -> None:
+        if candidate.previous_id is None:
+            saved_owner = any(owner == container.name and path in context.saved_compose
+                              for path, owner in context.compose_owners.items())
+            for service in services:
+                if (service in context.initial_running_services and
+                        service not in context.service_models.previous and not saved_owner):
+                    raise ContainerError(
+                        "Cannot replace running service {} without a previous Compose model".format(service))
         context.generated_candidates[container.name] = candidate
         candidate.publish()
         if not services:
