@@ -240,6 +240,34 @@ def test_changed_san_list_stages_without_touching_live_certificate(certificate_c
     assert _run(script, env, "check", "example.test", str(desired)).returncode == 0
 
 
+def test_native_nginx_validation_uses_staged_certificate_without_publishing(certificate_case, monkeypatch):
+    container, root, _, _ = certificate_case
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
+    pending = root / "certs/versions/pending"
+    for name, source in (("fullchain", "new.pem"), ("key", "new.key")):
+        shutil.copyfile(str(root / source), str(pending / ("example.test_" + name + ".pem")))
+    generation = root / "generated/candidate"
+    generation.mkdir(parents=True)
+    (generation / "certificate.version").write_text("pending\n")
+    original = (root / "certs/live/example.test_fullchain.pem").read_bytes()
+    calls = []
+
+    def validate(context, service, command, **kwargs):
+        assert service == "nginx" and command[-1] == "-t"
+        mounted = Path(kwargs["mount_overrides"]["/etc/certs"])
+        assert (mounted / "live/example.test_fullchain.pem").read_bytes() == (root / "new.pem").read_bytes()
+        assert (mounted / "live/example.test_key.pem").read_bytes() == (root / "new.key").read_bytes()
+        calls.append(command)
+        return SimpleNamespace(succeeded=True, stderr="", stdout="")
+
+    monkeypatch.setattr(container.manager.compose_runner, "validate_service", validate)
+    container.validate_config(SimpleNamespace(), SimpleNamespace(path=generation, generation_id="candidate"))
+
+    assert len(calls) == 1
+    assert (root / "certs/live").readlink() == Path("versions/legacy")
+    assert (root / "certs/live/example.test_fullchain.pem").read_bytes() == original
+
+
 def test_missing_baked_certificate_fails_without_runtime_issuance(certificate_case):
     _, root, script, env = certificate_case
     (root / "seed/certs/example.test_key.pem").unlink()
