@@ -238,7 +238,7 @@ class Container(BaseContainer):
                 proxy_conf=site.template,
                 proxy_url=site.proxy,
                 https_enable=https, waf_enable=waf,
-                waf_bypass=tuple(str(pattern) for pattern in site.waf_bypass),
+                waf_bypass=tuple(str(pattern) for pattern in site.waf_bypass) if waf else (),
                 auth_enable=auth,
                 auth_extra={
                     "acl_bypass": site.auth_bypass,
