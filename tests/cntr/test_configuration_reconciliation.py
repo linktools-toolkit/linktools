@@ -74,6 +74,20 @@ def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped")):
 
 
 @pytest.mark.parametrize("changed", [(), ("stopped",), ("running",), ("running", "stopped")])
+def test_partial_up_does_not_prepare_unrelated_images(tmp_path, monkeypatch):
+    operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
+    planned = []
+
+    def image_plan(model, services, force_pull=False):
+        planned.extend(services)
+        assert "stopped" not in services
+        return SimpleNamespace(pull=(), build=())
+
+    manager.image_preparer.plan = image_plan
+    operations.up(["target"])
+    assert planned == ["target"]
+
+
 def test_partial_up_applies_pending_running_config_without_starting_stopped_sibling(tmp_path, monkeypatch, changed):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed)
     operations.up(["target"])
