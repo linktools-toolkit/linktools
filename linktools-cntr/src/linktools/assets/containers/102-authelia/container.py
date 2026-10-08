@@ -9,7 +9,8 @@ import yaml
 
 from linktools import utils
 from linktools.cli import subcommand
-from linktools.cntr import BaseContainer, NginxSite, ContainerError
+from linktools.cntr import BaseContainer, ExposeLink, NginxSite, ContainerError
+from linktools.cntr.urls import load_nginx_url
 from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
@@ -57,7 +58,8 @@ class Container(BaseContainer):
         return {
             "nginx": {
                 "web": NginxSite(
-                    expose=self.expose_public("Authelia", "account", "单点登录"),
+                    expose=ExposeLink.public(
+                        "Authelia", "account", "单点登录", load_nginx_url(self, "web", "auth-admin")),
                     server_name=self.get_config_later("AUTHELIA_DOMAIN"),
                     template=self.get_source_path("templates", "nginx.conf"),
                     auth=None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False,
@@ -69,7 +71,7 @@ class Container(BaseContainer):
 
     @cached_property
     def _oidc_identity(self) -> "Mapping[str, Any]":
-        issuer = str(self.load_nginx_url("web"))
+        issuer = str(load_nginx_url(self, "web"))
         if not issuer.startswith("https://"):
             raise ContainerError("Authelia requires a concrete HTTPS public URL")
         return MappingProxyType({

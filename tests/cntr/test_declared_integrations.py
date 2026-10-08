@@ -3,6 +3,7 @@
 """Declarative integrations do not depend on navigation registration."""
 
 from linktools.cntr import NginxSite
+from linktools.cntr.urls import load_nginx_url
 
 
 def test_portainer_site_is_independent_of_navigation(fresh_manager):
@@ -15,8 +16,8 @@ def test_portainer_site_is_independent_of_navigation(fresh_manager):
     assert first.auth_bypass == (r"\.(css|js)$",)
     assert first is portainer.integrations["nginx"]["web"]
 
-    portainer.load_nginx_url("web")
-    portainer.load_nginx_url("web", "settings")
+    load_nginx_url(portainer, "web")
+    load_nginx_url(portainer, "web", "settings")
     assert len(portainer.start_hooks) == baseline
 
 
@@ -44,11 +45,11 @@ def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monke
         original = container.get_config
         monkeypatch.setattr(container, "get_config", lambda key, *args, _get=original, **kwargs:
                             _get(key, *args, **kwargs) if key.endswith("AUTH_ENABLE") else fail())
-        links = dict(container.integrations.get("flare", {}))
-        links.update({local_id: site.expose for local_id, site in
-                      container.integrations.get("nginx", {}).items() if site.expose is not None})
+        links = list(container.integrations.get("flare", ()))
+        links.extend(site.expose for site in container.integrations.get("nginx", {}).values()
+                     if site.expose is not None)
         assert links
-        assert all(isinstance(link, ExposeLink) for link in links.values())
+        assert all(isinstance(link, ExposeLink) for link in links)
     assert not hasattr(BaseContainer, "exposes")
 
 
@@ -95,7 +96,9 @@ def test_container_authoring_has_one_integration_entry():
     assert hasattr(BaseContainer, "integrations")
     for name in ("exposes", "config_sources", "integration_requires_start", "generated_config_path",
                  "prepare_generated_config", "render_generated_config", "validate_generated_config",
-                 "apply_generated_config", "render_nginx_template"):
+                 "apply_generated_config", "render_nginx_template", "expose_public",
+                 "expose_private", "expose_container", "expose_other", "load_config_url",
+                 "load_port_url", "load_nginx_url"):
         assert not hasattr(BaseContainer, name)
 
 
@@ -107,11 +110,11 @@ def test_proxy_runtime_dependency_does_not_select_authelia_admin(fresh_manager):
     assert "authelia-admin" not in selected.services
 
 
-def test_integrations_public_type_is_open_nested_mapping():
-    from typing import Mapping
-    from linktools.cntr import Integrations
+def test_integrations_public_type_accepts_named_or_anonymous_declarations():
+    from typing import Iterable, Mapping, Union
+    from linktools.cntr import Integration, Integrations
 
-    assert Integrations == Mapping[str, Mapping[str, object]]
+    assert Integrations == Mapping[str, Union[Mapping[str, Integration], Iterable[Integration]]]
 
 
 def _site_navigation_manager(declarations, links=None, nginx=True):
@@ -262,3 +265,86 @@ def test_absent_flare_does_not_resolve_attached_navigation():
     del manager.integration_snapshot["flare"]
     assert _render_navigation(manager)["apps.yml"]["links"] == []
     assert reads == []
+
+
+def test_declarations_have_canonical_public_identity_and_nominal_marker():
+    import importlib.util
+    from linktools import cntr
+    from linktools.cntr import container, integration
+
+    for name in ("Integration", "Integrations", "NginxSite", "ExposeCategory", "ExposeLink"):
+        assert getattr(cntr, name) is getattr(integration, name)
+    assert issubclass(cntr.NginxSite, cntr.Integration)
+    assert issubclass(cntr.ExposeLink, cntr.Integration)
+    assert not issubclass(cntr.ExposeCategory, cntr.Integration)
+    for name in ("ExposeMixin", "NginxMixin", "ExposeCategory", "ExposeLink", "Integrations"):
+        assert not hasattr(container, name)
+    assert importlib.util.find_spec("linktools.cntr._container.expose") is None
+    for name, description in (("public", "Public"), ("private", "Private"),
+                              ("container", "Internal"), ("other", "Tools")):
+        category = getattr(cntr.ExposeLink, name)
+        assert isinstance(category, cntr.ExposeCategory)
+        assert (category.name, category.desc) == (name, description)
+        link = category("App", "icon", "")
+        assert isinstance(link, cntr.Integration)
+        assert link.category is category
+        assert link.desc == "App"
+        assert link.url is None
+
+
+def test_flare_iterable_preserves_attached_then_standalone_order():
+    from linktools.cntr import ExposeLink
+
+    manager, _ = _site_navigation_manager({
+        "web": NginxSite("app.test", expose=ExposeLink.public("Attached", "web", "")),
+    }, (ExposeLink.public("First", "web", "", "https://one.test"),
+        ExposeLink.public("Second", "web", "", "https://two.test")))
+    assert [link["name"] for link in _render_navigation(manager)["apps.yml"]["links"]] == [
+        "Attached", "First", "Second"]
+
+
+def test_navigation_standard_categories_precede_first_seen_custom_categories():
+    from linktools.cntr import ExposeCategory, ExposeLink
+
+    team = ExposeCategory("team", "Team")
+    tools = ExposeCategory("tools", "Custom tools")
+    manager, _ = _site_navigation_manager({}, [
+        ExposeLink.container("Internal one", "web", "", "https://internal-one.test"),
+        team("Team one", "web", "", "https://team-one.test"),
+        ExposeLink.other("Other", "web", "", "https://other.test"),
+        ExposeLink.public("App one", "web", "", "https://app-one.test"),
+        ExposeLink.private("Private", "web", "", "https://private.test"),
+        tools("Tool", "web", "", "https://tool.test"),
+        ExposeLink.container("Internal two", "web", "", "https://internal-two.test"),
+        ExposeLink.public("App two", "web", "", "https://app-two.test"),
+        team("Team two", "web", "", "https://team-two.test"),
+    ])
+    result = _render_navigation(manager)
+    assert [category["id"] for category in result["bookmarks.yml"]["categories"]] == [
+        "private", "container", "other", "team", "tools"]
+    assert [link["name"] for link in result["bookmarks.yml"]["links"]] == [
+        "Private", "Internal one", "Internal two", "Other", "Team one", "Team two", "Tool"]
+    assert [link["name"] for link in result["apps.yml"]["links"]] == ["App one", "App two"]
+
+
+def test_authelia_admin_link_does_not_change_oidc_issuer(fresh_manager):
+    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    authelia = fresh_manager.containers["authelia"]
+    site = fresh_manager.nginx_sites[("authelia", "web")]
+    assert site.expose.url == "https://sso.example.test:9443/auth-admin"
+    assert authelia.oidc_client["issuer_url"] == "https://sso.example.test:9443"
+    assert authelia.oidc_client["authorization_url"] == "https://sso.example.test:9443/api/oidc/authorization"
+
+
+def test_general_templates_expose_url_functions(fresh_manager, tmp_path):
+    container = fresh_manager.containers["portainer"]
+    fresh_manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
+    fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
+    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
+    fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
+    template = tmp_path / "docker-compose.yml"
+    template.write_text('{{ urls.load_nginx_url(container, "web", "settings", queries={"mode": "a b"}) }}')
+    assert container.render_template(template) == "https://portainer.example.test:9443/settings?mode=a+b"

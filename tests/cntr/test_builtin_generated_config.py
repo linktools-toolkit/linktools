@@ -132,7 +132,7 @@ def test_authelia_oidc_identity_and_redirects_are_acyclic_readonly(monkeypatch):
     module = builtin("102-authelia")
     site = SimpleNamespace(enabled=True, oidc_redirects=("https://app.test", "https://app.test"))
     container = instance(module, project_name="project", containers={"nginx": SimpleNamespace(sites={"app": site})})
-    monkeypatch.setattr(container, "load_nginx_url", lambda local_id: "https://sso.test")
+    monkeypatch.setattr(module, "load_nginx_url", lambda owner, local_id: "https://sso.test")
     monkeypatch.setattr(container, "get_config", lambda key: "saved-secret")
     client = container.oidc_client
     assert client["client_secret"] == "saved-secret"

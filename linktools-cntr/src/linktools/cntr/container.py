@@ -3,12 +3,12 @@
 import os
 import re
 import textwrap
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import BooleanOptionalAction
-from linktools.core import ConfigField
+from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import Error
 from linktools.rich import choose
@@ -18,7 +18,6 @@ from linktools.utils import get_md5
 from ._container import actions as _actions
 from ._container import compose as _compose
 from ._container import template as _template
-from ._container.expose import ExposeCategory, ExposeLink, ExposeMixin, NginxMixin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -26,6 +25,7 @@ if TYPE_CHECKING:
     from typing import Any
     from linktools.core import Config, ConfigNamespace, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
+    from .integration import Integrations
     from .manager import ContainerManager
     from .context import EventContext
     from .repo.context import RepositoryConfigContext
@@ -34,9 +34,6 @@ if TYPE_CHECKING:
     from .runtime.process import RuntimeProcessFactory
     from .lifecycle.dispatcher import LifecycleDispatcher
     from .state.running import RunningStateStore
-
-
-Integrations = Mapping[str, Mapping[str, object]]
 
 
 class ContainerError(Error):
@@ -64,7 +61,7 @@ class AbstractMetaClass(type):
         return super().__new__(mcs, name, bases, namespace)
 
 
-class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
+class BaseContainer(metaclass=AbstractMetaClass):
     __abstract__ = True
 
     def __init__(self, manager: "ContainerManager", root_path: "PathType", name: str = None):
@@ -360,6 +357,24 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     def get_config_later(self, key: "ConfigKeyType", type: "ConfigType | None" = None, default: "Any" = MISSING) -> "T":
         return lazy_load(self.env_config.get, self._resolve_config_key(key), type=type, default=default)
+
+    def get_nginx_domain(self, name: "str | None" = None) -> "LazyProvider":
+
+        def get_domain(cfg: "dict[str, Any]") -> str:
+            if not self.containers["nginx"].enable:
+                return ""
+            if not cfg.get("NGINX_WILDCARD_DOMAIN", type=bool):
+                return cfg.get("NGINX_ROOT_DOMAIN")
+            root_domain = cfg.get("NGINX_ROOT_DOMAIN")
+            if root_domain in ("_", "localhost"):
+                return root_domain
+            if name is None:
+                return f"{self.name}.{root_domain}"
+            elif name.strip() == "":
+                return root_domain
+            return f"{name}.{root_domain}"
+
+        return LazyProvider(get_domain)
 
     def make_exec_context(self, commands: "str | Iterable[str]") -> "EventContext":
         from .context import EventContext

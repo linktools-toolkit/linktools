@@ -7,25 +7,47 @@ Unknown consumer names are errors. Known optional consumers that are not
 installed do not consume declarations.
 
 ```python
-from linktools.cntr import Integrations, NginxSite
+from linktools.cntr import ExposeLink, Integrations, NginxSite
+from linktools.cntr.urls import load_port_url
 
 
 @cached_property
 def integrations(self) -> "Integrations":
-    return {"nginx": {"web": NginxSite(
-        server_name=self.get_config_later("APP_DOMAIN"),
-        proxy="http://app:8080",
-        auth=None,
-        auth_bypass=(r"^/public/",),
-        waf_bypass=(),
-        expose=self.expose_public("App", "apps", "Application"),
-    )}}
+    return {
+        "nginx": {"web": NginxSite(
+            server_name=self.get_config_later("APP_DOMAIN"),
+            proxy="http://app:8080",
+            auth=None,
+            auth_bypass=(r"^/public/",),
+            waf_bypass=(),
+            expose=ExposeLink.public("App", "apps", "Application"),
+        )},
+        "flare": [ExposeLink.container(
+            "App direct", "apps", "Application",
+            load_port_url(self, "APP_PORT", https=False),
+        )],
+    }
 ```
 
-`Integrations` is the public `typing.Mapping[str, Mapping[str, object]]` alias:
-consumer name → producer-local ID → declaration object. Return ordinary nested
-dictionaries; each consumer validates its own values. The alias remains open to
-other consumer declarations and uses Python 3.6-compatible runtime typing.
+`integration.py` owns the public declaration types, also re-exported from
+`linktools.cntr`. `Integration` is an empty nominal marker: `NginxSite` and
+`ExposeLink` inherit it, and new consumer-specific declaration classes can too.
+`Integrations` is the Python 3.6-compatible alias
+`Mapping[str, Union[Mapping[str, Integration], Iterable[Integration]]]`:
+consumer name → named declarations or a finite iterable of declarations.
+nginx requires a named mapping with nonempty, stable producer-local IDs. Flare
+accepts either form; independent navigation links do not need invented IDs.
+
+The manager freezes each installed producer's declaration structure once per
+command into read-only mappings or tuples, including consuming a generator once.
+Iterables must be finite. If `integrations` is cached and its snapshot can be
+rebuilt, return a reusable list/tuple or provide a fresh iterator for the rebuild;
+do not reuse an exhausted generator.
+It checks consumer names, mapping keys and the `Integration` marker without
+resolving lazy fields or URLs. Consumers validate their own declaration content.
+The generic `iter_integrations` yields `(producer, local_id, declaration)` for
+named inputs and `(producer, None, declaration)` for anonymous inputs. It returns
+only explicit declarations for an installed consumer.
 
 `NginxSite.expose` optionally attaches an `ExposeLink` for navigation. Omitting
 its URL lazily inherits the resolved site's URL. Explicit `None` or `""` disables
@@ -34,20 +56,50 @@ has no site to inherit from and is skipped. The link's category is presentation
 metadata, not an authentication policy; there is no `public` site boolean.
 Sites without `expose` create no navigation.
 
-`integrations["flare"][local_id]` supplies an independent `ExposeLink` for navigation.
-The former `exposes` property is removed without an alias or fallback.
+`integrations["flare"]` supplies independent `ExposeLink` navigation values.
+Use the callable category objects `ExposeLink.public`, `ExposeLink.private`,
+`ExposeLink.container`, and `ExposeLink.other`, or an explicit `ExposeCategory`
+for a custom category. The former `exposes` property and `self.expose_*` helpers
+are removed without aliases or fallbacks.
 Links keep their category, name, icon, description and lazy URL; direct-port,
 external and non-HTTP links do not need an nginx site. Flare preserves container
 `order` (and snapshot order for ties). Within each producer, attached links follow
 nginx declaration insertion order, then independent links follow their Flare
-insertion order. Apps and bookmarks retain their own category/output order.
+insertion order. Public apps keep traversal order. Bookmark categories retain
+the standard `private`, `container`, `other` order, followed by custom categories
+in first-seen order; links within each category keep traversal order.
 Flare merges these two inputs itself; the manager's `iter_integrations` returns
 only explicit declarations. It skips empty URLs and
-rejects conflicting descriptions for the same category. `load_nginx_url("web", "ui")` lazily reads
-that site's URL; it never registers a hook or writes a configuration. A site
+rejects conflicting descriptions for the same category. A site
 without navigation still generates a proxy. The former registration arguments,
 `write_nginx_conf`, `load_exist_nginx_url`, and `append_ssl_domains` are removed.
 Migrate callers and templates together; there is no compatibility wrapper.
+
+## Lazy URL references
+
+Import the URL factories from `linktools.cntr.urls` and pass the owning container:
+
+```python
+from linktools.cntr.urls import load_config_url, load_nginx_url, load_port_url
+
+load_config_url(self, "APP_URL", "ui", queries={"mode": "compact"})
+load_port_url(self, "APP_PORT", "ui", https=False)
+load_nginx_url(self, "web", "ui")
+```
+
+Each returns the existing lazy URL proxy. Config URLs and port URLs stay empty
+when disabled. Ports must satisfy `0 < port < 65535`; the host is not read until
+the port is valid. nginx local IDs are checked immediately, while the
+`(container.name, local_id)` lookup waits until the proxy is read. Unknown site
+IDs fail, and declared disabled sites or absent nginx resolve to an empty URL.
+Path joining, query encoding and literal template placeholders remain unchanged.
+These factories never register hooks or write configuration.
+
+`BaseContainer.load_config_url`, `load_port_url`, `load_nginx_url`, and the old
+exposure mixin are removed; no URL mixin or resolver wrapper replaces them.
+General Compose/Dockerfile templates expose the same module as `urls`, alongside
+`utils`, so they can use `urls.load_nginx_url(container, "web")`. Native nginx
+templates retain only the explicit context described below.
 
 ## Site values
 

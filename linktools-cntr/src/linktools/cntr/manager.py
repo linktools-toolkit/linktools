@@ -13,11 +13,13 @@ from linktools.core import AliasProvider, ConfigField, LazyProvider, PromptProvi
 from linktools.decorator import cached_property
 
 from .container import BaseContainer, ContainerError, NoContainerInstalledError
+from .integration import Integration, NginxSite
 from .runtime.process import DEFAULT_DOCKER_HOST
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import Any, Iterator, Tuple, Mapping
+    from typing import Any, Iterator, Tuple, Mapping, Optional
+    from .integration import Integrations
     from linktools.core import CacheNamespace, ConfigStore, Environ
     from .registry.registry import ContainerResolver
     from .registry.loader import ContainerLoader
@@ -316,7 +318,7 @@ class ContainerManager:
         return RepoService(self)
 
     @cached_property
-    def integration_snapshot(self) -> "Mapping":
+    def integration_snapshot(self) -> "Mapping[str, Integrations]":
         """Freeze declaration structure once without resolving its lazy values."""
         from collections import OrderedDict
         from collections.abc import Mapping
@@ -331,14 +333,29 @@ class ContainerManager:
             for name, declarations in integrations.items():
                 if not isinstance(name, str) or name not in self.containers:
                     raise ContainerError("Unknown integration consumer %r in %s" % (name, producer.name))
-                if not isinstance(declarations, Mapping):
-                    raise ContainerError("Invalid %s integrations in %s" % (name, producer.name))
-                entries = OrderedDict()
-                for local_id, declaration in declarations.items():
-                    if not isinstance(local_id, str) or not local_id:
-                        raise ContainerError("Invalid %s integration ID in %s" % (name, producer.name))
-                    entries[local_id] = declaration
-                consumers[name] = MappingProxyType(entries)
+                if isinstance(declarations, Mapping):
+                    entries = OrderedDict()
+                    for local_id, declaration in declarations.items():
+                        if not isinstance(local_id, str) or not local_id:
+                            raise ContainerError("Invalid %s integration ID in %s" % (name, producer.name))
+                        if not isinstance(declaration, Integration):
+                            raise ContainerError("Invalid %s integration in %s: expected Integration" %
+                                                 (name, producer.name))
+                        entries[local_id] = declaration
+                    consumers[name] = MappingProxyType(entries)
+                else:
+                    if name == "nginx":
+                        raise ContainerError("Nginx integrations in %s require a named mapping" % producer.name)
+                    if isinstance(declarations, (str, bytes)):
+                        raise ContainerError("Invalid %s integrations in %s" % (name, producer.name))
+                    try:
+                        entries = tuple(declarations)
+                    except TypeError:
+                        raise ContainerError("Invalid %s integrations in %s" % (name, producer.name))
+                    if any(not isinstance(value, Integration) for value in entries):
+                        raise ContainerError("Invalid %s integration in %s: expected Integration" %
+                                             (name, producer.name))
+                    consumers[name] = entries
             result[producer.name] = MappingProxyType(consumers)
         return MappingProxyType(result)
 
@@ -353,22 +370,29 @@ class ContainerManager:
         return MappingProxyType({name: owners[name](self.containers[name])
                                  for name in self.integration_snapshot if name in owners})
 
-    def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, str, Any]]":
+    def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, Optional[str], Integration]]":
         """Yield read-only declaration inputs from the command's installed snapshot."""
+        from collections.abc import Mapping
+
         if consumer_name not in self.containers:
             raise ContainerError("Unknown integration consumer: " + consumer_name)
         snapshot = self.integration_snapshot
         if consumer_name not in snapshot:
             return
         for producer_name, consumers in snapshot.items():
-            for local_id, value in consumers.get(consumer_name, {}).items():
-                yield self.containers[producer_name], local_id, value
+            declarations = consumers.get(consumer_name, ())
+            if isinstance(declarations, Mapping):
+                for local_id, value in declarations.items():
+                    yield self.containers[producer_name], local_id, value
+            else:
+                for value in declarations:
+                    yield self.containers[producer_name], None, value
 
     @cached_property
     def nginx_sites(self) -> "Mapping":
         from collections import OrderedDict
         from types import MappingProxyType
-        from ._nginx import NginxSite, ResolvedSite
+        from ._nginx import ResolvedSite
 
         result = OrderedDict()
         # Keep identities when nginx is absent so missing IDs never silently pass.

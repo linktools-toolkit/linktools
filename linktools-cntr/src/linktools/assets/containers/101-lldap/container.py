@@ -4,7 +4,8 @@
 from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr import BaseContainer, ExposeLink, ContainerError
+from linktools.cntr.urls import load_port_url
 from linktools.core import ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
@@ -37,12 +38,12 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return {
-            "flare": {
-                "web": self.expose_container("LDAP", "account", "账号管理", self.load_port_url(
-                    "LLDAP_WEB_PORT",
+            "flare": [
+                ExposeLink.container("LDAP", "account", "账号管理", load_port_url(
+                    self, "LLDAP_WEB_PORT",
                     https=False,
                 )),
-            },
+            ],
         }
 
     def on_check(self, context: "EventContext") -> None:

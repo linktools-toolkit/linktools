@@ -4,7 +4,8 @@
 from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand
-from linktools.cntr import BaseContainer, NginxSite
+from linktools.cntr import BaseContainer, ExposeLink, NginxSite
+from linktools.cntr.urls import load_port_url
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 
@@ -38,15 +39,15 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return {
-            "flare": {
-                "direct": self.expose_container("Safeline", "alienOutline", "雷池WAF", self.load_port_url(
-                    "SAFELINE_PORT",
+            "flare": [
+                ExposeLink.container("Safeline", "alienOutline", "雷池WAF", load_port_url(
+                    self, "SAFELINE_PORT",
                     https=True
                 )),
-            },
+            ],
             "nginx": {
                 "web": NginxSite(
-                    expose=self.expose_public("Safeline", "alienOutline", "雷池WAF"),
+                    expose=ExposeLink.public("Safeline", "alienOutline", "雷池WAF"),
                     server_name=self.get_config_later("SAFELINE_DOMAIN"),
                     proxy="https://safeline-mgt:1443",
                     auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,

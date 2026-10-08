@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 from linktools.runtime import lazy_load
-from linktools.cntr import BaseContainer, NginxSite
+from linktools.cntr import BaseContainer, ExposeLink, NginxSite
+from linktools.cntr.urls import load_port_url
 
 if TYPE_CHECKING:
     from linktools.cntr import Integrations
@@ -27,15 +28,15 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return {
-            "flare": {
-                "direct": self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
-                    "PORTAINER_PORT",
+            "flare": [
+                ExposeLink.container("Portainer", "docker", "Docker管理工具", load_port_url(
+                    self, "PORTAINER_PORT",
                     https=False
                 )),
-            },
+            ],
             "nginx": {
                 "web": NginxSite(
-                    expose=self.expose_public("Portainer", "docker", "Docker管理工具"),
+                    expose=ExposeLink.public("Portainer", "docker", "Docker管理工具"),
                     server_name=self.get_config_later("PORTAINER_DOMAIN"),
                     proxy="http://portainer:9000",
                     auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,

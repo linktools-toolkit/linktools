@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Docker/Podman container management (``ct-cntr``): public entry points."""
+"""Docker container management (``ct-cntr``): public entry points."""
 
-from .container import ContainerError, BaseContainer, SourceContainer, Integrations, ExposeLink, ExposeCategory
+from .container import ContainerError, BaseContainer, SourceContainer
+from .integration import Integration, Integrations, NginxSite, ExposeLink, ExposeCategory
 from .manager import ContainerManager
-from ._nginx import NginxSite
 from .context import EventContext

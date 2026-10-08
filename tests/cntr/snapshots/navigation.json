@@ -4,7 +4,7 @@
       {
         "desc": "单点登录",
         "icon": "account",
-        "link": "https://sso.example.test:9443",
+        "link": "https://sso.example.test:9443/auth-admin",
         "name": "Authelia"
       },
       {

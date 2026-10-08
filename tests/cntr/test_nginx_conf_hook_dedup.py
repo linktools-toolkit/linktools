@@ -3,20 +3,20 @@
 """Navigation never owns proxy registration or mutates declaration identities."""
 from types import SimpleNamespace
 
-from linktools.cntr import NginxSite
-from linktools.cntr._container.expose import ExposeMixin, NginxMixin
+from linktools.cntr import BaseContainer, NginxSite
+from linktools.cntr.urls import load_nginx_url
 
 
 def test_same_site_can_have_many_navigation_links_without_hooks():
-    class Links(ExposeMixin):
+    class Links:
         name = "app"
         start_hooks = []
         manager = SimpleNamespace(nginx_sites={
             ("app", "web"): SimpleNamespace(url="https://app.example.com"),
         })
     container = Links()
-    first = container.load_nginx_url("web")
-    second = container.load_nginx_url("web", "admin")
+    first = load_nginx_url(container, "web")
+    second = load_nginx_url(container, "web", "admin")
     assert str(first) == "https://app.example.com"
     assert str(second) == "https://app.example.com/admin"
     assert not container.start_hooks
@@ -30,5 +30,5 @@ def test_sites_share_backends_without_sharing_identity():
 
 
 def test_legacy_mutating_entrypoints_are_absent():
-    assert not hasattr(ExposeMixin, "load_exist_nginx_url")
-    assert not hasattr(NginxMixin, "write_nginx_conf")
+    assert not hasattr(BaseContainer, "load_exist_nginx_url")
+    assert not hasattr(BaseContainer, "write_nginx_conf")

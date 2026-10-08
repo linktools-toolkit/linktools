@@ -2,12 +2,15 @@
 # -*- coding: utf-8 -*-
 """Flare generated configuration and application."""
 import os
+from collections import OrderedDict
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
 
-from ..container import ContainerError, ExposeLink
+from ..container import ContainerError
+from ..integration import ExposeLink
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -40,14 +43,14 @@ class FlareGeneration:
                 expose = manager.nginx_sites[(name, local_id)].expose
                 if expose is not None:
                     yield expose
-            for expose in consumers.get("flare", {}).values():
+            declarations = consumers.get("flare", ())
+            for expose in declarations.values() if isinstance(declarations, Mapping) else declarations:
                 yield expose
 
     def render(self, generation_id: str) -> "dict[str, str]":
 
-        categories = {}
+        categories = OrderedDict()
         apps = []
-        bookmarks = []
 
         for expose in self._iter_links():
             if not isinstance(expose, ExposeLink) or not expose.is_valid:
@@ -63,7 +66,6 @@ class FlareGeneration:
             existing[1].append(expose)
             if category.name == "public":
                 apps.append(expose)
-            bookmarks.append(expose)
 
         data = {"links": []}
         for app in apps:
@@ -76,7 +78,10 @@ class FlareGeneration:
         result = {"apps.yml": yaml.safe_dump(data, allow_unicode=True)}
 
         data = {"categories": [], "links": []}
-        for name, (description, links) in categories.items():
+        names = [name for name in ("private", "container", "other") if name in categories]
+        names.extend(name for name in categories if name not in ("private", "container", "other"))
+        for name in names:
+            description, links = categories[name]
             if name == "public":
                 continue
             if not links:

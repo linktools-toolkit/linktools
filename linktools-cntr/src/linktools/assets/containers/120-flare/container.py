@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
-from linktools.cntr import BaseContainer, NginxSite
+from linktools.cntr import BaseContainer, ExposeLink, NginxSite
+from linktools.cntr.urls import load_port_url
 from linktools.errors import ConfigNotFoundError
 from linktools.rich import prompt
 
@@ -56,9 +57,9 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return {
-            "flare": {
-                "direct": self.expose_container("Flare", "bookmark", "主页", self.load_port_url("FLARE_PORT", https=False)),
-            },
+            "flare": [
+                ExposeLink.container("Flare", "bookmark", "主页", load_port_url(self, "FLARE_PORT", https=False)),
+            ],
             "nginx": {
                 "web": NginxSite(
                     server_name=self.get_config_later("FLARE_DOMAIN"),

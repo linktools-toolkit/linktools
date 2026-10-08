@@ -9,10 +9,6 @@ from linktools.cntr.container import (
     BaseContainer,
     ContainerError,
     ContainerTemplateError,
-    ExposeCategory,
-    ExposeLink,
-    ExposeMixin,
-    NginxMixin,
     SimpleContainer,
     SourceContainer,
 )
@@ -22,7 +18,6 @@ from linktools.decorator import _CachedProperty
 def test_public_names_importable_from_container_module():
     for cls in (
         AbstractMetaClass, BaseContainer, ContainerError, ContainerTemplateError,
-        ExposeCategory, ExposeLink, ExposeMixin, NginxMixin,
         SimpleContainer, SourceContainer,
     ):
         assert cls is not None
@@ -34,8 +29,8 @@ def test_container_class_module_identity_unchanged():
     assert SimpleContainer.__module__ == "linktools.cntr.container"
 
 
-def test_base_container_mro_unchanged():
-    assert BaseContainer.__bases__ == (ExposeMixin, NginxMixin)
+def test_base_container_has_no_integration_mixins():
+    assert BaseContainer.__bases__ == (object,)
     assert type(BaseContainer) is AbstractMetaClass
 
 
