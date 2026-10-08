@@ -136,6 +136,9 @@ case "$1" in
                 directory="$versions/$id"
                 mkdir "$directory"
                 cp "$root/live/domains" "$root/live/primary" "$root/live/port" "$directory/"
+                if test -f "$root/live/build-revision"; then
+                    cp "$root/live/build-revision" "$directory/build-revision"
+                fi
                 cp -a "$account" "$directory/acme"
                 for name in cert key fullchain; do
                     if test -s "$renewal/${main}_${name}.pem"; then
