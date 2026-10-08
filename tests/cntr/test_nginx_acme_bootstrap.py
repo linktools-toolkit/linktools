@@ -120,7 +120,7 @@ def _run(path, environ, *args):
 def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_case):
     container, _, _, _ = certificate_case
     dockerfile = container.docker_file
-    assert "AS acme-build" in dockerfile and "--issue" in dockerfile
+    assert "AS acme-build" in dockerfile and "--issue --force" in dockerfile
     assert "COPY nginx-certificates nginx-reload" in dockerfile
     assert "COPY --from=acme-build /opt/nginx-initial" in dockerfile
     assert "--mount=type=secret,id=cntr_acme_account" in dockerfile

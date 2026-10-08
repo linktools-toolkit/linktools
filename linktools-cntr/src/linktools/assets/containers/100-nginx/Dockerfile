@@ -16,7 +16,7 @@ RUN --mount=type=secret,id=cntr_acme_account \
         tar -xf /run/secrets/cntr_acme_account -C /root/.acme.sh; \
     fi && \
     /opt/acme/acme.sh --home /opt/acme --config-home /root/.acme.sh --server {{ container.shell_quote(ACME_SERVER) }} \
-        --issue {{ container.acme_ssl_domains_args }} --dns {{ container.shell_quote(ACME_DNS_API) }}{% if ACME_ACCOUNT_EMAIL %} --accountemail {{ container.shell_quote(ACME_ACCOUNT_EMAIL) }}{% endif %} && \
+        --issue --force {{ container.acme_ssl_domains_args }} --dns {{ container.shell_quote(ACME_DNS_API) }}{% if ACME_ACCOUNT_EMAIL %} --accountemail {{ container.shell_quote(ACME_ACCOUNT_EMAIL) }}{% endif %} && \
     /opt/acme/acme.sh --home /opt/acme --config-home /root/.acme.sh --server {{ container.shell_quote(ACME_SERVER) }} \
         --install-cert {{ container.acme_ssl_domains_args }} {{ container.acme_ssl_certificate_args }} \
         --reloadcmd ':' && \
