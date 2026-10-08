@@ -311,6 +311,28 @@ def test_http_does_not_resolve_dns_secrets(certificate_case, monkeypatch):
     assert "nginx-certificates" not in container.docker_file
 
 
+def test_rollback_uses_previously_served_renewed_certificate(certificate_case, monkeypatch):
+    container, root, _, _ = certificate_case
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
+    candidate = root / "generated" / "old"
+    candidate.mkdir(parents=True)
+    (candidate / "certificate.version").write_text("legacy\n")
+    container._certificate_previous_actual = "versions/renewed"
+    container._certificate_switched = True
+    (root / "certs/versions/renewed").mkdir()
+    runner = container.manager.compose_runner
+    calls = []
+    monkeypatch.setattr(runner, "run_isolated_service", lambda *args: calls.append(("activate", args[2])))
+    monkeypatch.setattr(runner, "apply_service", lambda *args: calls.append(("apply", args[1])))
+    monkeypatch.setattr(runner, "wait_service_healthy", lambda *args: None)
+    monkeypatch.setattr(runner, "exec_service", lambda *args, **kwargs:
+                        SimpleNamespace(succeeded=True, stdout="old"))
+    container.apply_config(SimpleNamespace(rollback_service_models={}),
+                           SimpleNamespace(path=candidate, generation_id="old"), ("nginx",))
+    assert calls[0] == ("activate", ("/usr/local/bin/nginx-certificates", "activate", "renewed", "443"))
+    assert calls[1] == ("apply", "nginx")
+
+
 def test_preparation_reuses_matching_certificate_without_issuance(certificate_case, monkeypatch):
     container, root, _, _ = certificate_case
     monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
