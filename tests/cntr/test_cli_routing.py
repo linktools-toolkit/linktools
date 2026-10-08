@@ -66,6 +66,29 @@ def test_cli_restart_partial_records_stop_build_and_up(monkeypatch, fresh_manage
     assert next(i for i, cmd in enumerate(recorded) if cmd[0] == "build") < recorded.index(("stop", "portainer"))
 
 
+def test_restart_config_only_target_keeps_shared_services_running(monkeypatch, fresh_manager):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    recorded = _record(fresh_manager, monkeypatch)
+
+    cntr_main.command.on_command_restart(names=["portainer"])
+
+    assert not any(args[0] == "stop" for args in recorded)
+    assert any(args[0] == "up" and args[-1] == "nginx" for args in recorded)
+    assert not any(args[0] == "up" and args[-1] == "portainer" for args in recorded)
+
+
+def test_restart_mixed_config_and_service_targets_stops_only_real_service(monkeypatch, fresh_manager):
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    recorded = _record(fresh_manager, monkeypatch)
+
+    cntr_main.command.on_command_restart(names=["portainer", "nginx"])
+
+    stops = [args for args in recorded if args[0] == "stop"]
+    assert stops == [("stop", "nginx")]
+
+
 def test_cli_down_full_records_down(monkeypatch, fresh_manager):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)
