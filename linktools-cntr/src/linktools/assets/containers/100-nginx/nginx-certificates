@@ -50,7 +50,9 @@ activate() {
     port=$(cat "$directory/port")
     verify "$directory" "$main" "$directory/domains"
     previous=$(readlink "$root/live" 2>/dev/null || :)
-    test "$previous" = "versions/$id" && return 0
+    if test "$previous" = "versions/$id" && ! test -s /var/run/nginx.pid; then
+        return 0
+    fi
     if test -z "$previous" && test -s /var/run/nginx.pid; then
         echo 'Cannot change a running TLS certificate without a previous live version' >&2
         return 1
