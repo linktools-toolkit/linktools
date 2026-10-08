@@ -78,7 +78,7 @@ class ExecutionPlanner:
 
         commands = []
         services = list(selection.services)
-        if action == "restart":
+        if action == "restart" and (selection.full or services):
             commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
         if action in ("up", "restart"):
             services_to_start = start_selection.services
@@ -89,8 +89,9 @@ class ExecutionPlanner:
             commands.append(self._planned_command("down", [*file_args, "down", *services]))
 
         hooks = []
+        lifecycle_action = "up" if action == "restart" and not selection.full and not services else action
         for step in manager.lifecycle.iter_steps(
-                action, start_selection.target_containers, stop_containers=selection.target_containers):
+                lifecycle_action, start_selection.target_containers, stop_containers=selection.target_containers):
             if step.phase is None:
                 continue
             owner = step.container if step.container is not None else manager
