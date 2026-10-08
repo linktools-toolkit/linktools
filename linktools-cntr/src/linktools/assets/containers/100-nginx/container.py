@@ -4,7 +4,6 @@
 import json
 import os
 import re
-import shutil
 from typing import TYPE_CHECKING
 
 from linktools import utils
@@ -234,15 +233,6 @@ class Container(BaseContainer):
                 self.get_app_path("conf.d", "snippets", "auth.conf"),
             )
 
-        # 初始化conf.d
-        for container in self.manager.installed_state.get():
-            path = self.get_app_path("temporary", container.name)
-            if os.path.isdir(path):
-                shutil.copytree(
-                    path,
-                    self.get_app_path("conf.d", create_parent=True),
-                    dirs_exist_ok=True,
-                )
         explicit_default = False
         seen_domains = {}
         for producer, local_id, site in self.manager.iter_integrations("nginx"):
@@ -342,8 +332,7 @@ class Container(BaseContainer):
                 utils.remove_file(path)
 
     def on_removed(self, context: "EventContext") -> None:
-        utils.clear_directory(self.get_app_path("temporary"))
-        utils.clear_directory(self.get_app_path("conf.d"))
+        pass
 
     def write_conf(
         self, container: "BaseContainer", domain: str, *,
