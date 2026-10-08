@@ -4,10 +4,9 @@ umask 077
 
 root=/etc/certs
 versions="$root/versions"
-renewal="$root/.renewal"
 seed=/opt/nginx-initial
 acme=/opt/acme/acme.sh
-mkdir -p "$versions" "$renewal"
+mkdir -p "$versions"
 exec 9>"$root/.acme.lock"
 flock -x 9
 
@@ -37,6 +36,8 @@ verify() {
 configure() {
     main=$1
     account=$2
+    renewal=$3
+    mkdir -p "$renewal"
     "$acme" --home /opt/acme --config-home "$account" --install-cert -d "$main" \
         --cert-file "$renewal/${main}_cert.pem" \
         --key-file "$renewal/${main}_key.pem" \
@@ -112,11 +113,11 @@ case "$1" in
         mkdir "$directory/acme"
         cp -a "$seed/acme/." "$directory/acme/"
         verify "$directory" "$main" "$directory/domains"
-        configure "$main" "$directory/acme"
+        configure "$main" "$directory/acme" "$directory/renewal"
         ;;
     configure)
         shift
-        configure "$1" "$root/live/acme"
+        configure "$1" "$root/live/acme" "$root/live/renewal"
         ;;
     activate)
         shift
@@ -126,6 +127,7 @@ case "$1" in
         if test -L "$root/live"; then
             main=$(cat "$root/live/primary")
             account="$root/live/acme"
+            renewal="$root/live/renewal"
             before=$(openssl x509 -in "$renewal/${main}_fullchain.pem" -noout -fingerprint -sha256 2>/dev/null || :)
             "$acme" --home /opt/acme --config-home "$account" --cron >/dev/null
             after=$(openssl x509 -in "$renewal/${main}_fullchain.pem" -noout -fingerprint -sha256 2>/dev/null || :)
@@ -146,6 +148,7 @@ case "$1" in
                     fi
                 done
                 verify "$directory" "$main" "$directory/domains"
+                configure "$main" "$directory/acme" "$directory/renewal"
                 activate "$id"
             fi
         fi
