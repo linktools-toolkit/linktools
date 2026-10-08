@@ -498,7 +498,7 @@ def test_nginx_waits_for_health_before_generation_probe_or_reload(tmp_path, monk
         return SimpleNamespace(succeeded=True, stdout=next(responses))
 
     runner.exec_service = execute
-    nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new"), ("nginx",))
+    nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new", path=str(tmp_path / "generation")), ("nginx",))
     assert events[4:] == (["probe"] if loaded_generation == "new" else ["probe", "reload", "probe", "probe"])
     assert clock[0] == (1.0 if loaded_generation == "new" else 1.25)
 
@@ -518,7 +518,7 @@ def test_nginx_readiness_timeout_never_attempts_reload(tmp_path, monkeypatch, st
 
     runner.exec_service = unexpected
     with pytest.raises(ContainerError, match="Service nginx did not become healthy"):
-        nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new"), ("nginx",))
+        nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new", path=str(tmp_path / "generation")), ("nginx",))
     assert clock[0] == 30.0
 
 
@@ -536,6 +536,6 @@ def test_nginx_healthy_old_generation_still_requires_bounded_acknowledgment(tmp_
 
     runner.exec_service = execute
     with pytest.raises(ContainerError, match="Nginx did not acknowledge the generated configuration"):
-        nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new"), ("nginx",))
+        nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new", path=str(tmp_path / "generation")), ("nginx",))
     assert commands.count("nginx") == 1
     assert clock[0] == 30.0
