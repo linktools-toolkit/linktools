@@ -192,7 +192,8 @@ class Container(BaseContainer):
         )
         utils.write_file(
             self.get_app_path("conf.d", "00-cntr-upgrade.conf"),
-            "map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n",
+            "map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n"
+            'geo $cntr_dollar { default "$"; }\n',
         )
         utils.write_file(
             self.get_app_path("conf.d", "01-cntr-health.conf"),
