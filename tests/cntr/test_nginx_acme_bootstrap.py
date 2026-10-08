@@ -154,12 +154,17 @@ def _build_run(container, root):
     return command
 
 
-def test_dockerfile_issues_certificate_and_seeds_account_at_build_time(certificate_case):
+@pytest.mark.parametrize("reuse_account", [False, True])
+def test_dockerfile_issues_certificate_and_seeds_account_at_build_time(certificate_case, reuse_account):
     container, root, _, environment = certificate_case
     build = root / "build"
     build.mkdir()
     for path in ("certs", "acme"):
         (build / path).mkdir()
+    if reuse_account:
+        import tarfile
+        with tarfile.open(str(build / "build-account.tar"), mode="w") as archive:
+            archive.add(str(root / "acme/account.key"), arcname="account.key")
     command = _build_run(container, build)
     client = root / "bin/acme.sh"
     client.write_text("""#!/usr/bin/env python3
@@ -172,7 +177,11 @@ home.mkdir(parents=True, exist_ok=True)
 if "--issue" in args:
     if os.environ.get("FAIL_BUILD_ISSUE"):
         sys.exit(7)
-    home.joinpath("account.key").write_text("build-account")
+    account = home.joinpath("account.key")
+    if os.environ.get("EXPECT_REUSED_ACCOUNT") and (not account.exists() or account.read_text() != "existing-account-key"):
+        sys.exit(10)
+    if not account.exists():
+        account.write_text("build-account")
     home.joinpath("domains").write_text(",".join(
         args[index + 1] for index, value in enumerate(args[:-1]) if value == "--domain"))
 elif "--install-cert" in args:
@@ -184,11 +193,12 @@ else:
     sys.exit(9)
 """)
     client.chmod(0o755)
-    result = subprocess.run(["sh", "-ec", command], env=environment,
+    result = subprocess.run(["sh", "-ec", command],
+                            env=dict(environment, EXPECT_REUSED_ACCOUNT="1" if reuse_account else ""),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             universal_newlines=True)
     assert result.returncode == 0, result.stderr
-    assert (build / "seed/acme/account.key").read_text() == "build-account"
+    assert (build / "seed/acme/account.key").read_text() == ("existing-account-key" if reuse_account else "build-account")
     assert (build / "seed/certs/example.test_fullchain.pem").read_text() == "preissued"
     assert (build / "acme/domains").read_text().startswith("example.test,*.example.test")
 
