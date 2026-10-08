@@ -13,7 +13,7 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any, Optional, Sequence
-    from .container import BaseContainer
+    from .container import BaseContainer, ExposeLink
 
 
 class NginxSite:
@@ -29,7 +29,9 @@ class NginxSite:
             oidc_redirects: "Sequence[str]" = (), url: "Optional[Any]" = None,
             cert_domains: "Sequence[str]" = (),
             vars: "Optional[Mapping[str, Any]]" = None,
+            expose: "Optional[ExposeLink]" = None,
     ) -> None:
+        self.expose = expose
         self.server_name = server_name
         self.proxy = proxy
         self.template = template
@@ -67,6 +69,18 @@ class ResolvedSite:
         if value is MISSING or not isinstance(value, str):
             self._error(field + " must be a string")
         return str(value)
+
+    @cached_property
+    def expose(self) -> "Optional[ExposeLink]":
+        from .container import ExposeLink
+        from linktools.runtime import lazy_load
+
+        value = self._declaration.expose
+        if value is None:
+            return None
+        if not isinstance(value, ExposeLink):
+            self._error("expose must be an ExposeLink or None")
+        return value.with_default_url(lazy_load(lambda: self.url))
 
     @cached_property
     def server_name(self) -> str:

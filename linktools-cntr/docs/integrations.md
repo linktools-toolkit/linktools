@@ -7,24 +7,42 @@ Unknown consumer names are errors. Known optional consumers that are not
 installed do not consume declarations.
 
 ```python
+from linktools.cntr import Integrations, NginxSite
+
+
 @cached_property
-def integrations(self) -> "dict[str, dict[str, Any]]":
+def integrations(self) -> "Integrations":
     return {"nginx": {"web": NginxSite(
         server_name=self.get_config_later("APP_DOMAIN"),
         proxy="http://app:8080",
         auth=None,
         auth_bypass=(r"^/public/",),
         waf_bypass=(),
-    )}, "flare": {"web": self.expose_public(
-        "App", "apps", "Application", self.load_nginx_url("web"),
+        expose=self.expose_public("App", "apps", "Application"),
     )}}
 ```
 
-`integrations["flare"][local_id]` supplies an `ExposeLink` for navigation.
+`Integrations` is the public `typing.Mapping[str, Mapping[str, object]]` alias:
+consumer name → producer-local ID → declaration object. Return ordinary nested
+dictionaries; each consumer validates its own values. The alias remains open to
+other consumer declarations and uses Python 3.6-compatible runtime typing.
+
+`NginxSite.expose` optionally attaches an `ExposeLink` for navigation. Omitting
+its URL lazily inherits the resolved site's URL. Explicit `None` or `""` disables
+the link; an explicit URL stays unchanged. An omitted URL on a standalone link
+has no site to inherit from and is skipped. The link's category is presentation
+metadata, not an authentication policy; there is no `public` site boolean.
+Sites without `expose` create no navigation.
+
+`integrations["flare"][local_id]` supplies an independent `ExposeLink` for navigation.
 The former `exposes` property is removed without an alias or fallback.
 Links keep their category, name, icon, description and lazy URL; direct-port,
 external and non-HTTP links do not need an nginx site. Flare preserves container
-`order` and each producer’s declaration insertion order, skips empty URLs and
+`order` (and snapshot order for ties). Within each producer, attached links follow
+nginx declaration insertion order, then independent links follow their Flare
+insertion order. Apps and bookmarks retain their own category/output order.
+Flare merges these two inputs itself; the manager's `iter_integrations` returns
+only explicit declarations. It skips empty URLs and
 rejects conflicting descriptions for the same category. `load_nginx_url("web", "ui")` lazily reads
 that site's URL; it never registers a hook or writes a configuration. A site
 without navigation still generates a proxy. The former registration arguments,

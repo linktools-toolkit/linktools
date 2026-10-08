@@ -33,12 +33,21 @@ def instance(module, **manager):
     return container
 
 
+def flare_instance(module, entries):
+    snapshot = {"flare": {}}
+    containers = {}
+    for producer, local_id, expose in entries:
+        containers[producer.name] = producer
+        snapshot.setdefault(producer.name, {}).setdefault("flare", {})[local_id] = expose
+    return instance(module, integration_snapshot=snapshot, containers=containers, nginx_sites={})
+
+
 def test_flare_custom_categories_merge_by_name_without_title_deduplication():
     module = builtin("120-flare")
     first = ExposeCategory("team", "Team")("Same", "a", "One", "https://one.test")
     second = ExposeCategory("team", "Team")("Same", "b", "Two", "https://two.test")
-    source = SimpleNamespace(order=1)
-    container = instance(module, iter_integrations=lambda name: [(source, "one", first), (source, "two", second)])
+    source = SimpleNamespace(name="source", order=1)
+    container = flare_instance(module, [(source, "one", first), (source, "two", second)])
     result = FlareGeneration(container).render("id")
     bookmarks = yaml.safe_load(result["bookmarks.yml"])
     assert bookmarks["categories"] == [{"id": "team", "title": "Team"}]
@@ -49,8 +58,8 @@ def test_flare_rejects_conflicting_category_descriptions():
     module = builtin("120-flare")
     first = ExposeCategory("team", "Team")("One", "a", "", "https://one.test")
     second = ExposeCategory("team", "Different")("Two", "b", "", "https://two.test")
-    source = SimpleNamespace(order=1)
-    container = instance(module, iter_integrations=lambda name: [(source, "one", first), (source, "two", second)])
+    source = SimpleNamespace(name="source", order=1)
+    container = flare_instance(module, [(source, "one", first), (source, "two", second)])
     with pytest.raises(ContainerError, match="Conflicting description"):
         FlareGeneration(container).render("id")
 
@@ -210,8 +219,8 @@ def test_stopped_legacy_nginx_preserves_certificates_before_migration(tmp_path, 
 
 def test_flare_navigation_orders_producers_and_preserves_link_values():
     module = builtin("120-flare")
-    early = SimpleNamespace(order=10)
-    late = SimpleNamespace(order=20)
+    early = SimpleNamespace(name="early", order=10)
+    late = SimpleNamespace(name="late", order=20)
     public = ExposeCategory("public", "Public")
     tools = ExposeCategory("tools", "Tools")
     entries = [
@@ -221,7 +230,7 @@ def test_flare_navigation_orders_producers_and_preserves_link_values():
         (early, "direct", tools("Direct", "lan", "", "http://host:1234")),
         (early, "custom", tools("Custom", "link", "", "custom://literal/{{port}}")),
     ]
-    container = instance(module, iter_integrations=lambda name: entries)
+    container = flare_instance(module, entries)
     result = FlareGeneration(container).render("id")
     assert yaml.safe_load(result["apps.yml"])["links"] == [
         {"name": "App", "icon": "apps", "desc": "Description", "link": "https://app.test"}]

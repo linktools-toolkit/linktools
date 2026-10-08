@@ -9,6 +9,7 @@ from linktools.runtime import lazy_load
 from linktools.cntr import BaseContainer, NginxSite
 
 if TYPE_CHECKING:
+    from linktools.cntr import Integrations
     from typing import Any
 
 
@@ -24,11 +25,9 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def integrations(self) -> "dict[str, dict[str, Any]]":
+    def integrations(self) -> "Integrations":
         return {
             "flare": {
-                "web": self.expose_public("Portainer", "docker", "Docker管理工具",
-                                         self.load_nginx_url("web")),
                 "direct": self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
                     "PORTAINER_PORT",
                     https=False
@@ -36,6 +35,7 @@ class Container(BaseContainer):
             },
             "nginx": {
                 "web": NginxSite(
+                    expose=self.expose_public("Portainer", "docker", "Docker管理工具"),
                     server_name=self.get_config_later("PORTAINER_DOMAIN"),
                     proxy="http://portainer:9000",
                     auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,

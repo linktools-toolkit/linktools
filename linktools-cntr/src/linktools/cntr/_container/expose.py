@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from linktools import utils
 from linktools.core import LazyProvider
 from linktools.runtime import lazy_load
+from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any
@@ -20,13 +21,13 @@ class ExposeCategory:
         self.name = name
         self.desc = desc
 
-    def __call__(self, name: str, icon: str, desc: str, url: str) -> "ExposeLink":
+    def __call__(self, name: str, icon: str, desc: str, url: "str | None" = MISSING) -> "ExposeLink":
         return ExposeLink(self, name, icon, desc or name, url)
 
 
 class ExposeLink:
 
-    def __init__(self, category: "ExposeCategory", name: str, icon: str, desc: str, url: str) -> None:
+    def __init__(self, category: "ExposeCategory", name: str, icon: str, desc: str, url: "str | None" = MISSING) -> None:
         self.category = category
         self.name = name
         self.icon = icon
@@ -35,9 +36,15 @@ class ExposeLink:
 
     @property
     def url(self) -> "str | None":
-        if not self._url:
+        if self._url is MISSING or not self._url:
             return None
         return str(self._url)
+
+    def with_default_url(self, url: str) -> "ExposeLink":
+        """Bind only an omitted URL, preserving explicit empty/None values."""
+        if self._url is not MISSING:
+            return self
+        return ExposeLink(self.category, self.name, self.icon, self.desc, url)
 
     @property
     def is_valid(self) -> bool:

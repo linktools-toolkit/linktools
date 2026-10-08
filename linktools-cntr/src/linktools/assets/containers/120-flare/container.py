@@ -11,6 +11,7 @@ from linktools.errors import ConfigNotFoundError
 from linktools.rich import prompt
 
 if TYPE_CHECKING:
+    from linktools.cntr import Integrations
     from typing import Any
 
 
@@ -53,7 +54,7 @@ class Container(BaseContainer):
         return prompt("FLARE_PASSWORD")
 
     @cached_property
-    def integrations(self) -> "dict[str, dict[str, Any]]":
+    def integrations(self) -> "Integrations":
         return {
             "flare": {
                 "direct": self.expose_container("Flare", "bookmark", "主页", self.load_port_url("FLARE_PORT", https=False)),

@@ -3,7 +3,7 @@
 import os
 import re
 import textwrap
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 from linktools import utils
 from linktools.cli import subcommand, subcommand_argument
@@ -34,6 +34,9 @@ if TYPE_CHECKING:
     from .runtime.process import RuntimeProcessFactory
     from .lifecycle.dispatcher import LifecycleDispatcher
     from .state.running import RunningStateStore
+
+
+Integrations = Mapping[str, Mapping[str, object]]
 
 
 class ContainerError(Error):
@@ -115,7 +118,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return {}
 
     @property
-    def integrations(self) -> "dict[str, dict[str, Any]]":
+    def integrations(self) -> "Integrations":
         return {}
 
     @cached_property

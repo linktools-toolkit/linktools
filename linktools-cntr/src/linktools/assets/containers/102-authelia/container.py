@@ -14,6 +14,7 @@ from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvi
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
+    from linktools.cntr import Integrations
     from typing import Any, Mapping
     from collections.abc import Iterable
     from linktools.cntr import EventContext
@@ -52,13 +53,11 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def integrations(self) -> "dict[str, dict[str, Any]]":
+    def integrations(self) -> "Integrations":
         return {
-            "flare": {
-                "web": self.expose_public("Authelia", "account", "单点登录", self.load_nginx_url("web")),
-            },
             "nginx": {
                 "web": NginxSite(
+                    expose=self.expose_public("Authelia", "account", "单点登录"),
                     server_name=self.get_config_later("AUTHELIA_DOMAIN"),
                     template=self.get_source_path("templates", "nginx.conf"),
                     auth=None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False,

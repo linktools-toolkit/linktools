@@ -10,7 +10,7 @@ import yaml
 from ..container import ContainerError, ExposeLink
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
     from ..artifacts import GeneratedCandidate
     from ..container import BaseContainer
     from ..context import EventContext
@@ -25,14 +25,31 @@ class FlareGeneration:
     def prepare(self, context: "EventContext") -> None:
         pass
 
+    def _iter_links(self) -> "Iterator[ExposeLink]":
+        manager = self.container.manager
+        snapshot = manager.integration_snapshot
+        if "flare" not in snapshot:
+            return
+        producers = sorted(
+            (name for name, consumers in snapshot.items() if consumers),
+            key=lambda name: manager.containers[name].order,
+        )
+        for name in producers:
+            consumers = snapshot[name]
+            for local_id in consumers.get("nginx", {}):
+                expose = manager.nginx_sites[(name, local_id)].expose
+                if expose is not None:
+                    yield expose
+            for expose in consumers.get("flare", {}).values():
+                yield expose
+
     def render(self, generation_id: str) -> "dict[str, str]":
 
         categories = {}
         apps = []
         bookmarks = []
 
-        entries = sorted(self.container.manager.iter_integrations("flare"), key=lambda entry: entry[0].order)
-        for container, local_id, expose in entries:
+        for expose in self._iter_links():
             if not isinstance(expose, ExposeLink) or not expose.is_valid:
                 continue
             category = expose.category

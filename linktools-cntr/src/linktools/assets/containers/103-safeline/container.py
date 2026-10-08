@@ -9,6 +9,7 @@ from linktools.core import ConfigField
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
+    from linktools.cntr import Integrations
     from typing import Any
     from collections.abc import Iterable
 
@@ -35,10 +36,9 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def integrations(self) -> "dict[str, dict[str, Any]]":
+    def integrations(self) -> "Integrations":
         return {
             "flare": {
-                "web": self.expose_public("Safeline", "alienOutline", "雷池WAF", self.load_nginx_url("web")),
                 "direct": self.expose_container("Safeline", "alienOutline", "雷池WAF", self.load_port_url(
                     "SAFELINE_PORT",
                     https=True
@@ -46,6 +46,7 @@ class Container(BaseContainer):
             },
             "nginx": {
                 "web": NginxSite(
+                    expose=self.expose_public("Safeline", "alienOutline", "雷池WAF"),
                     server_name=self.get_config_later("SAFELINE_DOMAIN"),
                     proxy="https://safeline-mgt:1443",
                     auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,

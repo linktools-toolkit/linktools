@@ -9,6 +9,7 @@ from linktools.core import ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
+    from linktools.cntr import Integrations
     from typing import Any
     from linktools.cntr import EventContext
 
@@ -34,7 +35,7 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def integrations(self) -> "dict[str, dict[str, Any]]":
+    def integrations(self) -> "Integrations":
         return {
             "flare": {
                 "web": self.expose_container("LDAP", "account", "账号管理", self.load_port_url(
