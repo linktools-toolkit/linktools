@@ -130,10 +130,21 @@ class Container(BaseContainer):
 
     @cached_property
     def _acme_ssl_domains(self):
-        result = list()
+        result = []
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if domain:
             result.extend([domain, f"*.{domain}"])
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            for producer, local_id, site in self.manager.iter_integrations("nginx"):
+                if not isinstance(site, NginxSite):
+                    raise ContainerError(
+                        f"Invalid nginx site {producer.name}/{local_id}")
+                if not str(site.server_name) or site.https is False:
+                    continue
+                for cert_domain in site.cert_domains:
+                    value = str(cert_domain)
+                    if value and value not in result:
+                        result.append(value)
         return result
 
     @cached_property
