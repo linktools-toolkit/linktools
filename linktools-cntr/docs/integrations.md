@@ -8,17 +8,24 @@ installed do not consume declarations.
 
 ```python
 @cached_property
-def integrations(self) -> "dict[str, dict[str, NginxSite]]":
+def integrations(self) -> "dict[str, dict[str, Any]]":
     return {"nginx": {"web": NginxSite(
         server_name=self.get_config_later("APP_DOMAIN"),
         proxy="http://app:8080",
         auth=None,
         auth_bypass=(r"^/public/",),
         waf_bypass=(),
+    )}, "flare": {"web": self.expose_public(
+        "App", "apps", "Application", self.load_nginx_url("web"),
     )}}
 ```
 
-`exposes` only supplies navigation. `load_nginx_url("web", "ui")` lazily reads
+`integrations["flare"][local_id]` supplies an `ExposeLink` for navigation.
+The former `exposes` property is removed without an alias or fallback.
+Links keep their category, name, icon, description and lazy URL; direct-port,
+external and non-HTTP links do not need an nginx site. Flare preserves container
+`order` and each producer’s declaration insertion order, skips empty URLs and
+rejects conflicting descriptions for the same category. `load_nginx_url("web", "ui")` lazily reads
 that site's URL; it never registers a hook or writes a configuration. A site
 without navigation still generates a proxy. The former registration arguments,
 `write_nginx_conf`, `load_exist_nginx_url`, and `append_ssl_domains` are removed.
@@ -81,10 +88,42 @@ upstreams to Docker runtime DNS.
 ## Selection, publication and migration
 
 `dependencies` defines required installed dependencies and startup order.
-`config_sources` identifies installed source containers whose changes can
-require this consumer's candidate to be synchronized. It does not start a
-stopped source/consumer by itself. `restart app` stops explicit targets only;
-shared dependencies and consumers are ensured running or updated as needed.
+An enabled nginx site also needs its installed nginx runtime provider. Flare
+navigation is optional and never creates a startup dependency. Explicitly
+selecting Flare still starts it.
+
+Every `up` or `restart` renders the full installed candidate configuration and
+compares it with the last applied, fully resolved Compose service models and
+generated trees. Resolved snapshots preserve environment values from `.env`,
+`env_file` and Compose interpolation for comparison and rollback. Shared top-level
+network/volume changes conservatively invalidate running service models.
+Explicit targets and their runtime dependencies are ensured running. Other
+services are updated only when their configuration changed and they are already
+running; stopped sibling services are not started by configuration reconciliation.
+A partial command can therefore apply pending changes to other running services.
+When no resolved snapshot exists yet, a running service is reconciled once to
+establish it; rollback uses the previous saved Compose file where available.
+Historical external environment-file contents cannot be recovered retroactively.
+`restart app` stops only explicit targets, after all candidate validation passes.
+Preparation covers running services and their possible runtime dependencies;
+application still uses the final changed-service selection. Snapshots are captured
+after startup hooks, so hook-prepared environment files are included.
+The plan reports the full reconciliation scope and defers runtime-dependent
+update decisions until execution.
+
+Container authors do not declare `config_sources` or an integration startup
+policy. OIDC/template cross-container reads are captured by complete candidate
+rendering. Aggregate consumers read the complete installed snapshot, including
+removal of a producer's final declaration. No historical dependency graph or
+runtime configuration-read tracking is needed.
+
+The only new container authoring entry point is `integrations`. Generation
+paths and preparation, rendering, native validation, application and rollback
+belong to the four bundled consumer implementations. nginx-specific template
+rendering also belongs to its consumer; none of those operations is a
+`BaseContainer` extension hook. This navigation and synchronization addendum
+supersedes the earlier Site protocol's separate `exposes` and `config_sources`
+properties. Migrate both repositories together; there is no fallback alias.
 
 Generated configuration uses a stable mounted parent, immutable generation
 folders and an atomic `current` link. Candidates are rendered and validated

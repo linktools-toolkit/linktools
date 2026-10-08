@@ -175,17 +175,16 @@ def stub_generated_runtime(manager, monkeypatch):
                             *manager.compose_runner.apply_service_args(service, recreate)).check_call())
     monkeypatch.setattr(manager.compose_runner, "apply_services", lambda context, services:
                         [manager.compose_runner.apply_service(context, service) for service in services])
-    def candidate(container):
+    def candidate(container, render):
         return SimpleNamespace(container=container, changed=True, generation_id="candidate", previous_id=None,
                                publish=lambda: None, restore=lambda: None)
     monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate", candidate)
-    for container in manager.containers.values():
-        if container.generated_config_path is not None:
-            monkeypatch.setattr(container, "prepare_generated_config", lambda context: None)
-            monkeypatch.setattr(container, "validate_generated_config", lambda candidate, context: None)
-            monkeypatch.setattr(container, "apply_generated_config", lambda candidate, context:
-                                manager.compose_runner.apply_services(context, tuple(candidate.container.services)))
+    for owner in manager.generated_configs.values():
+        monkeypatch.setattr(owner, "prepare", lambda context: None)
+        monkeypatch.setattr(owner, "validate", lambda candidate, context: None)
+        monkeypatch.setattr(owner, "apply", lambda candidate, context, services:
+                            manager.compose_runner.apply_services(context, services))
     def bootstrap(context):
         manager.compose_runner.apply_service(context, "nginx")
         context.nginx_bootstrap_id = "bootstrap"
-    monkeypatch.setattr(manager.containers["nginx"], "bootstrap_generated_config", bootstrap)
+    monkeypatch.setattr(manager.generated_configs["nginx"], "bootstrap", bootstrap)

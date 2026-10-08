@@ -10,6 +10,10 @@ import pytest
 import yaml
 
 from linktools.cntr import ContainerError, ExposeCategory
+from linktools.cntr.generation import (
+    NginxGeneration, LldapGeneration, AutheliaGeneration, FlareGeneration,
+)
+from linktools.cntr._generation import authelia as authelia_generation
 
 
 ASSETS = Path(__file__).resolve().parents[2] / "linktools-cntr/src/linktools/assets/containers"
@@ -33,9 +37,9 @@ def test_flare_custom_categories_merge_by_name_without_title_deduplication():
     module = builtin("120-flare")
     first = ExposeCategory("team", "Team")("Same", "a", "One", "https://one.test")
     second = ExposeCategory("team", "Team")("Same", "b", "Two", "https://two.test")
-    source = SimpleNamespace(order=1, exposes=[first, second])
-    container = instance(module, installed_state=SimpleNamespace(get=lambda: [source]))
-    result = container.render_generated_config("id")
+    source = SimpleNamespace(order=1)
+    container = instance(module, iter_integrations=lambda name: [(source, "one", first), (source, "two", second)])
+    result = FlareGeneration(container).render("id")
     bookmarks = yaml.safe_load(result["bookmarks.yml"])
     assert bookmarks["categories"] == [{"id": "team", "title": "Team"}]
     assert [entry["link"] for entry in bookmarks["links"]] == ["https://one.test", "https://two.test"]
@@ -45,10 +49,10 @@ def test_flare_rejects_conflicting_category_descriptions():
     module = builtin("120-flare")
     first = ExposeCategory("team", "Team")("One", "a", "", "https://one.test")
     second = ExposeCategory("team", "Different")("Two", "b", "", "https://two.test")
-    source = SimpleNamespace(order=1, exposes=[first, second])
-    container = instance(module, installed_state=SimpleNamespace(get=lambda: [source]))
+    source = SimpleNamespace(order=1)
+    container = instance(module, iter_integrations=lambda name: [(source, "one", first), (source, "two", second)])
     with pytest.raises(ContainerError, match="Conflicting description"):
-        container.render_generated_config("id")
+        FlareGeneration(container).render("id")
 
 
 @pytest.mark.parametrize("second_backup_exists", [False, True])
@@ -66,7 +70,7 @@ def test_flare_first_migration_failure_restores_original_files(tmp_path, monkeyp
         (app / "bookmarks.yml.pre-cntr").write_text("older backup")
     monkeypatch.setattr(container, "get_app_path", lambda *parts: tmp_path.joinpath(*parts))
     with pytest.raises(ContainerError):
-        container.apply_generated_config(SimpleNamespace(changed=True), SimpleNamespace())
+        FlareGeneration(container).apply(SimpleNamespace(changed=True), SimpleNamespace(), ("flare",))
     for name in ("apps.yml", "bookmarks.yml"):
         assert not (app / name).is_symlink()
         assert (app / name).read_text() == "original " + name
@@ -80,10 +84,10 @@ def test_authelia_never_rotates_existing_secret_or_jwks(tmp_path, monkeypatch):
     jwks.write_text("existing jwks")
     def fail(*args, **kwargs):
         raise AssertionError("existing credentials must not be regenerated")
-    monkeypatch.setattr(module.rsa, "newkeys", fail)
+    monkeypatch.setattr(authelia_generation.rsa, "newkeys", fail)
     monkeypatch.setattr(module.utils, "random_string", fail)
-    module.Container._create_secret_file(secret)
-    module.Container._create_pem_file(jwks)
+    AutheliaGeneration._create_secret_file(secret)
+    AutheliaGeneration._create_pem_file(jwks)
     assert secret.read_text() == "existing secret"
     assert jwks.read_text() == "existing jwks"
 
@@ -96,7 +100,7 @@ def test_authelia_ldap_password_is_candidate_data_and_does_not_overwrite_legacy(
     monkeypatch.setattr(container, "get_config", lambda key: "new password")
     monkeypatch.setattr(container, "get_source_path", lambda *parts: tmp_path.joinpath(*parts))
     monkeypatch.setattr(container, "render_template", lambda path: "rendered " + path.name)
-    result = container.render_generated_config("new")
+    result = AutheliaGeneration(container).render("new")
     assert result["authentication_backend_ldap_password"] == "new password"
     assert legacy.read_text() == "old password"
 
@@ -110,7 +114,7 @@ def test_authelia_admin_checks_own_compose_changes_without_acl_forced_restart():
     )
     container = instance(module, compose_runner=runner)
     candidate = SimpleNamespace(changed=True, changed_files=("configuration.acl.yml",))
-    container.apply_generated_config(candidate, SimpleNamespace())
+    AutheliaGeneration(container).apply(candidate, SimpleNamespace(), ("authelia", "authelia-admin"))
     assert ("authelia", True) in actions
     assert ("authelia-admin", False) in actions
 
@@ -146,19 +150,17 @@ def test_portainer_callback_declaration_is_lazy_and_auth_conditioned(monkeypatch
 
 def test_flare_candidate_permissions_preserve_host_owner_and_service_read(tmp_path):
     import os
-    module = builtin("120-flare")
     for name in ("apps.yml", "bookmarks.yml"):
         (tmp_path / name).write_text("links: []\n")
         (tmp_path / name).chmod(0o600)
     container = SimpleNamespace(get_config=lambda key, **kwargs: os.getgid())
-    module.Container.validate_generated_config(container, SimpleNamespace(path=str(tmp_path)), None)
+    FlareGeneration(container).validate(SimpleNamespace(path=str(tmp_path)), None)
     for name in ("apps.yml", "bookmarks.yml"):
         assert (tmp_path / name).stat().st_mode & 0o777 == 0o640
         assert (tmp_path / name).stat().st_uid == os.getuid()
 
 
 def test_lldap_preparation_preserves_active_config_and_persistent_data(tmp_path):
-    module = builtin("101-lldap")
     secrets = tmp_path / "secrets"
     data = tmp_path / "data"
     secrets.mkdir()
@@ -170,9 +172,8 @@ def test_lldap_preparation_preserves_active_config_and_persistent_data(tmp_path)
     container = SimpleNamespace(
         get_app_path=lambda *parts: tmp_path.joinpath(*parts),
         runtime=SimpleNamespace(chmod=lambda *args, **kwargs: None),
-        _create_secret_file=module.Container._create_secret_file,
     )
-    module.Container.prepare_generated_config(container, None)
+    LldapGeneration(container).prepare(None)
     assert (secrets / "jwt_secret").read_text() == "existing-jwt"
     assert (secrets / "ldap_user_pass").read_text() == "old-password"
     assert (data / "lldap_config.toml").read_text() == "old-config"
@@ -180,17 +181,15 @@ def test_lldap_preparation_preserves_active_config_and_persistent_data(tmp_path)
 
 
 def test_lldap_derived_password_is_only_in_candidate():
-    module = builtin("101-lldap")
     container = SimpleNamespace(
         get_source_path=lambda *parts: parts,
         render_template=lambda source: 'database_url = "sqlite:///data/users.db?mode=rwc"',
         get_config=lambda key: "new-password",
     )
-    assert module.Container.render_generated_config(container, "generation")["ldap_user_pass"] == "new-password"
+    assert LldapGeneration(container).render("generation")["ldap_user_pass"] == "new-password"
 
 
-def test_stopped_legacy_nginx_preserves_certificates_before_migration(tmp_path):
-    module = builtin("100-nginx")
+def test_stopped_legacy_nginx_preserves_certificates_before_migration(tmp_path, monkeypatch):
     copied = []
     def preserve():
         copied.append(True)
@@ -200,10 +199,102 @@ def test_stopped_legacy_nginx_preserves_certificates_before_migration(tmp_path):
     container = SimpleNamespace(
         get_app_path=lambda *parts: tmp_path.joinpath(*parts),
         get_config=lambda key, **kwargs: values[key],
-        _preserve_legacy_files=preserve,
-        _acme_ssl_domains=("example.test",),
+        sites={},
         manager=SimpleNamespace(compose_runner=SimpleNamespace(validate_service=lambda *args, **kwargs: None)),
     )
-    module.Container.prepare_generated_config(
-        container, SimpleNamespace(initial_services={"nginx"}, initial_running=set()))
+    owner = NginxGeneration(container)
+    monkeypatch.setattr(owner, "_preserve_legacy_files", preserve)
+    owner.prepare(SimpleNamespace(initial_services={"nginx"}, initial_running=set()))
     assert copied == [True]
+
+
+def test_flare_navigation_orders_producers_and_preserves_link_values():
+    module = builtin("120-flare")
+    early = SimpleNamespace(order=10)
+    late = SimpleNamespace(order=20)
+    public = ExposeCategory("public", "Public")
+    tools = ExposeCategory("tools", "Tools")
+    entries = [
+        (late, "external", tools("External", "web", "", "https://external.test")),
+        (early, "public", public("App", "apps", "Description", "https://app.test")),
+        (early, "disabled", tools("Disabled", "off", "", "")),
+        (early, "direct", tools("Direct", "lan", "", "http://host:1234")),
+        (early, "custom", tools("Custom", "link", "", "custom://literal/{{port}}")),
+    ]
+    container = instance(module, iter_integrations=lambda name: entries)
+    result = FlareGeneration(container).render("id")
+    assert yaml.safe_load(result["apps.yml"])["links"] == [
+        {"name": "App", "icon": "apps", "desc": "Description", "link": "https://app.test"}]
+    links = yaml.safe_load(result["bookmarks.yml"])["links"]
+    assert [link["name"] for link in links] == ["Direct", "Custom", "External"]
+    assert links[1]["link"] == "custom://literal/{{port}}"
+
+
+@pytest.mark.parametrize("owner_type", [NginxGeneration, LldapGeneration, AutheliaGeneration, FlareGeneration])
+def test_generation_owner_empty_apply_scope_does_not_touch_stopped_services(owner_type):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Stopped services must not be touched")
+    runner = SimpleNamespace(
+        apply_service=unexpected, exec_service=unexpected,
+        wait_service_healthy=unexpected, wait_service_running=unexpected,
+        is_generation_current=unexpected,
+    )
+    container = SimpleNamespace(manager=SimpleNamespace(compose_runner=runner), get_app_path=unexpected)
+    owner_type(container).apply(SimpleNamespace(changed=True), SimpleNamespace(), ())
+
+
+@pytest.mark.parametrize("services, expected", [
+    (("authelia",), [("apply", "authelia", True), ("healthy", "authelia")]),
+    (("authelia-admin",), [("apply", "authelia-admin", True)]),
+    (("authelia-admin", "authelia", "authelia-redis"), [
+        ("apply", "authelia-redis", False), ("apply", "authelia", True),
+        ("healthy", "authelia"), ("apply", "authelia-admin", True),
+    ]),
+])
+def test_authelia_apply_scope_preserves_stopped_sibling(services, expected):
+    actions = []
+    runner = SimpleNamespace(
+        apply_service=lambda ctx, name, recreate=False: actions.append(("apply", name, recreate)),
+        wait_service_healthy=lambda ctx, name: actions.append(("healthy", name)),
+    )
+    container = SimpleNamespace(manager=SimpleNamespace(compose_runner=runner))
+    candidate = SimpleNamespace(changed=True, changed_files=("configuration.yml",))
+    AutheliaGeneration(container).apply(candidate, SimpleNamespace(), iter(services))
+    assert actions == expected
+
+
+def test_authelia_redis_only_scope_reconciles_without_starting_siblings(fresh_manager, monkeypatch):
+    actions = []
+    runner = fresh_manager.compose_runner
+    context = SimpleNamespace()
+    monkeypatch.setattr(runner, "apply_service", lambda ctx, name, recreate=False:
+                        actions.append((ctx, name, recreate)))
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Unselected Authelia services must not be checked or started")
+    monkeypatch.setattr(runner, "wait_service_healthy", unexpected)
+    monkeypatch.setattr(runner, "is_generation_current", unexpected)
+    fresh_manager.generated_configs["authelia"].apply(
+        SimpleNamespace(changed=False), context, ("authelia-redis",))
+    assert actions == [(context, "authelia-redis", False)]
+
+
+def test_native_owner_validators_use_candidate_paths_and_password_file():
+    calls = []
+    runner = SimpleNamespace(validate_service=lambda *args, **kwargs: calls.append((args, kwargs)))
+    container = SimpleNamespace(manager=SimpleNamespace(compose_runner=runner))
+    context = SimpleNamespace()
+    candidate = SimpleNamespace(generation_id="candidate")
+    NginxGeneration(container).validate(candidate, context)
+    AutheliaGeneration(container).validate(candidate, context)
+    assert calls[0] == ((context, "nginx", (
+        "nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/candidate/nginx.conf", "-t")), {})
+    assert calls[1][0][0:2] == (context, "authelia")
+    assert calls[1][0][2] == [
+        "authelia", "config", "validate", "--config=/generated/candidate/configuration.yml",
+        "--config=/generated/candidate/configuration.acl.yml",
+        "--config=/generated/candidate/configuration.2fa.yml",
+        "--config=/generated/candidate/configuration.oidc.yml",
+    ]
+    assert calls[1][1] == {"environment": {
+        "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE":
+        "/generated/candidate/authentication_backend_ldap_password"}}

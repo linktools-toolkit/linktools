@@ -343,25 +343,15 @@ class ContainerManager:
         return MappingProxyType(result)
 
     @cached_property
-    def config_source_snapshot(self) -> "Mapping":
-        """Validate source names and retain only installed configuration sources."""
-        from collections.abc import Iterable
+    def generated_configs(self) -> "Mapping":
+        """Command-local implementations for the bundled configuration owners."""
         from types import MappingProxyType
+        from .generation import NginxGeneration, LldapGeneration, AutheliaGeneration, FlareGeneration
 
-        result = {}
-        installed = self.integration_snapshot
-        for name in installed:
-            sources = self.containers[name].config_sources
-            if isinstance(sources, (str, bytes)) or not isinstance(sources, Iterable):
-                raise ContainerError("config_sources in %s must be an iterable of names" % name)
-            selected = []
-            for source in sources:
-                if not isinstance(source, str) or source not in self.containers:
-                    raise ContainerError("Unknown config source %r in %s" % (source, name))
-                if source in installed and source not in selected:
-                    selected.append(source)
-            result[name] = tuple(selected)
-        return MappingProxyType(result)
+        owners = {"nginx": NginxGeneration, "lldap": LldapGeneration,
+                  "authelia": AutheliaGeneration, "flare": FlareGeneration}
+        return MappingProxyType({name: owners[name](self.containers[name])
+                                 for name in self.integration_snapshot if name in owners})
 
     def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, str, Any]]":
         """Yield read-only declaration inputs from the command's installed snapshot."""
@@ -421,6 +411,4 @@ class ContainerManager:
                 self.logger.debug(f"Generate Dockerfile for {container.name}")
             if container.docker_compose and self.debug:  # 加载每个容器的docker-compose.yml
                 self.logger.debug(f"Generate docker-compose.yml for {container.name}")
-            if container.exposes and self.debug:
-                self.logger.debug(f"Load exposes for {container.name}")
         return containers

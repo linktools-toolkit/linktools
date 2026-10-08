@@ -266,7 +266,6 @@ sequenceDiagram
             ContainerManager->>Container: docker_file（渲染 Dockerfile 模板）
             ContainerManager->>Container: docker_compose（渲染 docker-compose.yml 模板）
             ContainerManager->>Container: hooks.call(AFTER_COMPOSE_RENDER, compose)
-            ContainerManager->>Container: exposes（加载对外服务链接）
         end
     end
 

@@ -5,6 +5,7 @@
 import pytest
 
 from linktools.cntr import ContainerError, NginxSite
+from linktools.cntr.generation import NginxGeneration
 from linktools.cntr.container import ContainerTemplateError
 
 
@@ -24,7 +25,7 @@ def test_header_macros_merge_case_insensitively_and_preserve_native_values(fresh
     source.write_text('''{% from "nginx/headers.j2" import proxy_headers, grpc_headers with context %}
 {{ proxy_headers({"host": "$native_host", "Origin": "https://$cntr_host/a\\\\b"}) }}
 {{ grpc_headers({"Forwarded": "for=$cntr_client_ip"}) }}''')
-    rendered = nginx.render_nginx_template(nginx, source, make_site())
+    rendered = NginxGeneration(nginx).render_template(nginx, source, make_site())
     assert rendered.count('proxy_set_header "host" ') == 1
     assert 'proxy_set_header "Host" ' not in rendered
     assert 'proxy_set_header "host" "$native_host";' in rendered
@@ -61,7 +62,7 @@ def test_header_names_are_quoted_and_auth_data_is_not_reinterpreted(fresh_manage
     site = make_site(auth_headers={"#Odd": "{{not_jinja}} $value"})
     source = tmp_path / "business.conf"
     source.write_text('{% from "nginx/headers.j2" import proxy_headers with context %}{{ proxy_headers() }}')
-    assert 'proxy_set_header "#Odd" ' in nginx.render_nginx_template(nginx, source, site)
+    assert 'proxy_set_header "#Odd" ' in NginxGeneration(nginx).render_template(nginx, source, site)
     maps = nginx.security_maps(site)
     assert "{{not_jinja}} ${cntr_dollar}value" in maps
 
@@ -76,7 +77,7 @@ def test_namespaced_single_pass_includes_comments_raw_and_literal_values(fresh_m
 {% include "local/child.conf" %}
 {% from "nginx/headers.j2" import proxy_headers with context %}{{ proxy_headers() }}
 {% raw %}{{port}}{% endraw %}''')
-    rendered = nginx.render_nginx_template(nginx, source, make_site(vars={
+    rendered = NginxGeneration(nginx).render_template(nginx, source, make_site(vars={
         "comment": "evaluated", "literal": "{{unexpanded}} $native",
     }))
     assert "# evaluated" in rendered
@@ -93,7 +94,7 @@ def test_template_errors_identify_owner_and_entrypoint(fresh_manager, tmp_path, 
     source = tmp_path / "business.conf"
     source.write_text(content)
     with pytest.raises(ContainerTemplateError) as error:
-        nginx.render_nginx_template(nginx, source, make_site())
+        NginxGeneration(nginx).render_template(nginx, source, make_site())
     assert "nginx/web" in str(error.value)
     assert str(source) in str(error.value)
 
@@ -109,8 +110,9 @@ def test_business_file_is_rendered_once_across_generation_markers(fresh_manager,
     site.enabled = True
     site.resolve = lambda: site
     nginx.__dict__["sites"] = {("nginx", "web"): site}
-    first = nginx.render_generated_config("first")
-    second = nginx.render_generated_config("second")
+    owner = NginxGeneration(nginx)
+    first = owner.render("first")
+    second = owner.render("second")
     assert calls == ["render"]
     assert first["sites/s_test/business.conf"] == second["sites/s_test/business.conf"]
     assert 'return 200 "first"' in first["nginx.conf"]

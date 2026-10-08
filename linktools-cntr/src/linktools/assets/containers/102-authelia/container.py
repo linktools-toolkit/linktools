@@ -2,25 +2,21 @@
 # -*- coding: utf-8 -*-
 """Authelia container definition."""
 
-import os
 from typing import TYPE_CHECKING
 from types import MappingProxyType
 
-import rsa
 import yaml
 
 from linktools import utils
-from linktools.cli import CommandError, subcommand
+from linktools.cli import subcommand
 from linktools.cntr import BaseContainer, NginxSite, ContainerError
 from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
     from typing import Any, Mapping
-    from pathlib import Path
-    from linktools.cntr.artifacts import GeneratedCandidate
     from collections.abc import Iterable
-    from linktools.cntr import EventContext, ExposeLink
+    from linktools.cntr import EventContext
 
 
 class Container(BaseContainer):
@@ -28,10 +24,6 @@ class Container(BaseContainer):
     @property
     def dependencies(self) -> "Iterable[str]":
         return ["nginx", "lldap"]
-
-    @property
-    def config_sources(self) -> "Iterable[str]":
-        return ("nginx", "lldap")
 
     @cached_property
     def configs(self) -> "dict[str, Any]":
@@ -60,8 +52,11 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def integrations(self) -> "dict[str, dict[str, NginxSite]]":
+    def integrations(self) -> "dict[str, dict[str, Any]]":
         return {
+            "flare": {
+                "web": self.expose_public("Authelia", "account", "单点登录", self.load_nginx_url("web")),
+            },
             "nginx": {
                 "web": NginxSite(
                     server_name=self.get_config_later("AUTHELIA_DOMAIN"),
@@ -72,12 +67,6 @@ class Container(BaseContainer):
                 ),
             },
         }
-
-    @cached_property
-    def exposes(self) -> "Iterable[ExposeLink]":
-        return [
-            self.expose_public("Authelia", "account", "单点登录", self.load_nginx_url("web")),
-        ]
 
     @cached_property
     def _oidc_identity(self) -> "Mapping[str, Any]":
@@ -146,48 +135,6 @@ class Container(BaseContainer):
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
 
-    @property
-    def generated_config_path(self) -> "Path":
-        return self.get_app_path("generated")
-
-    def prepare_generated_config(self, context: "EventContext") -> None:
-        secret_path = self.get_app_path("secrets")
-        secret_path.mkdir(parents=True, exist_ok=True)
-        self.get_app_path("config").mkdir(parents=True, exist_ok=True)
-        self.runtime.chmod(secret_path, 0o700, recursive=True)
-        for name in ("jwt_secret", "session_secret", "storage_encryption_key", "oidc_hmac_secret"):
-            self._create_secret_file(secret_path / name)
-        self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
-
-    def render_generated_config(self, generation_id: str) -> "dict[str, str]":
-        result = {
-            name: self.render_template(self.get_source_path("templates", name))
-            for name in ("configuration.yml", "configuration.acl.yml",
-                         "configuration.2fa.yml", "configuration.oidc.yml")
-        }
-        result["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
-        return result
-
-    def validate_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
-        root = "/generated/" + candidate.generation_id
-        command = ["authelia", "config", "validate"]
-        command.extend("--config=" + root + "/" + name for name in (
-            "configuration.yml", "configuration.acl.yml",
-            "configuration.2fa.yml", "configuration.oidc.yml"))
-        self.manager.compose_runner.validate_service(
-            context, "authelia", command,
-            environment={"AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE":
-                         root + "/authentication_backend_ldap_password"},
-        )
-
-    def apply_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
-        runner = self.manager.compose_runner
-        recreate = candidate.changed or not runner.is_generation_current(context, "authelia", candidate)
-        runner.apply_service(context, "authelia", recreate=recreate)
-        runner.wait_service_healthy(context, "authelia")
-        base_changed = "configuration.yml" in candidate.changed_files
-        runner.apply_service(context, "authelia-admin", recreate=base_changed)
-
     @subcommand("show-notification", help="show notification")
     def on_show_notification(self) -> None:
         path = self.get_app_path("config", "notification.txt")
@@ -207,23 +154,3 @@ class Container(BaseContainer):
         self.logger.info(
             yaml.dump(self.acl_rules, sort_keys=False)
         )
-
-    @classmethod
-    def _create_secret_file(cls, path, length=48):
-        if os.path.exists(path):
-            if not os.path.isfile(path):
-                raise CommandError(f"Path {path} exists and is not a file.")
-            return
-
-        utils.write_file(path, utils.random_string(length))
-
-    @classmethod
-    def _create_pem_file(cls, path):
-        if os.path.exists(path):
-            if not os.path.isfile(path):
-                raise CommandError(f"Path {path} exists and is not a file.")
-            return
-
-        public_key, private_key = rsa.newkeys(nbits=2048, exponent=65537)
-        private_pem = private_key.save_pkcs1(format="PEM")
-        utils.write_file(path, private_pem)

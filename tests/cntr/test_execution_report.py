@@ -23,7 +23,8 @@ def _record(manager, monkeypatch, build=False):
         return ImagePlan(build=targets if build else (), pull=(), targets=targets)
 
     monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
-    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {}})
+    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
+        name: {} for container in context.containers for name in container.services}})
     monkeypatch.setattr(manager.image_preparer, "plan", fake_plan)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
@@ -130,7 +131,8 @@ def test_build_command_proxy_secrets_are_redacted(fresh_manager, monkeypatch):
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
     monkeypatch.setenv("http_proxy", "http://user:super-secret@proxy:8080")
-    monkeypatch.setattr(fresh_manager.compose_runner, "final_model", lambda context: {"services": {}})
+    monkeypatch.setattr(fresh_manager.compose_runner, "final_model", lambda context: {"services": {
+        name: {} for container in context.containers for name in container.services}})
     monkeypatch.setattr(
         fresh_manager.image_preparer,
         "plan",

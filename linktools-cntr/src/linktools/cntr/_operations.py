@@ -99,72 +99,94 @@ class ComposeOperations:
         )
 
     def start_selection(self, selection: ComposeSelection) -> ComposeSelection:
-        """Expand a partial start to installed dependency and integration consumers."""
+        """Resolve runtime providers without starting unrelated sibling services."""
         installed = {container.name: container for container in selection.project_containers}
-        owners = {
-            service: container
-            for container in selection.project_containers
-            for service in container.services
-        }
+        owners = {service: container for container in selection.project_containers for service in container.services}
         required = set(selection.target_containers)
+        services = set(selection.services) if selection.services else {
+            service for container in required for service in container.services}
 
         while True:
-            before = set(required)
+            before = (set(required), set(services))
             for container in tuple(required):
                 for dependency in container.dependencies:
                     if dependency not in installed:
                         raise ContainerError(
                             f"Required dependency {dependency!r} for {container.name} is not installed")
-                    required.add(installed[dependency])
-
-                for service in container.services.values():
-                    depends_on = service.get("depends_on") or ()
-                    for dependency in depends_on:
-                        owner = owners.get(dependency)
-                        if owner is None:
-                            raise ContainerError(
-                                f"Compose dependency {dependency!r} for {container.name} is not installed")
-                        required.add(owner)
-
-                for consumer_name, declarations in self.manager.integration_snapshot[container.name].items():
-                    consumer = installed.get(consumer_name)
-                    if consumer is None:
-                        continue
-                    if consumer_name == "nginx":
-                        if not any(str(site.server_name) for site in declarations.values()):
-                            continue
-                    required.add(consumer)
-
-            nginx = installed.get("nginx")
-            if nginx in required:
+                    owner = installed[dependency]
+                    required.add(owner)
+                    services.update(owner.services)
+                declarations = self.manager.integration_snapshot[container.name].get("nginx", {})
+                nginx = installed.get("nginx")
+                if nginx is not None and any(str(site.server_name) for site in declarations.values()):
+                    required.add(nginx)
+                    services.update(nginx.services)
+            for name in tuple(services):
+                owner = owners[name]
+                for dependency in owner.services[name].get("depends_on") or ():
+                    provider = owners.get(dependency)
+                    if provider is None:
+                        raise ContainerError(f"Compose dependency {dependency!r} for {owner.name} is not installed")
+                    required.add(provider)
+                    services.add(dependency)
+            if installed.get("nginx") in required:
                 from ._nginx import NginxSite
                 for producer, local_id, site in self.manager.iter_integrations("nginx"):
                     if not isinstance(site, NginxSite):
-                        raise ContainerError(
-                            f"Invalid nginx integration {producer.name}/{local_id}")
+                        raise ContainerError(f"Invalid nginx integration {producer.name}/{local_id}")
                     if not str(site.server_name):
                         continue
                     for capability, provider in (("auth", "authelia"), ("waf", "safeline")):
                         configured = getattr(site, capability)
                         if configured is None:
-                            configured = self.manager.env_config.get(
-                                "NGINX_" + capability.upper() + "_ENABLE", type=bool)
+                            configured = self.manager.env_config.get("NGINX_" + capability.upper() + "_ENABLE", type=bool)
                         if configured:
                             if provider not in installed:
-                                raise ContainerError(
-                                    f"Nginx site {producer.name}/{local_id} requires {provider}")
+                                raise ContainerError(f"Nginx site {producer.name}/{local_id} requires {provider}")
                             required.add(installed[provider])
-            if required == before:
+                            services.update(("authelia",) if provider == "authelia" else installed[provider].services)
+            if before == (required, services):
                 break
-
         ordered = tuple(self.manager.resolver.resolve_dependencies(required))
-        services = tuple(
-            name for container in ordered for name in container.services
-        )
-        if not services:
+        ordered_services = []
+        visiting = set()
+
+        def visit(name):
+            if name in ordered_services:
+                return
+            if name in visiting:
+                raise ContainerError("Compose dependency cycle at " + name)
+            visiting.add(name)
+            for dependency in owners[name].dependencies:
+                for service in installed[dependency].services:
+                    visit(service)
+            for dependency in owners[name].services[name].get("depends_on") or ():
+                visit(dependency)
+            visiting.remove(name)
+            ordered_services.append(name)
+
+        for container in ordered:
+            for name in container.services:
+                if name in services:
+                    visit(name)
+        if not ordered_services:
             names = ", ".join(c.name for c in selection.target_containers)
             raise ContainerError(f"No runnable service for {names}")
-        return ComposeSelection(selection.project_containers, ordered, services, selection.full)
+        return ComposeSelection(selection.project_containers, ordered, tuple(ordered_services), selection.full)
+
+    def _reconcile_selection(self, explicit, context, changed_generations=()) -> ComposeSelection:
+        services = set(explicit.services) if not explicit.full else {
+            name for container in explicit.target_containers for name in container.services}
+        targets = set(explicit.target_containers)
+        for container in explicit.project_containers:
+            changed = container.name in changed_generations
+            pending = {name for name in container.services if name in context.initial_running_services and
+                       (changed or name in context.changed_compose_services)}
+            if pending:
+                services.update(pending)
+                targets.add(container)
+        return self.start_selection(ComposeSelection(explicit.project_containers, tuple(targets),
+                                                     tuple(services), explicit.full))
 
     def _make_context(self, commands, selection: ComposeSelection) -> "EventContext":
         context = EventContext()
@@ -175,16 +197,8 @@ class ComposeOperations:
         return context
 
     def sync_selection(self, selection: ComposeSelection) -> "tuple[BaseContainer, ...]":
-        """Configuration edges expand synchronization, never the running set."""
-        names = {container.name for container in selection.target_containers}
-        sources = self.manager.config_source_snapshot
-        while True:
-            expanded = names | {name for name, values in sources.items() if names.intersection(values)}
-            if expanded == names:
-                break
-            names = expanded
-        return tuple(self.manager.resolver.resolve_dependencies(
-            c for c in selection.project_containers if c.name in names))
+        """Reconcile the full installed configuration without widening startup."""
+        return selection.project_containers
 
     def up(self, names: "Sequence[str] | None" = None, pull: bool = False,
            report: bool = False) -> None:
@@ -197,7 +211,7 @@ class ComposeOperations:
             self._start(names, pull, report, restart=True)
 
     def _start(self, names, pull: bool, report: bool, restart: bool) -> None:
-        from .artifacts import GeneratedCandidate, collect_candidates
+        from .artifacts import AppliedServiceModels, GeneratedCandidate, collect_candidates
         manager = self.manager
         explicit = self.select(names, for_start=True)
         selection = self.start_selection(explicit)
@@ -207,6 +221,7 @@ class ComposeOperations:
         runner = manager.compose_runner
         import os
         context.saved_compose = {}
+        context.applied_compose = {}
         context.compose_files = {}
         context.compose_owners = {}
         context.changed_compose_services = set()
@@ -222,33 +237,33 @@ class ComposeOperations:
                     context.saved_compose[path] = previous
             except FileNotFoundError:
                 previous = None
-            if previous != content:
-                import yaml
-                old_services = (yaml.safe_load(previous) or {}).get("services", {}) if previous else {}
-                new_services = (yaml.safe_load(content) or {}).get("services", {})
-                context.changed_compose_services.update(name for name, value in new_services.items()
-                                                        if old_services.get(name) != value)
         actual = manager.docker_inspector.get_project_state(selection.project_containers)
         running = set(actual.running_container_names)
         context.initial_running = frozenset(running)
+        context.initial_running_services = frozenset(
+            service.service for service in actual.services if service.state in ("running", "restarting"))
         context.initial_services = frozenset(service.service for service in getattr(actual, "services", ()))
         if not any(service.service == "nginx" and service.state == "running" for service in actual.services):
             running.discard("nginx")
-        # A running synchronized nginx is also an applying consumer. Its
-        # optional providers must join the same closure before image planning.
-        nginx = next((c for c in sync if c.name == "nginx"), None)
-        if nginx is not None and "nginx" in running and nginx not in selection.target_containers:
-            selection = self.start_selection(ComposeSelection(selection.project_containers,
-                selection.target_containers + (nginx,), selection.services, selection.full))
-            sync = self.sync_selection(selection)
-            context.target_containers = list(selection.target_containers)
-            context.config_containers = list(sync)
-        required = {c.name for c in selection.target_containers}
+        # Image preparation may include running aggregate owners that later
+        # prove unchanged; only the final candidate closure is applied.
+        generations = manager.generated_configs
+        context.changed_compose_services = set(context.initial_running_services)
+        selection = self._reconcile_selection(explicit, context, generations)
+        context.target_containers = list(selection.target_containers)
 
-        # Startup callbacks and all validation precede any explicit restart stop.
+        # Hooks may prepare env_file inputs; capture the authoritative resolved
+        # candidate only after startup preparation, and before any target stops.
         with manager.lifecycle.notify_start(context):
             model = runner.final_model(context)
-            image_services = tuple(name for c in sync for name in c.services)
+            context.service_models = AppliedServiceModels(manager, model)
+            context.changed_compose_services = set(context.service_models.changed_services)
+            selection = self._reconcile_selection(explicit, context, generations)
+            required_services = set(selection.services)
+            image_services = tuple(name for c in sync for name in c.services
+                                   if name in required_services or c.name in generations or
+                                   (name in context.initial_running_services and
+                                    name in context.changed_compose_services))
             image_plan = manager.image_preparer.plan(model, image_services, force_pull=pull)
             context.changed_image_services = set(image_plan.pull) | set(image_plan.build)
             if image_plan.pull:
@@ -260,16 +275,21 @@ class ComposeOperations:
                     runner.build(context, runner.options_for_build(image_plan.build, pull=pull))
             candidates = {}
             for container in sync:
-                if container.generated_config_path is not None:
+                owner = generations.get(container.name)
+                if owner is not None:
                     with record_phase(context, "prepare-config", container=container.name, logger=manager.logger):
-                        container.prepare_generated_config(context)
-                        candidates[container.name] = GeneratedCandidate(container)
+                        owner.prepare(context)
+                        candidates[container.name] = GeneratedCandidate(container, owner.render)
             context.generated_candidates = candidates
             for container in sync:
                 candidate = candidates.get(container.name)
                 if candidate is not None:
                     with record_phase(context, "validate-config", container=container.name, logger=manager.logger):
-                        container.validate_generated_config(candidate, context)
+                        generations[container.name].validate(candidate, context)
+
+            selection = self._reconcile_selection(explicit, context,
+                {name for name, candidate in candidates.items() if candidate.changed})
+            required_services = set(selection.services)
 
             if restart:
                 stop_context = self._make_context(context.commands, explicit)
@@ -280,113 +300,121 @@ class ComposeOperations:
                 running.difference_update(c.name for c in explicit.target_containers)
 
             nginx = next((c for c in sync if c.name == "nginx"), None)
-            if nginx is not None and nginx.name in required and nginx.name not in running:
+            if nginx is not None and "nginx" in required_services and nginx.name not in running:
                 with record_phase(context, "bootstrap", container="nginx", logger=manager.logger):
-                    nginx.bootstrap_generated_config(context)
+                    generations["nginx"].bootstrap(context)
                     running.add("nginx")
                     if candidates.get("nginx") and not candidates["nginx"].previous_id:
                         candidates["nginx"].previous_id = context.nginx_bootstrap_id
 
-            # The resolver owns strong dependency order. nginx full config is
-            # deferred until its optional auth/WAF providers are ready.
-            deferred = []
-            for container in sync:
-                if container.name == "nginx":
-                    continue
-                if (container.name not in required and container.name not in ("authelia", "safeline")) or container.name == "flare":
-                    deferred.append(container)
-                    continue
+            owners = {service: container for container in sync for service in container.services}
+            # nginx's bootstrap satisfies provider readiness; publish its full
+            # generation only after auth/WAF services, then update navigation.
+            services = tuple(name for name in selection.services if owners[name].name not in ("nginx", "flare")) + tuple(
+                name for group in ("nginx", "flare") for name in selection.services if owners[name].name == group)
+            context.applied_generation_services = {}
+            for service in services:
+                container = owners[service]
                 candidate = candidates.get(container.name)
-                should_run = container.name in required
-                should_apply = should_run or container.name in running
                 if candidate is not None:
-                    if should_run:
-                        prerequisites = [name for name in container.services
-                                         if name != container.name and name != "authelia-admin"]
-                        if prerequisites:
-                            runner.apply_services(context, prerequisites)
                     with record_phase(context, "publish-config", container=container.name, logger=manager.logger):
-                        self._publish_candidate(container, candidate, context, should_apply)
-                elif should_run or container.name in running:
+                        self._publish_candidate(container, candidate, context, (service,))
+                else:
                     with record_phase(context, "up", container=container.name, logger=manager.logger):
-                        self._apply_services_with_rollback(container, context, container.name in running)
-                if should_run:
-                    state_context = self._make_context(context.commands, ComposeSelection(
-                        selection.project_containers, (container,), tuple(container.services), False))
-                    manager.running_state.mark_started(state_context)
-                if container.name in ("authelia", "safeline") and should_apply:
-                    service = "authelia" if container.name == "authelia" else "safeline-mgt"
-                    if service in container.services:
-                        runner.wait_service_healthy(context, service)
-
-            if nginx is not None:
-                candidate = candidates.get("nginx")
-                if candidate is not None:
-                    with record_phase(context, "publish-config", container="nginx", logger=manager.logger):
-                        self._publish_candidate(nginx, candidate, context, "nginx" in running)
-                if nginx.name in required:
-                    state_context = self._make_context(context.commands, ComposeSelection(
-                        selection.project_containers, (nginx,), tuple(nginx.services), False))
-                    manager.running_state.mark_started(state_context)
-            for container in deferred:
-                candidate = candidates.get(container.name)
-                should_apply = container.name in required or container.name in running
-                if candidate is not None:
-                    with record_phase(context, "publish-config", container=container.name, logger=manager.logger):
-                        self._publish_candidate(container, candidate, context, should_apply)
-                elif should_apply:
-                    self._apply_services_with_rollback(container, context, container.name in running)
-                if container.name in required:
-                    state_context = self._make_context(context.commands, ComposeSelection(
-                        selection.project_containers, (container,), tuple(container.services), False))
-                    manager.running_state.mark_started(state_context)
+                        self._apply_services_with_rollback(container, context, (service,))
+                if service == "safeline-mgt":
+                    runner.wait_service_healthy(context, service)
+                state_context = self._make_context(context.commands, ComposeSelection(
+                    selection.project_containers, (container,), (service,), False))
+                manager.running_state.mark_started(state_context)
+            for container in sync:
+                if container.name in candidates and not any(name in required_services for name in container.services):
+                    self._publish_candidate(container, candidates[container.name], context, ())
         with manager.lifecycle.notify_remove(context):
             pass
         if report:
             render_report(manager.logger, get_records(context))
 
-    def _record_applied_compose(self, container, context) -> None:
+    def _record_applied_compose(self, container, context, services) -> None:
         import os
+        import yaml
         from .artifacts import atomic_write_text_if_changed, sha256_of
+        if hasattr(context, "service_models"):
+            context.service_models.record(services)
         for path, content in getattr(context, "compose_files", {}).items():
             if context.compose_owners[path] != container.name:
                 continue
+            # A synchronized owner may contain stopped sibling services. Keep
+            # their last-applied models until those services are actually used.
+            applied_content = getattr(context, "applied_compose", {}).get(path, context.saved_compose.get(path, ""))
+            previous = yaml.safe_load(applied_content) or {}
+            current = yaml.safe_load(content) or {}
+            applied_services = dict(previous.get("services", {}))
+            for service in services:
+                if service in current.get("services", {}):
+                    applied_services[service] = current["services"][service]
+            current["services"] = applied_services
+            content = yaml.safe_dump(current, sort_keys=False)
             applied = os.path.join(str(self.manager.data_path), "compose", "applied", container.name + ".yml")
             os.makedirs(os.path.dirname(applied), exist_ok=True)
             atomic_write_text_if_changed(applied, content)
+            if hasattr(context, "applied_compose"):
+                context.applied_compose[path] = content
             self.manager.artifact_index.record({os.path.relpath(applied, str(self.manager.data_path)): {
                 "kind": "compose-applied", "container": container.name, "sha256": sha256_of(content)}})
 
-    def _apply_services_with_rollback(self, container, context, was_running: bool) -> None:
+    def _restore_applied_compose(self, container, context, previous) -> None:
+        import os
+        from .artifacts import atomic_write_text_if_changed, sha256_of
+        applied = getattr(context, "applied_compose", {})
+        for path, content in previous.items():
+            if path not in applied:
+                continue
+            destination = os.path.join(str(self.manager.data_path), "compose", "applied", container.name + ".yml")
+            atomic_write_text_if_changed(destination, content)
+            applied[path] = content
+            self.manager.artifact_index.record({os.path.relpath(destination, str(self.manager.data_path)): {
+                "kind": "compose-applied", "container": container.name, "sha256": sha256_of(content)}})
+
+    def _apply_services_with_rollback(self, container, context, services) -> None:
         from .artifacts import atomic_write_text_if_changed
         runner = self.manager.compose_runner
         try:
-            runner.apply_services(context, tuple(container.services))
-            self._record_applied_compose(container, context)
+            runner.apply_services(context, services)
+            self._record_applied_compose(container, context, services)
         except Exception as error:
             previous = {path: content for path, content in context.saved_compose.items()
                         if context.compose_owners[path] == container.name}
-            if previous and was_running:
+            running = tuple(service for service in services if service in context.initial_running_services)
+            saved_models = getattr(context, "service_models", None)
+            if running and (previous or (saved_models and any(name in saved_models.previous for name in running))):
                 try:
                     files = dict(context.compose_files)
                     files.update(previous)
                     for path, content in previous.items():
                         atomic_write_text_if_changed(path, content)
-                    runner.apply_saved_services(context, tuple(container.services), files)
+                    for service in running:
+                        model = context.service_models.previous.get(service) if hasattr(context, "service_models") else None
+                        runner.apply_saved_services(context, (service,), {"previous.yml": model} if model else files)
+                    if hasattr(context, "service_models"):
+                        context.service_models.restore(running)
+                    self._restore_applied_compose(container, context, previous)
                 except Exception as rollback_error:
                     raise ContainerError("{} apply failed: {}; Compose rollback failed: {}".format(
                         container.name, error, rollback_error)) from error
             raise
 
-    def _publish_candidate(self, container, candidate, context, apply: bool) -> None:
+    def _publish_candidate(self, container, candidate, context, services) -> None:
         from copy import copy
         context.generated_candidates[container.name] = candidate
         candidate.publish()
-        if not apply:
+        if not services:
             return
         try:
-            container.apply_generated_config(candidate, context)
-            self._record_applied_compose(container, context)
+            self.manager.generated_configs[container.name].apply(candidate, context, services)
+            self._record_applied_compose(container, context, services)
+            applied = getattr(context, "applied_generation_services", {})
+            applied.setdefault(container.name, []).extend(services)
         except Exception as error:
             try:
                 candidate.restore()
@@ -402,16 +430,27 @@ class ComposeOperations:
                                if context.compose_owners[path] == container.name}
                 try:
                     context.generated_candidates[container.name] = previous
+                    if hasattr(context, "service_models"):
+                        context.rollback_service_models = context.service_models.previous
                     if old_compose:
                         context.rollback_compose_files = dict(context.compose_files)
                         context.rollback_compose_files.update(old_compose)
-                    container.apply_generated_config(previous, context)
+                    affected = tuple(getattr(context, "applied_generation_services", {}).get(container.name, ())) + tuple(services)
+                    restore_services = tuple(dict.fromkeys(service for service in affected
+                                                          if service in context.initial_running_services))
+                    if restore_services:
+                        self.manager.generated_configs[container.name].apply(previous, context, restore_services)
+                        if hasattr(context, "service_models"):
+                            context.service_models.restore(restore_services)
+                        self._restore_applied_compose(container, context, old_compose)
                 except Exception as rollback_error:
                     raise ContainerError("{} apply failed: {}; rollback failed: {}".format(
                         container.name, error, rollback_error)) from error
                 finally:
                     if hasattr(context, "rollback_compose_files"):
                         del context.rollback_compose_files
+                    if hasattr(context, "rollback_service_models"):
+                        del context.rollback_service_models
                     from .artifacts import atomic_write_text_if_changed
                     for path, content in old_compose.items():
                         atomic_write_text_if_changed(path, content)

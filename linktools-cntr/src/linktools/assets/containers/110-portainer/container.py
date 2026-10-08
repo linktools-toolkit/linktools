@@ -10,8 +10,6 @@ from linktools.cntr import BaseContainer, NginxSite
 
 if TYPE_CHECKING:
     from typing import Any
-    from collections.abc import Iterable
-    from linktools.cntr import ExposeLink
 
 
 class Container(BaseContainer):
@@ -26,8 +24,16 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def integrations(self) -> "dict[str, dict[str, NginxSite]]":
+    def integrations(self) -> "dict[str, dict[str, Any]]":
         return {
+            "flare": {
+                "web": self.expose_public("Portainer", "docker", "Docker管理工具",
+                                         self.load_nginx_url("web")),
+                "direct": self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
+                    "PORTAINER_PORT",
+                    https=False
+                )),
+            },
             "nginx": {
                 "web": NginxSite(
                     server_name=self.get_config_later("PORTAINER_DOMAIN"),
@@ -40,14 +46,3 @@ class Container(BaseContainer):
                 ),
             },
         }
-
-    @cached_property
-    def exposes(self) -> "Iterable[ExposeLink]":
-        return [
-            self.expose_public("Portainer", "docker", "Docker管理工具",
-                               self.load_nginx_url("web")),
-            self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
-                "PORTAINER_PORT",
-                https=False
-            )),
-        ]

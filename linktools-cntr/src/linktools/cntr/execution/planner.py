@@ -79,14 +79,14 @@ class ExecutionPlanner:
         if action == "restart":
             commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
         if action in ("up", "restart"):
-            ordered = list(start_selection.target_containers)
-            ordered = ([c for c in ordered if c.name not in ("nginx", "flare")] +
-                       [c for c in ordered if c.name == "nginx"] +
-                       [c for c in ordered if c.name == "flare"])
-            for container in ordered:
-                for service in container.services:
-                    commands.append(self._planned_command(
-                        "up", [*file_args, *manager.compose_runner.apply_service_args(service, remove_orphans=selection.full)]))
+            owners = {name: container.name for container in start_selection.project_containers
+                      for name in container.services}
+            services_to_start = [name for name in start_selection.services if owners[name] not in ("nginx", "flare")]
+            services_to_start.extend(name for group in ("nginx", "flare")
+                                     for name in start_selection.services if owners[name] == group)
+            for service in services_to_start:
+                commands.append(self._planned_command(
+                    "up", [*file_args, *manager.compose_runner.apply_service_args(service, remove_orphans=selection.full)]))
         elif action == "down":
             commands.append(self._planned_command("down", [*file_args, "down", *services]))
 
@@ -110,9 +110,13 @@ class ExecutionPlanner:
 
         warnings = []
         if action in ("up", "restart"):
+            warnings.append("Configuration is reconciled across the complete installed project. "
+                            "Other running services with pending configuration changes may also be updated; "
+                            "unrelated stopped services stay stopped. Runtime inspection and native "
+                            "candidate validation determine those additional updates during execution.")
             sync = manager.compose_operations.sync_selection(start_selection)
             for container in sync:
-                if container.generated_config_path is not None:
+                if container.name in manager.generated_configs:
                     warnings.append("{}: generated candidate native validation is pending execution; "
                                     "no hooks, secrets or generated files were prepared".format(container.name))
             if any(container.name == "nginx" for container in sync):

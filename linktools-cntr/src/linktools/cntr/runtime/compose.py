@@ -244,6 +244,10 @@ class ComposeRunner:
         return args
 
     def apply_service(self, context: "EventContext", service: str, recreate: bool = False) -> int:
+        previous = getattr(context, "rollback_service_models", {}).get(service)
+        if previous is not None:
+            self.apply_saved_services(context, (service,), {"previous.yml": previous})
+            return 0
         saved = getattr(context, "rollback_compose_files", None)
         if saved is not None:
             self.apply_saved_services(context, (service,), saved)

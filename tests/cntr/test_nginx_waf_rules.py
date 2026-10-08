@@ -5,6 +5,7 @@
 import pytest
 
 from linktools.cntr import ContainerError, NginxSite
+from linktools.cntr.generation import NginxGeneration
 
 
 def _render_site(nginx, waf, patterns):
@@ -14,7 +15,7 @@ def _render_site(nginx, waf, patterns):
     )
     site.file_id = "site_123"
     site.var_name = "123"
-    return nginx.render_nginx_template(
+    return NginxGeneration(nginx).render_template(
         nginx, nginx.get_source_path("templates", "server.conf"), site,
     )
 

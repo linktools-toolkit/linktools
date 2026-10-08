@@ -14,12 +14,13 @@ def _neutralize_runtime(manager, monkeypatch):
     from linktools.cntr.runtime.inspect import ProjectRuntimeState
     monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
                         ProjectRuntimeState(manager.project_name, (), "docker"))
-    monkeypatch.setattr(manager.compose_operations, "sync_selection", lambda selection: selection.target_containers)
+    monkeypatch.setattr(manager, "generated_configs", {})
     monkeypatch.setattr(manager.compose_operations, "start_selection", lambda selection: selection)
     monkeypatch.setattr(manager.compose_runner, "apply_services", lambda context, services:
                         manager.compose_runner.up(context, None))
 
-    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {}})
+    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
+        name: {} for container in context.containers for name in container.services}})
     monkeypatch.setattr(
         manager.image_preparer,
         "plan",

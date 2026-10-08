@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.cntr._container._nginx_template import render_nginx_template
+from linktools.cntr.generation import NginxGeneration
 
 
 def _port():
@@ -127,7 +127,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
                                proxy="http://127.0.0.1:" + str(app_port))
 
         def render(name, selected=site):
-            return render_nginx_template(producer, nginx, nginx.get_source_path("templates", name), selected)
+            return NginxGeneration(nginx).render_template(producer, nginx.get_source_path("templates", name), selected)
 
         root = render("nginx.conf", SimpleNamespace(vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
         # The fixture changes only sandbox resources and loopback endpoint addresses.

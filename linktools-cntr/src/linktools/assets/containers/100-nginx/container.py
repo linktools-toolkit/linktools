@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Nginx reverse-proxy container definition."""
 import json
-import os
 import re
 from typing import TYPE_CHECKING
 
@@ -19,15 +18,9 @@ from linktools.types import MISSING
 if TYPE_CHECKING:
     from typing import Any, Mapping
     from linktools.cntr import EventContext
-    from linktools.cntr.artifacts import GeneratedCandidate
-    from linktools.types import PathType
 
 
 class Container(BaseContainer):
-
-    @property
-    def config_sources(self) -> "tuple[str, ...]":
-        return tuple(self.manager.installed_state.load_names())
 
     @staticmethod
     def _nginx_literal(value: "Any") -> str:
@@ -132,36 +125,6 @@ class Container(BaseContainer):
                     default=MISSING if meta.get("required", True) else "",
                 )
         return configs
-
-    @cached_property
-    def _acme_ssl_domains(self):
-        result = []
-        domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if domain:
-            result.extend([domain, f"*.{domain}"])
-        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            for site in self.sites.values():
-                if not site.enabled or not site.https:
-                    continue
-                for value in site.cert_domains:
-                    if value and value not in result:
-                        result.append(value)
-        return result
-
-    @cached_property
-    def acme_ssl_domains_args(self) -> str:
-        return " ".join([f"--domain {domain}" for domain in self._acme_ssl_domains if domain])
-
-    @cached_property
-    def acme_ssl_certificate_args(self) -> str:
-        domain = self.get_config("NGINX_ROOT_DOMAIN")
-        if domain:
-            return " ".join([
-                "--cert-file", f"/etc/certs/{domain}_cert.pem",
-                "--key-file", f"/etc/certs/{domain}_key.pem",
-                "--fullchain-file", f"/etc/certs/{domain}_fullchain.pem",
-            ])
-        return ""
 
     def _get_default_index_url(self):
         return utils.make_url(
@@ -269,164 +232,3 @@ class Container(BaseContainer):
                 "    volatile;", "    default " + incoming + ";", "    1 " + self.quote(value) + ";", "}",
             ])
         return "\n".join(lines)
-
-    @cached_property
-    def _rendered_site_files(self) -> "tuple[dict[str, str], bool]":
-        """Evaluate business templates once for this declaration snapshot."""
-        from types import SimpleNamespace
-        result = {}
-        active = []
-        for site in self.sites.values():
-            if site.enabled:
-                active.append(site.resolve())
-        if not any(site.server_name == "_" for site in active):
-            active.append(SimpleNamespace(
-                producer=self, local_id="default", file_id="cntr_default", var_name="cntr_default",
-                server_name="_", https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
-                waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, vars={},
-                template=self.get_source_path("templates", "index.conf"), proxy=None,
-            ))
-        for site in active:
-            producer = site.producer
-            source = site.template or self.get_source_path("templates", "default.conf")
-            result["sites/" + site.file_id + "/business.conf"] = producer.render_nginx_template(self, source, site)
-            result["sites/" + site.file_id + ".conf"] = producer.render_nginx_template(
-                self, self.get_source_path("templates", "server.conf"), site)
-            if site.auth:
-                result["sites/" + site.file_id + "/auth.conf"] = producer.render_nginx_template(
-                    self, self.get_source_path("templates", "auth_location.conf"), site)
-        return result, any(site.waf for site in active)
-
-    def render_generated_config(self, generation_id: str) -> "dict[str, str]":
-        """Render a generation marker around the immutable business snapshot."""
-        from types import SimpleNamespace
-        files, waf = self._rendered_site_files
-        result = dict(files)
-        root_site = SimpleNamespace(vars={
-            "generation_id": generation_id, "waf": waf,
-            "site_files": tuple(name for name in files if name.count("/") == 1),
-        })
-        result["nginx.conf"] = self.render_nginx_template(
-            self, self.get_source_path("templates", "nginx.conf"), root_site)
-        return result
-
-    @property
-    def generated_config_path(self) -> "PathType":
-        return self.get_app_path("generated")
-
-    def prepare_generated_config(self, context: "EventContext") -> None:
-        for name in ("generated", "certs", "acme"):
-            self.get_app_path(name).mkdir(parents=True, exist_ok=True)
-        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            return
-        import shlex
-        domain = self.get_config("NGINX_ROOT_DOMAIN")
-        certificate = self.get_app_path("certs", domain + "_fullchain.pem")
-        key = self.get_app_path("certs", domain + "_key.pem")
-        if ("nginx" in getattr(context, "initial_services", getattr(context, "initial_running", ())) and
-                not os.path.lexists(self.get_app_path("generated", "current"))):
-            self._preserve_legacy_files()
-        if certificate.exists() and key.exists():
-            checks = ["openssl x509 -checkend 2592000 -noout -in " +
-                      shlex.quote("/etc/certs/" + domain + "_fullchain.pem")]
-            for name in self._acme_ssl_domains:
-                if name.startswith("*."):
-                    checks.append(r"openssl x509 -noout -ext subjectAltName -in {} | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -Fx -- {}".format(
-                        shlex.quote("/etc/certs/" + domain + "_fullchain.pem"), shlex.quote("DNS:" + name)))
-                else:
-                    checks.append("openssl x509 -noout -checkhost {} -in {}".format(
-                        shlex.quote(name), shlex.quote("/etc/certs/" + domain + "_fullchain.pem")))
-            try:
-                self.manager.compose_runner.validate_service(context, "nginx", ("sh", "-c", " && ".join(checks)))
-                return
-            except ContainerError:
-                self.logger.info("Renew certificate for expiry or changed domain coverage")
-        # Existing certificate/account volumes are reused; issuance is never a
-        # build step and credentials are never baked into an image layer.
-        domains = " ".join("--domain " + shlex.quote(item) for item in self._acme_ssl_domains)
-        command = "acme.sh --config-home /root/.acme.sh --issue {} --dns {} && acme.sh --config-home /root/.acme.sh --install-cert {} {}".format(
-            domains, shlex.quote(self.get_config("ACME_DNS_API")), domains,
-            self.acme_ssl_certificate_args)
-        self.manager.compose_runner.validate_service(
-            context, "nginx", ("sh", "-c", command), network=True)
-
-    def _preserve_legacy_files(self) -> None:
-        import shutil
-        import tempfile
-        from pathlib import Path
-        backup = self.get_app_path("migration-backup")
-        if not backup.exists():
-            temporary = Path(tempfile.mkdtemp(
-                prefix="migration-backup-", dir=str(self.get_app_path())))
-            self.logger.info("Preserve legacy nginx certificates and ACME account before mount migration")
-            for source, name in (("/etc/certs/.", "certs"), ("/root/.acme.sh/.", "acme")):
-                destination = temporary / name
-                destination.mkdir()
-                self.runtime.create_docker_process("cp", "{}:{}".format(
-                    self.get_service_name("nginx"), source), str(destination)).check_call()
-            previous = self.get_app_path("conf.d")
-            if previous.exists():
-                shutil.copytree(str(previous), str(temporary / "conf.d"), symlinks=True)
-            os.rename(str(temporary), str(backup))
-        for name in ("certs", "acme"):
-            source = backup / name
-            if not source.is_dir():
-                raise ContainerError("Legacy nginx migration backup is incomplete")
-            for path in source.rglob("*"):
-                destination = self.get_app_path(name) / path.relative_to(source)
-                if os.path.lexists(destination):
-                    continue
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if path.is_symlink():
-                    os.symlink(os.readlink(str(path)), str(destination))
-                elif path.is_dir():
-                    destination.mkdir()
-                else:
-                    shutil.copy2(str(path), str(destination))
-
-    def validate_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
-        self.manager.compose_runner.validate_service(context, "nginx", (
-            "nginx", "-p", "/etc/nginx/", "-c",
-            "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t"))
-
-    def confirm_generated_config(self, context: "EventContext", generation_id: str,
-                                 timeout: int = 30) -> None:
-        import time
-        deadline = time.monotonic() + timeout
-        while True:
-            result = self.manager.compose_runner.exec_service(context, "nginx", (
-                "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
-                "/run/nginx-cntr-health.sock", "http://localhost/__cntr/health"), check=False)
-            if result.succeeded and result.stdout.strip() == generation_id:
-                return
-            if time.monotonic() >= deadline:
-                raise ContainerError("Nginx did not acknowledge the generated configuration")
-            time.sleep(0.25)
-
-    def bootstrap_generated_config(self, context: "EventContext") -> None:
-        from linktools.cntr.artifacts import GeneratedCandidate
-        def render(generation_id: str) -> "dict[str, str]":
-            return {"nginx.conf": 'events {}\nhttp {\n'
-                    'server { listen unix:/run/nginx-cntr-health.sock; '
-                    'location = /__cntr/health { default_type text/plain; return 200 "' + generation_id + '"; }}\n'
-                    'server { listen ' + str(self.get_config("NGINX_HTTP_PORT")) + ' default_server; return 503; }\n}\n'}
-        candidate = GeneratedCandidate(self, render=render)
-        self.validate_generated_config(candidate, context)
-        candidate.publish()
-        self.manager.compose_runner.apply_service(context, "nginx", recreate=True)
-        self.confirm_generated_config(context, candidate.generation_id)
-        context.nginx_bootstrap_id = candidate.generation_id
-
-    def apply_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
-        runner = self.manager.compose_runner
-        # This also handles the first stable-parent mount and target-image
-        # changes, using Compose's ordinary reconciliation.
-        runner.apply_service(context, "nginx")
-        result = runner.exec_service(context, "nginx", (
-            "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
-            "/run/nginx-cntr-health.sock", "http://localhost/__cntr/health"), check=False)
-        if result.succeeded and result.stdout.strip() == candidate.generation_id:
-            return
-        runner.exec_service(context, "nginx", (
-            "nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/current/nginx.conf", "-s", "reload"))
-        self.confirm_generated_config(context, candidate.generation_id)

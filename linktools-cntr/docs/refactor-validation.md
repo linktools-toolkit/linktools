@@ -13,6 +13,29 @@ Date: 2026-10-08.
 - No version bump, remote push, live service deployment, or real credential
   rotation was performed
 
+## Navigation protocol addendum
+
+The navigation follow-on moves the five builtin `exposes` getters into Flare
+integrations, removes eager navigation loading, and pairs with a local homelab
+migration of 25 getters and 65 links. It does not publish or deploy either
+repository. The Site baseline and its deployment limitations below remain
+applicable; the original specification retained `exposes`.
+
+The authoring surface is reduced to `integrations`: `config_sources`, the
+integration-start policy, generation paths and lifecycle methods, and the
+nginx template wrapper are removed from `BaseContainer`. Four internal builtin
+owners implement generation. Complete candidate comparison replaces authored
+configuration-source edges, including GitLab/LiteLLM OIDC reads. This deliberately
+allows a partial command to apply pending changes to other running services;
+stopped services remain stopped unless explicitly selected or required at runtime.
+
+Navigation regressions cover lazy values, absent Flare, explicit versus implicit
+starts, running versus stopped Flare, full installed snapshots during partial
+updates, deleted final declarations, producer/link order, category conflicts,
+empty URLs and direct/external/non-HTTP links. The optional native nginx suite
+is not required for this declaration-only change and was not rerun. Real Docker,
+SafeLine, Authelia/OIDC, ACME and Unix-socket acceptance remain unverified here.
+
 ## Reproducible local checks
 
 Run the normal gate with the repository's installed dependencies:

@@ -138,7 +138,6 @@ def manager_with(containers, installed):
 def test_snapshot_is_once_and_optional_consumer_is_not_consumed():
     class Counted:
         name = "app"
-        config_sources = ()
         calls = 0
         @property
         def integrations(self):
@@ -149,20 +148,6 @@ def test_snapshot_is_once_and_optional_consumer_is_not_consumed():
     assert list(manager.iter_integrations("nginx")) == []
     assert ("app", "web") in manager.nginx_sites
     assert app.calls == 1
-
-
-@pytest.mark.parametrize("sources", ["nginx", ("unknown",)])
-def test_config_source_structure_validation(sources):
-    app = SimpleNamespace(name="app", integrations={}, config_sources=sources)
-    manager = manager_with({"app": app, "nginx": object()}, ["app"])
-    with pytest.raises(ContainerError):
-        manager.config_source_snapshot
-
-
-def test_sources_fold_duplicates_and_ignore_known_uninstalled():
-    app = SimpleNamespace(name="app", integrations={}, config_sources=("app", "app", "nginx"))
-    manager = manager_with({"app": app, "nginx": object()}, ["app"])
-    assert manager.config_source_snapshot["app"] == ("app",)
 
 
 def test_explicit_false_does_not_read_unneeded_global_switches():

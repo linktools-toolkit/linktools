@@ -32,7 +32,8 @@ def _record(manager, monkeypatch, fail=False):
         return _Proc()
 
     monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
-    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {}})
+    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
+        name: {} for container in context.containers for name in container.services}})
     monkeypatch.setattr(
         manager.image_preparer,
         "plan",

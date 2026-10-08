@@ -11,7 +11,6 @@ from linktools.decorator import cached_property
 if TYPE_CHECKING:
     from typing import Any
     from collections.abc import Iterable
-    from linktools.cntr import ExposeLink
 
 
 class Container(BaseContainer):
@@ -19,10 +18,6 @@ class Container(BaseContainer):
     @property
     def dependencies(self) -> "Iterable[str]":
         return ["nginx"]
-
-    @property
-    def config_sources(self) -> "Iterable[str]":
-        return ("nginx",)
 
     @cached_property
     def configs(self) -> "dict[str, Any]":
@@ -40,8 +35,15 @@ class Container(BaseContainer):
         )
 
     @cached_property
-    def integrations(self) -> "dict[str, dict[str, NginxSite]]":
+    def integrations(self) -> "dict[str, dict[str, Any]]":
         return {
+            "flare": {
+                "web": self.expose_public("Safeline", "alienOutline", "雷池WAF", self.load_nginx_url("web")),
+                "direct": self.expose_container("Safeline", "alienOutline", "雷池WAF", self.load_port_url(
+                    "SAFELINE_PORT",
+                    https=True
+                )),
+            },
             "nginx": {
                 "web": NginxSite(
                     server_name=self.get_config_later("SAFELINE_DOMAIN"),
@@ -52,16 +54,6 @@ class Container(BaseContainer):
                 ),
             },
         }
-
-    @cached_property
-    def exposes(self) -> "Iterable[ExposeLink]":
-        return [
-            self.expose_public("Safeline", "alienOutline", "雷池WAF", self.load_nginx_url("web")),
-            self.expose_container("Safeline", "alienOutline", "雷池WAF", self.load_port_url(
-                "SAFELINE_PORT",
-                https=True
-            )),
-        ]
 
     @subcommand("reset-admin", help="reset safeline admin password")
     def on_reset_admin(self) -> None:

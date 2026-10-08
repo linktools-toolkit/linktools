@@ -378,3 +378,24 @@ def test_plan_restart_up_command_matches_runtime_builder_exactly(fresh_manager):
     for command in plan.commands[1:]:
         expected_tail = tuple(fresh_manager.compose_runner.apply_service_args(command.args[-1]))
         assert command.args[-len(expected_tail):] == expected_tail
+
+
+def test_plan_excludes_unselected_authentication_admin(fresh_manager, monkeypatch):
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
+    plan = fresh_manager.planner.plan("up", ["portainer"])
+    commands = [command.args for command in plan.commands if command.phase == "up"]
+    assert not any(command[-1] == "authelia-admin" for command in commands)
+    assert any(command[-1] == "authelia" for command in commands)
+
+
+def test_plan_preserves_interleaved_service_dependency_order(fresh_manager, monkeypatch):
+    from linktools.cntr._operations import ComposeSelection
+    operations = fresh_manager.compose_operations
+    explicit = operations.select(["portainer"], metadata_only=True, for_start=True)
+    selected = ComposeSelection(explicit.project_containers,
+                                (fresh_manager.containers["authelia"], fresh_manager.containers["portainer"]),
+                                ("authelia-redis", "portainer", "authelia"), False)
+    monkeypatch.setattr(operations, "start_selection", lambda selection: selected)
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
+    plan = fresh_manager.planner.plan("up", ["portainer"])
+    assert [command.args[-1] for command in plan.commands if command.phase == "up"] == list(selected.services)

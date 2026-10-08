@@ -115,32 +115,8 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return {}
 
     @property
-    def exposes(self) -> "Iterable[ExposeLink]":
-        return []
-
-    @property
     def integrations(self) -> "dict[str, dict[str, Any]]":
         return {}
-
-    @property
-    def config_sources(self) -> "Iterable[str]":
-        return []
-
-    @property
-    def generated_config_path(self) -> "PathType | None":
-        return None
-
-    def prepare_generated_config(self, context: "EventContext") -> None:
-        pass
-
-    def render_generated_config(self, generation_id: str) -> "dict[str, str]":
-        raise NotImplementedError
-
-    def validate_generated_config(self, candidate: "Any", context: "EventContext") -> None:
-        raise NotImplementedError
-
-    def apply_generated_config(self, candidate: "Any", context: "EventContext") -> None:
-        raise NotImplementedError
 
     @cached_property
     def settings(self) -> "ConfigNamespace":
@@ -485,12 +461,6 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
 
     def render_template(self, source: "PathType", destination: "PathType | None" = None, **kwargs: "Any") -> str:
         return _template.render_template(self, source, destination=destination, **kwargs)
-
-    def render_nginx_template(
-            self, nginx: "BaseContainer", source: "PathType", site: "Any",
-    ) -> str:
-        from ._container._nginx_template import render_nginx_template
-        return render_nginx_template(self, nginx, source, site)
 
 
     def __repr__(self):

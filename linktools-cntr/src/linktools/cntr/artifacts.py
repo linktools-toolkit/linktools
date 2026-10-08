@@ -200,13 +200,12 @@ class GeneratedCandidate:
     """An immutable generated tree with an atomic, reversible current link."""
 
     def __init__(self, container: "BaseContainer",
-                 render: "Callable[[str], dict[str, str]] | None" = None) -> None:
+                 render: "Callable[[str], dict[str, str]]") -> None:
         import uuid
         self.container = container
-        self.root = str(container.generated_config_path)
+        self.root = str(container.get_app_path("generated"))
         self.previous_id = self.current_id(self.root)
         self.generation_id = self.previous_id or uuid.uuid4().hex
-        render = render or container.render_generated_config
         files = render(self.generation_id)
         self.changed = not self.previous_id or not self.matches(files)
         if self.changed and self.previous_id:
@@ -276,3 +275,101 @@ class GeneratedCandidate:
 
     def restore(self) -> None:
         self.activate(self.previous_id)
+
+
+class AppliedServiceModels:
+    """Track each service's applied model, retaining project support for rollback."""
+
+    def __init__(self, manager: "ContainerManager", model: dict) -> None:
+        from types import MappingProxyType
+        import yaml
+
+        self.manager = manager
+        self.root = os.path.join(str(manager.data_path), "compose", "applied", "services")
+        if not isinstance(model, dict) or not isinstance(model.get("services"), dict):
+            raise ContainerError("Resolved Compose model must contain a services mapping")
+        resolved = self._normalize(model)
+        current, previous = {}, {}
+        changed = set(model["services"])
+        for service, spec in model["services"].items():
+            if not isinstance(service, str) or not service or not isinstance(spec, dict):
+                raise ContainerError("Resolved Compose services must have names and mapping definitions")
+            # Compose validates dependencies even with --no-deps. Each service
+            # snapshot therefore retains its full project's rollback support.
+            current[service] = resolved
+            path = self._path(service)
+            try:
+                with open(path, encoding="utf-8") as stream:
+                    saved = yaml.safe_load(stream)
+            except FileNotFoundError:
+                if os.path.lexists(path):
+                    raise ContainerError("Cannot read applied Compose model for service {}".format(service)) from None
+                continue
+            except (OSError, UnicodeError, yaml.YAMLError):
+                raise ContainerError("Cannot read applied Compose model for service {}".format(service)) from None
+            if (not isinstance(saved, dict) or not isinstance(saved.get("services"), dict)
+                    or service not in saved["services"]
+                    or any(not isinstance(name, str) or not name or not isinstance(definition, dict)
+                           for name, definition in saved["services"].items())):
+                raise ContainerError("Invalid applied Compose model for service {}".format(service))
+            previous[service] = self._normalize(saved)
+            if self._projection(saved, service) == self._projection(model, service):
+                changed.remove(service)
+        self.current = MappingProxyType(current)
+        self.previous = MappingProxyType(previous)
+        self.changed_services = frozenset(changed)
+
+    @classmethod
+    def _projection(cls, model: dict, service: str) -> str:
+        shared = {key: value for key, value in model.items() if key != "services"}
+        return cls._normalize(dict(shared, services={service: model["services"][service]}))
+
+    @classmethod
+    def _normalize(cls, model: dict) -> str:
+        import yaml
+        try:
+            # Compose's resolved model is JSON-compatible. Round-tripping also
+            # removes YAML aliases whose spelling depends on object identity.
+            value = json.loads(json.dumps(model, sort_keys=True, allow_nan=False))
+            return yaml.safe_dump(value, sort_keys=True, allow_unicode=False)
+        except (TypeError, ValueError, yaml.YAMLError):
+            raise ContainerError("Applied Compose model is not a valid resolved model") from None
+
+    def _path(self, service: str) -> str:
+        return os.path.join(self.root, service.encode("utf-8").hex() + ".yml")
+
+    def record(self, services: "Iterable[str]") -> None:
+        selected = tuple(dict.fromkeys(services))
+        if any(service not in self.current for service in selected):
+            raise ContainerError("Cannot record services absent from the resolved Compose model")
+        if not selected:
+            return
+        os.makedirs(self.root, mode=0o700, exist_ok=True)
+        os.chmod(os.path.dirname(self.root), 0o700)
+        os.chmod(self.root, 0o700)
+        entries = {}
+        for service in selected:
+            content = self.current[service]
+            path = self._path(service)
+            # Resolved environments may contain secrets; the atomic writer's
+            # fresh 0600 file must not inherit a permissive existing mode.
+            utils.atomic_write(path, content, encoding="utf-8")
+            entries[os.path.relpath(path, str(self.manager.data_path))] = dict(
+                kind="compose-applied-service", container=service, sha256=sha256_of(content))
+        self.manager.artifact_index.record(entries)
+
+    def restore(self, services: "Iterable[str]") -> None:
+        """Restore snapshot identities after their runtime rollback succeeds."""
+        entries = {}
+        for service in dict.fromkeys(services):
+            path = self._path(service)
+            previous = self.previous.get(service)
+            if previous is None:
+                if os.path.exists(path):
+                    os.unlink(path)
+                continue
+            utils.atomic_write(path, previous, encoding="utf-8")
+            entries[os.path.relpath(path, str(self.manager.data_path))] = dict(
+                kind="compose-applied-service", container=service, sha256=sha256_of(previous))
+        if entries:
+            self.manager.artifact_index.record(entries)
