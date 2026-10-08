@@ -421,8 +421,7 @@ class Container(BaseContainer):
         (directory / "primary").write_text(domain + "\n", encoding="utf-8")
         (directory / "port").write_text(
             str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
-        (directory / "domains").write_text(
-            "\n".join(self.acme_ssl_domains) + "\n", encoding="utf-8")
+        (directory / "domains").write_text("", encoding="utf-8")
         os.symlink("versions/" + directory.name, str(link))
 
     def on_prepare_config(self, context: "EventContext") -> None:
@@ -562,15 +561,35 @@ class Container(BaseContainer):
         if "nginx" not in services:
             return
         runner = self.manager.compose_runner
-        # This also handles the first stable-parent mount and target-image
-        # changes, using Compose's ordinary reconciliation.
-        runner.apply_service(context, "nginx")
-        runner.wait_service_healthy(context, "nginx")
-        result = runner.exec_service(context, "nginx", (
-            "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
-            "/run/nginx-health.sock", "http://localhost/health"), check=False)
-        if result.succeeded and result.stdout.strip() == candidate.generation_id:
-            return
-        runner.exec_service(context, "nginx", (
-            "nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/current/nginx.conf", "-s", "reload"))
-        self.confirm(context, candidate.generation_id)
+        root = self.get_app_path("certs")
+        live = root / "live"
+        previous = os.readlink(str(live)) if live.is_symlink() else None
+        marker = Path(candidate.path) / "certificate.version"
+        version = marker.read_text(encoding="utf-8").strip() if marker.exists() else None
+        changed = bool(version and previous != "versions/" + version)
+        try:
+            runner.apply_service(context, "nginx")
+            runner.wait_service_healthy(context, "nginx")
+            if changed:
+                runner.exec_service(
+                    context, "nginx",
+                    ("/usr/local/bin/nginx-certificates", "activate", version))
+            result = runner.exec_service(context, "nginx", (
+                "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
+                "/run/nginx-health.sock", "http://localhost/health"), check=False)
+            if result.succeeded and result.stdout.strip() == candidate.generation_id:
+                return
+            runner.exec_service(context, "nginx", (
+                "nginx", "-p", "/etc/nginx/", "-c",
+                "/etc/nginx/generated/current/nginx.conf", "-s", "reload"))
+            self.confirm(context, candidate.generation_id)
+        except Exception:
+            if changed and previous:
+                original = os.path.basename(previous)
+                try:
+                    runner.exec_service(context, "nginx", (
+                        "/usr/local/bin/nginx-certificates", "activate", original))
+                except Exception as rollback_error:
+                    raise ContainerError(
+                        "Nginx certificate rollback failed: {}".format(rollback_error)) from rollback_error
+            raise
