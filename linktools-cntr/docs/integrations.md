@@ -119,6 +119,10 @@ only explicit declarations. It skips empty URLs and rejects conflicting
 descriptions, output areas, or orders for the same category ID. A site
 without navigation still generates a proxy. The former registration arguments,
 `write_nginx_conf`, `load_exist_nginx_url`, and `append_ssl_domains` are removed.
+When migrating a legacy `write_nginx_conf(..., auth_enable=False)` call,
+set `Nginx.site(..., auth=False)` explicitly to retain its no-auth behavior.
+`auth=None` now inherits `NGINX_AUTH_ENABLE`; HTTP-only and public
+sites must use `auth=False` when global authentication is enabled.
 Migrate callers and templates together; there is no compatibility wrapper.
 
 ## Lazy URL references
@@ -226,8 +230,14 @@ them. Original request values are `$original_scheme`, `$original_host`,
 `$original_uri`, `$original_method`, `$original_client_ip`, and `$original_port`.
 
 Generated output consists of `nginx.conf` and one self-contained
-`sites/<site-id>.conf` per site (including `sites/default.conf` when needed).
-Read the root for shared request maps and the health listener; read one site file
+`sites/<site-id>.conf` per effective hostname and listener group (including
+`sites/default.conf` when needed). Multiple declarations with the same
+hostname, HTTP port and compatible HTTPS/WAF/auth routing policy share one
+server and contribute their distinct, once-rendered business locations. Their
+producer/local IDs and per-declaration template variables remain independent.
+Incompatible policies are rejected; duplicate native locations are rejected by
+`nginx -t`, never silently overwritten.
+Read the root for shared request maps and the health listener; read a site file
 for its maps, listeners, WAF path, authentication endpoint, and business locations.
 Business templates are evaluated once and their text is embedded without another
 Jinja pass. There are no generated per-site auth/business include directories.
@@ -251,9 +261,11 @@ An enabled nginx site also needs its installed nginx runtime provider. Flare
 navigation is optional and never creates a startup dependency. Explicitly
 selecting Flare still starts it.
 
-Every `up` or `restart` renders the full installed candidate configuration and
-compares it with the last applied, fully resolved Compose service models and
-generated trees. Resolved snapshots preserve environment values from `.env`,
+Every `up` or `restart` resolves the full installed integration snapshot and
+Compose model, then stages and validates generated candidates for the selected
+services, their dependencies, and previously running services requiring
+synchronization. Generated owners unrelated to the operation and currently
+stopped are prepared when they are next selected or required. Resolved snapshots preserve environment values from `.env`,
 `env_file` and Compose interpolation for comparison and rollback. Shared top-level
 network/volume changes conservatively invalidate running service models.
 Explicit targets and their runtime dependencies are ensured running. Other
@@ -350,7 +362,11 @@ An ordinary running dependency is still applied in dependency order before its
 dependents. On a cold start with no previous generation, a successfully
 acknowledged bootstrap becomes the fallback for a failed final application.
 Rollback can restore previously running services and those acknowledged bootstrap
-services; it must not start unrelated stopped siblings. A failed, unacknowledged
+services; it must not start unrelated stopped siblings. During first migration,
+when no previous generated version exists, native state (including the nginx
+certificate pointer) and previously running services are restored using the
+captured prior Compose model instead of treating the missing generation as
+evidence that no old service exists. A failed, unacknowledged
 bootstrap does not make its service a rollback restore target.
 `generation_label(service, generation_id)` controls the generated service marker;
 its default marks the same-named service of a generated owner.
@@ -360,8 +376,10 @@ Startup follows one orchestration path:
 1. Run startup checks, `on_starting` and registered pre-start hooks for the
    preparation scope, which can include other running owners. Then resolve the
    authoritative Compose model so hook-prepared environment files are included
-2. Prepare required images, then call `on_prepare_config` and `render_config` for
-   every installed generated owner, including owners outside the explicit targets
+2. Prepare only required images, then call `on_prepare_config` and
+   `render_config` for active generated owners in the reconciled selection.
+   Owners running outside the explicit targets remain eligible for synchronization;
+   stopped, unrelated owners are not prepared
 3. Validate all final generated candidates, reconcile the final changed-service
    scope, and stage and validate any required intermediate bootstrap candidates
 4. For restart, stop only the explicit targets after successful validation
