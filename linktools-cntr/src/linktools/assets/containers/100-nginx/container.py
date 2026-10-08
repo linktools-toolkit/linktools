@@ -393,28 +393,91 @@ class Container(BaseContainer):
         })
         result["nginx.conf"] = self._render_site_template(
             self, self.get_source_path("templates", "nginx.conf"), root_site)
+        if getattr(self, "_certificate_version", None) is not None:
+            result["certificate.version"] = self._certificate_version + "\n"
         return result
 
+    def _initialize_certificate_mount(self, domain: str) -> None:
+        """Make existing TLS files available under the stable live pointer."""
+        import shutil
+        from uuid import uuid4
+
+        root = self.get_app_path("certs")
+        link = root / "live"
+        if os.path.lexists(str(link)):
+            if not link.is_symlink():
+                raise ContainerError("Nginx live certificate path must be a symbolic link")
+            return
+        required = tuple(root / (domain + "_" + suffix + ".pem")
+                         for suffix in ("fullchain", "key"))
+        if not all(path.is_file() for path in required):
+            return
+        directory = root / "versions" / ("legacy-" + uuid4().hex)
+        directory.mkdir(parents=True)
+        for name in ("cert", "fullchain", "key"):
+            source = root / (domain + "_" + name + ".pem")
+            if source.is_file():
+                shutil.copy2(str(source), str(directory / source.name))
+        (directory / "primary").write_text(domain + "\n", encoding="utf-8")
+        (directory / "port").write_text(
+            str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
+        (directory / "domains").write_text(
+            "\n".join(self.acme_ssl_domains) + "\n", encoding="utf-8")
+        os.symlink("versions/" + directory.name, str(link))
+
     def on_prepare_config(self, context: "EventContext") -> None:
+        from uuid import uuid4
+        import shutil
+
         for name in ("generated", "certs", "acme"):
             self.get_app_path(name).mkdir(parents=True, exist_ok=True)
+        self._certificate_version = None
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
         if ("nginx" in getattr(context, "initial_services", getattr(context, "initial_running", ())) and
                 not os.path.lexists(self.get_app_path("generated", "current"))):
             self._preserve_legacy_files()
+
         domain = self.get_config("NGINX_ROOT_DOMAIN")
-        certificate = shlex.quote("/etc/certs/" + domain + "_fullchain.pem")
-        checks = ["/usr/local/bin/nginx-init-certificates",
-                  "openssl x509 -checkend 0 -noout -in " + certificate]
-        for name in self.acme_ssl_domains:
-            if name.startswith("*."):
-                checks.append(r"openssl x509 -noout -ext subjectAltName -in {} | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -Fx -- {}".format(
-                    certificate, shlex.quote("DNS:" + name)))
-            else:
-                checks.append("openssl x509 -noout -checkhost {} -in {}".format(shlex.quote(name), certificate))
-        self.manager.compose_runner.validate_service(
-            context, "nginx", ("sh", "-ec", " && ".join(checks)))
+        self._initialize_certificate_mount(domain)
+        root = self.get_app_path("certs")
+        current = root / "live"
+        version = uuid4().hex
+        directory = root / "versions" / version
+        directory.mkdir(parents=True)
+        (directory / "primary").write_text(domain + "\n", encoding="utf-8")
+        (directory / "port").write_text(
+            str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
+        (directory / "domains").write_text(
+            "\n".join(self.acme_ssl_domains) + "\n", encoding="utf-8")
+        runner = self.manager.compose_runner
+        request = "/etc/certs/versions/{}/domains".format(version)
+        valid = runner.validate_service(
+            context, "nginx",
+            ("/usr/local/bin/nginx-certificates", "check", domain, request),
+            check=False,
+        )
+        if valid.succeeded:
+            self._certificate_version = os.path.basename(os.readlink(str(current)))
+            shutil.rmtree(str(directory))
+            runner.validate_service(
+                context, "nginx",
+                ("/usr/local/bin/nginx-certificates", "configure", domain),
+            )
+            return
+
+        runner.validate_service(
+            context, "nginx",
+            ("/usr/local/bin/nginx-certificates", "prepare", version, domain,
+             self.get_config("ACME_SERVER"), self.get_config("ACME_DNS_API"),
+             self.get_config("ACME_ACCOUNT_EMAIL")),
+            network=True,
+        )
+        self._certificate_version = version
+        if not os.path.lexists(str(current)):
+            if "nginx" in getattr(context, "initial_services", ()):
+                raise ContainerError("Cannot replace a running nginx certificate without a previous live version")
+            os.symlink("versions/" + version, str(current))
 
     def _preserve_legacy_files(self) -> None:
         import shutil
