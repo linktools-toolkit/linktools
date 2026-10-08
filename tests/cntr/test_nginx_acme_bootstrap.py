@@ -131,6 +131,7 @@ def test_changed_san_list_stages_without_touching_live_certificate(certificate_c
     assert (root / "certs/live").readlink() == Path("versions/legacy")
     assert (root / "certs/live/example.test_fullchain.pem").read_bytes() == old
     assert (root / "acme/account.key").read_text() == "existing-account-key"
+    assert (root / "certs/versions/pending/example.test_key.pem").stat().st_mode & 0o777 == 0o600
     assert "-d *.code.example.test" in (root / "issue.args").read_text()
     assert _run(script, env, "activate", "pending").returncode == 0
     assert (root / "certs/live").readlink() == Path("versions/pending")
