@@ -4,6 +4,8 @@
 import json
 import os
 import re
+import shlex
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -150,6 +152,42 @@ class Container(BaseContainer):
                     if value and value not in result:
                         result.append(value)
         return result
+
+    @cached_property
+    def cert_image_revision(self) -> str:
+        """Image identity changes only when build-time TLS requirements change."""
+        parts = [self.get_config("NGINX_TAG"),
+                 str(self.get_config("NGINX_HTTPS_ENABLE", type=bool))]
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            parts.extend((self.get_config("ACME_SERVER"),
+                          self.get_config("ACME_DNS_API"),
+                          self.get_config("ACME_ACCOUNT_EMAIL")))
+            parts.extend(self.acme_ssl_domains)
+        return hashlib.sha256("\n".join(map(str, parts)).encode("utf-8")).hexdigest()[:16]
+
+    @cached_property
+    def acme_ssl_domains_args(self) -> str:
+        return " ".join("--domain " + shlex.quote(domain) for domain in self.acme_ssl_domains if domain)
+
+    @cached_property
+    def acme_ssl_certificate_args(self) -> str:
+        domain = self.get_config("NGINX_ROOT_DOMAIN")
+        if domain:
+            return " ".join([
+                "--cert-file", shlex.quote(f"/etc/certs/{domain}_cert.pem"),
+                "--key-file", shlex.quote(f"/etc/certs/{domain}_key.pem"),
+                "--fullchain-file", shlex.quote(f"/etc/certs/{domain}_fullchain.pem"),
+            ])
+        return ""
+
+    def acme_dns_environment_value(self, field: ConfigField) -> str:
+        value = str(self.get_config(field))
+        if "\n" in value or "\r" in value:
+            raise ContainerError("DNS credentials must be single-line values for Dockerfile ENV")
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+
+    def shell_quote(self, value: object) -> str:
+        return shlex.quote(str(value))
 
     def _get_default_index_url(self):
         return utils.make_url(
