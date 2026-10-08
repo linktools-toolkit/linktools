@@ -32,7 +32,7 @@ def certificate_case(fresh_manager, tmp_path):
     cfg.set("ACME_DNS_API", "dns_cf")
     cfg.set("CF_Token", "fake-token")
     for key in ("docker_file", "docker_compose", "services", "extend_configs",
-                "acme_ssl_domains", "acme_ssl_domains_args"):
+                "acme_ssl_domains"):
         container.__dict__.pop(key, None)
 
     certs = tmp_path / "certs"
@@ -112,7 +112,7 @@ def test_acme_is_prepared_at_runtime_not_baked_into_image(certificate_case):
     assert "ENV CF_Token" not in dockerfile
     assert "nginx-certificates renew" in dockerfile
     assert container.docker_compose["services"]["nginx"]["environment"]["CF_Token"] == "fake-token"
-    assert "--domain example.test" in container.acme_ssl_domains_args
+    assert container.acme_ssl_domains[:2] == ["example.test", "*.example.test"]
 
 
 def test_changed_san_list_stages_without_touching_live_certificate(certificate_case):
