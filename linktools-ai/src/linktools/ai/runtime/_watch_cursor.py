@@ -79,6 +79,66 @@ def decode_execution_watch_cursor(
         raise AIError(ErrorCode.CURSOR_INVALID) from error
 
 
+def encode_execution_observation_cursor(
+    namespace: str,
+    tenant_id: str,
+    execution_id: str,
+    *,
+    include_content: bool,
+    event_seqs: Mapping[str, int],
+) -> str:
+    normalized = _execution_event_seqs(event_seqs)
+    return encode_runtime_cursor(
+        _signer(namespace, "execution-observation"),
+        tenant_id=tenant_id,
+        resource_kind="EXECUTION_OBSERVATION",
+        filter_digest=_filter_digest(
+            execution_id,
+            include_content=include_content,
+            kind="execution_observation",
+        ),
+        position=json.dumps(
+            normalized,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
+def decode_execution_observation_cursor(
+    namespace: str,
+    tenant_id: str,
+    execution_id: str,
+    cursor: str,
+    *,
+    include_content: bool,
+) -> Mapping[str, int]:
+    payload = decode_runtime_cursor(
+        cursor,
+        _signer(namespace, "execution-observation"),
+        tenant_id=tenant_id,
+        resource_kind="EXECUTION_OBSERVATION",
+        filter_digest=_filter_digest(
+            execution_id,
+            include_content=include_content,
+            kind="execution_observation",
+        ),
+    )
+    if payload.revision != 0:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    try:
+        value = json.loads(payload.position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    try:
+        return _execution_event_seqs(value)
+    except AIError as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+
+
 def encode_graph_watch_cursor(
     namespace: str,
     tenant_id: str,
@@ -310,10 +370,12 @@ __all__ = [
     "decode_evaluation_watch_cursor",
     "decode_task_results_cursor",
     "decode_execution_watch_cursor",
+    "decode_execution_observation_cursor",
     "decode_graph_watch_cursor",
     "encode_evaluation_watch_cursor",
     "encode_task_results_cursor",
     "encode_execution_watch_cursor",
+    "encode_execution_observation_cursor",
     "encode_graph_watch_cursor",
 ]
 

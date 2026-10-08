@@ -1071,6 +1071,18 @@ class TaskModelProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionObservationEvent:
+    """Execution-tree or metadata delivery with an independent observation cursor.
+
+    The nested tree cursor remains a legacy tree-only checkpoint. Model metadata
+    reuses the outer cursor and is compensated again on every reconnection.
+    """
+
+    event: ExecutionTreeEvent | TaskModelProjection
+    cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class TaskGraphRunEvent:
     graph_id: str
     node_id: "str | None"
@@ -1591,6 +1603,7 @@ __all__ = [
     "ExecutionStreamEvent",
     "ExecutionTraceItem",
     "ExecutionTreeEvent",
+    "ExecutionObservationEvent",
     "ExecutionView",
     "ExternalService",
     "ExternalSupplyRequest",

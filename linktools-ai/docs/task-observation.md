@@ -360,3 +360,65 @@ Earlier source cleanup in this branch also removed get_at_version and atomic
 writer aliases, renamed EvaluationRecord.experiment_id and
 OperationLedgerRepositoryImpl, and centralized model_binding_error. Storage
 key ownership changes themselves retain their prior key bytes.
+
+## Opt-in execution model metadata
+
+`Execution.watch()` and `Execution.wait()` accept
+`include_model_interactions=True`; `runtime.executions.wait()` forwards the
+same option. The default remains tree events only. In the opt-in mode each
+`ExecutionObservationEvent` wraps either an `ExecutionTreeEvent` or the existing
+`TaskModelProjection`. Model items always omit request/response content, even
+when tree content is requested. Agent and Session convenience calls do not
+forward this option.
+
+The outer cursor is the metadata-mode checkpoint. A wrapped tree event retains
+its independent tree-only cursor; the two modes reject each other's cursors.
+Metadata delivery reuses the current durable event coordinates. Every new
+observation, including a reconnect or final wait, compensates current model
+request snapshots again. Consumers upsert by execution ID, agent run sequence,
+and model request sequence; they must not add duplicate usage or expect an
+exactly-once model transition log.
+
+Subscriptions precede model snapshots. The same owner reconciles active request
+identities, durable suffixes, and the final finite authorized execution-tree and
+model cutoffs. Incomplete final coverage remains a stream observation error in
+`WaitResult`, preserving the authoritative result and last callback ACK.
+Standalone watch raises that error instead of silently ending. Its drain uses
+the same five-second maximum, and Runtime retains pending observer cleanup.
+With no callback, `wait(include_model_interactions=True)` still starts no
+observation and establishes no metadata coverage guarantee.
+
+## Bounded graph cancellation settlement
+
+`TaskGraphRun.cancel(settle_timeout_seconds=seconds)` opts into terminal
+settlement. Omitting the argument or passing None retains submission plus a
+current-state read, which may be nonterminal. The bounded form returns the
+existing `TaskGraphResult` only after control completes and an authorized read
+confirms SUCCEEDED, FAILED, CANCELLED, or BLOCKED. It preserves the actual
+terminal state; WAITING and RECOVERY_REQUIRED are not terminal settlement.
+
+One monotonic deadline covers activation, control, and all state reads. The
+budget must be finite, nonnegative, and not boolean. Zero expires before
+activation or control. Expiry raises `AIError(STORAGE_RECOVERY_REQUIRED)` with
+`phase="cancel_settlement"`, graph ID, and reason `control_pending`,
+`deadline_nonterminal`, `deadline_unknown`, or `cleanup_pending`. A known last
+state is included as `graph_status`; unfinished owned work adds
+`cleanup_pending=True`. This diagnostic never changes the durable graph status.
+An accepted control operation remains Runtime-owned after timeout or caller
+cancellation, including observation of its late failure. No extra read starts
+after the deadline. Noncooperative drivers or cleanup do not become hard
+real-time operations merely because the caller's wait is bounded.
+
+Use the same explicit idempotency key and force setting when recovering an
+uncertain cancellation intent. Settlement does not imply external effects were
+undone, and `wait()` timeout still never requests cancellation. Applications
+remain responsible for any later state snapshot, business notifications,
+partial-result policy, or decision to cancel after a wait timeout.
+
+The underlying `TaskGraphService.cancel()` accepts an optional synchronous
+`admission_guard`. Bounded handles use it after graph authorization and directly
+before the service creates its owned finalizer, with no intervening await.
+Raising prevents admission. Passing this guard means accepting local control
+ownership, not proving a durable operation was committed. The legacy handle
+path does not pass the new keyword; custom services supporting bounded
+settlement must implement the same handoff contract.
