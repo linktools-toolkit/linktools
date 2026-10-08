@@ -76,7 +76,11 @@ elif "--install-cert" in args:
                        ("--key-file", "new.key")):
         shutil.copyfile(str(root / name), args[args.index(flag) + 1])
 elif "--cron" in args:
-    pass
+    if os.environ.get("MOCK_RENEW"):
+        root = Path(os.environ["MOCK_CERTIFICATES"])
+        target = Path(os.environ["MOCK_RENEWAL"])
+        for suffix, source in (("cert", "new.pem"), ("fullchain", "new.pem"), ("key", "new.key")):
+            shutil.copyfile(str(root / source), str(target / ("example.test_" + suffix + ".pem")))
 else:
     raise SystemExit(3)
 """)
@@ -93,6 +97,7 @@ else:
     path.write_text(script)
     path.chmod(0o755)
     environment = dict(os.environ, MOCK_CERTIFICATES=str(tmp_path),
+                       MOCK_RENEWAL=str(certs / ".renewal"),
                        MOCK_STATE=str(tmp_path / "issue.args"),
                        PATH=str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
     return container, tmp_path, path, environment
@@ -148,12 +153,27 @@ def test_renewal_promotes_only_validated_certificate_versions(certificate_case):
     assert _run(script, env, "prepare", "pending", "example.test",
                 "letsencrypt", "dns_cf", "").returncode == 0
 
+    stage = root / "certs/.renewal"
+    shutil.copyfile(str(root / "old.pem"), str(stage / "example.test_fullchain.pem"))
+    shutil.copyfile(str(root / "old.key"), str(stage / "example.test_key.pem"))
+    env = dict(env, MOCK_RENEW="1")
     result = _run(script, env, "renew")
     assert result.returncode == 0, result.stderr
     live = (root / "certs/live").readlink()
     assert str(live).startswith("versions/renew-")
     assert (root / "certs/live/example.test_fullchain.pem").read_bytes() != original
     assert (root / "certs/versions/legacy/example.test_fullchain.pem").read_bytes() == original
+
+
+def test_renewal_never_promotes_stale_installed_certificates(certificate_case):
+    _, root, script, env = certificate_case
+    original = (root / "certs/live/example.test_fullchain.pem").read_bytes()
+    assert _run(script, env, "prepare", "pending", "example.test",
+                "letsencrypt", "dns_cf", "").returncode == 0
+    result = _run(script, env, "renew")
+    assert result.returncode == 0, result.stderr
+    assert (root / "certs/live").readlink() == Path("versions/legacy")
+    assert (root / "certs/live/example.test_fullchain.pem").read_bytes() == original
 
 
 def test_failed_nginx_reload_restores_old_certificate(certificate_case):
