@@ -4,7 +4,7 @@
 from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand
-from linktools.cntr import BaseContainer
+from linktools.cntr import BaseContainer, NginxSite
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 
@@ -36,19 +36,23 @@ class Container(BaseContainer):
         )
 
     @cached_property
+    def integrations(self) -> "dict[str, dict[str, NginxSite]]":
+        return {
+            "nginx": {
+                "web": NginxSite(
+                    server_name=self.get_config_later("SAFELINE_DOMAIN"),
+                    proxy="https://safeline-mgt:1443",
+                    auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,
+                    auth_bypass=(r"\.(css|js)$",),
+                    auth_headers={"X-SLCE-API-TOKEN": self.get_config_later("SAFELINE_API_TOKEN")},
+                ),
+            },
+        }
+
+    @cached_property
     def exposes(self) -> "Iterable[ExposeLink]":
         return [
-            self.expose_public("Safeline", "alienOutline", "雷池WAF", self.load_nginx_url(
-                "SAFELINE_DOMAIN",
-                proxy_url="https://safeline-mgt:1443",
-                auth_enable=self.get_config("SAFELINE_AUTH_ENABLE"),
-                auth_extra={
-                    "acl_bypass": ["\\.(css|js)$"],
-                    "auth_headers": {
-                        "X-SLCE-API-TOKEN": self.get_config("SAFELINE_API_TOKEN"),
-                    }
-                },
-            )),
+            self.expose_public("Safeline", "alienOutline", "雷池WAF", self.load_nginx_url("web")),
             self.expose_container("Safeline", "alienOutline", "雷池WAF", self.load_port_url(
                 "SAFELINE_PORT",
                 https=True
