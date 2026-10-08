@@ -317,8 +317,8 @@ def test_rollback_uses_previously_served_renewed_certificate(certificate_case, m
     candidate = root / "generated" / "old"
     candidate.mkdir(parents=True)
     (candidate / "certificate.version").write_text("legacy\n")
-    container._certificate_previous_actual = "versions/renewed"
-    container._certificate_switched = True
+    context = SimpleNamespace(rollback_service_models={},
+                              nginx_certificate_previous="versions/renewed")
     (root / "certs/versions/renewed").mkdir()
     runner = container.manager.compose_runner
     calls = []
@@ -327,8 +327,7 @@ def test_rollback_uses_previously_served_renewed_certificate(certificate_case, m
     monkeypatch.setattr(runner, "wait_service_healthy", lambda *args: None)
     monkeypatch.setattr(runner, "exec_service", lambda *args, **kwargs:
                         SimpleNamespace(succeeded=True, stdout="old"))
-    container.apply_config(SimpleNamespace(rollback_service_models={}),
-                           SimpleNamespace(path=candidate, generation_id="old"), ("nginx",))
+    container.apply_config(context, SimpleNamespace(path=candidate, generation_id="old"), ("nginx",))
     assert calls[0] == ("activate", ("/usr/local/bin/nginx-certificates", "activate", "renewed", "443"))
     assert calls[1] == ("apply", "nginx")
 

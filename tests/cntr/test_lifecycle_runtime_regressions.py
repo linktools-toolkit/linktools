@@ -94,6 +94,30 @@ def running_nginx():
     return ServiceRuntimeState(("nginx",), "nginx", "nginx-runtime", "running", "healthy", "nginx:old", None, {})
 
 
+def test_full_restart_bootstraps_nginx_after_stop(tmp_path, monkeypatch):
+    nginx = NginxContainer("nginx", {"nginx": {"image": "nginx:target"}}, tmp_path / "nginx")
+    operations, manager, runner, calls, _ = manager_at(
+        tmp_path, (nginx,), (running_nginx(),))
+    operations.select = lambda *args, **kwargs: ComposeSelection((nginx,), (nginx,), (), True)
+    manager.generated_configs["nginx"] = nginx
+    nginx.render_config = lambda generation: {"nginx.conf": "final " + generation}
+    nginx.render_bootstrap = lambda generation: {"nginx.conf": "bootstrap " + generation}
+    old = GeneratedCandidate(nginx, nginx.render_config)
+    old.publish()
+    nginx.on_prepare_config = lambda context: None
+    nginx.validate_config = lambda *args: None
+    nginx.confirm = lambda *args: None
+    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
+    runner.exec_service = lambda *args, **kwargs: SimpleNamespace(succeeded=True, stdout="")
+    ready = []
+    runner.wait_service_healthy = lambda ctx, service: ready.append((service, tuple(calls)))
+
+    operations.restart()
+
+    assert calls[0] == ("stop",)
+    assert ready and all(any(command[0] == "up" for command in seen) for _, seen in ready)
+
+
 @pytest.mark.parametrize("failure", ["acknowledgment", "application", "readiness"])
 def test_restart_bootstrap_failure_restores_generation_and_exact_runtime_snapshot(tmp_path, monkeypatch, failure):
     nginx = NginxContainer("nginx", {"nginx": {"image": "nginx:new"}}, tmp_path / "nginx")

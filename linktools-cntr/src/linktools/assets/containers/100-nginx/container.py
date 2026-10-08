@@ -453,6 +453,8 @@ class Container(BaseContainer):
     def on_starting(self, context: "EventContext") -> None:
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
+        for name in ("certs", "acme"):
+            self.get_app_path(name).mkdir(parents=True, exist_ok=True)
         if ("nginx" in context.initial_services and
                 not os.path.lexists(self.get_app_path("generated", "current"))):
             self._preserve_legacy_files()
@@ -482,8 +484,6 @@ class Container(BaseContainer):
         for name in ("generated", "certs", "acme"):
             self.get_app_path(name).mkdir(parents=True, exist_ok=True)
         self._certificate_version = None
-        self._certificate_previous_actual = None
-        self._certificate_switched = False
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
 
@@ -633,15 +633,14 @@ class Container(BaseContainer):
         marker = Path(candidate.path) / "certificate.version"
         version = marker.read_text(encoding="utf-8").strip() if marker.exists() else None
         rollback = hasattr(context, "rollback_service_models")
-        if rollback and self._certificate_switched:
-            version = (os.path.basename(self._certificate_previous_actual)
-                       if self._certificate_previous_actual is not None else None)
+        previous = getattr(context, "nginx_certificate_previous", MISSING)
+        if rollback and previous is not MISSING:
+            version = os.path.basename(previous) if previous is not None else None
         changed = bool(version and (not live.is_symlink() or
                                     os.readlink(str(live)) != "versions/" + version))
         if changed and not rollback:
-            self._certificate_previous_actual = os.readlink(str(live)) if live.is_symlink() else None
-            self._certificate_switched = True
-        if rollback and self._certificate_switched and version is None and live.is_symlink():
+            context.nginx_certificate_previous = os.readlink(str(live)) if live.is_symlink() else None
+        if rollback and previous is None and live.is_symlink():
             runner.run_isolated_service(context, "nginx",
                                         ("/usr/local/bin/nginx-certificates", "unpublish"))
         if changed:
