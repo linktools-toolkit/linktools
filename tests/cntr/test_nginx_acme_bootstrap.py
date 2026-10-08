@@ -218,6 +218,21 @@ def test_preparation_reuses_matching_certificate_without_issuance(certificate_ca
     assert (root / "certs/live").readlink() == Path("versions/legacy")
 
 
+def test_preparation_can_enable_https_on_running_http_only_nginx(certificate_case, monkeypatch):
+    container, root, _, _ = certificate_case
+    (root / "certs/live").unlink()
+    (root / "generated").mkdir()
+    (root / "generated/current").symlink_to("http-only")
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
+
+    def validate(context, service, command, **kwargs):
+        return SimpleNamespace(succeeded=command[1] != "check")
+
+    monkeypatch.setattr(container.manager.compose_runner, "validate_service", validate)
+    container.on_prepare_config(SimpleNamespace(initial_services=("nginx",)))
+    assert (root / "certs/live").readlink() == Path("versions") / container._certificate_version
+
+
 def test_preparation_stages_added_names_without_publishing(certificate_case, monkeypatch):
     container, root, _, _ = certificate_case
     monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
