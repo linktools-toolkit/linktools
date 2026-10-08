@@ -405,11 +405,17 @@ class ComposeOperations:
     def _require_rollback_model(self, container, candidate, context, services) -> None:
         if candidate.previous_id is not None:
             return
-        saved_owner = any(owner == container.name and path in context.saved_compose
-                          for path, owner in context.compose_owners.items())
+        import yaml
+        saved_services = set()
+        for path, owner in context.compose_owners.items():
+            if owner != container.name or path not in context.saved_compose:
+                continue
+            old = yaml.safe_load(context.saved_compose[path]) or {}
+            if isinstance(old, dict) and isinstance(old.get("services"), dict):
+                saved_services.update(old["services"])
         for service in services:
             if (service in context.initial_running_services and
-                    service not in context.service_models.previous and not saved_owner):
+                    service not in context.service_models.previous and service not in saved_services):
                 raise ContainerError(
                     "Cannot replace running service {} without a previous Compose model".format(service))
 
