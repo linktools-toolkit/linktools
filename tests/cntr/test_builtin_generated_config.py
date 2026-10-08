@@ -1,30 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Builtin consumer contracts without Docker or persistent project state."""
-import importlib.util
-from functools import lru_cache
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from linktools.cntr import ContainerError, ExposeCategory
-from linktools.cntr.generation import (
-    NginxGeneration, LldapGeneration, AutheliaGeneration, FlareGeneration,
-)
-from linktools.cntr._generation import authelia as authelia_generation
+from linktools.cntr import ContainerError, Flare
+from _harness import builtin_consumer_type
+from _harness import builtin_module as builtin
 
 
-ASSETS = Path(__file__).resolve().parents[2] / "linktools-cntr/src/linktools/assets/containers"
-
-
-@lru_cache(maxsize=None)
-def builtin(name):
-    spec = importlib.util.spec_from_file_location("test_generated_" + name.replace("-", "_"), str(ASSETS / name / "container.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+NginxGeneration = builtin_consumer_type("100-nginx")
+LldapGeneration = builtin_consumer_type("101-lldap")
+AutheliaGeneration = builtin_consumer_type("102-authelia")
+FlareGeneration = builtin_consumer_type("120-flare")
 
 
 def instance(module, **manager):
@@ -34,18 +24,19 @@ def instance(module, **manager):
 
 
 def flare_instance(module, entries):
-    snapshot = {"flare": {}}
+    snapshot = {"flare": []}
     containers = {}
-    for producer, local_id, expose in entries:
+    for producer, local_id, link in entries:
         containers[producer.name] = producer
-        snapshot.setdefault(producer.name, {}).setdefault("flare", {})[local_id] = expose
-    return instance(module, integration_snapshot=snapshot, containers=containers, nginx_sites={})
+        snapshot.setdefault(producer.name, []).append(link)
+    return instance(module, integration_snapshot={name: tuple(values) for name, values in snapshot.items()},
+                    containers=containers, nginx_sites={})
 
 
 def test_flare_custom_categories_merge_by_name_without_title_deduplication():
     module = builtin("120-flare")
-    first = ExposeCategory("team", "Team")("Same", "a", "One", "https://one.test")
-    second = ExposeCategory("team", "Team")("Same", "b", "Two", "https://two.test")
+    first = Flare.category("team", "Team")("Same", "a", "One", "https://one.test")
+    second = Flare.category("team", "Team")("Same", "b", "Two", "https://two.test")
     source = SimpleNamespace(name="source", order=1)
     container = flare_instance(module, [(source, "one", first), (source, "two", second)])
     result = FlareGeneration(container).render("id")
@@ -56,8 +47,8 @@ def test_flare_custom_categories_merge_by_name_without_title_deduplication():
 
 def test_flare_rejects_conflicting_category_descriptions():
     module = builtin("120-flare")
-    first = ExposeCategory("team", "Team")("One", "a", "", "https://one.test")
-    second = ExposeCategory("team", "Different")("Two", "b", "", "https://two.test")
+    first = Flare.category("team", "Team")("One", "a", "", "https://one.test")
+    second = Flare.category("team", "Different")("Two", "b", "", "https://two.test")
     source = SimpleNamespace(name="source", order=1)
     container = flare_instance(module, [(source, "one", first), (source, "two", second)])
     with pytest.raises(ContainerError, match="Conflicting description"):
@@ -93,7 +84,7 @@ def test_authelia_never_rotates_existing_secret_or_jwks(tmp_path, monkeypatch):
     jwks.write_text("existing jwks")
     def fail(*args, **kwargs):
         raise AssertionError("existing credentials must not be regenerated")
-    monkeypatch.setattr(authelia_generation.rsa, "newkeys", fail)
+    monkeypatch.setattr(module.rsa, "newkeys", fail)
     monkeypatch.setattr(module.utils, "random_string", fail)
     AutheliaGeneration._create_secret_file(secret)
     AutheliaGeneration._create_pem_file(jwks)
@@ -151,7 +142,7 @@ def test_portainer_callback_declaration_is_lazy_and_auth_conditioned(monkeypatch
         return key == "PORTAINER_AUTH_ENABLE"
     monkeypatch.setattr(container, "get_config", config)
     monkeypatch.setattr(container, "get_config_later", lambda key: "portainer.test")
-    declaration = container.integrations["nginx"]["web"]
+    declaration = next(value for value in container.integrations if value.consumer == "nginx")
     assert calls == ["PORTAINER_AUTH_ENABLE"]
     assert tuple(declaration.oidc_redirects) == ()
     assert calls == ["PORTAINER_AUTH_ENABLE", "PORTAINER_AUTH_ENABLE", "NGINX_AUTH_ENABLE"]
@@ -221,8 +212,8 @@ def test_flare_navigation_orders_producers_and_preserves_link_values():
     module = builtin("120-flare")
     early = SimpleNamespace(name="early", order=10)
     late = SimpleNamespace(name="late", order=20)
-    public = ExposeCategory("public", "Public")
-    tools = ExposeCategory("tools", "Tools")
+    public = Flare.category("public", "Public", apps=True)
+    tools = Flare.category("tools", "Tools")
     entries = [
         (late, "external", tools("External", "web", "", "https://external.test")),
         (early, "public", public("App", "apps", "Description", "https://app.test")),

@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """LLDAP container definition."""
+import os
 from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cntr import BaseContainer, ExposeLink, ContainerError
+from linktools.cli import CommandError
+from linktools.cntr import BaseContainer, Flare, Nginx, ContainerError
+from linktools.cntr.integration import IntegrationConsumer
 from linktools.cntr.urls import load_port_url
 from linktools.core import ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
-    from linktools.cntr import Integrations
+    from collections.abc import Iterable
     from typing import Any
-    from linktools.cntr import EventContext
+    from linktools.cntr import EventContext, Integrations
+    from linktools.cntr.artifacts import GeneratedCandidate
+    from linktools.types import PathType
 
 
 class Container(BaseContainer):
+
+    @cached_property
+    def integration_consumer(self) -> IntegrationConsumer:
+        return LldapGeneration(self)
 
     @cached_property
     def configs(self) -> "dict[str, Any]":
@@ -26,7 +35,7 @@ class Container(BaseContainer):
 
         return dict(
             LLDAP_TAG="stable",
-            LLDAP_DOMAIN=self.get_nginx_domain("ldap"),
+            LLDAP_DOMAIN=Nginx.domain(self, "ldap"),
             LLDAP_PORT=ConfigField(cast=int, default=0),
             LLDAP_WEB_PORT=ConfigField(cast=int, default=0),
             LLDAP_BASE_DN=ConfigField(provider=LazyProvider(lambda r: get_base_dn(r))),
@@ -37,17 +46,58 @@ class Container(BaseContainer):
 
     @cached_property
     def integrations(self) -> "Integrations":
-        return {
-            "flare": [
-                ExposeLink.container("LDAP", "account", "账号管理", load_port_url(
-                    self, "LLDAP_WEB_PORT",
-                    https=False,
-                )),
-            ],
-        }
+        return [
+            Flare.bookmark("LDAP", "account", load_port_url(
+                self, "LLDAP_WEB_PORT",
+                https=False,
+            ), category="container"),
+        ]
 
     def on_check(self, context: "EventContext") -> None:
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if not domain or "." not in domain:
             raise ContainerError(f"Invalid domain `{domain}` for LDAP, "
                                  f"Please set NGINX_ROOT_DOMAIN to a valid domain (e.g., example.com).")
+
+
+class LldapGeneration(IntegrationConsumer):
+    """Own the builtin lldap consumer without extending container hooks."""
+
+    generated = True
+
+    def prepare(self, context: "EventContext") -> None:
+        secret_path = self.container.get_app_path("secrets")
+        secret_path.mkdir(parents=True, exist_ok=True)
+        self.container.get_app_path("data").mkdir(parents=True, exist_ok=True)
+        self.container.runtime.chmod(secret_path, 0o700, recursive=True)
+        self._create_secret_file(secret_path / "jwt_secret", length=64)
+
+    def render(self, generation_id: str) -> "dict[str, str]":
+        return {
+            "lldap_config.toml": self.container.render_template(self.container.get_source_path("templates", "lldap_config.toml")),
+            "ldap_user_pass": str(self.container.get_config("LLDAP_ADMIN_PASSWORD")),
+        }
+
+    def validate(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+        # The builtin TOML contains only fixed database/key locations. LLDAP has
+        # no standalone config validator; readiness is checked after application.
+        if not self.container.get_config("LLDAP_ADMIN_PASSWORD"):
+            raise ContainerError("LLDAP administrator password must not be empty")
+
+    def apply(self, candidate: "GeneratedCandidate", context: "EventContext",
+              services: "Iterable[str]") -> None:
+        if "lldap" not in services:
+            return
+        runner = self.container.manager.compose_runner
+        recreate = candidate.changed or not runner.is_generation_current(context, "lldap", candidate)
+        runner.apply_service(context, "lldap", recreate=recreate)
+        runner.wait_service_healthy(context, "lldap")
+
+    @classmethod
+    def _create_secret_file(cls, path: "PathType", length: int = 48) -> None:
+        if os.path.exists(path):
+            if not os.path.isfile(path):
+                raise CommandError(f"Path {path} exists and is not a file.")
+            return
+
+        utils.write_file(path, utils.random_string(length))

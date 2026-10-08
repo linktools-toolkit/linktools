@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from .container import ContainerError
 from .context import EventContext
 from .execution.model import get_records, record_phase, render_report
+from .integration import consumer_type, order_services, runtime_requirements
 from .runtime.compose import service_dependencies
 
 if TYPE_CHECKING:
@@ -120,11 +121,10 @@ class ComposeOperations:
                     owner = installed[dependency]
                     required.add(owner)
                     services.update(owner.services)
-                declarations = self.manager.integration_snapshot[container.name].get("nginx", {})
-                nginx = installed.get("nginx")
-                if nginx is not None and any(str(site.server_name) for site in declarations.values()):
-                    required.add(nginx)
-                    services.update(nginx.services)
+            for provider, provider_services in runtime_requirements(
+                    self.manager, {container.name for container in required}).items():
+                required.add(installed[provider])
+                services.update(provider_services)
             for name in tuple(services):
                 owner = owners[name]
                 for dependency in service_dependencies(definitions[name]):
@@ -133,22 +133,6 @@ class ComposeOperations:
                         raise ContainerError(f"Compose dependency {dependency!r} for {owner.name} is not installed")
                     required.add(provider)
                     services.add(dependency)
-            if installed.get("nginx") in required:
-                from .integration import NginxSite
-                for producer, local_id, site in self.manager.iter_integrations("nginx"):
-                    if not isinstance(site, NginxSite):
-                        raise ContainerError(f"Invalid nginx integration {producer.name}/{local_id}")
-                    if not str(site.server_name):
-                        continue
-                    for capability, provider in (("auth", "authelia"), ("waf", "safeline")):
-                        configured = getattr(site, capability)
-                        if configured is None:
-                            configured = self.manager.env_config.get("NGINX_" + capability.upper() + "_ENABLE", type=bool)
-                        if configured:
-                            if provider not in installed:
-                                raise ContainerError(f"Nginx site {producer.name}/{local_id} requires {provider}")
-                            required.add(installed[provider])
-                            services.update(("authelia",) if provider == "authelia" else installed[provider].services)
             if before == (required, services):
                 break
         ordered = tuple(self.manager.resolver.resolve_dependencies(required))
@@ -243,13 +227,11 @@ class ComposeOperations:
             except FileNotFoundError:
                 previous = None
         actual = manager.docker_inspector.get_project_state(selection.project_containers)
-        running = set(actual.running_container_names)
-        context.initial_running = frozenset(running)
+        context.initial_running = frozenset(actual.running_container_names)
+        running_services = {service.service for service in actual.services if service.state == "running"}
         context.initial_running_services = frozenset(
             service.service for service in actual.services if service.state in ("running", "restarting"))
         context.initial_services = frozenset(service.service for service in getattr(actual, "services", ()))
-        if not any(service.service == "nginx" and service.state == "running" for service in actual.services):
-            running.discard("nginx")
         # Image preparation may include running aggregate owners that later
         # prove unchanged; only the final candidate closure is applied.
         generations = manager.generated_configs
@@ -294,8 +276,7 @@ class ComposeOperations:
                         generations[container.name].validate(candidate, context)
 
             selection = self._reconcile_selection(explicit, context,
-                {name for name, candidate in candidates.items() if candidate.changed or
-                 (name == "nginx" and getattr(context, "nginx_certificate_replaced", False))})
+                {name for name, candidate in candidates.items() if generations[name].needs_apply(candidate, context)})
             required_services = set(selection.services)
 
             if restart:
@@ -304,25 +285,26 @@ class ComposeOperations:
                     with record_phase(context, "stop", command=("stop", *explicit.services), logger=manager.logger):
                         runner.stop(stop_context, explicit.services)
                         manager.running_state.mark_stopped(stop_context)
-                running.difference_update(c.name for c in explicit.target_containers)
+                running_services.difference_update(
+                    service for container in explicit.target_containers for service in container.services)
 
-            nginx = next((c for c in sync if c.name == "nginx"), None)
-            if nginx is not None and "nginx" in required_services and nginx.name not in running:
-                with record_phase(context, "bootstrap", container="nginx", logger=manager.logger):
+            for container in sync:
+                owner = generations.get(container.name)
+                services = tuple(service for service in container.services if service in required_services)
+                if owner is None or not owner.needs_bootstrap(services, running_services):
+                    continue
+                with record_phase(context, "bootstrap", container=container.name, logger=manager.logger):
                     try:
-                        generations["nginx"].bootstrap(context)
+                        bootstrap_id = owner.bootstrap(context)
                     except Exception as error:
-                        self._rollback_candidate(nginx, candidates["nginx"], context, ("nginx",), error)
+                        self._rollback_candidate(container, candidates[container.name], context, services, error)
                         raise
-                    running.add("nginx")
-                    if candidates.get("nginx") and not candidates["nginx"].previous_id:
-                        candidates["nginx"].previous_id = context.nginx_bootstrap_id
+                    running_services.update(services)
+                    if not candidates[container.name].previous_id:
+                        candidates[container.name].previous_id = bootstrap_id
 
             owners = {service: container for container in sync for service in container.services}
-            # nginx's bootstrap satisfies provider readiness; publish its full
-            # generation only after auth/WAF services, then update navigation.
-            services = tuple(name for name in selection.services if owners[name].name not in ("nginx", "flare")) + tuple(
-                name for group in ("nginx", "flare") for name in selection.services if owners[name].name == group)
+            services = order_services(sync, selection.services)
             context.applied_generation_services = {}
             for service in services:
                 container = owners[service]
@@ -333,8 +315,7 @@ class ComposeOperations:
                 else:
                     with record_phase(context, "up", container=container.name, logger=manager.logger):
                         self._apply_services_with_rollback(container, context, (service,))
-                if service == "safeline-mgt":
-                    runner.wait_service_healthy(context, service)
+                consumer_type(container).after_apply(manager, context, service)
                 state_context = self._make_context(context.commands, ComposeSelection(
                     selection.project_containers, (container,), (service,), False))
                 manager.running_state.mark_started(state_context)

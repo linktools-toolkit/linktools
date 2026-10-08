@@ -18,7 +18,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.cntr.generation import NginxGeneration
+from _harness import builtin_consumer_type
+
+
+NginxGeneration = builtin_consumer_type("100-nginx")
 
 
 def _port():

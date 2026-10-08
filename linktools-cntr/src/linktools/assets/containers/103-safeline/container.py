@@ -4,18 +4,23 @@
 from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand
-from linktools.cntr import BaseContainer, ExposeLink, NginxSite
+from linktools.cntr import BaseContainer, Flare, Nginx
+from linktools.cntr.integration import IntegrationConsumer
 from linktools.cntr.urls import load_port_url
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
-    from linktools.cntr import Integrations
-    from typing import Any
     from collections.abc import Iterable
+    from typing import Any
+    from linktools.cntr import ContainerManager, EventContext, Integrations
 
 
 class Container(BaseContainer):
+
+    @cached_property
+    def integration_consumer(self) -> IntegrationConsumer:
+        return SafelineConsumer(self)
 
     @property
     def dependencies(self) -> "Iterable[str]":
@@ -26,7 +31,7 @@ class Container(BaseContainer):
         return dict(
             SAFELINE_TAG="latest",
             SAFELINE_IMAGE_PREFIX="chaitin",
-            SAFELINE_DOMAIN=self.get_nginx_domain(),
+            SAFELINE_DOMAIN=Nginx.domain(self),
             SAFELINE_AUTH_ENABLE=ConfigField(cast=bool, default=True),
             SAFELINE_POSTGRES_PASSWORD="Pg-pAssw0rd",
             SAFELINE_SUBNET_PREFIX="172.22.242",
@@ -38,24 +43,20 @@ class Container(BaseContainer):
 
     @cached_property
     def integrations(self) -> "Integrations":
-        return {
-            "flare": [
-                ExposeLink.container("Safeline", "alienOutline", "雷池WAF", load_port_url(
-                    self, "SAFELINE_PORT",
-                    https=True
-                )),
-            ],
-            "nginx": {
-                "web": NginxSite(
-                    expose=ExposeLink.public("Safeline", "alienOutline", "雷池WAF"),
-                    server_name=self.get_config_later("SAFELINE_DOMAIN"),
-                    proxy="https://safeline-mgt:1443",
-                    auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,
-                    auth_bypass=(r"\.(css|js)$",),
-                    auth_headers={"X-SLCE-API-TOKEN": self.get_config_later("SAFELINE_API_TOKEN")},
-                ),
-            },
-        }
+        return [
+            Flare.bookmark("Safeline", "alienOutline", load_port_url(
+                self, "SAFELINE_PORT",
+                https=True
+            ), category="container"),
+            Nginx.site(
+                server_name=self.get_config_later("SAFELINE_DOMAIN"),
+                expose=Flare.public("Safeline", "alienOutline", "雷池WAF"),
+                proxy="https://safeline-mgt:1443",
+                auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,
+                auth_bypass=(r"\.(css|js)$",),
+                auth_headers={"X-SLCE-API-TOKEN": self.get_config_later("SAFELINE_API_TOKEN")},
+            ),
+        ]
 
     @subcommand("reset-admin", help="reset safeline admin password")
     def on_reset_admin(self) -> None:
@@ -63,3 +64,10 @@ class Container(BaseContainer):
             "exec", "-it", self.get_service_name("safeline-mgt"),
             "resetadmin"
         ).call()
+
+
+class SafelineConsumer(IntegrationConsumer):
+    @classmethod
+    def after_apply(cls, manager: "ContainerManager", context: "EventContext", service: str) -> None:
+        if service == "safeline-mgt":
+            manager.compose_runner.wait_service_healthy(context, service)

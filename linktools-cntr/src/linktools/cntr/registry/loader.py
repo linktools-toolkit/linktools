@@ -78,7 +78,7 @@ class ContainerLoader:
 
         # Builtin container fields form the manager's base schema. Register
         # them before loading any third-party repository so repo providers
-        # (for example get_nginx_domain()) can resolve shared builtin fields
+        # (for example Nginx.domain()) can resolve shared builtin fields
         # such as NGINX_ROOT_DOMAIN.
         for container in containers:
             container.register_configs()

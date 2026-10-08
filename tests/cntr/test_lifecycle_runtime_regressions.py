@@ -5,11 +5,13 @@ import copy
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 
-from linktools.cntr._generation.nginx import NginxGeneration
+from linktools.cntr.integration import IntegrationConsumer
+from _harness import builtin_consumer_type
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.artifacts import AppliedServiceModels, GeneratedCandidate
 from linktools.cntr.container import ContainerError
@@ -17,11 +19,19 @@ from linktools.cntr.runtime.compose import ComposeRunner, service_dependencies
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
 from linktools.cntr.state.running import RunningStateStore
 
+if TYPE_CHECKING:
+    from typing import AbstractSet, Iterable, Mapping
+    from linktools.cntr import ContainerManager, EventContext
+
+
+NginxGeneration = builtin_consumer_type("100-nginx")
+
 
 class Container:
     dependencies = ()
     docker_file = None
     sites = {}
+    integration_consumer = None
 
     def __init__(self, name, services, path):
         self.name, self.services, self.path = name, services, path
@@ -33,7 +43,8 @@ class Container:
 
     def get_config(self, key, **kwargs):
         return {"NGINX_HTTP_PORT": 80, "NGINX_HTTPS_ENABLE": True,
-                "NGINX_ROOT_DOMAIN": "example.test", "ACME_DNS_API": "dns_test"}[key]
+                "NGINX_ROOT_DOMAIN": "example.test", "ACME_DNS_API": "dns_test",
+                "ACME_SERVER": "letsencrypt", "ACME_ACCOUNT_EMAIL": ""}[key]
 
 
 def manager_at(root, containers, states=(), model=None):
@@ -49,8 +60,8 @@ def manager_at(root, containers, states=(), model=None):
         return SimpleNamespace(check_call=lambda: 0)
 
     manager = SimpleNamespace(project_name="test", data_path=root, logger=None,
-        containers={c.name: c for c in containers}, integration_snapshot={c.name: {} for c in containers},
-        generated_configs={}, iter_integrations=lambda consumer: iter(()),
+        containers={c.name: c for c in containers}, integration_snapshot={c.name: () for c in containers},
+        integration_consumers={}, generated_configs={}, iter_integrations=lambda consumer: iter(()),
         environ=SimpleNamespace(locks=SimpleNamespace(process_lock=lambda key: nullcontext())),
         lifecycle=SimpleNamespace(notify_start=lambda ctx: nullcontext(), notify_stop=lambda ctx: nullcontext(),
                                   notify_remove=lambda ctx: nullcontext()),
@@ -67,6 +78,11 @@ def manager_at(root, containers, states=(), model=None):
     manager.running_state = RunningStateStore(manager)
     for container in containers:
         container.manager = manager
+        consumer = container.integration_consumer
+        if consumer is not None:
+            manager.integration_consumers[container.name] = consumer
+            if consumer.generated:
+                manager.generated_configs[container.name] = consumer
     runner = manager.compose_runner = ComposeRunner(manager)
     model = model or {"services": {name: spec for c in containers for name, spec in c.services.items()}}
     runner.final_model = lambda ctx: copy.deepcopy(model)
@@ -91,6 +107,8 @@ def test_restart_bootstrap_failure_restores_generation_and_exact_runtime_snapsho
     AppliedServiceModels(manager, old_model).record(("nginx",))
     previous = AppliedServiceModels(manager, new_model).previous["nginx"]
     owner = manager.generated_configs["nginx"] = NginxGeneration(nginx)
+    nginx.integration_consumer = owner
+    manager.integration_consumers["nginx"] = owner
     owner.render = lambda generation: {"nginx.conf": "serving " + generation}
     prior = GeneratedCandidate(nginx, owner.render)
     prior.publish()
@@ -129,6 +147,8 @@ def test_restart_bootstrap_and_rollback_failures_are_both_reported(tmp_path, mon
     nginx = Container("nginx", {"nginx": {}}, tmp_path / "nginx")
     operations, manager, runner, calls, restored = manager_at(tmp_path, (nginx,), (running_nginx(),))
     owner = manager.generated_configs["nginx"] = NginxGeneration(nginx)
+    nginx.integration_consumer = owner
+    manager.integration_consumers["nginx"] = owner
     owner.render = lambda generation: {"nginx.conf": "serving " + generation}
     prior = GeneratedCandidate(nginx, owner.render)
     prior.publish()
@@ -202,6 +222,8 @@ def test_renewal_reconciles_only_running_nginx_for_unrelated_partial_up(tmp_path
     operations, manager, runner, calls, restored = manager_at(
         tmp_path, (target, nginx), (running_nginx(),) if running else ())
     owner = manager.generated_configs["nginx"] = NginxGeneration(nginx)
+    nginx.integration_consumer = owner
+    manager.integration_consumers["nginx"] = owner
     owner.render = lambda generation: {"nginx.conf": "serving " + generation}
     prior = GeneratedCandidate(nginx, owner.render)
     prior.publish()
@@ -220,7 +242,7 @@ def test_acme_install_and_runtime_share_config_home():
     path = Path(__file__).parents[2] / "linktools-cntr/src/linktools/assets/containers/100-nginx/Dockerfile"
     text = path.read_text()
     assert "--home /opt/acme --config-home /root/.acme.sh" in text
-    assert "acme.sh --config-home /root/.acme.sh --set-default-ca" in text
+    assert "ln -s /opt/acme/acme.sh /usr/bin/acme.sh" in text
 
 
 @pytest.mark.parametrize("relation", [
@@ -250,6 +272,83 @@ def test_dependency_normalization_preserves_explicit_conditions_and_external_lin
     assert service_dependencies({"depends_on": {"database": {"condition": "service_healthy"}},
         "links": ["database:cache"], "volumes_from": ["container:external:ro"],
         "external_links": ["external"]}) == {"database": {"condition": "service_healthy"}}
+
+
+def test_consumer_policy_adds_only_its_required_provider_services(tmp_path, monkeypatch) -> None:
+    class MetricsConsumer(IntegrationConsumer):
+        application_order = 10
+
+        @classmethod
+        def runtime_requirements(cls, manager: "ContainerManager",
+                                 required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
+            return {"storage": ("database",)} if "metrics" in required else {}
+
+    app = Container("metrics", {"metrics": {}}, tmp_path / "metrics")
+    storage = Container("storage", {"database": {}, "idle": {}}, tmp_path / "storage")
+    app.integration_consumer = MetricsConsumer(app)
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (storage, app))
+    operations.select = lambda *args, **kwargs: ComposeSelection((storage, app), (app,), ("metrics",), False)
+    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
+    operations.up(["metrics"])
+    assert [call[-1] for call in calls if call[0] == "up"] == ["database", "metrics"]
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_consumer_policy_controls_bootstrap_order_and_runtime_only_updates(tmp_path, monkeypatch, running) -> None:
+    events = []
+
+    class IndexConsumer(IntegrationConsumer):
+        generated = True
+        application_order = 100
+        uses_generation_label = False
+
+        def prepare(self, context: "EventContext") -> None:
+            context.index_changed = True
+
+        def render(self, generation_id: str) -> "dict[str, str]":
+            return {"config": "serving " + generation_id}
+
+        def validate(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+            pass
+
+        def needs_apply(self, candidate: "GeneratedCandidate", context: "EventContext") -> bool:
+            assert not candidate.changed
+            return context.index_changed
+
+        def needs_bootstrap(self, services: "Iterable[str]", running_services: "AbstractSet[str]") -> bool:
+            return "indexer" in services and "indexer" not in running_services
+
+        def bootstrap(self, context: "EventContext") -> str:
+            candidate = GeneratedCandidate(self.container, lambda generation: {"config": "bootstrap " + generation})
+            candidate.publish()
+            self.container.manager.compose_runner.apply_service(context, "indexer", recreate=True)
+            events.append("bootstrap")
+            return candidate.generation_id
+
+        def apply(self, candidate: "GeneratedCandidate", context: "EventContext",
+                  services: "Iterable[str]") -> None:
+            for service in services:
+                self.container.manager.compose_runner.apply_service(context, service)
+                events.append("apply")
+
+    app = Container("target", {"target": {}}, tmp_path / "target")
+    indexer = Container("indexer", {"indexer": {}}, tmp_path / "indexer")
+    indexer.integration_consumer = IndexConsumer(indexer)
+    state = ServiceRuntimeState(("indexer",), "indexer", "index-runtime", "running", None, "image", None, {})
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (indexer, app), (state,) if running else ())
+    owner = indexer.integration_consumer
+    previous = GeneratedCandidate(indexer, owner.render)
+    previous.publish()
+    AppliedServiceModels(manager, runner.final_model(None)).record(("indexer", "target"))
+    selected = (app,) if running else (app, indexer)
+    selected_services = ("target",) if running else ("indexer", "target")
+    operations.select = lambda *args, **kwargs: ComposeSelection((indexer, app), selected, selected_services, False)
+    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
+    operations.up([container.name for container in selected])
+    assert events == (["apply"] if running else ["bootstrap", "apply"])
+    assert [call[-1] for call in calls if call[0] == "up"] == (
+        ["target", "indexer"] if running else ["indexer", "target", "indexer"])
+    assert GeneratedCandidate.current_id(str(indexer.get_app_path("generated"))) == previous.generation_id
 
 
 def test_isolated_raw_arguments_decode_only_compose_serialization_and_leave_snapshot_unchanged():

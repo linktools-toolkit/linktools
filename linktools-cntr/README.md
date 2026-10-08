@@ -126,6 +126,9 @@ ct-cntr config list
 # 设置配置变量
 ct-cntr config set NGINX_ROOT_DOMAIN=example.com ACME_DNS_API=dns_ali Ali_Key=xxx Ali_Secret=yyy
 
+# 指定 ACME CA 与账户邮箱（默认 CA 为 Let's Encrypt，邮箱可选）
+ct-cntr config set ACME_SERVER=letsencrypt ACME_ACCOUNT_EMAIL=admin@example.com
+
 # 删除配置变量
 ct-cntr config unset NGINX_ROOT_DOMAIN ACME_DNS_API Ali_Key Ali_Secret
 
@@ -343,7 +346,23 @@ sequenceDiagram
 
 ## 声明式集成与配置发布
 
-内置 nginx 使用 `NginxSite` 声明站点，导航 URL 不再负责注册代理。
+`integrations` 返回扁平的 `Integration` 数组，通过 `Nginx` 和 `Flare` 工厂统一声明：
+
+```python
+from linktools.cntr import Flare, Nginx
+
+return [
+    Nginx.site("app.example.com", expose=Flare.public("应用", "web", "应用描述")),
+    Flare.bookmark("工具", "web", "https://tool.example.com", category="tool"),
+]
+```
+
+`Flare.public` 创建带描述的应用；`Flare.bookmark` 支持自定义分区。
+使用 `Flare.category("tool", "工具", order=5)` 可进一步设置分区标题和顺序。
+域名配置使用 `ConfigField(provider=Nginx.domain(self))`。
+共享声明和消费者协议位于 `integration/` 包中；具体配置生成、启动依赖和发布策略
+放在各自的 asset `container.py`，通过 `integration_consumer` 提供给 manager。
+导航 URL 不再负责注册代理。
 `auth_bypass` 与 `waf_bypass` 分别控制认证和 WAF 路径旁路；自定义模板保留 nginx 原生路由语义。
 外部容器仓库需要同时迁移 Python 声明、模板和 OIDC 读取接口。
 详见 [集成协议与迁移说明](docs/integrations.md)。

@@ -181,7 +181,7 @@ def test_running_sync_nginx_expands_auth_provider_before_publish(fresh_manager, 
     from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
     recorded = _record(fresh_manager, monkeypatch)
     declarations = dict(fresh_manager.integration_snapshot)
-    declarations["portainer"] = {}
+    declarations["portainer"] = ()
     monkeypatch.setattr(fresh_manager, "integration_snapshot", declarations)
     state = ServiceRuntimeState(("nginx",), "nginx", "nginx", "running", "healthy", "nginx:test", None, {})
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda containers:
@@ -216,8 +216,12 @@ def test_changed_compose_environment_prevents_generation_reuse():
 
 
 def test_native_diagnostic_keeps_site_source_but_omits_secret():
+    from _harness import builtin_consumer_type
+
     error = 'nginx: [emerg] invalid secret-token in /etc/nginx/generated/id/sites/s_617070_776562/business.conf:12'
+    container = SimpleNamespace(name="proxy", services={"nginx": {}})
     manager = SimpleNamespace(nginx_sites={("app", "web"): SimpleNamespace(template="/templates/app.j2")},
+        integration_consumers={"proxy": builtin_consumer_type("100-nginx")(container)},
         structured_runner=SimpleNamespace(execute=lambda *args, **kwargs:
             SimpleNamespace(succeeded=False, stdout="", stderr=error, returncode=1)),
         runtime=SimpleNamespace(create_docker_process=lambda *args, **kwargs: None))
@@ -244,7 +248,7 @@ def test_saved_generated_model_retains_previous_generation_label():
 
     manager = SimpleNamespace(project_name="test", runtime=SimpleNamespace(create_docker_process=process))
     context = SimpleNamespace(generated_candidates={"authelia": SimpleNamespace(
-        container=SimpleNamespace(name="authelia"), generation_id="previous")})
+        container=SimpleNamespace(name="authelia", integration_consumer=None), generation_id="previous")})
     ComposeRunner(manager).apply_saved_services(
         context, ("authelia",), {"old.yml": "services:\n  authelia:\n    image: authelia:old\n"})
     assert captured[-1]["services"]["authelia"]["labels"] == {"io.linktools.cntr.generation": "previous"}
@@ -262,7 +266,7 @@ def test_navigation_consumer_syncs_without_becoming_start_requirement(fresh_mana
 
 def test_removed_final_declarations_still_synchronize_aggregate_consumers(fresh_manager, monkeypatch):
     producer = fresh_manager.containers["portainer"]
-    monkeypatch.setattr(producer, "integrations", {})
+    monkeypatch.setattr(producer, "integrations", [])
     explicit = fresh_manager.compose_operations.select(["portainer"], metadata_only=True, for_start=True)
     selection = fresh_manager.compose_operations.start_selection(explicit)
     assert [c.name for c in selection.target_containers] == ["portainer"]

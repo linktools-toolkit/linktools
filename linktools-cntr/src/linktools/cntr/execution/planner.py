@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from ..artifacts import collect_candidates, sha256_of
 from ..container import ContainerError
+from ..integration import consumer_type, order_services
 from ..runtime.structured import redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
 
@@ -79,11 +80,7 @@ class ExecutionPlanner:
         if action == "restart":
             commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
         if action in ("up", "restart"):
-            owners = {name: container.name for container in start_selection.project_containers
-                      for name in container.services}
-            services_to_start = [name for name in start_selection.services if owners[name] not in ("nginx", "flare")]
-            services_to_start.extend(name for group in ("nginx", "flare")
-                                     for name in start_selection.services if owners[name] == group)
+            services_to_start = order_services(start_selection.project_containers, start_selection.services)
             for service in services_to_start:
                 commands.append(self._planned_command(
                     "up", [*file_args, *manager.compose_runner.apply_service_args(service, remove_orphans=selection.full)]))
@@ -119,9 +116,8 @@ class ExecutionPlanner:
                 if container.name in manager.generated_configs:
                     warnings.append("{}: generated candidate native validation is pending execution; "
                                     "no hooks, secrets or generated files were prepared".format(container.name))
-            if any(container.name == "nginx" for container in sync):
-                warnings.append("nginx: first stable generated-parent mount requires container recreation; "
-                                "cold starts use health-only bootstrap before provider readiness")
+            for container in sync:
+                warnings.extend(consumer_type(container).plan_warnings())
         preflight = "skipped"
         if action in ("up", "restart") and candidate_files:
             preflight = manager.docker_inspector.preflight_candidates(candidate_files)

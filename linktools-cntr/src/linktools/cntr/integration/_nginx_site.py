@@ -13,8 +13,9 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any, Optional
-    from .container import BaseContainer
-    from .integration import ExposeLink, NginxSite
+    from ..container import BaseContainer
+    from ._flare import FlareLink
+    from ._nginx import NginxSite
 
 
 class ResolvedSite:
@@ -29,7 +30,7 @@ class ResolvedSite:
         self._declaration = declaration
 
     def _error(self, message: str) -> None:
-        from .container import ContainerError
+        from ..container import ContainerError
         raise ContainerError("Nginx site %s/%s: %s" % (self.producer.name, self.local_id, message))
 
     def _text(self, value: "Any", field: str, optional: bool = False) -> "Optional[str]":
@@ -40,15 +41,15 @@ class ResolvedSite:
         return str(value)
 
     @cached_property
-    def expose(self) -> "Optional[ExposeLink]":
-        from .integration import ExposeLink
+    def expose(self) -> "Optional[FlareLink]":
+        from ._flare import FlareLink
         from linktools.runtime import lazy_load
 
         value = self._declaration.expose
         if value is None:
             return None
-        if not isinstance(value, ExposeLink):
-            self._error("expose must be an ExposeLink or None")
+        if not isinstance(value, FlareLink):
+            self._error("expose must be a FlareLink or None")
         return value.with_default_url(lazy_load(lambda: self.url))
 
     @cached_property

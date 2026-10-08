@@ -5,16 +5,24 @@ Date: 2026-10-08.
 ## Scope and compatibility
 
 The paired cntr and homelab changes use one public declaration contract:
-`Integration`, `Integrations`, `NginxSite`, `ExposeCategory`, and `ExposeLink` in
-`linktools.cntr.integration`. Named mappings retain stable local IDs; finite
-iterables are available to consumers that do not require names. Nginx requires
-named sites. Flare accepts ordered unnamed links and site-attached navigation.
+`Integration`, `Integrations`, `Nginx`, `Flare`, `NginxSite`, `FlareCategory`, and
+`FlareLink` in `linktools.cntr.integration`. Producers use `Nginx.site(...)` and
+`Flare.public/bookmark(...)` to return one flat finite iterable of
+declarations. Each declaration identifies its consumer; nginx sites carry stable
+local IDs. Flare accepts ordered unnamed links and site-attached navigation.
 See [integrations.md](integrations.md) for the authoring API and lazy URL helpers.
 
-The authoring surface remains `configs`, `dependencies`, and `integrations`.
+The producer authoring surface remains `configs`, `dependencies`, and
+`integrations`. Consumers additionally provide `integration_consumer`.
 The removed BaseContainer generation hooks, `config_sources`, exposure helpers,
-and URL mixins are not compatibility APIs. Four internal builtin owners handle
-configuration generation. Complete candidate comparison deliberately allows a
+and URL mixins are not compatibility APIs. Concrete consumer implementations
+and lifecycle policies live in their asset `container.py` files. The
+`integration/` package owns the shared declarations and consumer protocol; the
+manager collects container-provided instances instead of using a builtin-name
+registry. The shared core orchestrates dependency, bootstrap, validation,
+publication and rollback operations. Domain configuration uses
+`Nginx.domain(container, name)` instead
+of `BaseContainer.get_nginx_domain`. Complete candidate comparison allows a
 partial `up` or `restart` to apply pending changes to other running services;
 unrelated stopped services stay stopped unless required by runtime dependencies.
 
@@ -43,9 +51,9 @@ Package build and artifact verification have not been performed for this pass.
 
 ## Regression coverage
 
-- Declaration snapshots: pure types, named and unnamed collections, one-time
-  finite-iterator consumption, immutable structure, insertion order, disabled
-  consumers, and lazy values that are not read while declarations are collected
+- Declaration snapshots: mixed consumer types, local ID validation and duplicate
+  rejection, one-time finite-iterator consumption, immutable structure, insertion
+  order, disabled consumers, and lazy values that stay unread during collection
 - URL factories: delayed configuration/host/site reads, immediate local-ID
   validation, missing and disabled values, per-producer site identities, and
   unchanged path/query composition
@@ -56,6 +64,8 @@ Package build and artifact verification have not been performed for this pass.
 - Lifecycle: restoration after failed nginx bootstrap, matching applied Compose
   snapshots, certificate replacement despite unchanged config IDs, aligned ACME
   cron configuration, and explicit/implicit Compose dependency ordering
+- ACME bootstrap: a local client substitute covers empty config mounts, explicit
+  CA/contact arguments, account reuse, and failed issuance without a live CA
 - Runtime arguments: literal-dollar decoding only at the raw Docker boundary,
   retaining correctly escaped persisted Compose files for later rollback
 - Paired commands: MCP Playwright and MCP Push `show` handlers, including Push's

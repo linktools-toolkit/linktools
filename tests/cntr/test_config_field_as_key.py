@@ -91,11 +91,11 @@ def test_get_config_still_accepts_plain_string_key(fresh_manager):
     assert fresh_manager.env_config.get("DOCKER_HOST") == fresh_manager.containers["portainer"].get_config("DOCKER_HOST")
 
 
-def test_get_nginx_domain_provider_via_configfield_key(fresh_manager):
-    # get_nginx_domain() returns a LazyProvider -- must go on provider=, not
-    # default=.
+def test_nginx_domain_provider_via_configfield_key(fresh_manager):
+    from linktools.cntr import Nginx
+
     portainer = fresh_manager.containers["portainer"]
-    field = ConfigField(name="SOME_DOMAIN", provider=portainer.get_nginx_domain("x"))
+    field = ConfigField(name="SOME_DOMAIN", provider=Nginx.domain(portainer, "x"))
     assert isinstance(field.provider, LazyProvider)
     assert portainer.get_config(field) == "_"  # NGINX_ROOT_DOMAIN falls back to "_" in tests
 
@@ -104,11 +104,11 @@ def test_third_party_nginx_domain_provider_uses_builtin_schema(tmp_path, capsys,
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "container.py").write_text(
-        "from linktools.cntr import BaseContainer\n"
+        "from linktools.cntr import BaseContainer, Nginx\n"
         "class Container(BaseContainer):\n"
         "    @property\n"
         "    def configs(self):\n"
-        "        return {'AIONUI_DOMAIN': self.get_nginx_domain()}\n",
+        "        return {'AIONUI_DOMAIN': Nginx.domain(self)}\n",
         encoding="utf-8",
     )
     manager, container = _install_single(tmp_path, repo, "repo")

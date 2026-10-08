@@ -16,14 +16,23 @@ Test-only. It does three things, none of which touch production code:
    unchanged; ``cast="path"`` fields now resolve correctly in core).
 """
 import getpass
+import importlib.util
 import json
 import os
+from functools import lru_cache
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from linktools.errors import CliError
 from linktools.types import MISSING
 import linktools.rich as _rich
+
+if TYPE_CHECKING:
+    from types import ModuleType
+    from typing import Type
+    from linktools.cntr.integration import IntegrationConsumer
 
 _INTERACTIVE_PATCHED = False
 
@@ -75,6 +84,26 @@ def install_deterministic_interaction() -> None:
     _rich.choose = _placeholder_choose
     _rich.confirm = lambda prompt, default=False, **kw: default
     _INTERACTIVE_PATCHED = True
+
+
+@lru_cache(maxsize=None)
+def builtin_module(name: str) -> "ModuleType":
+    """Load a trusted builtin asset with deterministic interaction."""
+    install_deterministic_interaction()
+    assets = Path(__file__).resolve().parents[2] / "linktools-cntr/src/linktools/assets/containers"
+    spec = importlib.util.spec_from_file_location("test_generated_" + name.replace("-", "_"),
+                                                 str(assets / name / "container.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def builtin_consumer_type(name: str) -> "Type[IntegrationConsumer]":
+    container = object.__new__(builtin_module(name).Container)
+    consumer = container.integration_consumer
+    if consumer is None:
+        raise ValueError("Builtin has no integration consumer: " + name)
+    return type(consumer)
 
 
 def _reset_global_config() -> None:
@@ -186,5 +215,5 @@ def stub_generated_runtime(manager, monkeypatch):
                             manager.compose_runner.apply_services(context, services))
     def bootstrap(context):
         manager.compose_runner.apply_service(context, "nginx")
-        context.nginx_bootstrap_id = "bootstrap"
+        return "bootstrap"
     monkeypatch.setattr(manager.generated_configs["nginx"], "bootstrap", bootstrap)

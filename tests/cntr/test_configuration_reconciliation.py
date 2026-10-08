@@ -14,7 +14,8 @@ from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeSt
 
 class Container:
     dependencies = ()
-    integrations = {}
+    integrations = ()
+    integration_consumer = None
 
     def __init__(self, name, services):
         self.name = name
@@ -51,8 +52,8 @@ def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped")):
     )
     manager = SimpleNamespace(
         project_name="test", data_path=tmp_path, logger=None,
-        containers={c.name: c for c in containers}, integration_snapshot={c.name: {} for c in containers},
-        generated_configs={}, compose_runner=runner,
+        containers={c.name: c for c in containers}, integration_snapshot={c.name: () for c in containers},
+        integration_consumers={}, generated_configs={}, compose_runner=runner,
         environ=SimpleNamespace(locks=SimpleNamespace(process_lock=lambda key: nullcontext())),
         lifecycle=SimpleNamespace(notify_start=lambda context: nullcontext(), notify_remove=lambda context: nullcontext()),
         image_preparer=SimpleNamespace(plan=lambda *args, **kwargs: SimpleNamespace(pull=(), build=())),
@@ -210,7 +211,7 @@ def test_service_edge_preserves_its_owners_strong_group_dependencies():
     first.services["b"]["depends_on"] = {"a": {}}
     second.dependencies = ("c",)
     project = (first, second, dependency)
-    manager = SimpleNamespace(integration_snapshot={c.name: {} for c in project},
+    manager = SimpleNamespace(integration_snapshot={c.name: () for c in project}, integration_consumers={},
         resolver=SimpleNamespace(resolve_dependencies=lambda selected: (first, dependency, second)))
     selected = ComposeOperations(manager).start_selection(ComposeSelection(project, (first,), ("b",), False))
     assert selected.services == ("c", "a", "b")

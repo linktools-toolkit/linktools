@@ -4,12 +4,15 @@
 
 import pytest
 
-from linktools.cntr import ContainerError, NginxSite
-from linktools.cntr.generation import NginxGeneration
+from linktools.cntr import ContainerError, Nginx
+from _harness import builtin_consumer_type
+
+
+NginxGeneration = builtin_consumer_type("100-nginx")
 
 
 def _render_site(nginx, waf, patterns):
-    site = NginxSite(
+    site = Nginx.site(
         server_name="app.example.test", https=False, waf=waf, auth=False,
         waf_bypass=patterns,
     )

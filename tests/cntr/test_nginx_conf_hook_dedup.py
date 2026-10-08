@@ -3,7 +3,7 @@
 """Navigation never owns proxy registration or mutates declaration identities."""
 from types import SimpleNamespace
 
-from linktools.cntr import BaseContainer, NginxSite
+from linktools.cntr import BaseContainer, Nginx
 from linktools.cntr.urls import load_nginx_url
 
 
@@ -23,8 +23,8 @@ def test_same_site_can_have_many_navigation_links_without_hooks():
 
 
 def test_sites_share_backends_without_sharing_identity():
-    one = NginxSite("app.example.com", proxy="http://backend:8080")
-    two = NginxSite("admin.example.com", proxy="http://backend:8080")
+    one = Nginx.site("app.example.com", proxy="http://backend:8080")
+    two = Nginx.site("admin.example.com", proxy="http://backend:8080")
     assert one is not two
     assert one.proxy == two.proxy
 

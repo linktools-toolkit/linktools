@@ -241,22 +241,10 @@ class ComposeRunner:
         result = self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_process(*args, capture_output=True), check=False)
         # Native error output can contain credentials expanded into the config.
-        if not result.succeeded or "conflicting server name" in (result.stdout + result.stderr).lower():
-            import re
-            diagnostic = ""
-            match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
-            if match:
-                diagnostic = " at {}:{}".format(match.group(1), match.group(2))
-                identity = re.search(r"(?:site|s)_([0-9a-f]+)_([0-9a-f]+)", match.group(1))
-                if identity:
-                    try:
-                        producer, local_id = (bytes.fromhex(value).decode("utf-8") for value in identity.groups())
-                        diagnostic += " (site {!r}/{!r})".format(producer, local_id)
-                        site = self.manager.nginx_sites.get((producer, local_id))
-                        if site is not None:
-                            diagnostic += " template {!r}".format(site.template or "nginx/default.conf")
-                    except (ValueError, UnicodeDecodeError):
-                        pass
+        from ..integration import consumer_for_service
+        consumer = consumer_for_service(self.manager, service)
+        if consumer.validation_failed(result):
+            diagnostic = consumer.validation_diagnostic(self.manager, result)
             raise ContainerError("Native validation failed for service {}{} (exit {})".format(
                 service, diagnostic, result.returncode))
         return result
@@ -283,7 +271,8 @@ class ComposeRunner:
         import yaml
         candidates = getattr(context, "generated_candidates", {})
         candidate = next((c for c in candidates.values() if service == c.container.name), None)
-        if candidate is None or candidate.container.name == "nginx":
+        from ..integration import consumer_type
+        if candidate is None or not consumer_type(candidate.container).uses_generation_label:
             return self.manager.runtime.create_docker_compose_process(context.containers, *args).check_call()
         overlay = {"services": {service: {"labels": {
             "io.linktools.cntr.generation": candidate.generation_id}}}}
@@ -374,11 +363,12 @@ class ComposeRunner:
                 file_args.extend(["--file", path])
             import yaml
             candidates = getattr(context, "generated_candidates", {})
+            from ..integration import consumer_type
             labels = {
                 candidate.container.name: {"labels": {
                     "io.linktools.cntr.generation": candidate.generation_id}}
                 for candidate in candidates.values()
-                if candidate.container.name in services and candidate.container.name != "nginx"
+                if candidate.container.name in services and consumer_type(candidate.container).uses_generation_label
             }
             if labels:
                 path = os.path.join(directory, "generation.yml")

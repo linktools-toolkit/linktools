@@ -4,8 +4,8 @@
 
 import pytest
 
-from linktools.cntr import NginxSite
-from linktools.cntr._nginx import ResolvedSite
+from linktools.cntr import Nginx
+from linktools.cntr.integration import ResolvedSite
 
 
 @pytest.fixture(autouse=True)
@@ -30,7 +30,7 @@ def test_oidc_client_is_read_only_and_uses_saved_secret(fresh_manager):
 def test_oidc_redirects_derive_only_from_current_sites(fresh_manager, monkeypatch):
     authelia = fresh_manager.containers["authelia"]
     producer = fresh_manager.containers["portainer"]
-    site = NginxSite(
+    site = Nginx.site(
         server_name="service.example.com",
         proxy="http://app:8080",
         oidc_redirects=("", "/callback", "https://external.example.com/callback", "/callback"),
@@ -51,7 +51,7 @@ def test_oidc_redirects_derive_only_from_current_sites(fresh_manager, monkeypatc
 def test_acl_supports_native_optional_fields(fresh_manager, monkeypatch):
     authelia = fresh_manager.containers["authelia"]
     producer = fresh_manager.containers["portainer"]
-    site = NginxSite(
+    site = Nginx.site(
         server_name="secure.example.com",
         proxy="http://app:8080",
         auth_rule={"policy": "one_factor", "networks": ["10.0.0.0/8"]},

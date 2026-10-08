@@ -4,16 +4,19 @@
 
 import pytest
 
-from linktools.cntr import ContainerError, NginxSite
-from linktools.cntr.generation import NginxGeneration
+from linktools.cntr import ContainerError, Nginx
+from _harness import builtin_consumer_type
 from linktools.cntr.container import ContainerTemplateError
+
+
+NginxGeneration = builtin_consumer_type("100-nginx")
 
 
 def make_site(**kwargs):
     values = dict(server_name="app.example.test", https=True, waf=True, auth=True,
                   proxy="http://app:8080", auth_headers={"Authorization": 'Bearer "$host"'})
     values.update(kwargs)
-    site = NginxSite(**values)
+    site = Nginx.site(**values)
     site.local_id = "web"
     site.file_id = site.var_name = "s_test"
     return site
