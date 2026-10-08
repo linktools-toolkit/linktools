@@ -243,7 +243,7 @@ def test_changed_compose_environment_prevents_generation_reuse():
     assert not runner.is_generation_current(context, "authelia", SimpleNamespace(generation_id="same"))
 
 
-def test_native_diagnostic_keeps_site_source_but_omits_secret():
+def test_native_diagnostic_keeps_site_source_but_omits_secret(tmp_path):
     from _harness import builtin_container_type
 
     error = 'nginx: [emerg] invalid secret-token in /etc/nginx/generated/id/sites/s_617070_776562.conf:12'
@@ -261,7 +261,7 @@ def test_native_diagnostic_keeps_site_source_but_omits_secret():
     manager.compose_runner = runner
     container.manager = manager
     with pytest.raises(ContainerError) as raised:
-        container.validate_config(SimpleNamespace(), SimpleNamespace(generation_id="id"))
+        container.validate_config(SimpleNamespace(), SimpleNamespace(generation_id="id", path=str(tmp_path)))
     message = str(raised.value)
     assert "'app'/'web'" in message
     assert "/templates/app.j2" in message
@@ -397,7 +397,7 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
     ("nginx", 0, "nginx: [warn] conflicting server name secret-token"),
     ("authelia", 1, "invalid secret-token in /generated/id/configuration.yml:12"),
 ])
-def test_asset_validator_interprets_raw_result_without_exposing_secrets(service, returncode, stderr):
+def test_asset_validator_interprets_raw_result_without_exposing_secrets(service, returncode, stderr, tmp_path):
     from _harness import builtin_container_type
 
     result = SimpleNamespace(succeeded=returncode == 0, returncode=returncode, stdout="", stderr=stderr)
@@ -413,7 +413,7 @@ def test_asset_validator_interprets_raw_result_without_exposing_secrets(service,
     container = object.__new__(builtin_container_type("100-nginx" if service == "nginx" else "102-authelia"))
     container.manager = manager
     with pytest.raises(ContainerError, match="Native validation failed") as raised:
-        container.validate_config(context, SimpleNamespace(generation_id="id"))
+        container.validate_config(context, SimpleNamespace(generation_id="id", path=str(tmp_path)))
     assert "secret-token" not in str(raised.value)
 
 

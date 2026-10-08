@@ -4,11 +4,19 @@
       "name": "aio-nginx"
     }
   },
+  "secrets": {
+    "cntr_acme_account": {
+      "file": "<APP_DATA>/nginx/acme-build-account.tar"
+    }
+  },
   "services": {
     "nginx": {
       "build": {
         "context": "<ASSETS>/100-nginx",
-        "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile"
+        "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile",
+        "secrets": [
+          "cntr_acme_account"
+        ]
       },
       "command": [
         "nginx",
@@ -25,7 +33,8 @@
         "CF_Email": "",
         "CF_Key": "",
         "CF_Token": "",
-        "CF_Zone_ID": ""
+        "CF_Zone_ID": "",
+        "NGINX_HTTPS_PORT": "443"
       },
       "healthcheck": {
         "interval": "5s",

@@ -565,8 +565,9 @@ class Container(BaseContainer):
                    "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t")
         marker = Path(candidate.path) / "certificate.version"
         version = marker.read_text(encoding="utf-8").strip() if marker.exists() else None
-        root = self.get_app_path("certs")
-        live = root / "live"
+        if version:
+            root = self.get_app_path("certs")
+            live = root / "live"
         if version and (not live.is_symlink() or os.readlink(str(live)) != "versions/" + version):
             import shutil
             import tempfile

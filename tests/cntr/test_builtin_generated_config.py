@@ -205,7 +205,9 @@ def test_stopped_legacy_nginx_preserves_certificates_before_migration(tmp_path, 
     container.__dict__["acme_ssl_domains"] = ["example.test", "*.example.test"]
     owner = container
     monkeypatch.setattr(owner, "_preserve_legacy_files", preserve)
-    owner.on_prepare_config(SimpleNamespace(initial_services={"nginx"}, initial_running=set()))
+    context = SimpleNamespace(initial_services={"nginx"}, initial_running=set())
+    owner.on_starting(context)
+    owner.on_prepare_config(context)
     assert copied == [True]
 
 
@@ -281,14 +283,14 @@ def test_authelia_redis_only_scope_reconciles_without_starting_siblings(fresh_ma
     assert actions == [(context, "authelia-redis", False)]
 
 
-def test_native_owner_validators_use_candidate_paths_and_password_file():
+def test_native_owner_validators_use_candidate_paths_and_password_file(tmp_path):
     calls = []
     def validate_service(*args, **kwargs):
         calls.append((args, kwargs))
         return SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0)
     runner = SimpleNamespace(validate_service=validate_service)
     context = SimpleNamespace()
-    candidate = SimpleNamespace(generation_id="candidate")
+    candidate = SimpleNamespace(generation_id="candidate", path=str(tmp_path))
     instance(builtin("100-nginx"), compose_runner=runner).validate_config(context, candidate)
     instance(builtin("102-authelia"), compose_runner=runner).validate_config(context, candidate)
     assert calls[0] == ((context, "nginx", (
