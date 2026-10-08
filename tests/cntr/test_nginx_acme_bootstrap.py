@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime ACME preparation: staged keys, live pointer and renewal."""
+"""Build-time ACME issue and offline runtime promotion of baked certificates."""
 
 import os
 import shutil
@@ -57,6 +57,14 @@ def certificate_case(fresh_manager, tmp_path):
     (requested / "domains").write_text(
         "example.test\n*.example.test\n*.code.example.test\n")
     (tmp_path / "acme/account.key").write_text("existing-account-key")
+    (legacy / "acme").mkdir()
+    (legacy / "acme/account.key").write_text("existing-account-key")
+    seed = tmp_path / "seed"
+    (seed / "certs").mkdir(parents=True)
+    (seed / "acme").mkdir()
+    (seed / "acme/account.key").write_text("build-account-key")
+    for source, suffix in ((new, "fullchain"), (new_key, "key"), (new, "cert")):
+        shutil.copyfile(str(source), str(seed / "certs" / ("example.test_" + suffix + ".pem")))
 
     client = tmp_path / "bin/acme.sh"
     client.write_text("""#!/usr/bin/env python3
@@ -66,9 +74,7 @@ import shutil
 from pathlib import Path
 args = sys.argv[1:]
 if "--issue" in args:
-    if os.environ.get("FAIL_ISSUE"):
-        raise SystemExit(7)
-    Path(os.environ["MOCK_STATE"]).write_text(" ".join(args))
+    raise SystemExit("Runtime certificate preparation must never issue new certificates")
 elif "--install-cert" in args:
     root = Path(os.environ["MOCK_CERTIFICATES"])
     for flag, name in (("--cert-file", "new.pem"),
@@ -89,6 +95,7 @@ else:
     for before, after in (
         ("/etc/certs", str(certs)),
         ("/root/.acme.sh", str(tmp_path / "acme")),
+        ("/opt/nginx-initial", str(seed)),
         ("/opt/acme/acme.sh", str(client)),
         ("/var/run/nginx.pid", str(tmp_path / "fake.pid")),
     ):
@@ -109,15 +116,20 @@ def _run(path, environ, *args):
                           universal_newlines=True)
 
 
-def test_acme_is_prepared_at_runtime_not_baked_into_image(certificate_case):
+def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_case):
     container, _, _, _ = certificate_case
     dockerfile = container.docker_file
-    assert "nginx-certificates" in dockerfile
-    assert "RUN acme.sh --issue" not in dockerfile
-    assert "ENV CF_Token" not in dockerfile
+    assert "RUN acme.sh" in dockerfile and "--issue" in dockerfile
+    assert "COPY nginx-certificates nginx-reload" in dockerfile
+    assert "/opt/nginx-initial/certs" in dockerfile
     assert "nginx-certificates renew" in dockerfile
     assert container.docker_compose["services"]["nginx"]["environment"]["CF_Token"] == "fake-token"
-    assert container.acme_ssl_domains[:2] == ["example.test", "*.example.test"]
+    assert container.docker_compose["services"]["nginx"]["build"]
+    old_image = container.docker_compose["services"]["nginx"]["image"]
+    container.__dict__["acme_ssl_domains"] = ["example.test", "*.example.test", "*.code.example.test"]
+    container.__dict__.pop("cert_image_revision", None)
+    container.__dict__.pop("docker_compose", None)
+    assert container.docker_compose["services"]["nginx"]["image"] != old_image
 
 
 def test_changed_san_list_stages_without_touching_live_certificate(certificate_case):
@@ -125,34 +137,33 @@ def test_changed_san_list_stages_without_touching_live_certificate(certificate_c
     desired = root / "certs/versions/pending/domains"
     assert _run(script, env, "check", "example.test", str(desired)).returncode != 0
     old = (root / "certs/live/example.test_fullchain.pem").read_bytes()
-    result = _run(script, env, "prepare", "pending", "example.test",
-                  "letsencrypt", "dns_cf", "")
+    result = _run(script, env, "prepare", "pending", "example.test")
     assert result.returncode == 0, result.stderr
     assert (root / "certs/live").readlink() == Path("versions/legacy")
     assert (root / "certs/live/example.test_fullchain.pem").read_bytes() == old
     assert (root / "acme/account.key").read_text() == "existing-account-key"
     assert (root / "certs/versions/pending/example.test_key.pem").stat().st_mode & 0o777 == 0o600
-    assert "-d *.code.example.test" in (root / "issue.args").read_text()
+    assert (root / "certs/versions/pending/acme/account.key").read_text() == "build-account-key"
+    assert not (root / "issue.args").exists()
     assert _run(script, env, "activate", "pending").returncode == 0
     assert (root / "certs/live").readlink() == Path("versions/pending")
     assert _run(script, env, "check", "example.test", str(desired)).returncode == 0
 
 
-def test_failed_issuance_leaves_live_version_untouched(certificate_case):
+def test_missing_baked_certificate_fails_without_runtime_issuance(certificate_case):
     _, root, script, env = certificate_case
-    env = dict(env, FAIL_ISSUE="1")
-    result = _run(script, env, "prepare", "pending", "example.test",
-                  "letsencrypt", "dns_cf", "")
+    (root / "seed/certs/example.test_key.pem").unlink()
+    result = _run(script, env, "prepare", "pending", "example.test")
     assert result.returncode != 0
     assert (root / "certs/live").readlink() == Path("versions/legacy")
     assert (root / "acme/account.key").read_text() == "existing-account-key"
+    assert not (root / "issue.args").exists()
 
 
 def test_renewal_promotes_only_validated_certificate_versions(certificate_case):
     _, root, script, env = certificate_case
     original = (root / "certs/live/example.test_fullchain.pem").read_bytes()
-    assert _run(script, env, "prepare", "pending", "example.test",
-                "letsencrypt", "dns_cf", "").returncode == 0
+    assert _run(script, env, "prepare", "pending", "example.test").returncode == 0
 
     stage = root / "certs/.renewal"
     shutil.copyfile(str(root / "old.pem"), str(stage / "example.test_fullchain.pem"))
@@ -169,8 +180,7 @@ def test_renewal_promotes_only_validated_certificate_versions(certificate_case):
 def test_renewal_never_promotes_stale_installed_certificates(certificate_case):
     _, root, script, env = certificate_case
     original = (root / "certs/live/example.test_fullchain.pem").read_bytes()
-    assert _run(script, env, "prepare", "pending", "example.test",
-                "letsencrypt", "dns_cf", "").returncode == 0
+    assert _run(script, env, "prepare", "pending", "example.test").returncode == 0
     result = _run(script, env, "renew")
     assert result.returncode == 0, result.stderr
     assert (root / "certs/live").readlink() == Path("versions/legacy")
@@ -179,8 +189,7 @@ def test_renewal_never_promotes_stale_installed_certificates(certificate_case):
 
 def test_failed_nginx_reload_restores_old_certificate(certificate_case):
     _, root, script, env = certificate_case
-    assert _run(script, env, "prepare", "pending", "example.test",
-                "letsencrypt", "dns_cf", "").returncode == 0
+    assert _run(script, env, "prepare", "pending", "example.test").returncode == 0
     (root / "fake.pid").write_text("123")
     nginx = root / "bin/nginx"
     nginx.write_text("#!/bin/sh\nexit 1\n")
@@ -252,4 +261,4 @@ def test_preparation_stages_added_names_without_publishing(certificate_case, mon
         "example.test", "*.example.test", "*.code.example.test",
     ]
     assert [call[0][1] for call in calls] == ["check", "prepare"]
-    assert calls[1][1]["network"] is True
+    assert not calls[1][1].get("network")
