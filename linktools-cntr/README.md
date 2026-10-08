@@ -139,7 +139,7 @@ ct-cntr config edit --editor vim
 ct-cntr config reload
 ```
 
-nginx 的 ACME 证书在镜像**构建期**签发。证书域名或 CA 等构建输入变化时，会生成新的 nginx 镜像标签并在部署前构建；容器启动前只离线校验证书、导入镜像中已签发的证书与 ACME 状态，不进行网络签发。当前有效证书会继续复用，新增 SAN 则通过 `certs/versions` 与 `certs/live` 原子切换，原有证书和账号数据不会直接覆盖。自动续期仍在容器运行期间按照 cron 执行；要手动强制重新签发可使用 `ct-cntr restart nginx --pull`。
+nginx 的 ACME 证书在镜像**构建期**签发。证书域名或 CA 等构建输入变化时，会生成新的 nginx 镜像标签并在部署前构建；容器启动前只离线校验证书、导入镜像中已签发的证书与 ACME 状态，不进行网络签发。当前有效证书会继续复用，新增 SAN 则通过 `certs/versions` 与 `certs/live` 原子切换，原有证书和账号数据不会直接覆盖。自动续期仍在容器运行期间按照 cron 执行；证书域名或 CA 更新将触发新镜像构建。`--pull` 只请求更新基础镜像，不保证跳过 Docker 构建缓存或重新签发证书。
 
 ## 进阶功能
 
