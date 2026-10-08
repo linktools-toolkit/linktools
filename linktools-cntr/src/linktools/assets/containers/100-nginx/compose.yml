@@ -1,5 +1,9 @@
 services:
   nginx:
+    image: '{{ container.get_service_name("nginx") }}:{{ container.cert_image_revision }}'
+    build:
+      context: '{{ container.get_docker_context_path() }}'
+      dockerfile: '{{ container.get_docker_file_destination() }}'
     volumes:
       - '{{ (APP_PATH/"generated") | mkdir | chown }}:/etc/nginx/generated:ro'
       - '{{ (APP_PATH/"certs") | mkdir | chown }}:/etc/certs'
