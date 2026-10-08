@@ -467,6 +467,13 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def render_template(self, source: "PathType", destination: "PathType | None" = None, **kwargs: "Any") -> str:
         return _template.render_template(self, source, destination=destination, **kwargs)
 
+    def render_nginx_template(
+            self, nginx: "BaseContainer", source: "PathType", site: "Any",
+    ) -> str:
+        from ._container._nginx_template import render_nginx_template
+        return render_nginx_template(self, nginx, source, site)
+
+
     def __repr__(self):
         return f"Container<{self.name}>"
 
