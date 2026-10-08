@@ -132,6 +132,72 @@ def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_cas
     assert container.docker_compose["services"]["nginx"]["image"] != old_image
 
 
+def test_dockerfile_issues_certificate_and_seeds_account_at_build_time(certificate_case):
+    container, root, _, environment = certificate_case
+    build = root / "build"
+    build.mkdir()
+    for path in ("certs", "acme"):
+        (build / path).mkdir()
+    script = container.docker_file.split("RUN acme.sh", 1)[1]
+    command = "acme.sh" + script.split("# {% endif %}", 1)[0]
+    for source, target in (
+        ("/etc/certs", build / "certs"),
+        ("/root/.acme.sh", build / "acme"),
+        ("/opt/nginx-initial", build / "seed"),
+    ):
+        command = command.replace(source, str(target))
+    client = root / "bin/acme.sh"
+    client.write_text("""#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+args = sys.argv[1:]
+home = Path(args[args.index("--config-home") + 1])
+home.mkdir(parents=True, exist_ok=True)
+if "--issue" in args:
+    if os.environ.get("FAIL_BUILD_ISSUE"):
+        sys.exit(7)
+    home.joinpath("account.key").write_text("build-account")
+    home.joinpath("domains").write_text(",".join(
+        args[index + 1] for index, value in enumerate(args[:-1]) if value == "--domain"))
+elif "--install-cert" in args:
+    if not home.joinpath("account.key").exists():
+        sys.exit(8)
+    for field in ("--cert-file", "--key-file", "--fullchain-file"):
+        Path(args[args.index(field) + 1]).write_text("preissued")
+else:
+    sys.exit(9)
+""")
+    client.chmod(0o755)
+    result = subprocess.run(["sh", "-ec", command], env=environment,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True)
+    assert result.returncode == 0, result.stderr
+    assert (build / "seed/acme/account.key").read_text() == "build-account"
+    assert (build / "seed/certs/example.test_fullchain.pem").read_text() == "preissued"
+    assert (build / "acme/domains").read_text().startswith("example.test,*.example.test")
+
+
+def test_build_issuance_failure_cannot_produce_runtime_seed(certificate_case):
+    container, root, _, environment = certificate_case
+    build = root / "failed-build"
+    build.mkdir()
+    (build / "certs").mkdir()
+    (build / "acme").mkdir()
+    command = "acme.sh" + container.docker_file.split("RUN acme.sh", 1)[1].split("# {% endif %}", 1)[0]
+    for source, target in (
+        ("/etc/certs", build / "certs"),
+        ("/root/.acme.sh", build / "acme"),
+        ("/opt/nginx-initial", build / "seed"),
+    ):
+        command = command.replace(source, str(target))
+    environment = dict(environment, FAIL_BUILD_ISSUE="1")
+    result = subprocess.run(["sh", "-ec", command], env=environment,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode != 0
+    assert not (build / "seed").exists()
+
+
 def test_changed_san_list_stages_without_touching_live_certificate(certificate_case):
     _, root, script, env = certificate_case
     desired = root / "certs/versions/pending/domains"
