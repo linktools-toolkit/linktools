@@ -414,26 +414,4 @@ class Container(BaseContainer):
                 sub_conf_path.parent / "00-auth-location.conf",
                 **context,
             )
-            if auth_extra:
-                uris = auth_extra.get("oidc_redirect_uris", None)
-                if uris:
-                    oidc_redirect_uris = authelia.oidc_clients[0].get("RedirectURLs")
-                    for uri in uris:
-                        if not uri:
-                            self.logger.info(f"{container} invalid oidc redirect uri: None, skip.")
-                            continue
-                        scheme = self.get_config("NGINX_DEFAULT_SCHEME")
-                        port = self.get_config("NGINX_DEFAULT_PORT")
-                        base_url = utils.make_url(scheme, domain, port)
-                        redirect_uri = uri.format(scheme=scheme, domain=domain, port=port, base_url=base_url)
-                        if not redirect_uri:
-                            self.logger.info(f"{container} invalid oidc redirect uri: {uri}, skip.")
-                            continue
-                        oidc_redirect_uris.add(redirect_uri)
-
-                acl_rule = auth_extra.get("acl_rule", None)
-                if acl_rule:
-                    target_acl_rule = authelia.acl_rules.setdefault(domain, {})
-                    target_acl_rule["Subject"] = acl_rule.get("subject", None)
-                    target_acl_rule["Policy"] = acl_rule.get("policy", None)
 
