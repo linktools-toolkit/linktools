@@ -3,7 +3,7 @@
 """Authelia container definition."""
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping, Any
 
 import rsa
 import yaml
@@ -73,64 +73,103 @@ class Container(BaseContainer):
         ]
 
     @cached_property
-    def _key_prefix(self):
-        return f"{self.get_config('AUTHELIA_DOMAIN')}_{self.get_config('NGINX_HTTPS_PORT')}"
+    def oidc_client(self) -> "Mapping[str, Any]":
+        """Read-only OIDC connection details, independent of site redirects."""
+        from types import MappingProxyType
+
+        domain = self.get_config("AUTHELIA_DOMAIN")
+        issuer = utils.make_url("https", domain, self.get_config("NGINX_HTTPS_PORT"))
+        return MappingProxyType({
+            "client_id": f"{self.project_name}-web-client",
+            "client_name": f"Web Client ({self.project_name})",
+            "client_secret": self.get_config("AUTHELIA_OIDC_CLIENT_SECRET"),
+            "issuer_url": issuer,
+            "authorization_url": issuer + "/api/oidc/authorization",
+            "token_url": issuer + "/api/oidc/token",
+            "userinfo_url": issuer + "/api/oidc/userinfo",
+            "user_identifier": "preferred_username",
+            "scopes": ("openid", "profile", "groups", "email", "phone"),
+        })
 
     @cached_property
-    def acl_rules(self) -> "dict[str, Any]":
-        result = None
+    def acl_rules(self) -> "list[dict[str, Any]]":
+        """Regenerate native access rules from this project's current sites."""
+        from linktools.cntr import NginxSite
 
-        with self.settings.transaction() as settings:
-            result = settings.get(f"{self._key_prefix}_acl_rules", default=None)
-            if result is None:
-                result = {}
-                settings.set(f"{self._key_prefix}_acl_rules", result)
+        rules = []
+        for producer, site_id, site in self.manager.iter_integrations("nginx"):
+            if not isinstance(site, NginxSite):
+                raise ContainerError(f"Invalid nginx integration {producer.name}/{site_id}")
+            domain = str(site.server_name)
+            if not domain or not site.auth_rule:
+                continue
+            rule = dict(site.auth_rule)
+            if "domain" not in rule and "domain_regex" not in rule:
+                if domain.startswith("~") or "*" in domain or " " in domain or domain == "_":
+                    raise ContainerError(
+                        f"Authelia rule for {producer.name}/{site_id} requires a native domain")
+                rule["domain"] = [domain]
+            rule.setdefault(
+                "policy",
+                "two_factor" if self.get_config("AUTHELIA_MIN_AUTH_LEVEL") > 1 else "one_factor",
+            )
+            rules.append(rule)
+        return rules
 
-        return result
+    @cached_property
+    def oidc_redirects(self) -> "tuple[str, ...]":
+        """Rebuild currently declared callbacks, never restoring stale derived state."""
+        from urllib.parse import urlsplit, urlunsplit
+        from linktools.cntr import NginxSite
 
-    @staticmethod
-    def _oidc_clients_json_safe(result):
-        # RedirectURLs is kept as a set in memory (nginx's write_conf, across
-        # every container doing OIDC integration, calls .add() on it), which
-        # CacheStore's JSON codec cannot persist -- serialize a shallow copy
-        # with it converted to a sorted list instead of mutating the original.
-        return [dict(client, RedirectURLs=sorted(client.get("RedirectURLs", ()))) for client in result]
+        redirects = [self.oidc_client["issuer_url"]]
+        for producer, site_id, site in self.manager.iter_integrations("nginx"):
+            if not isinstance(site, NginxSite):
+                raise ContainerError(f"Invalid nginx integration {producer.name}/{site_id}")
+            domain = str(site.server_name)
+            if not domain or not site.oidc_redirects:
+                continue
+            if domain == "_" or domain.startswith("~") or "*" in domain or " " in domain:
+                if not site.url:
+                    raise ContainerError(f"OIDC site {producer.name}/{site_id} requires a URL")
+            base = str(site.url) if site.url else utils.make_url(
+                "https" if site.https is not False else "http", domain,
+                self.get_config("NGINX_HTTPS_PORT" if site.https is not False else "NGINX_HTTP_PORT")
+            )
+            if "{{" in base or "}}" in base:
+                raise ContainerError(f"OIDC site {producer.name}/{site_id} has a template URL")
+            for redirect in site.oidc_redirects:
+                target = str(redirect)
+                if target.startswith("//"):
+                    raise ContainerError(f"OIDC site {producer.name}/{site_id} has a protocol-relative URI")
+                if not target:
+                    target = base
+                elif target.startswith("/"):
+                    parsed = urlsplit(base)
+                    target = urlunsplit((parsed.scheme, parsed.netloc, target, "", ""))
+                parsed = urlsplit(target)
+                if parsed.scheme != "https" or not parsed.netloc or parsed.fragment:
+                    raise ContainerError(f"OIDC site {producer.name}/{site_id} has an invalid redirect URI")
+                if target not in redirects:
+                    redirects.append(target)
+        return tuple(redirects)
 
     @cached_property
     def oidc_clients(self) -> "list[dict[str, Any]]":
-        result = None
-
-        with self.settings.transaction() as settings:
-            result = settings.get(f"{self._key_prefix}_oidc_clients", default=None)
-            if result is None:
-                port = self.get_config("NGINX_HTTPS_PORT")
-                domain = self.get_config("AUTHELIA_DOMAIN")
-                auth_url = utils.make_url("https", domain, port)
-
-                client = dict()
-                client["ClientID"] = f"{self.project_name}-web-client"
-                client["ClientName"] = f"Web Client ({self.project_name})"
-                client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
-                client["IssuerURL"] = auth_url
-                client["AuthorizationURL"] = f"{auth_url}/api/oidc/authorization"
-                client["AccessTokenURL"] = f"{auth_url}/api/oidc/token"
-                client["ResourceURL"] = f"{auth_url}/api/oidc/userinfo"
-                client["RedirectURLs"] = {auth_url}
-                client["UserIdentifier"] = "preferred_username"
-                client["Scopes"] = "openid profile groups email phone"
-                result = [client]
-            else:
-                # Persisted as a list (see _oidc_clients_json_safe); restore
-                # the set so .add() keeps working for this run.
-                result[0]["RedirectURLs"] = set(result[0].get("RedirectURLs", ()))
-
-            client = result[0]
-            client["ClientID"] = f"{self.project_name}-web-client"
-            client["ClientName"] = f"Web Client ({self.project_name})"
-            client["ClientSecret"] = self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
-            settings.set(f"{self._key_prefix}_oidc_clients", self._oidc_clients_json_safe(result))
-
-        return result
+        """Native Authelia authoring structure derived from one read-only client."""
+        client = self.oidc_client
+        return [{
+            "ClientID": client["client_id"],
+            "ClientName": client["client_name"],
+            "ClientSecret": client["client_secret"],
+            "IssuerURL": client["issuer_url"],
+            "AuthorizationURL": client["authorization_url"],
+            "AccessTokenURL": client["token_url"],
+            "ResourceURL": client["userinfo_url"],
+            "RedirectURLs": self.oidc_redirects,
+            "UserIdentifier": client["user_identifier"],
+            "Scopes": " ".join(client["scopes"]),
+        }]
 
     def on_init(self) -> None:
         self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
