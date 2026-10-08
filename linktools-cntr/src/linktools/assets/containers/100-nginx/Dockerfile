@@ -1,7 +1,7 @@
 FROM nginx:{{ NGINX_TAG }}
 
 # {% if NGINX_HTTPS_ENABLE %}
-RUN apk --no-cache add openssl socat coreutils
+RUN apk --no-cache add openssl socat coreutils util-linux
 
 RUN curl https://get.acme.sh | sh -s -- --home /opt/acme --config-home /root/.acme.sh --nocron && \
     ln -s /opt/acme/acme.sh /usr/bin/acme.sh
