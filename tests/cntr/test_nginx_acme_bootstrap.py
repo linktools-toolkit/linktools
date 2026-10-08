@@ -194,7 +194,7 @@ def test_preparation_stages_added_names_without_publishing(certificate_case, mon
         return SimpleNamespace(succeeded=command[1] != "check")
 
     monkeypatch.setattr(container.manager.compose_runner, "validate_service", validate)
-    container.on_prepare_config(SimpleNamespace(initial_services=("nginx",)))
+    container.on_prepare_config(SimpleNamespace(initial_services=()))
 
     assert container._certificate_version != "legacy"
     assert (root / "certs/live").readlink() == Path("versions/legacy")
