@@ -348,6 +348,8 @@ class Container(BaseContainer):
             conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}.conf")
             sub_conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}_confs", f"{proxy_name}.conf")
 
+        if auth_extra is MISSING or auth_extra is None:
+            auth_extra = {}
         if not domain:
             raise ContainerError("not found domain")
         if not proxy_conf:
