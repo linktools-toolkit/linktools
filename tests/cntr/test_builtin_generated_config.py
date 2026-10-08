@@ -193,9 +193,11 @@ def test_stopped_legacy_nginx_preserves_certificates_before_migration(tmp_path, 
         copied.append(True)
         (tmp_path / "certs" / "example.test_fullchain.pem").write_text("certificate")
         (tmp_path / "certs" / "example.test_key.pem").write_text("key")
-    values = {"NGINX_HTTPS_ENABLE": True, "NGINX_ROOT_DOMAIN": "example.test"}
+    values = {"NGINX_HTTPS_ENABLE": True, "NGINX_ROOT_DOMAIN": "example.test",
+              "NGINX_HTTPS_PORT": 443}
     container = instance(builtin("100-nginx"),
-                         compose_runner=SimpleNamespace(validate_service=lambda *args, **kwargs: None))
+                         compose_runner=SimpleNamespace(
+                             validate_service=lambda *args, **kwargs: SimpleNamespace(succeeded=True)))
     container.get_app_path = lambda *parts: tmp_path.joinpath(*parts)
     container.get_config = lambda key, **kwargs: values[key]
     container.__dict__["acme_ssl_domains"] = ["example.test", "*.example.test"]
