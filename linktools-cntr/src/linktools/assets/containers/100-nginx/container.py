@@ -164,6 +164,11 @@ class Container(BaseContainer):
             self.get_app_path("conf.d", "00-cntr-upgrade.conf"),
             "map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n",
         )
+        utils.write_file(
+            self.get_app_path("conf.d", "01-cntr-health.conf"),
+            'server { listen unix:/run/nginx-cntr-health.sock; '
+            'location = /__cntr/health { default_type text/plain; return 200 "cntr"; } }\n',
+        )
         self.render_template(
             self.get_source_path("templates", "header_all.conf"),
             self.get_app_path("conf.d", "snippets", "header_all.conf"),
