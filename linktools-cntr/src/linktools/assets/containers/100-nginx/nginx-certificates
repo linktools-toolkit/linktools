@@ -1,0 +1,148 @@
+#!/bin/sh
+set -eu
+
+root=/etc/certs
+versions="$root/versions"
+renewal="$root/.renewal"
+account=/root/.acme.sh
+acme=/opt/acme/acme.sh
+mkdir -p "$versions" "$renewal" "$account"
+exec 9>"$root/.acme.lock"
+flock -x 9
+
+verify() {
+    directory=$1
+    main=$2
+    domains_file=$3
+    fullchain="$directory/${main}_fullchain.pem"
+    key="$directory/${main}_key.pem"
+    test -s "$fullchain" && test -s "$key"
+    openssl x509 -in "$fullchain" -noout -checkend 0 >/dev/null
+    cert_key=$(openssl x509 -in "$fullchain" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256)
+    file_key=$(openssl pkey -in "$key" -pubout -outform DER | openssl dgst -sha256)
+    test "$cert_key" = "$file_key"
+    while IFS= read -r domain || test -n "$domain"; do
+        test -n "$domain" || continue
+        case "$domain" in
+            \*.*)
+                openssl x509 -in "$fullchain" -noout -ext subjectAltName |
+                    tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+                    grep -Fx -- "DNS:$domain" >/dev/null ;;
+            *) openssl x509 -in "$fullchain" -noout -checkhost "$domain" >/dev/null ;;
+        esac
+    done < "$domains_file"
+}
+
+configure() {
+    main=$1
+    "$acme" --home /opt/acme --config-home "$account" --install-cert -d "$main" \
+        --cert-file "$renewal/${main}_cert.pem" \
+        --key-file "$renewal/${main}_key.pem" \
+        --fullchain-file "$renewal/${main}_fullchain.pem" \
+        --reloadcmd ':' >/dev/null
+}
+
+activate() {
+    id=$1
+    directory="$versions/$id"
+    main=$(cat "$directory/primary")
+    port=$(cat "$directory/port")
+    verify "$directory" "$main" "$directory/domains"
+    previous=$(readlink "$root/live" 2>/dev/null || :)
+    test "$previous" = "versions/$id" && return 0
+    if test -z "$previous" && test -s /var/run/nginx.pid; then
+        echo 'Cannot change a running TLS certificate without a previous live version' >&2
+        return 1
+    fi
+    ln -s "versions/$id" "$root/.next-$$"
+    mv -Tf "$root/.next-$$" "$root/live"
+    if test -s /var/run/nginx.pid; then
+        if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
+           ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
+            if test -n "$previous"; then
+                ln -s "$previous" "$root/.next-$$"
+                mv -Tf "$root/.next-$$" "$root/live"
+                nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload || :
+            fi
+            return 1
+        fi
+        expected=$(openssl x509 -in "$directory/${main}_fullchain.pem" -noout -fingerprint -sha256)
+        attempt=0
+        while test "$attempt" -lt 30; do
+            actual=$(openssl s_client -connect "127.0.0.1:$port" -servername "$main" </dev/null 2>/dev/null |
+                     openssl x509 -noout -fingerprint -sha256 2>/dev/null || :)
+            test "$actual" = "$expected" && return 0
+            sleep 1
+            attempt=$((attempt + 1))
+        done
+        if test -n "$previous"; then
+            ln -s "$previous" "$root/.next-$$"
+            mv -Tf "$root/.next-$$" "$root/live"
+            nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload || :
+        fi
+        echo 'New TLS certificate was not served after reload' >&2
+        return 1
+    fi
+}
+
+case "$1" in
+    check)
+        shift
+        main=$1
+        shift
+        verify "$root/live" "$main" "$1"
+        ;;
+    prepare)
+        shift
+        id=$1
+        main=$2
+        server=$3
+        dns=$4
+        email=$5
+        shift 5
+        directory="$versions/$id"
+        test -f "$directory/domains"
+        set -- --home /opt/acme --config-home "$account" --issue --force --server "$server" --dns "$dns"
+        while IFS= read -r domain || test -n "$domain"; do
+            test -n "$domain" || continue
+            set -- "$@" -d "$domain"
+        done < "$directory/domains"
+        if test -n "$email"; then
+            set -- "$@" --accountemail "$email"
+        fi
+        "$acme" "$@" >/dev/null
+        configure "$main"
+        for name in cert key fullchain; do
+            cp "$renewal/${main}_${name}.pem" "$directory/${main}_${name}.pem"
+        done
+        verify "$directory" "$main" "$directory/domains"
+        ;;
+    configure)
+        shift
+        configure "$1"
+        ;;
+    activate)
+        shift
+        activate "$1"
+        ;;
+    renew)
+        if test -L "$root/live"; then
+            "$acme" --home /opt/acme --config-home "$account" --cron >/dev/null
+            main=$(cat "$root/live/primary")
+            if test -s "$renewal/${main}_fullchain.pem" &&
+               { ! cmp -s "$renewal/${main}_fullchain.pem" "$root/live/${main}_fullchain.pem" ||
+                 ! cmp -s "$renewal/${main}_key.pem" "$root/live/${main}_key.pem"; }; then
+                id="renew-$(date +%s)-$$"
+                directory="$versions/$id"
+                mkdir "$directory"
+                cp "$root/live/domains" "$root/live/primary" "$root/live/port" "$directory/"
+                for name in cert key fullchain; do
+                    cp "$renewal/${main}_${name}.pem" "$directory/${main}_${name}.pem"
+                done
+                verify "$directory" "$main" "$directory/domains"
+                activate "$id"
+            fi
+        fi
+        ;;
+    *) echo 'Usage: nginx-certificates {check|prepare|configure|activate|renew}' >&2; exit 2 ;;
+esac
