@@ -352,6 +352,22 @@ def test_nginx_activation_failure_restores_previous_cert_when_reload_succeeds(ce
     assert (root / "certs/live").readlink() == Path("versions/legacy")
 
 
+def test_nginx_load_rejects_missing_intermediate_san(certificate_case):
+    _, root, script, env = certificate_case
+    assert _run(script, env, "prepare", "pending", "example.test").returncode == 0
+    (root / "certs/versions/pending/domains").write_text(
+        "example.test\n*.missing.example.test\n*.code.example.test\n")
+    (root / "certs/live").unlink()
+    (root / "certs/live").symlink_to("versions/pending")
+    (root / "fake.pid").write_text("123")
+    nginx = root / "bin/nginx"
+    nginx.write_text("#!/bin/sh\nexit 0\n")
+    nginx.chmod(0o755)
+    result = _run(script, env, "load", "pending")
+    assert result.returncode == 1
+    assert "failed verification" in result.stderr
+
+
 def test_nginx_load_failure_preserves_pointer_for_transaction_rollback(certificate_case):
     _, root, script, env = certificate_case
     assert _run(script, env, "prepare", "pending", "example.test").returncode == 0

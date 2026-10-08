@@ -16,19 +16,19 @@ verify() {
     domains_file=$3
     fullchain="$directory/${main}_fullchain.pem"
     key="$directory/${main}_key.pem"
-    test -s "$fullchain" && test -s "$key"
-    openssl x509 -in "$fullchain" -noout -checkend 0 >/dev/null
-    cert_key=$(openssl x509 -in "$fullchain" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256)
-    file_key=$(openssl pkey -in "$key" -pubout -outform DER | openssl dgst -sha256)
-    test "$cert_key" = "$file_key"
+    test -s "$fullchain" && test -s "$key" || return 1
+    openssl x509 -in "$fullchain" -noout -checkend 0 >/dev/null || return 1
+    cert_key=$(openssl x509 -in "$fullchain" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256) || return 1
+    file_key=$(openssl pkey -in "$key" -pubout -outform DER | openssl dgst -sha256) || return 1
+    test "$cert_key" = "$file_key" || return 1
     while IFS= read -r domain || test -n "$domain"; do
         test -n "$domain" || continue
         case "$domain" in
             \*.*)
                 openssl x509 -in "$fullchain" -noout -ext subjectAltName |
                     tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
-                    grep -Fx -- "DNS:$domain" >/dev/null ;;
-            *) openssl x509 -in "$fullchain" -noout -checkhost "$domain" >/dev/null ;;
+                    grep -Fx -- "DNS:$domain" >/dev/null || return 1 ;;
+            *) openssl x509 -in "$fullchain" -noout -checkhost "$domain" >/dev/null || return 1 ;;
         esac
     done < "$domains_file"
 }
