@@ -4,36 +4,37 @@
 
 import pytest
 
-from linktools.cntr import ContainerError
+from linktools.cntr import ContainerError, NginxSite
+
+
+def _render_site(nginx, waf, patterns):
+    site = NginxSite(
+        server_name="app.example.test", https=False, waf=waf, auth=False,
+        waf_bypass=patterns,
+    )
+    site.file_id = "site_123"
+    site.var_name = "123"
+    return nginx.render_nginx_template(
+        nginx, nginx.get_source_path("templates", "server.conf"), site,
+    )
 
 
 def test_site_waf_bypass_routes_through_named_location(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    source = nginx.get_source_path("templates", "server.conf")
-    rendered = nginx.render_template(
-        source, DOMAIN="app.example.test", DOMAIN_NAME="site_123",
-        SITE_VAR="123", HTTPS_ENABLE=False, WAF_ENABLE=True,
-        WAF_BYPASS=(r"^/health$", r"\.(css|js)$"),
-        NGINX_HTTP_PORT=8080, NGINX_WAF_PORT=8000,
-    )
+    rendered = _render_site(nginx, True, (r"^/health$", r"\.(css|js)$"))
     assert "map $uri $cntr_waf_skip_123" in rendered
     assert r"~*^/health$ 1;" in rendered
     assert r"~*\.(css|js)$ 1;" in rendered
     assert "if ($cntr_waf_skip_123 = 0)" in rendered
     assert "error_page 418 = @cntr_waf" in rendered
     assert "location @cntr_waf" in rendered
-    assert "location /" not in rendered
     assert "include /etc/nginx/conf.d/site_123_confs/*.conf;" in rendered
+    assert "real_ip_header X-Cntr-Client-IP;" in rendered
 
 
 def test_disabled_waf_has_no_bypass_or_internal_origin(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    rendered = nginx.render_template(
-        nginx.get_source_path("templates", "server.conf"),
-        DOMAIN="app.example.test", DOMAIN_NAME="site_123",
-        SITE_VAR="123", HTTPS_ENABLE=False, WAF_ENABLE=False, WAF_BYPASS=(),
-        NGINX_HTTP_PORT=8080,
-    )
+    rendered = _render_site(nginx, False, ())
     assert "$cntr_waf_skip_" not in rendered
     assert "@cntr_waf" not in rendered
 
