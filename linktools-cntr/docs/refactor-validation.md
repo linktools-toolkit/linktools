@@ -92,8 +92,9 @@ Package build and artifact verification have not been performed for this pass.
   priority ordering, pure bootstrap rendering through the shared candidate path,
   acknowledged bootstrap availability and cold rollback, per-service readiness,
   and post-start callbacks restricted to final application targets
-- ACME bootstrap: a local client substitute covers empty config mounts, explicit
-  CA/contact arguments, account reuse, and failed issuance without a live CA
+- ACME runtime: the target nginx image prepares certificates after image construction;
+  a local client substitute covers changed SAN sets, account reuse, staged activation,
+  and failed issuance/reload without contacting a live CA
 - Candidate serialization: shared pure Compose/Dockerfile destinations and text,
   read-only collection, byte parity with writers, single model reads and rejection
   of invalid Compose values before destination creation
@@ -102,6 +103,16 @@ Package build and artifact verification have not been performed for this pass.
 - Paired commands: MCP Playwright and MCP Push `show` handlers, including Push's
   optional channel argument
 
+Nginx certificate preparation now uses the installed target image at runtime.
+A valid mounted certificate is reused. Missing or incomplete SAN coverage triggers
+DNS issuance using the persisted ACME account, with the new key and chain staged
+under `certs/versions` before a single `certs/live` symlink switch. The
+`nginx-certificates` helper checks the private key, expiry and requested names;
+activation reloads nginx and confirms the served TLS fingerprint. Renewals use
+the same versioned activation path. Existing root-level certificates remain
+intact as migration backups. This does not establish real-CA acceptance without
+target-environment tests.
+
 ## Remaining acceptance gates
 
 | Area | Remaining target-environment validation |
@@ -109,7 +120,7 @@ Package build and artifact verification have not been performed for this pass.
 | Native nginx | Full migrated homelab route set, HTTP/2 gRPC, SSE/WebSocket, and unusual custom headers |
 | Authentication | Real Authelia sessions, OIDC flows, and alternate-authentication provenance assurance |
 | SafeLine | Actual target images, Docker networks, request metadata, and forwarding behavior |
-| Certificates | Real ACME issuance, renewal/cron reload, provider credentials, and persisted account reuse |
+| Certificates | Real ACME issuance, persisted account reuse, changed SANs, renewal/cron reload, and live TLS certificate verification |
 | Lifecycle | HTTP/WAF and HTTPS/auth cold starts, bind mounts, Unix health socket permissions, reload/rollback acknowledgements, and concurrent Docker operations |
 | Persistent state | Legacy migration copy/mount behavior and real LDAP/password interoperability |
 | Packaging | Built artifacts and artifact verification |
