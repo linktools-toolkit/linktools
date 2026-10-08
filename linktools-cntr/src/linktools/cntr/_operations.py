@@ -228,10 +228,8 @@ class ComposeOperations:
             context.changed_compose_services = set(context.service_models.changed_services)
             selection = self._reconcile_selection(explicit, context, generations)
             required_services = set(selection.services)
-            image_services = tuple(name for c in sync for name in c.services
-                                   if name in required_services or c.name in generations or
-                                   (name in context.initial_running_services and
-                                    name in context.changed_compose_services))
+            generation_targets = {container.name for container in selection.target_containers}
+            image_services = tuple(name for c in sync for name in c.services if name in required_services)
             image_plan = manager.image_preparer.plan(model, image_services, force_pull=pull)
             context.changed_image_services = set(image_plan.pull) | set(image_plan.build)
             if image_plan.pull:
@@ -244,7 +242,7 @@ class ComposeOperations:
             candidates = {}
             for container in sync:
                 owner = generations.get(container.name)
-                if owner is not None:
+                if owner is not None and container.name in generation_targets:
                     with record_phase(context, "prepare-config", container=container.name, logger=manager.logger):
                         owner.on_prepare_config(context)
                         candidates[container.name] = GeneratedCandidate(container, owner.render_config)
