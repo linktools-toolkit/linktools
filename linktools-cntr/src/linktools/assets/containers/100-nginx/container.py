@@ -388,11 +388,12 @@ class Container(BaseContainer):
         if not all(path.is_file() for path in required):
             return
         directory = root / "versions" / ("legacy-" + uuid4().hex)
-        directory.mkdir(parents=True)
+        directory.mkdir(parents=True, mode=0o700)
         for name in ("cert", "fullchain", "key"):
             source = root / (domain + "_" + name + ".pem")
             if source.is_file():
                 shutil.copy2(str(source), str(directory / source.name))
+        os.chmod(str(directory / (domain + "_key.pem")), 0o600)
         (directory / "primary").write_text(domain + "\n", encoding="utf-8")
         (directory / "port").write_text(
             str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
@@ -418,7 +419,7 @@ class Container(BaseContainer):
         current = root / "live"
         version = uuid4().hex
         directory = root / "versions" / version
-        directory.mkdir(parents=True)
+        directory.mkdir(parents=True, mode=0o700)
         (directory / "primary").write_text(domain + "\n", encoding="utf-8")
         (directory / "port").write_text(
             str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
