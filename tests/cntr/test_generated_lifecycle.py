@@ -180,7 +180,7 @@ def test_first_upgrade_reports_unrecoverable_missing_compose_snapshot(tmp_path):
         applied_generation_services={}, service_models=AppliedServiceModels(
             owner.manager, {"services": owner.services}),
     )
-    with pytest.raises(ContainerError, match="rollback failed: No previous Compose model"):
+    with pytest.raises(ContainerError, match="Cannot replace running service test without a previous Compose model"):
         ComposeOperations(owner.manager)._publish_candidate(owner, candidate, context, ("test",))
     assert GeneratedCandidate.current_id(str(owner.path)) is None
 
@@ -393,6 +393,11 @@ def test_partial_update_applies_navigation_only_if_flare_is_running(fresh_manage
     from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
 
     recorded = _record(fresh_manager, monkeypatch)
+    if running:
+        from linktools.cntr.artifacts import compose_candidate
+        path, content = compose_candidate(fresh_manager.containers["flare"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
     services = (ServiceRuntimeState(("flare",), "flare", "flare-runtime", "running",
                                     None, "flare:test", None, {}),) if running else ()
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda containers:
