@@ -77,6 +77,14 @@ def test_http_auth_rejected_and_disabled_auth_fields_unread():
     assert producer.site.auth_bypass == ()
 
 
+def test_migrated_http_site_must_disable_inherited_auth_explicitly():
+    producer = Producer(Nginx.site("public.example.test", proxy="http://app",
+                                  https=False, auth=False))
+    assert producer.site.resolve() is producer.site
+    assert producer.site.auth is False
+    assert producer.site.url == "http://public.example.test"
+
+
 @pytest.mark.parametrize("domain", ["_", "*.test", "a.test b.test", "~^app\\.test$", "a.test\tb.test"])
 def test_nonliteral_domain_requires_explicit_url(domain):
     producer = Producer(Nginx.site(domain, proxy="http://app"))
