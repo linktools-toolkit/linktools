@@ -330,7 +330,7 @@ def test_partial_update_applies_navigation_only_if_flare_is_running(fresh_manage
 
     monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate", candidate)
     fresh_manager.compose_operations.up(["portainer"])
-    assert "flare" in published
+    assert ("flare" in published) is running
     assert any(command[0] == "up" and command[-1] == "flare" for command in recorded) is running
 
 
