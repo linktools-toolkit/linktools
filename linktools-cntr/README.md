@@ -139,6 +139,8 @@ ct-cntr config edit --editor vim
 ct-cntr config reload
 ```
 
+nginx 的 ACME 证书在运行阶段使用持久化账号准备，不再将证书和 DNS 凭据写入镜像。证书及私钥通过 `certs/versions` 保存，签发与校验成功后由 `certs/live` 原子切换；未满足新增域名时不会直接覆盖当前证书。自动续期使用相同的校验和切换路径。首次升级到这套流程时需重建 nginx 镜像，例如执行 `ct-cntr restart nginx --pull`，并在实际环境确认 ACME DNS 网络和凭据可用。
+
 ## 进阶功能
 
 ```bash
