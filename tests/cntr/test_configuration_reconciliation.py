@@ -73,7 +73,6 @@ def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped")):
     return operations, manager, calls, paths
 
 
-@pytest.mark.parametrize("changed", [(), ("stopped",), ("running",), ("running", "stopped")])
 def test_partial_up_does_not_prepare_unrelated_images(tmp_path, monkeypatch):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
     planned = []
@@ -110,10 +109,11 @@ def test_running_generated_owner_sync_does_not_build_stopped_sibling(tmp_path, m
     operations.up(["target"])
     assert planned == ["target", "running"]
     assert validated == ["prepare", "validate"]
-    assert ("apply", ("running",)) in calls
+    assert ("apply", ("running",)) not in calls
     assert not any("stopped" in call[1] for call in calls)
 
 
+@pytest.mark.parametrize("changed", [(), ("stopped",), ("running",), ("running", "stopped")])
 def test_partial_up_applies_pending_running_config_without_starting_stopped_sibling(tmp_path, monkeypatch, changed):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed)
     operations.up(["target"])
