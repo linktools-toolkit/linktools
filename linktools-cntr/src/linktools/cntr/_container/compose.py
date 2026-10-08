@@ -32,7 +32,7 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
         if data is None:
             data = {}
         if not isinstance(data, dict):
-            from ..container import ContainerError
+            from ..errors import ContainerError
             raise ContainerError(f"Compose root must be a mapping: {path}")
         if "services" in data and isinstance(data["services"], dict):
             for name, service in data["services"].items():
@@ -75,7 +75,7 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
                     # model and is never replaced.
                     service["image"] = container.get_service_name(name)
                 if "image" in service and service["image"] == "":
-                    from ..container import ContainerError
+                    from ..errors import ContainerError
                     raise ContainerError(f"Service `{name}` has an empty image")
                 if "env_file" not in service:
                     path = container.get_source_path(".env")

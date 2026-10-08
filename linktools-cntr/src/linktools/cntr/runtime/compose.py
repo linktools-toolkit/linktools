@@ -54,7 +54,7 @@ def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[st
     Availability is reserved for acknowledged bootstrap services, never the
     general running set: ordinary dependencies must apply their new model first.
     """
-    from ..container import ContainerError
+    from ..errors import ContainerError
     containers = tuple(containers)
     installed = {container.name: container for container in containers}
     owners = {name: container for container in containers for name in container.services}
@@ -122,7 +122,7 @@ class ComposeRunner:
         if not services:
             # Imported lazily to keep runtime.compose free of a module-level
             # dependency on ..container (which imports this module).
-            from ..container import ContainerError
+            from ..errors import ContainerError
             names = ",".join(c.name for c in context.target_containers)
             raise ContainerError(f"No service found in container `{names}`")
         return services
@@ -179,7 +179,7 @@ class ComposeRunner:
             ), check=True,
         )
         if not isinstance(result, dict) or not isinstance(result.get("services"), dict):
-            from ..container import ContainerError
+            from ..errors import ContainerError
             raise ContainerError("Docker Compose returned an invalid final model")
         return result
 
@@ -267,7 +267,7 @@ class ComposeRunner:
                 definition = model.get(category, {}).get(name, {})
                 source = definition.get("file")
                 if not source:
-                    from ..container import ContainerError
+                    from ..errors import ContainerError
                     raise ContainerError("Isolated validation requires a local {} file".format(category))
                 target = (item.get("target") if isinstance(item, dict) else None) or name
                 if not target.startswith("/"):
@@ -296,7 +296,7 @@ class ComposeRunner:
         result = self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_process(*args, capture_output=True), check=False)
         if check and not result.succeeded:
-            from ..container import ContainerError
+            from ..errors import ContainerError
             # Command output can contain expanded credentials.
             raise ContainerError("Native validation failed for service {} (exit {})".format(
                 service, result.returncode))
@@ -310,7 +310,7 @@ class ComposeRunner:
         result = self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_process(*args, capture_output=True), check=False)
         if not result.succeeded:
-            from ..container import ContainerError
+            from ..errors import ContainerError
             raise ContainerError("Isolated service command failed for {} (exit {})".format(
                 service, result.returncode))
 
@@ -372,7 +372,7 @@ class ComposeRunner:
 
     def wait_service_running(self, context: "EventContext", service: str, timeout: int = 30) -> None:
         import time
-        from ..container import ContainerError
+        from ..errors import ContainerError
         deadline = time.monotonic() + timeout
         while True:
             state = self.manager.docker_inspector.get_project_state(context.containers)
@@ -391,7 +391,7 @@ class ComposeRunner:
 
     def wait_service_healthy(self, context: "EventContext", service: str, timeout: int = 30) -> None:
         import time
-        from ..container import ContainerError
+        from ..errors import ContainerError
         deadline = time.monotonic() + timeout
         while True:
             state = self.manager.docker_inspector.get_project_state(context.containers)
@@ -404,7 +404,7 @@ class ComposeRunner:
 
     def wait_service_dependencies(self, context: "EventContext", service: str) -> None:
         """Honor Compose readiness conditions for every native apply path."""
-        from ..container import ContainerError
+        from ..errors import ContainerError
         model = getattr(context, "compose_model", None) or self.final_model(context)
         for dependency, options in service_dependencies(model["services"][service]).items():
             condition = options.get("condition", "service_started")
@@ -421,7 +421,7 @@ class ComposeRunner:
 
     def wait_service_completed(self, context: "EventContext", service: str, timeout: int = 30) -> None:
         import time
-        from ..container import ContainerError
+        from ..errors import ContainerError
         deadline = time.monotonic() + timeout
         while True:
             state = self.manager.docker_inspector.get_project_state(context.containers)

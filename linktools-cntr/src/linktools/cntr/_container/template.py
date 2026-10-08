@@ -94,5 +94,5 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
         return result
 
     except TemplateError as e:
-        from ..container import ContainerTemplateError
+        from ..errors import ContainerTemplateError
         raise ContainerTemplateError(e)
