@@ -92,9 +92,9 @@ Package build and artifact verification have not been performed for this pass.
   priority ordering, pure bootstrap rendering through the shared candidate path,
   acknowledged bootstrap availability and cold rollback, per-service readiness,
   and post-start callbacks restricted to final application targets
-- ACME runtime: the target nginx image prepares certificates after image construction;
-  a local client substitute covers changed SAN sets, account reuse, staged activation,
-  and failed issuance/reload without contacting a live CA
+- ACME build: the nginx image issues the full declared SAN set before deployment;
+  offline preparation imports the built certificate and its account, checks keys/SANs,
+  and retains previous versions without starting a new ACME challenge
 - Candidate serialization: shared pure Compose/Dockerfile destinations and text,
   read-only collection, byte parity with writers, single model reads and rejection
   of invalid Compose values before destination creation
@@ -103,15 +103,16 @@ Package build and artifact verification have not been performed for this pass.
 - Paired commands: MCP Playwright and MCP Push `show` handlers, including Push's
   optional channel argument
 
-Nginx certificate preparation now uses the installed target image at runtime.
-A valid mounted certificate is reused. Missing or incomplete SAN coverage triggers
-DNS issuance using the persisted ACME account, with the new key and chain staged
-under `certs/versions` before a single `certs/live` symlink switch. The
-`nginx-certificates` helper checks the private key, expiry and requested names;
-activation reloads nginx and confirms the served TLS fingerprint. Renewals use
-the same versioned activation path. Existing root-level certificates remain
-intact as migration backups. This does not establish real-CA acceptance without
-target-environment tests.
+Nginx ACME issuance runs during Docker image build, not startup. Image tags
+incorporate the declared domains, CA settings and base nginx tag, causing
+changed SAN requirements to produce a new image before application. Runtime
+preparation operates offline: it checks the persisted certificate, copies the
+preissued image certificate and matching ACME account into a candidate version
+only if the active certificate is insufficient, and verifies SAN coverage and
+the private key. The selected `certs/live` symlink changes atomically and
+rolls back on failure. The previous account remains preserved; newer images
+bring their own versioned ACME state for subsequent cron renewals. Real CA
+issuance and image-key distribution still require target-environment review.
 
 ## Remaining acceptance gates
 
