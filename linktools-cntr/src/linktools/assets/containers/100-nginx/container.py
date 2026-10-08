@@ -160,6 +160,10 @@ class Container(BaseContainer):
             self.get_app_path("conf.d", "snippets", "header.conf"),
             X_HEADER_ENABLE=not waf_enable
         )
+        utils.write_file(
+            self.get_app_path("conf.d", "00-cntr-upgrade.conf"),
+            "map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n",
+        )
         self.render_template(
             self.get_source_path("templates", "header_all.conf"),
             self.get_app_path("conf.d", "snippets", "header_all.conf"),
@@ -212,9 +216,9 @@ class Container(BaseContainer):
             if auth and not https:
                 raise ContainerError(
                     f"Nginx site {producer.name}/{local_id} requires HTTPS for Authelia")
-            if site.waf_bypass or site.vars:
+            if site.vars:
                 raise ContainerError(
-                    f"Nginx site {producer.name}/{local_id} needs the new WAF/template renderer")
+                    f"Nginx site {producer.name}/{local_id} has unresolved template variables")
             key = domain.lower()
             previous = seen_domains.setdefault(key, (producer.name, local_id))
             if previous != (producer.name, local_id):
@@ -229,6 +233,7 @@ class Container(BaseContainer):
                 proxy_conf=site.template,
                 proxy_url=site.proxy,
                 https_enable=https, waf_enable=waf,
+                waf_bypass=tuple(str(pattern) for pattern in site.waf_bypass),
                 auth_enable=auth,
                 auth_extra={
                     "acl_bypass": site.auth_bypass,
@@ -294,6 +299,7 @@ class Container(BaseContainer):
         proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
         https_enable: bool = MISSING, waf_enable: bool = MISSING,
         auth_enable: bool = False, auth_extra: "dict[str, Any]" = MISSING,
+        waf_bypass: "tuple[str, ...]" = (),
         flush: bool = False,
     ) -> None:
 
@@ -333,6 +339,8 @@ class Container(BaseContainer):
             AUTH_ENABLE=auth_enable,
             AUTH_HEADERS=auth_extra.get("auth_headers", None) if auth_extra else None,
             AUTH_BYPASS=auth_extra.get("acl_bypass", None) if auth_extra else None,
+            WAF_BYPASS=waf_bypass,
+            SITE_VAR=proxy_domain_name.encode("utf-8").hex(),
         )
 
         conf_path.parent.mkdir(parents=True, exist_ok=True)
