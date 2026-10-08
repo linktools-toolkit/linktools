@@ -205,6 +205,10 @@ class Container(BaseContainer):
             self.get_app_path("conf.d", "00-cntr-upgrade.conf"),
             "map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n"
             'geo $cntr_dollar { default "$"; }\n',
+            'map $realip_remote_addr $cntr_actual_socket {\n'
+            '    "" $remote_addr;\n'
+            '    default $realip_remote_addr;\n'
+            '}\n',
         )
         utils.write_file(
             self.get_app_path("conf.d", "01-cntr-health.conf"),
