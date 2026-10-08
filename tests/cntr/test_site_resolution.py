@@ -98,11 +98,10 @@ def test_placeholder_domain_skips_navigation_but_not_required_oidc_url():
         expose=Flare.public("App", "app", "Application"),
         oidc_redirects=("/callback",),
     ))
-    assert producer.site.resolve() is producer.site
     assert producer.site.expose.url is None
     assert str(load_nginx_url(producer, "web")) == ""
     with pytest.raises(ContainerError, match="explicit public URL"):
-        producer.site.oidc_redirects
+        producer.site.resolve()
 
 
 def test_literal_template_url_is_not_executed_or_relative_oidc_base():
