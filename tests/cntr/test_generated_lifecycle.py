@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.cntr.artifacts import GeneratedCandidate
+from linktools.cntr.artifacts import AppliedServiceModels, GeneratedCandidate
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.container import ContainerError
 from linktools.cntr.runtime.compose import ComposeRunner
@@ -27,18 +27,18 @@ class _Generated:
     def get_app_path(self, *parts):
         return self.path
 
-    def render(self, generation_id):
+    def on_render(self, generation_id):
         return {"config": self.content, "health": generation_id}
 
 
 def test_candidate_does_not_publish_until_requested(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.render)
+    first = GeneratedCandidate(owner, owner.on_render)
     assert not os.path.lexists(tmp_path / "generated/current")
     first.publish()
     old_inode = (tmp_path / "generated").stat().st_ino
     owner.content = "second"
-    second = GeneratedCandidate(owner, owner.render)
+    second = GeneratedCandidate(owner, owner.on_render)
     assert (tmp_path / "generated/current/config").read_text() == "first"
     second.publish()
     assert (tmp_path / "generated/current/config").read_text() == "second"
@@ -49,10 +49,10 @@ def test_candidate_does_not_publish_until_requested(tmp_path):
 
 def test_unchanged_candidate_reuses_generation_and_inode(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.render)
+    first = GeneratedCandidate(owner, owner.on_render)
     first.publish()
     before = os.stat(first.path).st_ino
-    second = GeneratedCandidate(owner, owner.render)
+    second = GeneratedCandidate(owner, owner.on_render)
     assert not second.changed
     assert second.generation_id == first.generation_id
     assert os.stat(second.path).st_ino == before
@@ -61,7 +61,7 @@ def test_unchanged_candidate_reuses_generation_and_inode(tmp_path):
 
 def test_render_failure_preserves_current(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.render)
+    first = GeneratedCandidate(owner, owner.on_render)
     first.publish()
     def fail(generation):
         raise ValueError("bad template")
@@ -72,17 +72,19 @@ def test_render_failure_preserves_current(tmp_path):
 
 def test_apply_failure_restores_and_confirms_old_generation(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.render)
+    first = GeneratedCandidate(owner, owner.on_render)
     first.publish()
     owner.content = "second"
-    second = GeneratedCandidate(owner, owner.render)
+    second = GeneratedCandidate(owner, owner.on_render)
     calls = []
-    def apply(candidate, context, services):
+    def apply(context, candidate, services):
         calls.append(candidate.generation_id)
         if candidate.generation_id == second.generation_id:
             raise RuntimeError("new failed")
-    owner.manager.generated_configs = {"test": SimpleNamespace(apply=apply)}
-    context = SimpleNamespace(generated_candidates={}, initial_running_services={"test"})
+    owner.manager.generated_configs = {"test": SimpleNamespace(on_apply=apply)}
+    context = SimpleNamespace(generated_candidates={}, initial_running_services={"test"},
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
+        service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
     with pytest.raises(RuntimeError, match="new failed"):
         ComposeOperations(owner.manager)._publish_candidate(owner, second, context, ("test",))
     assert calls == [second.generation_id, first.generation_id]
@@ -91,16 +93,18 @@ def test_apply_failure_restores_and_confirms_old_generation(tmp_path):
 
 def test_rollback_failure_reports_both_failures(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.render)
+    first = GeneratedCandidate(owner, owner.on_render)
     first.publish()
     owner.content = "second"
-    second = GeneratedCandidate(owner, owner.render)
-    def apply(candidate, context, services):
+    second = GeneratedCandidate(owner, owner.on_render)
+    def apply(context, candidate, services):
         raise RuntimeError("new failed" if candidate.generation_id == second.generation_id else "old failed")
-    owner.manager.generated_configs = {"test": SimpleNamespace(apply=apply)}
+    owner.manager.generated_configs = {"test": SimpleNamespace(on_apply=apply)}
+    context = SimpleNamespace(generated_candidates={}, initial_running_services={"test"},
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
+        service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
     with pytest.raises(ContainerError, match="new failed.*rollback failed: old failed"):
-        ComposeOperations(owner.manager)._publish_candidate(
-            owner, second, SimpleNamespace(generated_candidates={}, initial_running_services={"test"}), ("test",))
+        ComposeOperations(owner.manager)._publish_candidate(owner, second, context, ("test",))
 
 
 def test_isolated_validation_preserves_image_env_and_mounts_without_network_identity():
@@ -121,9 +125,8 @@ def test_full_configuration_scope_does_not_expand_startup_selection():
     app = SimpleNamespace(name="app")
     stopped = SimpleNamespace(name="oidc-app")
     consumer = SimpleNamespace(name="authelia")
-    manager = SimpleNamespace()
     selected = ComposeSelection((app, consumer, stopped), (app, consumer), ("app", "authelia"), False)
-    synced = ComposeOperations(manager).sync_selection(selected)
+    synced = selected.project_containers
     assert tuple(item.name for item in synced) == ("app", "authelia", "oidc-app")
     assert tuple(item.name for item in selected.target_containers) == ("app", "authelia")
 
@@ -132,10 +135,10 @@ def test_restart_validates_every_candidate_before_stopping(fresh_manager, monkey
     from test_exec_routing import _record
     recorded = _record(fresh_manager, monkeypatch)
     validated = []
-    def fail(candidate, context):
+    def fail(context, candidate):
         validated.append(candidate.container.name)
         raise ContainerError("native syntax failed")
-    monkeypatch.setattr(fresh_manager.generated_configs["nginx"], "validate", fail)
+    monkeypatch.setattr(fresh_manager.generated_configs["nginx"], "on_validate", fail)
     with pytest.raises(ContainerError, match="native syntax failed"):
         fresh_manager.compose_operations.restart(["portainer"])
     assert validated == ["nginx"]
@@ -146,11 +149,11 @@ def test_provider_failure_does_not_apply_full_nginx(fresh_manager, monkeypatch):
     from test_exec_routing import _record
     recorded = _record(fresh_manager, monkeypatch)
     full_nginx = []
-    monkeypatch.setattr(fresh_manager.generated_configs["nginx"], "apply",
-                        lambda candidate, context, services: full_nginx.append(candidate.generation_id))
-    def fail(candidate, context, services):
+    monkeypatch.setattr(fresh_manager.generated_configs["nginx"], "on_apply",
+                        lambda context, candidate, services: full_nginx.append(candidate.generation_id))
+    def fail(context, candidate, services):
         raise ContainerError("authentication unavailable")
-    monkeypatch.setattr(fresh_manager.generated_configs["authelia"], "apply", fail)
+    monkeypatch.setattr(fresh_manager.generated_configs["authelia"], "on_apply", fail)
     with pytest.raises(ContainerError, match="authentication unavailable"):
         fresh_manager.compose_operations.up(["portainer"])
     assert not full_nginx
@@ -201,7 +204,9 @@ def test_compose_only_apply_failure_restores_previous_service_model(tmp_path):
     runner = SimpleNamespace(apply_services=fail,
                              apply_saved_services=lambda context, services, files: applied.append(files))
     context = SimpleNamespace(saved_compose={str(config): "old"}, compose_files={str(config): "new"},
-                              compose_owners={str(config): "app"}, initial_running_services={"app"})
+                              compose_owners={str(config): "app"}, initial_running_services={"app"}, applied_compose={},
+                              service_models=AppliedServiceModels(SimpleNamespace(data_path=tmp_path),
+                                                                 {"services": {"app": {}}}))
     owner = SimpleNamespace(name="app", services={"app": {}})
     with pytest.raises(RuntimeError, match="new process failed"):
         ComposeOperations(SimpleNamespace(compose_runner=runner))._apply_services_with_rollback(owner, context, ("app",))
@@ -231,7 +236,7 @@ def test_native_diagnostic_keeps_site_source_but_omits_secret():
     manager.compose_runner = runner
     container.manager = manager
     with pytest.raises(ContainerError) as raised:
-        manager.integration_consumers["proxy"].validate(SimpleNamespace(generation_id="id"), SimpleNamespace())
+        manager.integration_consumers["proxy"].on_validate(SimpleNamespace(), SimpleNamespace(generation_id="id"))
     message = str(raised.value)
     assert "'app'/'web'" in message
     assert "/templates/app.j2" in message
@@ -248,9 +253,10 @@ def test_saved_generated_model_retains_previous_generation_label():
         captured.extend(yaml.safe_load(open(path).read()) for path in files)
         return SimpleNamespace(check_call=lambda: None)
 
-    manager = SimpleNamespace(project_name="test", runtime=SimpleNamespace(create_docker_process=process))
+    manager = SimpleNamespace(project_name="test", runtime=SimpleNamespace(create_docker_process=process),
+                              integration_consumers={"authelia": SimpleNamespace(uses_generation_label=True)})
     context = SimpleNamespace(generated_candidates={"authelia": SimpleNamespace(
-        container=SimpleNamespace(name="authelia", integration_consumer=SimpleNamespace(uses_generation_label=True)),
+        container=SimpleNamespace(name="authelia"),
         generation_id="previous")})
     ComposeRunner(manager).apply_saved_services(
         context, ("authelia",), {"old.yml": "services:\n  authelia:\n    image: authelia:old\n"})
@@ -262,7 +268,7 @@ def test_navigation_consumer_syncs_without_becoming_start_requirement(fresh_mana
     explicit = operations.select(["portainer"], metadata_only=True, for_start=True)
     selection = operations.start_selection(explicit)
     assert "flare" not in [container.name for container in selection.target_containers]
-    assert "flare" in [container.name for container in operations.sync_selection(selection)]
+    assert "flare" in [container.name for container in selection.project_containers]
     selected_flare = operations.select(["flare"], metadata_only=True, for_start=True)
     assert "flare" in [container.name for container in operations.start_selection(selected_flare).target_containers]
 
@@ -273,7 +279,7 @@ def test_removed_final_declarations_still_synchronize_aggregate_consumers(fresh_
     explicit = fresh_manager.compose_operations.select(["portainer"], metadata_only=True, for_start=True)
     selection = fresh_manager.compose_operations.start_selection(explicit)
     assert [c.name for c in selection.target_containers] == ["portainer"]
-    assert {"nginx", "flare"} <= {c.name for c in fresh_manager.compose_operations.sync_selection(selection)}
+    assert {"nginx", "flare"} <= {c.name for c in selection.project_containers}
     assert "portainer" not in [c.name for c, _, _ in fresh_manager.iter_integrations("flare")]
     assert ("portainer", "web") not in fresh_manager.nginx_sites
 
@@ -302,20 +308,22 @@ def test_partial_update_applies_navigation_only_if_flare_is_running(fresh_manage
 
 def test_unchanged_candidate_replaces_bootstrap_before_application(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    full = GeneratedCandidate(owner, owner.render)
+    full = GeneratedCandidate(owner, owner.on_render)
     full.publish()
-    unchanged = GeneratedCandidate(owner, owner.render)
+    unchanged = GeneratedCandidate(owner, owner.on_render)
     assert not unchanged.changed
     bootstrap = GeneratedCandidate(owner, lambda generation: {"config": "health-only", "health": generation})
     bootstrap.publish()
     applied = []
 
-    def apply(candidate, context, services):
+    def apply(context, candidate, services):
         applied.append(GeneratedCandidate.current_id(candidate.root))
         assert (Path(candidate.root) / "current/config").read_text() == "first"
 
-    owner.manager.generated_configs = {"test": SimpleNamespace(apply=apply)}
-    context = SimpleNamespace(generated_candidates={}, initial_running_services=set())
+    owner.manager.generated_configs = {"test": SimpleNamespace(on_apply=apply)}
+    context = SimpleNamespace(generated_candidates={}, initial_running_services=set(),
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
+        service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
     ComposeOperations(owner.manager)._publish_candidate(owner, unchanged, context, ("test",))
     assert applied == [full.generation_id]
 
@@ -329,18 +337,18 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
     old_model = {"services": {name: {"image": "old"} for name in owner.services}}
     new_model = {"services": {name: {"image": "new"} for name in owner.services}}
     AppliedServiceModels(owner.manager, old_model).record(owner.services)
-    full = GeneratedCandidate(owner, owner.render)
+    full = GeneratedCandidate(owner, owner.on_render)
     full.publish()
     owner.content = "new"
-    candidate = GeneratedCandidate(owner, owner.render)
+    candidate = GeneratedCandidate(owner, owner.on_render)
     calls = []
 
-    def apply(value, context, services):
+    def apply(context, value, services):
         calls.append((value.generation_id, tuple(services)))
         if value.generation_id == candidate.generation_id and services == ("sidecar",):
             raise RuntimeError("sidecar failed")
 
-    owner.manager.generated_configs = {"test": SimpleNamespace(apply=apply)}
+    owner.manager.generated_configs = {"test": SimpleNamespace(on_apply=apply)}
     path = str(tmp_path / "test.yml")
     context = SimpleNamespace(generated_candidates={}, initial_running_services=set(owner.services),
         applied_generation_services={}, applied_compose={},
@@ -375,5 +383,45 @@ def test_asset_validator_interprets_raw_result_without_exposing_secrets(service,
     consumer = builtin_consumer_type("100-nginx" if service == "nginx" else "102-authelia")(
         SimpleNamespace(manager=manager))
     with pytest.raises(ContainerError, match="Native validation failed") as raised:
-        consumer.validate(SimpleNamespace(generation_id="id"), context)
+        consumer.on_validate(context, SimpleNamespace(generation_id="id"))
     assert "secret-token" not in str(raised.value)
+
+
+@pytest.mark.parametrize("has_snapshot", [False, True])
+def test_native_validation_reuses_command_snapshot_or_resolves_fresh(has_snapshot):
+    model = {"services": {"app": {"image": "app:prepared"}}}
+    resolved = []
+    validated = []
+    runner = ComposeRunner(SimpleNamespace(
+        structured_runner=SimpleNamespace(execute=lambda *args, **kwargs: SimpleNamespace(succeeded=True)),
+        runtime=SimpleNamespace(create_docker_process=lambda *args, **kwargs: None)))
+    runner.final_model = lambda context: resolved.append(None) or model
+    runner.isolated_service_args = lambda candidate, *args: validated.append(candidate) or []
+    context = SimpleNamespace(compose_model=model) if has_snapshot else SimpleNamespace()
+    for _ in range(2):
+        runner.validate_service(context, "app", ("validate",))
+    assert validated == [model, model]
+    assert len(resolved) == (0 if has_snapshot else 2)
+
+
+@pytest.mark.parametrize("has_snapshot", [False, True])
+def test_generation_image_check_reuses_command_snapshot_or_resolves_fresh(has_snapshot):
+    from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
+
+    model = {"services": {"app": {"image": "app:prepared"}}}
+    state = ServiceRuntimeState(("app",), "app", "runtime", "running", "healthy", "app:prepared", None,
+                                {"io.linktools.cntr.generation": "id"}, image_id="sha256:prepared")
+    resolved = []
+    commands = []
+    runner = ComposeRunner(SimpleNamespace(project_name="p",
+        docker_inspector=SimpleNamespace(get_project_state=lambda containers: ProjectRuntimeState("p", (state,), "docker")),
+        structured_runner=SimpleNamespace(execute=lambda *args, **kwargs: SimpleNamespace(stdout="sha256:prepared")),
+        runtime=SimpleNamespace(create_docker_process=lambda *args, **kwargs: commands.append(args))))
+    runner.final_model = lambda context: resolved.append(None) or model
+    context = SimpleNamespace(containers=())
+    if has_snapshot:
+        context.compose_model = model
+    for _ in range(2):
+        assert runner.is_generation_current(context, "app", SimpleNamespace(generation_id="id"))
+    assert len(resolved) == (0 if has_snapshot else 2)
+    assert all(command[-1] == "app:prepared" for command in commands)

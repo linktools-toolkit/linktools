@@ -7,11 +7,22 @@
       "name": "aio-safeline-ce"
     }
   },
+  "secrets": {
+    "nginx-acme": {
+      "file": "<TEMP>/container/nginx/acme-build.env"
+    }
+  },
   "services": {
     "nginx": {
       "build": {
         "context": "<ASSETS>/100-nginx",
-        "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile"
+        "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile",
+        "secrets": [
+          {
+            "source": "nginx-acme",
+            "target": "nginx-acme"
+          }
+        ]
       },
       "command": [
         "nginx",

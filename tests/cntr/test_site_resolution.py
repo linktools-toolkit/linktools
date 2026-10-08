@@ -289,3 +289,18 @@ def test_unknown_consumer_rejected_and_empty_installed_consumer_is_empty() -> No
     assert list(manager.iter_integrations("app")) == []
     with pytest.raises(ContainerError, match="Unknown integration consumer"):
         list(manager.iter_integrations("missing"))
+
+
+@pytest.mark.parametrize("server_name,default", [("_", False), ("app.example.com", True)])
+def test_default_server_is_independent_of_domain(server_name: str, default: bool) -> None:
+    producer = Producer(Nginx.site(server_name, proxy="http://app", default=default))
+    assert producer.site.default is default
+    assert producer.site.server_name == server_name
+    if default:
+        assert producer.site.url == "https://app.example.com"
+
+
+def test_disabled_default_is_lazy() -> None:
+    producer = Producer(Nginx.site("", default=lazy_load(fail)))
+    assert producer.site.default is False
+    assert producer.site.resolve() is producer.site

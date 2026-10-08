@@ -26,10 +26,6 @@ if TYPE_CHECKING:
 class Container(BaseContainer):
 
     @cached_property
-    def integration_consumer(self) -> IntegrationConsumer:
-        return FlareGeneration(self)
-
-    @cached_property
     def configs(self) -> "dict[str, Any]":
         return dict(
             # NGINX_WILDCARD_DOMAIN is owned by the nginx container (its own
@@ -82,20 +78,15 @@ class Container(BaseContainer):
         ]
 
 
-class FlareGeneration(IntegrationConsumer):
+class Consumer(IntegrationConsumer):
     """Own the builtin flare consumer without extending container hooks."""
 
     generated = True
     application_order = 200
 
-    def prepare(self, context: "EventContext") -> None:
-        pass
-
     def _iter_links(self) -> "Iterator[FlareLink]":
         manager = self.container.manager
         snapshot = manager.integration_snapshot
-        if "flare" not in snapshot:
-            return
         producers = sorted(
             (name for name, declarations in snapshot.items() if declarations),
             key=lambda name: manager.containers[name].order,
@@ -112,7 +103,7 @@ class FlareGeneration(IntegrationConsumer):
                 if declaration.consumer == "flare":
                     yield declaration
 
-    def render(self, generation_id: str) -> "dict[str, str]":
+    def on_render(self, generation_id: str) -> "dict[str, str]":
 
         categories = OrderedDict()
         apps = {"links": []}
@@ -150,7 +141,7 @@ class FlareGeneration(IntegrationConsumer):
             "bookmarks.yml": yaml.safe_dump(bookmarks, allow_unicode=True),
         }
 
-    def validate(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+    def on_validate(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
         group = self.container.get_config("DOCKER_GID", type=int)
         for name in ("apps.yml", "bookmarks.yml"):
             path = Path(candidate.path) / name
@@ -161,8 +152,8 @@ class FlareGeneration(IntegrationConsumer):
                 self.container.runtime.create_process("chgrp", str(group), str(path), privilege=True).check_call()
             path.chmod(0o640)
 
-    def apply(self, candidate: "GeneratedCandidate", context: "EventContext",
-              services: "Iterable[str]") -> None:
+    def on_apply(self, context: "EventContext", candidate: "GeneratedCandidate",
+                 services: "Iterable[str]") -> None:
         if "flare" not in services:
             return
         app = self.container.get_app_path("app")

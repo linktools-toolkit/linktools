@@ -61,6 +61,10 @@ class ResolvedSite:
         return "nginx" in self.producer.manager.integration_snapshot and bool(self.server_name)
 
     @cached_property
+    def default(self) -> bool:
+        return bool(self._declaration.default) if self.enabled else False
+
+    @cached_property
     def literal_domain(self) -> "Optional[str]":
         value = self.server_name
         return value if re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", value) else None
@@ -134,8 +138,8 @@ class ResolvedSite:
         except TypeError:
             self._error(field + " must be a sequence of strings")
 
-    def _mapping(self, field: str, active: bool = True) -> "Mapping":
-        if not self.enabled or not active:
+    def _mapping(self, field: str) -> "Mapping":
+        if not self.enabled:
             return MappingProxyType({})
         value = getattr(self._declaration, field)
         if not isinstance(value, Mapping):
@@ -151,7 +155,7 @@ class ResolvedSite:
         return self._sequence("auth_bypass", self.auth)
 
     @cached_property
-    def auth_headers(self) -> "Mapping":
+    def auth_headers(self) -> "Mapping[str, str]":
         if not self.auth:
             return MappingProxyType({})
         return MappingProxyType({self._text(k, "auth_headers name"): self._text(v, "auth_headers value")
@@ -207,7 +211,7 @@ class ResolvedSite:
             return self
         if not self.template and not self.proxy:
             self._error("default proxy template requires a nonempty proxy")
-        for field in ("https", "waf", "auth", "waf_bypass", "auth_bypass", "auth_headers",
+        for field in ("default", "https", "waf", "auth", "waf_bypass", "auth_bypass", "auth_headers",
                       "auth_rule", "oidc_redirects", "cert_domains", "vars"):
             getattr(self, field)
         if self.producer.name == "authelia" and not self.https:

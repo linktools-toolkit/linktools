@@ -6,9 +6,13 @@ services:
       - '{{ (APP_PATH/"acme") | mkdir | chown }}:/root/.acme.sh'
     command: ["nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/current/nginx.conf", "-g", "daemon off;"]
 #   {% if NGINX_HTTPS_ENABLE %}
+    build:
+      secrets:
+        - source: nginx-acme
+          target: nginx-acme
     environment:
 #     {% for key in container.extend_configs %}
-      {{ key }}: '{{ container.get_config(container.extend_configs[key]) }}'
+      {{ key }}: {{ container.get_config(container.extend_configs[key]) | string | replace('$', '$$') | tojson }}
 #     {% endfor %}
 #   {% endif %}
     ports:
@@ -34,4 +38,10 @@ networks:
   nginx:
 # {% if "safeline" in manager.installed_state.load_names() %}
   safeline-ce:
+# {% endif %}
+
+# {% if NGINX_HTTPS_ENABLE %}
+secrets:
+  nginx-acme:
+    file: '{{ container.acme_build_secret_path }}'
 # {% endif %}

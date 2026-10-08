@@ -42,7 +42,7 @@ def _no_real_processes(monkeypatch, fresh_manager):
     )
 
 
-def test_plan_never_invokes_hooks(fresh_manager, monkeypatch):
+def test_plan_never_invokes_lifecycle_hooks(fresh_manager, monkeypatch):
     calls = []
     monkeypatch.setattr(
         LifecycleDispatcher,
@@ -51,8 +51,8 @@ def test_plan_never_invokes_hooks(fresh_manager, monkeypatch):
     )
     monkeypatch.setattr(
         HookRegistry,
-        "call",
-        lambda self, phase, context=None, reverse=False: calls.append(1),
+        "_invoke",
+        lambda self, hook, context: calls.append(1),
     )
 
     fresh_manager.planner.plan("up")
@@ -399,3 +399,18 @@ def test_plan_preserves_interleaved_service_dependency_order(fresh_manager, monk
     monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
     plan = fresh_manager.planner.plan("up", ["portainer"])
     assert [command.args[-1] for command in plan.commands if command.phase == "up"] == list(selected.services)
+
+
+def test_plan_loads_artifact_index_once_per_call(fresh_manager, monkeypatch):
+    loads = []
+    original = fresh_manager.artifact_index.load
+
+    def load():
+        loads.append(None)
+        return original()
+
+    monkeypatch.setattr(fresh_manager.artifact_index, "load", load)
+    for action in ("up", "down"):
+        plan = fresh_manager.planner.plan(action)
+        assert len(plan.artifacts) > 1
+    assert len(loads) == 2

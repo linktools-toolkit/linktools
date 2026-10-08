@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from typing import Any
     from linktools.core import Config, ConfigNamespace, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
-    from .integration import IntegrationConsumer, Integrations
+    from .integration import Integrations
     from .manager import ContainerManager
     from .context import EventContext
     from .repo.context import RepositoryConfigContext
@@ -117,11 +117,6 @@ class BaseContainer(metaclass=AbstractMetaClass):
     @property
     def integrations(self) -> "Integrations":
         return []
-
-    @cached_property
-    def integration_consumer(self) -> "IntegrationConsumer | None":
-        """Provide a side-effect-free consumer implementation for this container."""
-        return None
 
     @cached_property
     def settings(self) -> "ConfigNamespace":

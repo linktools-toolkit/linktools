@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+# Installation also runs during the image build, before nginx exists.
+if [ -s /var/run/nginx.pid ]; then
+    nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t
+    nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload
+fi

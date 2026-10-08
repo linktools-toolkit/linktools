@@ -99,11 +99,7 @@ def builtin_module(name: str) -> "ModuleType":
 
 
 def builtin_consumer_type(name: str) -> "Type[IntegrationConsumer]":
-    container = object.__new__(builtin_module(name).Container)
-    consumer = container.integration_consumer
-    if consumer is None:
-        raise ValueError("Builtin has no integration consumer: " + name)
-    return type(consumer)
+    return builtin_module(name).Consumer
 
 
 def _reset_global_config() -> None:
@@ -148,6 +144,14 @@ def make_manager(data_path, temp_path, name: str = "aio"):
     manager = ContainerManager(environ, name=name)
     manager.installed_state.add(*manager.containers.keys())
     manager.prepare_installed_containers()
+    # Read-only plans require configured inputs; preparation does not render
+    # Dockerfiles or freeze integration snapshots just to populate defaults.
+    for key in ("DOCKER_USER", "DOCKER_TYPE", "DOCKER_APP_PATH", "DOCKER_USER_DATA_PATH",
+                "NGINX_ROOT_DOMAIN", "NGINX_HTTP_PORT", "NGINX_HTTPS_ENABLE", "ACME_DNS_API",
+                "LLDAP_ADMIN_PASSWORD"):
+        manager.env_config.get(key)
+    for field in manager.containers["nginx"].extend_configs.values():
+        manager.containers["nginx"].get_config(field)
     return manager
 
 
@@ -209,11 +213,11 @@ def stub_generated_runtime(manager, monkeypatch):
                                publish=lambda: None, restore=lambda: None)
     monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate", candidate)
     for owner in manager.generated_configs.values():
-        monkeypatch.setattr(owner, "prepare", lambda context: None)
-        monkeypatch.setattr(owner, "validate", lambda candidate, context: None)
-        monkeypatch.setattr(owner, "apply", lambda candidate, context, services:
+        monkeypatch.setattr(owner, "on_prepare", lambda context: None)
+        monkeypatch.setattr(owner, "on_validate", lambda context, candidate: None)
+        monkeypatch.setattr(owner, "on_apply", lambda context, candidate, services:
                             manager.compose_runner.apply_services(context, services))
     def bootstrap(context):
         manager.compose_runner.apply_service(context, "nginx")
         return "bootstrap"
-    monkeypatch.setattr(manager.generated_configs["nginx"], "bootstrap", bootstrap)
+    monkeypatch.setattr(manager.generated_configs["nginx"], "on_bootstrap", bootstrap)

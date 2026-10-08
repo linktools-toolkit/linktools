@@ -2,11 +2,20 @@
 # -*- coding: utf-8 -*-
 """Single-pass template namespaces and complete proxy header ownership."""
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from linktools.cntr import ContainerError, Nginx
 from _harness import builtin_consumer_type
 from linktools.cntr.container import ContainerTemplateError
+
+
+if TYPE_CHECKING:
+    from typing import Any, Mapping, Optional
+    from linktools.cntr import ContainerManager
+    from linktools.cntr.container import BaseContainer
+    from linktools.cntr.integration import ResolvedSite
 
 
 NginxGeneration = builtin_consumer_type("100-nginx")
@@ -107,15 +116,15 @@ def test_business_file_is_rendered_once_across_generation_markers(fresh_manager,
     calls = []
     source = tmp_path / "business.conf"
     source.write_text("{{ vars.record() }}\nlocation / { return 204; }")
-    site = make_site(server_name="_", waf=False, auth=False, template=source,
+    site = make_site(server_name="_", default=True, waf=False, auth=False, template=source,
                      vars={"record": lambda: calls.append("render") or "# business"})
     site.producer = nginx
     site.enabled = True
     site.resolve = lambda: site
     nginx.__dict__["sites"] = {("nginx", "web"): site}
     owner = NginxGeneration(nginx)
-    first = owner.render("first")
-    second = owner.render("second")
+    first = owner.on_render("first")
+    second = owner.on_render("second")
     assert calls == ["render"]
     assert first["sites/s_test/business.conf"] == second["sites/s_test/business.conf"]
     assert 'return 200 "first"' in first["nginx.conf"]
@@ -123,3 +132,93 @@ def test_business_file_is_rendered_once_across_generation_markers(fresh_manager,
     assert "/current/" not in "\n".join(first.values())
     assert "NGINX_ROOT_site" not in "\n".join(first.values())
     assert "default_server" in first["sites/s_test.conf"]
+
+
+@pytest.mark.parametrize("server_name", ["_", "app.example.test", "*.example.test", "~^app\\.example\\.test$"])
+@pytest.mark.parametrize("default", [False, True])
+def test_default_listeners_are_explicit_and_independent_of_server_name(
+        fresh_manager: "ContainerManager", server_name: str, default: bool) -> None:
+    nginx = fresh_manager.containers["nginx"]
+    site = make_site(server_name=server_name, default=default)
+    rendered = NginxGeneration(nginx).render_template(
+        nginx, nginx.get_source_path("templates", "server.conf"), site)
+    assert rendered.count("default_server") == (3 if default else 0)
+    assert rendered.count("server_name " + server_name + ";") == 3
+    assert "auth_request /__cntr/auth;" in rendered
+    assert "proxy_pass $cntr_waf_target;" in rendered
+    assert "ssl_certificate " in rendered
+
+
+def generation_site(nginx: "BaseContainer", local_id: str = "web",
+                    ports: "Optional[Mapping[str, int]]" = None, **kwargs: "Any") -> "ResolvedSite":
+    from types import SimpleNamespace
+    from linktools.cntr.integration import ResolvedSite
+
+    def get_config(key: str, **options: "Any") -> "Any":
+        return ports[key] if ports and key in ports else nginx.get_config(key, **options)
+
+    producer = SimpleNamespace(name=local_id, manager=nginx.manager,
+                               get_config=get_config, env_config=SimpleNamespace(get=get_config))
+    values = dict(server_name="app.example.test", proxy="http://app:8080",
+                  https=False, waf=False, auth=False)
+    values.update(kwargs)
+    return ResolvedSite(producer, local_id, Nginx.site(**values))
+
+
+@pytest.mark.parametrize("default", [False, True])
+def test_fallback_depends_on_explicit_default_not_underscore(fresh_manager: "ContainerManager", default: bool) -> None:
+    nginx = fresh_manager.containers["nginx"]
+    site = generation_site(nginx, server_name="_", default=default)
+    nginx.__dict__["sites"] = {site.identity: site}
+    files = NginxGeneration(nginx).on_render("test")
+    assert ("sites/cntr_default.conf" in files) is not default
+    assert ("default_server" in files["sites/" + site.file_id + ".conf"]) is default
+    if not default:
+        assert "default_server" in files["sites/cntr_default.conf"]
+        assert 'server_name "";' in files["sites/cntr_default.conf"]
+        assert "server_name _;" not in files["sites/cntr_default.conf"]
+        assert "server_name _;" in files["sites/" + site.file_id + ".conf"]
+
+
+def test_disabled_default_keeps_fallback_without_resolving_other_fields(fresh_manager: "ContainerManager") -> None:
+    from linktools.runtime import lazy_load
+
+    def fail() -> None:
+        raise AssertionError("disabled site evaluated")
+
+    nginx = fresh_manager.containers["nginx"]
+    site = generation_site(nginx, server_name="", default=lazy_load(fail), proxy=lazy_load(fail))
+    nginx.__dict__["sites"] = {site.identity: site}
+    files = NginxGeneration(nginx).on_render("test")
+    assert "sites/cntr_default.conf" in files
+    assert "sites/" + site.file_id + ".conf" not in files
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_explicit_defaults_only_conflict_on_shared_listeners(fresh_manager: "ContainerManager", shared: bool) -> None:
+    nginx = fresh_manager.containers["nginx"]
+    first = generation_site(nginx, "first", ports={"NGINX_HTTP_PORT": 8080}, default=True)
+    second = generation_site(nginx, "second", ports={"NGINX_HTTP_PORT": 8080 if shared else 8081}, default=True)
+    nginx.__dict__["sites"] = {site.identity: site for site in (first, second)}
+    owner = NginxGeneration(nginx)
+    if shared:
+        with pytest.raises(ContainerError, match="[Dd]efault"):
+            owner.on_render("test")
+    else:
+        files = owner.on_render("test")
+        assert "listen 8080 default_server;" in files["sites/" + first.file_id + ".conf"]
+        assert "listen 8081 default_server;" in files["sites/" + second.file_id + ".conf"]
+        assert "sites/cntr_default.conf" not in files
+
+
+@pytest.mark.parametrize("capability,port", [("https", "NGINX_HTTPS_PORT"), ("waf", "NGINX_WAF_PORT")])
+def test_defaults_detect_collisions_on_optional_listeners(
+        fresh_manager: "ContainerManager", capability: str, port: str) -> None:
+    nginx = fresh_manager.containers["nginx"]
+    first = generation_site(nginx, "first", ports={"NGINX_HTTP_PORT": 8080, port: 8443},
+                            default=True, **{capability: True})
+    second = generation_site(nginx, "second", ports={"NGINX_HTTP_PORT": 8081, port: 8443},
+                             default=True, **{capability: True})
+    nginx.__dict__["sites"] = {site.identity: site for site in (first, second)}
+    with pytest.raises(ContainerError, match="[Dd]efault"):
+        NginxGeneration(nginx).on_render("test")

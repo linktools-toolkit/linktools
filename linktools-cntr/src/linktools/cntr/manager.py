@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from typing import Any, Iterator, Tuple, Mapping, Optional
     from linktools.core import CacheNamespace, ConfigStore, Environ
     from .registry.registry import ContainerResolver
-    from .registry.loader import ContainerLoader
+    from .registry.loader import ContainerLoader, ContainerLoadError
     from ._operations import ComposeOperations
     from .runtime.compose import ComposeRunner
     from .runtime.process import RuntimeProcessFactory
@@ -65,7 +65,8 @@ class ContainerManager:
         # failures (import/on_init errors) from the last time containers
         # were discovered, for callers (e.g. Doctor) that want to report
         # them instead of only the log-only warning.
-        self.container_load_errors: "list[Any]" = []
+        self.container_load_errors: "list[ContainerLoadError]" = []
+        self._loaded_consumers: "Mapping[str, IntegrationConsumer]" = {}
 
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
@@ -208,6 +209,7 @@ class ContainerManager:
         result = dict()
         load_result = self.loader.load_all()
         self.container_load_errors = load_result.errors
+        self._loaded_consumers = load_result.consumers
         for container in load_result.containers:
             existing = result.get(container.name)
             if existing is not None:
@@ -355,16 +357,8 @@ class ContainerManager:
     def integration_consumers(self) -> "Mapping[str, IntegrationConsumer]":
         """Consumer implementations provided by the installed containers."""
         from types import MappingProxyType
-        from .integration import IntegrationConsumer
-        result = {}
-        for name in self.integration_snapshot:
-            container = self.containers[name]
-            consumer = container.integration_consumer
-            if consumer is not None:
-                if not isinstance(consumer, IntegrationConsumer) or consumer.container is not container:
-                    raise ContainerError("Invalid integration consumer in " + name)
-                result[name] = consumer
-        return MappingProxyType(result)
+        return MappingProxyType({name: self._loaded_consumers[name] for name in self.integration_snapshot
+                                 if name in self._loaded_consumers})
 
     @cached_property
     def generated_configs(self) -> "Mapping[str, IntegrationConsumer]":
@@ -417,8 +411,8 @@ class ContainerManager:
         for container in containers:
             container.on_prepare()
         for container in containers:
-            if container.docker_file and self.debug:  # 加载每个容器的dockerfile
+            if self.debug and container.docker_file:  # 加载每个容器的dockerfile
                 self.logger.debug(f"Generate Dockerfile for {container.name}")
-            if container.docker_compose and self.debug:  # 加载每个容器的docker-compose.yml
+            if self.debug and container.docker_compose:  # 加载每个容器的docker-compose.yml
                 self.logger.debug(f"Generate docker-compose.yml for {container.name}")
         return containers

@@ -27,10 +27,6 @@ if TYPE_CHECKING:
 
 class Container(BaseContainer):
 
-    @cached_property
-    def integration_consumer(self) -> IntegrationConsumer:
-        return AutheliaGeneration(self)
-
     @property
     def dependencies(self) -> "Iterable[str]":
         return ["nginx", "lldap"]
@@ -163,12 +159,12 @@ class Container(BaseContainer):
         )
 
 
-class AutheliaGeneration(IntegrationConsumer):
+class Consumer(IntegrationConsumer):
     """Own the builtin authelia consumer without extending container hooks."""
 
     generated = True
 
-    def prepare(self, context: "EventContext") -> None:
+    def on_prepare(self, context: "EventContext") -> None:
         secret_path = self.container.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
         self.container.get_app_path("config").mkdir(parents=True, exist_ok=True)
@@ -177,7 +173,7 @@ class AutheliaGeneration(IntegrationConsumer):
             self._create_secret_file(secret_path / name)
         self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
 
-    def render(self, generation_id: str) -> "dict[str, str]":
+    def on_render(self, generation_id: str) -> "dict[str, str]":
         result = {
             name: self.container.render_template(self.container.get_source_path("templates", name))
             for name in ("configuration.yml", "configuration.acl.yml",
@@ -186,7 +182,7 @@ class AutheliaGeneration(IntegrationConsumer):
         result["authentication_backend_ldap_password"] = str(self.container.get_config("AUTHELIA_LDAP_PASSWORD"))
         return result
 
-    def validate(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+    def on_validate(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
         root = "/generated/" + candidate.generation_id
         command = ["authelia", "config", "validate"]
         command.extend("--config=" + root + "/" + name for name in (
@@ -205,8 +201,8 @@ class AutheliaGeneration(IntegrationConsumer):
             raise ContainerError("Native validation failed for service authelia{} (exit {})".format(
                 diagnostic, result.returncode))
 
-    def apply(self, candidate: "GeneratedCandidate", context: "EventContext",
-              services: "Iterable[str]") -> None:
+    def on_apply(self, context: "EventContext", candidate: "GeneratedCandidate",
+                 services: "Iterable[str]") -> None:
         runner = self.container.manager.compose_runner
         services = tuple(services)
         for service in services:

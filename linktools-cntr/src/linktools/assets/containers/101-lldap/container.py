@@ -18,17 +18,14 @@ if TYPE_CHECKING:
     from linktools.cntr import EventContext, Integrations
     from linktools.cntr.artifacts import GeneratedCandidate
     from linktools.types import PathType
+    from linktools.core import ConfigResolver
 
 
 class Container(BaseContainer):
 
     @cached_property
-    def integration_consumer(self) -> IntegrationConsumer:
-        return LldapGeneration(self)
-
-    @cached_property
     def configs(self) -> "dict[str, Any]":
-        def get_base_dn(cfg: "dict[str, Any]") -> str:
+        def get_base_dn(cfg: "ConfigResolver") -> str:
             domain = cfg.get("NGINX_ROOT_DOMAIN")
             parts = domain.split(".")
             return ",".join([f"dc={part}" for part in parts])
@@ -60,32 +57,32 @@ class Container(BaseContainer):
                                  f"Please set NGINX_ROOT_DOMAIN to a valid domain (e.g., example.com).")
 
 
-class LldapGeneration(IntegrationConsumer):
+class Consumer(IntegrationConsumer):
     """Own the builtin lldap consumer without extending container hooks."""
 
     generated = True
 
-    def prepare(self, context: "EventContext") -> None:
+    def on_prepare(self, context: "EventContext") -> None:
         secret_path = self.container.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
         self.container.get_app_path("data").mkdir(parents=True, exist_ok=True)
         self.container.runtime.chmod(secret_path, 0o700, recursive=True)
         self._create_secret_file(secret_path / "jwt_secret", length=64)
 
-    def render(self, generation_id: str) -> "dict[str, str]":
+    def on_render(self, generation_id: str) -> "dict[str, str]":
         return {
             "lldap_config.toml": self.container.render_template(self.container.get_source_path("templates", "lldap_config.toml")),
             "ldap_user_pass": str(self.container.get_config("LLDAP_ADMIN_PASSWORD")),
         }
 
-    def validate(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+    def on_validate(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
         # The builtin TOML contains only fixed database/key locations. LLDAP has
         # no standalone config validator; readiness is checked after application.
         if not self.container.get_config("LLDAP_ADMIN_PASSWORD"):
             raise ContainerError("LLDAP administrator password must not be empty")
 
-    def apply(self, candidate: "GeneratedCandidate", context: "EventContext",
-              services: "Iterable[str]") -> None:
+    def on_apply(self, context: "EventContext", candidate: "GeneratedCandidate",
+                 services: "Iterable[str]") -> None:
         if "lldap" not in services:
             return
         runner = self.container.manager.compose_runner

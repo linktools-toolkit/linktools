@@ -160,6 +160,12 @@ templates retain only the explicit context described below.
 ## Site values
 
 - `server_name=""` disables the site and unrelated secret/config resolution
+- `default=True` makes this site the native default server on its HTTP, HTTPS
+  (when enabled), and WAF (when enabled) listeners, regardless of its hostname.
+  Enabled defaults must not share a listening socket. If none is declared, nginx
+  adds one built-in fallback site. `server_name="_"` alone no longer requests
+  default behavior; migrate catch-all declarations to `default=True`
+  (this is separate from `NGINX_ROOT_DOMAIN`)
 - `https`, `waf`, and `auth`: `None` inherits, `False` disables, and `True`
   requires the global capability; missing providers fail closed
 - Browser authentication requires HTTPS
@@ -243,24 +249,31 @@ rendering. Aggregate consumers read the complete installed snapshot, including
 removal of a producer's final declaration. No historical dependency graph or
 runtime configuration-read tracking is needed.
 
-Producers declare their inputs through `integrations`. Consumer containers
-provide an `IntegrationConsumer` instance through `integration_consumer`, which
-defaults to `None`. Constructing the consumer must be lazy and side-effect free;
-cache the instance on its owning container:
+Producers declare their inputs through `integrations`. A container module may
+also export `Consumer(IntegrationConsumer)` beside `Container`. The existing
+container loader discovers both classes; the manager creates and caches one
+consumer per installed owning container. Construction must be side-effect free.
 
 ```python
 from linktools.cntr.integration import IntegrationConsumer
 
 
 class Container(BaseContainer):
-    @cached_property
-    def integration_consumer(self) -> IntegrationConsumer:
-        return MyConsumer(self)
+    pass
+
+
+class Consumer(IntegrationConsumer):
+    generated = True
+    # Implement the generated-configuration lifecycle hooks below.
 ```
 
-`MyConsumer` subclasses `IntegrationConsumer`. Set `generated=True` and
-implement `prepare`, `render`, `validate`, and `apply` when it owns generated
-configuration. A consumer without generated files can supply runtime policies
+`Consumer` subclasses `IntegrationConsumer`. Set `generated=True` and
+implement `on_render(generation_id)`, `on_validate(context, candidate)`, and
+`on_apply(context, candidate, services)` when it owns generated configuration.
+Optional lifecycle hooks use the same instance style as `BaseContainer`:
+`on_prepare(context)`, `on_bootstrap(context)`, and `on_applied(context, service)`.
+`get_runtime_requirements(required)` reads the manager through `self.container`;
+`plan_warnings` is tuple data. A consumer without generated files can supply runtime policies
 and readiness handling alone. Each implementation must belong to the container
 that provides it. The manager freezes installed consumers once per command;
 unknown container names receive no special implementation.
@@ -281,7 +294,7 @@ Planning and execution use the same service-ordering operation. The core owns
 generic dependency closure, Compose execution, candidate publication and
 rollback. `ContainerManager.nginx_sites` only caches and delegates site
 resolution to `Nginx.resolve_sites`; it contains no nginx validation policy.
-The implementations are supplied through `BaseContainer.integration_consumer`;
+The implementations are module-level `Consumer` classes discovered beside `Container`;
 individual generation stages are not BaseContainer lifecycle hooks. Concrete
 Generation classes are local to each asset, and are not exported by the main
 package. The former `linktools.cntr.generation` module is removed.
@@ -297,13 +310,28 @@ ready before the complete nginx config is activated. nginx health returns the
 loaded generation ID, and failed application restores the previous generation.
 Cross-service state is not an atomic transaction; failures remain command errors.
 
-nginx selects the CA explicitly during runtime issuance and certificate
-installation using `ACME_SERVER` (default `letsencrypt`). This works with an empty
-ACME bind mount and does not depend on default CA/account files from the image.
-`ACME_ACCOUNT_EMAIL` optionally supplies the contact email for account registration;
-leaving it empty preserves an existing account's contact settings. The mounted
-ACME directory retains account keys and certificate renewal state. Image builds
-install the client without embedding a placeholder account email or CA selection.
+nginx issues and installs its initial certificates while building the image, using
+`ACME_SERVER` (default `letsencrypt`), optional `ACME_ACCOUNT_EMAIL`, and the
+selected DNS API. Building requires BuildKit and Compose build secrets. DNS
+values are supplied through a mode-0600 temporary secret outside the build
+context and removed when the command process exits. They are not Dockerfile
+`ARG`/`ENV` values. ACME's credential-bearing `account.conf` is discarded before
+saving the image's initial state, and domain configs retain only ACME `Le_*`
+renewal fields; runtime DNS environment settings supply renewal
+credentials. Images still contain certificates, private keys and ACME account
+state: protect the image and its build cache as secrets; do not publish them.
+
+Deployment seeds only empty certificate/ACME mounts from the image, then validates
+expiry and domain coverage offline. Existing mounts (including account keys and
+renewed certificates) take precedence. Missing, expired or incompatible persisted
+certificates fail validation; deployment does not request replacement certificates
+from a CA. Build a fresh image and deliberately reconcile persisted state when
+changing certificate domains. Legacy container files are backed up before mount
+migration. The ACME client lives in `/opt/acme`, outside the persisted config mount.
+An explicit daily cron uses the persisted config and a reload script that validates
+the active generated configuration before reloading; legacy reload commands are
+updated without changing their account or certificate keys. HTTPS-disabled images
+skip ACME installation, issuance, secrets and cron.
 
 Deployment migration must be coordinated with all external repository callers:
 

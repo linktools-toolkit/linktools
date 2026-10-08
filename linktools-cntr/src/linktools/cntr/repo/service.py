@@ -26,6 +26,7 @@ from .requirements import ensure_requirement
 if TYPE_CHECKING:
     import logging
     from typing import Any
+    from linktools.core import Config
     from ..manager import ContainerManager
 
 
@@ -103,7 +104,7 @@ def safe_display_url(url: "Any") -> "Any":
     return parsed._replace(netloc=netloc).geturl()
 
 
-def _compute_manager_config_keys(env_config: "Any") -> "frozenset[str]":
+def _compute_manager_config_keys(env_config: "Config") -> "frozenset[str]":
     keys = set()
     for field in env_config.schema.fields():
         keys.add(field.name)
@@ -496,7 +497,7 @@ class RepoService(object):
             }
         return info
 
-    def _find_reserved_environment_keys(self, file_config: "Any") -> "list[str]":
+    def _find_reserved_environment_keys(self, file_config: "ProjectProfile") -> "list[str]":
         """Manager-owned keys (``_compute_manager_config_keys``) this
         repository's own ``.linktools.json`` declares under ``env``
         -- every container resolves fields through the manager's own shared

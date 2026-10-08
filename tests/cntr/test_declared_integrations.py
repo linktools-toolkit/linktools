@@ -81,10 +81,10 @@ def test_partial_nginx_selection_refreshes_full_navigation_snapshot(fresh_manage
     fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
     operations = fresh_manager.compose_operations
     selection = operations.select(["nginx"], metadata_only=True, for_start=True)
-    synchronized = operations.sync_selection(selection)
+    synchronized = selection.project_containers
     flare = fresh_manager.containers["flare"]
     assert flare in synchronized
-    result = fresh_manager.generated_configs["flare"].render("candidate")
+    result = fresh_manager.generated_configs["flare"].on_render("candidate")
     links = yaml.safe_load(result["apps.yml"])["links"]
     portainer = next(link for link in links if link["name"] == "Portainer")
     assert ":9443" in portainer["link"]
@@ -148,7 +148,7 @@ def _render_navigation(manager):
     import yaml
 
     return {key: yaml.safe_load(value) for key, value in
-            FlareGeneration(SimpleNamespace(manager=manager)).render("candidate").items()}
+            FlareGeneration(SimpleNamespace(manager=manager)).on_render("candidate").items()}
 
 
 def test_site_navigation_inherits_only_omitted_url_lazily():
@@ -260,18 +260,20 @@ def test_navigation_merge_preserves_producer_ties_and_local_id_collisions():
         "One", "Two", "Path", "Other"]
 
 
-def test_absent_flare_does_not_resolve_attached_navigation():
+def test_absent_flare_does_not_resolve_attached_navigation(fresh_manager, monkeypatch):
     from linktools.cntr import Flare
     from linktools.runtime import lazy_load
 
     def fail():
         raise AssertionError("absent consumer must not resolve URL")
-    manager, reads = _site_navigation_manager({"web": Nginx.site(
+
+    installed = [c for c in fresh_manager.installed_state.get(resolve=True) if c.name != "flare"]
+    monkeypatch.setattr(fresh_manager.installed_state, "get", lambda resolve=False: installed)
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "integrations", [Nginx.site(
         "app.test", expose=Flare.category("public", "Public", apps=True)("App", "web", "", lazy_load(fail)),
-    )})
-    del manager.integration_snapshot["flare"]
-    assert _render_navigation(manager)["apps.yml"]["links"] == []
-    assert reads == []
+    )])
+    assert "flare" not in fresh_manager.generated_configs
+    assert list(fresh_manager.iter_integrations("flare")) == []
 
 
 def test_declarations_have_canonical_public_identity_and_nominal_marker():
@@ -480,18 +482,24 @@ def test_namespace_factories_preserve_typed_constructor_and_mixed_list():
     assert declarations[0].local_id == "web"
 
 
-def test_consumer_snapshot_reuses_instances_and_rejects_wrong_owner(fresh_manager, monkeypatch):
+def test_consumer_snapshot_reuses_instances_without_container_field(fresh_manager):
     import pytest
-    from linktools.cntr import ContainerError
-    from linktools.cntr.integration import IntegrationConsumer
+    from linktools.cntr import BaseContainer
 
-    consumer = fresh_manager.containers["nginx"].integration_consumer
+    assert not hasattr(BaseContainer, "integration_consumer")
+    consumer = fresh_manager.integration_consumers["nginx"]
+    assert consumer.container is fresh_manager.containers["nginx"]
     assert fresh_manager.integration_consumers["nginx"] is consumer
     assert fresh_manager.generated_configs["nginx"] is consumer
     with pytest.raises(TypeError):
         fresh_manager.integration_consumers["nginx"] = consumer
-    fresh_manager.__dict__.pop("integration_consumers", None)
-    monkeypatch.setattr(fresh_manager.containers["nginx"], "integration_consumer",
-                        IntegrationConsumer(fresh_manager.containers["flare"]))
-    with pytest.raises(ContainerError, match="Invalid integration consumer in nginx"):
-        fresh_manager.integration_consumers
+
+
+def test_companion_consumers_preserve_container_dependencies(fresh_manager):
+    assert tuple(fresh_manager.containers["authelia"].dependencies) == ("nginx", "lldap")
+    assert tuple(fresh_manager.containers["safeline"].dependencies) == ("nginx",)
+    installed = fresh_manager.resolver.resolve_dependencies([fresh_manager.containers["authelia"]])
+    assert {container.name for container in installed} == {"nginx", "lldap", "authelia"}
+    selection = fresh_manager.compose_operations.select(["portainer"], metadata_only=True, for_start=True)
+    started = fresh_manager.compose_operations.start_selection(selection)
+    assert "lldap" in started.services

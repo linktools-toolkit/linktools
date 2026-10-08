@@ -15,7 +15,6 @@ from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeSt
 class Container:
     dependencies = ()
     integrations = ()
-    integration_consumer = None
 
     def __init__(self, name, services):
         self.name = name

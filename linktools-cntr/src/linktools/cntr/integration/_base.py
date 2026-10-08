@@ -8,7 +8,6 @@ if TYPE_CHECKING:
     from ..artifacts import GeneratedCandidate
     from ..container import BaseContainer
     from ..context import EventContext
-    from ..manager import ContainerManager
 
 
 class Integration:
@@ -28,22 +27,16 @@ class IntegrationConsumer:
     generated = False
     application_order = 0
     uses_generation_label = True
+    plan_warnings: "tuple[str, ...]" = ()
 
     def __init__(self, container: "BaseContainer") -> None:
         self.container = container
 
-    @classmethod
-    def runtime_requirements(cls, manager: "ContainerManager",
-                             required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
+    def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
         """Return installed providers and the services required from each."""
         return {}
 
-    @classmethod
-    def plan_warnings(cls) -> "tuple[str, ...]":
-        return ()
-
-    @classmethod
-    def after_apply(cls, manager: "ContainerManager", context: "EventContext", service: str) -> None:
+    def on_applied(self, context: "EventContext", service: str) -> None:
         pass
 
     def needs_apply(self, candidate: "GeneratedCandidate", context: "EventContext") -> bool:
@@ -52,19 +45,19 @@ class IntegrationConsumer:
     def needs_bootstrap(self, services: "Iterable[str]", running_services: "AbstractSet[str]") -> bool:
         return False
 
-    def bootstrap(self, context: "EventContext") -> str:
+    def on_bootstrap(self, context: "EventContext") -> str:
         """Return the confirmed bootstrap generation for rollback."""
         raise NotImplementedError
 
-    def prepare(self, context: "EventContext") -> None:
+    def on_prepare(self, context: "EventContext") -> None:
+        pass
+
+    def on_render(self, generation_id: str) -> "dict[str, str]":
         raise NotImplementedError
 
-    def render(self, generation_id: str) -> "dict[str, str]":
+    def on_validate(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
         raise NotImplementedError
 
-    def validate(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
-        raise NotImplementedError
-
-    def apply(self, candidate: "GeneratedCandidate", context: "EventContext",
-              services: "Iterable[str]") -> None:
+    def on_apply(self, context: "EventContext", candidate: "GeneratedCandidate",
+                 services: "Iterable[str]") -> None:
         raise NotImplementedError

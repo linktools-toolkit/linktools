@@ -48,7 +48,7 @@ def test_loader_picks_the_locally_defined_subclass_not_the_imported_base(fresh_m
     builtin_context = RepositoryConfigContext(
         root_path=None, file_config=None, url=None, builtin=True,
     )
-    loaded = list(ContainerLoader(fresh_manager)._load_one(str(tmp_path), builtin_context))
+    loaded = list(ContainerLoader(fresh_manager)._load_one(str(tmp_path), builtin_context, [], {}))
 
     assert len(loaded) == 1
     assert loaded[0].__class__.__name__ == "AppContainer"

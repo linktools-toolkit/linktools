@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from typing import Any
     from ..container import BaseContainer
     from ..manager import ContainerManager
+    from ..runtime.inspect import ServiceRuntimeState
 
 STATUS_SCHEMA_VERSION = 1
 _RUNNING_STATES = ("running", "restarting")
@@ -153,7 +154,7 @@ def collect_status(
         queryable = False
         error = str(exc)
 
-    services_by_container: "dict[str, list[Any]]" = {}
+    services_by_container: "dict[str, list[ServiceRuntimeState]]" = {}
     if state is not None:
         for svc in state.services:
             for owner in svc.logical_containers:

@@ -13,14 +13,10 @@ from linktools.decorator import cached_property
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Any
-    from linktools.cntr import ContainerManager, EventContext, Integrations
+    from linktools.cntr import EventContext, Integrations
 
 
 class Container(BaseContainer):
-
-    @cached_property
-    def integration_consumer(self) -> IntegrationConsumer:
-        return SafelineConsumer(self)
 
     @property
     def dependencies(self) -> "Iterable[str]":
@@ -66,8 +62,7 @@ class Container(BaseContainer):
         ).call()
 
 
-class SafelineConsumer(IntegrationConsumer):
-    @classmethod
-    def after_apply(cls, manager: "ContainerManager", context: "EventContext", service: str) -> None:
+class Consumer(IntegrationConsumer):
+    def on_applied(self, context: "EventContext", service: str) -> None:
         if service == "safeline-mgt":
-            manager.compose_runner.wait_service_healthy(context, service)
+            self.container.manager.compose_runner.wait_service_healthy(context, service)

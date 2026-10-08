@@ -20,7 +20,8 @@ from ..container import ContainerError
 
 if TYPE_CHECKING:
     import logging
-    from typing import Any
+    from typing import Optional
+    from linktools.types import PathType
     from ..manager import ContainerManager
 
 
@@ -107,7 +108,7 @@ class RepoGit(object):
             return RepoGitResult(success=True, revision=repo.head_sha(),
                                   dirty=repo.is_dirty(), error=None)
 
-    def inspect(self, repo_path: "Any") -> "dict":
+    def inspect(self, repo_path: "Optional[PathType]") -> "dict":
         if not self.available:
             self.warn_unavailable("Reading Git repository metadata")
             return {

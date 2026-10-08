@@ -21,6 +21,7 @@ from ..runtime.structured import redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
 
 if TYPE_CHECKING:
+    from typing import Any
     from ..manager import ContainerManager
 
 PLAN_SCHEMA_VERSION = 1
@@ -59,8 +60,9 @@ class ExecutionPlanner:
         start_selection = manager.compose_operations.start_selection(selection) if action != "down" else selection
 
         candidates = collect_candidates(manager, selection.project_containers)
+        artifact_index = manager.artifact_index.load()
         artifacts = [
-            self._planned_artifact(dest, kind, container_name, content)
+            self._planned_artifact(dest, kind, container_name, content, artifact_index)
             for dest, (kind, container_name, content) in candidates.items()
         ]
         candidate_files = {dest: content for dest, (_, _, content) in candidates.items()}
@@ -80,7 +82,8 @@ class ExecutionPlanner:
         if action == "restart":
             commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
         if action in ("up", "restart"):
-            services_to_start = order_services(start_selection.project_containers, start_selection.services)
+            services_to_start = order_services(
+                start_selection.project_containers, start_selection.services, manager.integration_consumers)
             for service in services_to_start:
                 commands.append(self._planned_command(
                     "up", [*file_args, *manager.compose_runner.apply_service_args(service, remove_orphans=selection.full)]))
@@ -111,7 +114,7 @@ class ExecutionPlanner:
                             "Other running services with pending configuration changes may also be updated; "
                             "unrelated stopped services stay stopped. Runtime inspection and native "
                             "candidate validation determine those additional updates during execution.")
-            sync = manager.compose_operations.sync_selection(start_selection)
+            sync = start_selection.project_containers
             for container in sync:
                 if container.name in manager.generated_configs:
                     warnings.append("{}: generated candidate native validation is pending execution; "
@@ -119,7 +122,7 @@ class ExecutionPlanner:
             for container in sync:
                 consumer = manager.integration_consumers.get(container.name)
                 if consumer is not None:
-                    warnings.extend(consumer.plan_warnings())
+                    warnings.extend(consumer.plan_warnings)
         preflight = "skipped"
         if action in ("up", "restart") and candidate_files:
             preflight = manager.docker_inspector.preflight_candidates(candidate_files)
@@ -142,9 +145,10 @@ class ExecutionPlanner:
             preflight=preflight,
         )
 
-    def _planned_artifact(self, dest: str, kind: str, container: str, content: str) -> "PlannedArtifact":
+    def _planned_artifact(self, dest: str, kind: str, container: str, content: str,
+                          artifact_index: "dict[str, dict[str, Any]]") -> "PlannedArtifact":
         rel_path = os.path.relpath(dest, str(self.manager.data_path))
-        existing = self.manager.artifact_index.load().get(rel_path)
+        existing = artifact_index.get(rel_path)
         old_sha256 = existing.get("sha256") if existing else None
         new_sha256 = sha256_of(content)
         if old_sha256 is None:

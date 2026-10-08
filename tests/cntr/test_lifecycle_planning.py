@@ -8,7 +8,6 @@ from linktools.cntr.lifecycle import HookCycleError, HookPhase, HookRegistry, Ho
 
 
 class _Container:
-    integration_consumer = None
 
     def __init__(self, name, events, dependencies=(), order=500):
         self.name = name

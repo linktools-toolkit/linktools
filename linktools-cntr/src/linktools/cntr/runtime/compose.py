@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from ..artifacts import GeneratedCandidate
     from .structured import CommandResult
     from ..manager import ContainerManager
+    from ..integration import IntegrationConsumer
 
 
 _PROXY_ENV_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
@@ -46,10 +47,11 @@ def service_dependencies(spec: "dict[str, Any]") -> "dict[str, dict[str, Any]]":
     return result
 
 
-def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[str]") -> "tuple[str, ...]":
+def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[str]",
+                   consumers: "Mapping[str, IntegrationConsumer]") -> "tuple[str, ...]":
     priorities = {}
     for container in containers:
-        consumer = container.integration_consumer
+        consumer = consumers.get(container.name)
         priority = consumer.application_order if consumer is not None else 0
         priorities.update((service, priority) for service in container.services)
     return tuple(sorted(services, key=priorities.__getitem__))
@@ -62,9 +64,6 @@ class ComposeOptions:
     pull: bool = False
     remove_orphans: bool = False
     services: "list[str]" = field(default_factory=list)
-    # Compatibility field for callers constructing options; preparation owns
-    # all pull decisions now.
-    emit_default_pull: bool = False
     # CLI `up` and both `exec up`/`exec restart` include proxy --build-args;
     # CLI `restart` deliberately never did.
     include_proxy_build_args: bool = True
@@ -133,8 +132,7 @@ class ComposeRunner:
         ).check_call()
 
     def options_for_build(self, services: "Sequence[str]", pull: bool = False) -> ComposeOptions:
-        return ComposeOptions(pull=pull, services=list(services),
-                              emit_default_pull=False)
+        return ComposeOptions(pull=pull, services=list(services))
 
     def final_model(self, context: "EventContext") -> "dict[str, Any]":
         result = self.manager.structured_runner.execute_json(
@@ -245,7 +243,9 @@ class ComposeRunner:
     def validate_service(self, context: "EventContext", service: str,
                          command: "Sequence[str]", environment: "Mapping[str, object] | None" = None,
                          network: bool = False, check: bool = True) -> "CommandResult":
-        model = self.final_model(context)
+        model = getattr(context, "compose_model", None)
+        if model is None:
+            model = self.final_model(context)
         args = self.isolated_service_args(model, service, command, environment, network)
         result = self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_process(*args, capture_output=True), check=False)
@@ -278,7 +278,7 @@ class ComposeRunner:
         import yaml
         candidates = getattr(context, "generated_candidates", {})
         candidate = next((c for c in candidates.values() if service == c.container.name), None)
-        if candidate is None or not candidate.container.integration_consumer.uses_generation_label:
+        if candidate is None or not self.manager.integration_consumers[candidate.container.name].uses_generation_label:
             return self.manager.runtime.create_docker_compose_process(context.containers, *args).check_call()
         overlay = {"services": {service: {"labels": {
             "io.linktools.cntr.generation": candidate.generation_id}}}}
@@ -299,7 +299,10 @@ class ComposeRunner:
                 item.labels.get("io.linktools.cntr.generation") == candidate.generation_id
                 for item in matches):
             return False
-        spec = self.final_model(context)["services"][service]
+        model = getattr(context, "compose_model", None)
+        if model is None:
+            model = self.final_model(context)
+        spec = model["services"][service]
         target = spec.get("image") or (self.manager.project_name + "-" + service)
         result = self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_process(
@@ -373,7 +376,7 @@ class ComposeRunner:
                 candidate.container.name: {"labels": {
                     "io.linktools.cntr.generation": candidate.generation_id}}
                 for candidate in candidates.values()
-                if candidate.container.name in services and candidate.container.integration_consumer.uses_generation_label
+                if candidate.container.name in services and self.manager.integration_consumers[candidate.container.name].uses_generation_label
             }
             if labels:
                 path = os.path.join(directory, "generation.yml")
