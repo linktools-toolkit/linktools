@@ -4,6 +4,10 @@ services:
     build:
       context: '{{ container.get_docker_context_path() }}'
       dockerfile: '{{ container.get_docker_file_destination() }}'
+#   {% if NGINX_HTTPS_ENABLE %}
+      secrets:
+        - cntr_acme_account
+#   {% endif %}
     volumes:
       - '{{ (APP_PATH/"generated") | mkdir | chown }}:/etc/nginx/generated:ro'
       - '{{ (APP_PATH/"certs") | mkdir | chown }}:/etc/certs'
@@ -37,3 +41,9 @@ services:
 
 networks:
   nginx:
+
+# {% if NGINX_HTTPS_ENABLE %}
+secrets:
+  cntr_acme_account:
+    file: '{{ container.get_app_path("acme-build-account.tar") }}'
+# {% endif %}

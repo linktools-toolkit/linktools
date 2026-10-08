@@ -442,6 +442,39 @@ class Container(BaseContainer):
         (directory / "build-revision").write_text(self.cert_image_revision, encoding="utf-8")
         os.symlink("versions/" + directory.name, str(link))
 
+    def on_prepare(self) -> None:
+        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            return
+        archive = self.get_app_path("acme-build-account.tar", create_parent=True)
+        if not archive.exists():
+            archive.touch(mode=0o600)
+        os.chmod(str(archive), 0o600)
+
+    def on_starting(self, context: "EventContext") -> None:
+        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            return
+        if ("nginx" in context.initial_services and
+                not os.path.lexists(self.get_app_path("generated", "current"))):
+            self._preserve_legacy_files()
+        import tarfile
+        import tempfile
+        account = self.get_app_path("certs", "live", "acme")
+        if not account.is_dir():
+            account = self.get_app_path("acme")
+        archive = self.get_app_path("acme-build-account.tar")
+        with tempfile.NamedTemporaryFile(dir=str(archive.parent), delete=False) as stream:
+            temp = stream.name
+            os.chmod(temp, 0o600)
+            try:
+                if account.is_dir():
+                    with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as output:
+                        for entry in account.iterdir():
+                            output.add(str(entry), arcname=entry.name)
+            except Exception:
+                os.unlink(temp)
+                raise
+        os.replace(temp, str(archive))
+
     def on_prepare_config(self, context: "EventContext") -> None:
         from uuid import uuid4
         import shutil
@@ -451,9 +484,6 @@ class Container(BaseContainer):
         self._certificate_version = None
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
-        if ("nginx" in getattr(context, "initial_services", getattr(context, "initial_running", ())) and
-                not os.path.lexists(self.get_app_path("generated", "current"))):
-            self._preserve_legacy_files()
 
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         self._initialize_certificate_mount(domain)

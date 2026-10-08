@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # {% if NGINX_HTTPS_ENABLE %}
 FROM nginx:{{ NGINX_TAG }} AS acme-build
 
@@ -9,7 +10,11 @@ RUN curl https://get.acme.sh | sh -s -- --home /opt/acme --config-home /root/.ac
 ENV {{ key }}={{ container.acme_dns_environment_value(field) }}
 # {% endfor %}
 
-RUN mkdir -p /etc/certs && \
+RUN --mount=type=secret,id=cntr_acme_account \
+    mkdir -p /root/.acme.sh /etc/certs && \
+    if [ -s /run/secrets/cntr_acme_account ]; then \
+        tar -xf /run/secrets/cntr_acme_account -C /root/.acme.sh; \
+    fi && \
     /opt/acme/acme.sh --home /opt/acme --config-home /root/.acme.sh --server {{ container.shell_quote(ACME_SERVER) }} \
         --issue {{ container.acme_ssl_domains_args }} --dns {{ container.shell_quote(ACME_DNS_API) }}{% if ACME_ACCOUNT_EMAIL %} --accountemail {{ container.shell_quote(ACME_ACCOUNT_EMAIL) }}{% endif %} && \
     /opt/acme/acme.sh --home /opt/acme --config-home /root/.acme.sh --server {{ container.shell_quote(ACME_SERVER) }} \

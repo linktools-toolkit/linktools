@@ -123,6 +123,8 @@ def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_cas
     assert "AS acme-build" in dockerfile and "--issue" in dockerfile
     assert "COPY nginx-certificates nginx-reload" in dockerfile
     assert "COPY --from=acme-build /opt/nginx-initial" in dockerfile
+    assert "--mount=type=secret,id=cntr_acme_account" in dockerfile
+    assert container.docker_compose["services"]["nginx"]["build"]["secrets"] == ["cntr_acme_account"]
     assert dockerfile.rfind("ENV CF_Token") < dockerfile.rfind("FROM nginx:")
     assert "/opt/nginx-initial/certs" in dockerfile
     assert "nginx-certificates renew" in dockerfile
@@ -137,15 +139,16 @@ def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_cas
 
 def _build_run(container, root):
     text = container.docker_file
-    marker = "RUN mkdir -p /etc/certs && \\"
+    marker = "RUN --mount=type=secret,id=cntr_acme_account \\"
     if marker not in text:
         raise AssertionError("ACME issuance must run inside the builder stage")
-    command = "mkdir -p /etc/certs && \\" + text.split(marker, 1)[1].split("FROM nginx:", 1)[0]
+    command = "mkdir -p /root/.acme.sh /etc/certs && \\" + text.split(marker, 1)[1].split("FROM nginx:", 1)[0]
     for source, target in (
         ("/etc/certs", root / "certs"),
         ("/root/.acme.sh", root / "acme"),
         ("/opt/nginx-initial", root / "seed"),
         ("/opt/acme/acme.sh", root.parent / "bin/acme.sh"),
+        ("/run/secrets/cntr_acme_account", root / "build-account.tar"),
     ):
         command = command.replace(source, str(target))
     return command
@@ -188,6 +191,18 @@ else:
     assert (build / "seed/acme/account.key").read_text() == "build-account"
     assert (build / "seed/certs/example.test_fullchain.pem").read_text() == "preissued"
     assert (build / "acme/domains").read_text().startswith("example.test,*.example.test")
+
+
+def test_acme_build_secret_reuses_active_account(certificate_case, monkeypatch):
+    import tarfile
+    container, root, _, _ = certificate_case
+    monkeypatch.setattr(container, "get_app_path", lambda *parts, **kwargs: root.joinpath(*parts))
+    container.on_prepare()
+    container.on_starting(SimpleNamespace(initial_services=()))
+    archive = root / "acme-build-account.tar"
+    assert archive.stat().st_mode & 0o777 == 0o600
+    with tarfile.open(str(archive)) as stream:
+        assert stream.extractfile("account.key").read() == b"existing-account-key"
 
 
 def test_build_issuance_failure_cannot_produce_runtime_seed(certificate_case):
