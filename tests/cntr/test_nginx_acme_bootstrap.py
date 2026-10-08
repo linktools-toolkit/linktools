@@ -164,3 +164,42 @@ def test_http_does_not_resolve_dns_secrets(certificate_case, monkeypatch):
     container.on_prepare_config(SimpleNamespace(initial_services=()))
     container.__dict__.pop("docker_file", None)
     assert "nginx-certificates" not in container.docker_file
+
+
+def test_preparation_reuses_matching_certificate_without_issuance(certificate_case, monkeypatch):
+    container, root, _, _ = certificate_case
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
+    calls = []
+
+    def validate(context, service, command, **kwargs):
+        calls.append((command[1], kwargs))
+        return SimpleNamespace(succeeded=True)
+
+    monkeypatch.setattr(container.manager.compose_runner, "validate_service", validate)
+    container.on_prepare_config(SimpleNamespace(initial_services=()))
+
+    assert container._certificate_version == "legacy"
+    assert [name for name, _ in calls] == ["check", "configure"]
+    assert (root / "certs/live").readlink() == Path("versions/legacy")
+
+
+def test_preparation_stages_added_names_without_publishing(certificate_case, monkeypatch):
+    container, root, _, _ = certificate_case
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
+    container.__dict__["acme_ssl_domains"] = ["example.test", "*.example.test", "*.code.example.test"]
+    calls = []
+
+    def validate(context, service, command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(succeeded=command[1] != "check")
+
+    monkeypatch.setattr(container.manager.compose_runner, "validate_service", validate)
+    container.on_prepare_config(SimpleNamespace(initial_services=("nginx",)))
+
+    assert container._certificate_version != "legacy"
+    assert (root / "certs/live").readlink() == Path("versions/legacy")
+    assert (root / "certs/versions" / container._certificate_version / "domains").read_text().splitlines() == [
+        "example.test", "*.example.test", "*.code.example.test",
+    ]
+    assert [call[0][1] for call in calls] == ["check", "prepare"]
+    assert calls[1][1]["network"] is True
