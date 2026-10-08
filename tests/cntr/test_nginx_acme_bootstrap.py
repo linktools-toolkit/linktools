@@ -58,6 +58,7 @@ def certificate_case(fresh_manager, tmp_path):
         "example.test\n*.example.test\n*.code.example.test\n")
     (tmp_path / "acme/account.key").write_text("existing-account-key")
     (legacy / "acme").mkdir()
+    (legacy / "renewal").mkdir()
     (legacy / "acme/account.key").write_text("existing-account-key")
     seed = tmp_path / "seed"
     (seed / "certs").mkdir(parents=True)
@@ -104,7 +105,7 @@ else:
     path.write_text(script)
     path.chmod(0o755)
     environment = dict(os.environ, MOCK_CERTIFICATES=str(tmp_path),
-                       MOCK_RENEWAL=str(certs / ".renewal"),
+                       MOCK_RENEWAL=str(certs / "live/renewal"),
                        MOCK_STATE=str(tmp_path / "issue.args"),
                        PATH=str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
     return container, tmp_path, path, environment
@@ -231,7 +232,7 @@ def test_renewal_promotes_only_validated_certificate_versions(certificate_case):
     original = (root / "certs/live/example.test_fullchain.pem").read_bytes()
     assert _run(script, env, "prepare", "pending", "example.test").returncode == 0
 
-    stage = root / "certs/.renewal"
+    stage = root / "certs/live/renewal"
     shutil.copyfile(str(root / "old.pem"), str(stage / "example.test_fullchain.pem"))
     shutil.copyfile(str(root / "old.key"), str(stage / "example.test_key.pem"))
     env = dict(env, MOCK_RENEW="1")
