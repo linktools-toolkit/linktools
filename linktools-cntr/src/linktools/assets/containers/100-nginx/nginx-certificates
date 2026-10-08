@@ -7,6 +7,7 @@ versions="$root/versions"
 seed=/opt/nginx-initial
 acme=/opt/acme/acme.sh
 mkdir -p "$versions"
+owner=$(stat -c '%u:%g' "$root")
 exec 9>"$root/.acme.lock"
 flock -x 9
 
@@ -43,6 +44,7 @@ configure() {
         --key-file "$renewal/${main}_key.pem" \
         --fullchain-file "$renewal/${main}_fullchain.pem" \
         --reloadcmd ':' >/dev/null
+    chown -R "$owner" "$account" "$renewal"
 }
 
 load_tls() {
@@ -137,6 +139,7 @@ case "$1" in
         cp -a "$seed/acme/." "$directory/acme/"
         verify "$directory" "$main" "$directory/domains"
         configure "$main" "$directory/acme" "$directory/renewal"
+        chown -R "$owner" "$directory"
         ;;
     configure)
         shift
@@ -160,6 +163,7 @@ case "$1" in
             account="$root/live/acme"
             renewal="$root/live/renewal"
             "$acme" --home /opt/acme --config-home "$account" --cron >/dev/null
+            chown -R "$owner" "$account" "$renewal"
             if test -s "$renewal/${main}_fullchain.pem" &&
                { ! cmp -s "$renewal/${main}_fullchain.pem" "$root/live/${main}_fullchain.pem" ||
                  ! cmp -s "$renewal/${main}_key.pem" "$root/live/${main}_key.pem"; }; then
@@ -178,6 +182,7 @@ case "$1" in
                 done
                 verify "$directory" "$main" "$directory/domains"
                 configure "$main" "$directory/acme" "$directory/renewal"
+                chown -R "$owner" "$directory"
                 activate "$id" "$NGINX_HTTPS_PORT"
             fi
         fi
