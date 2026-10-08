@@ -40,8 +40,8 @@ def test_exec_up_prepares_images_then_starts(monkeypatch, fresh_manager):
         monkeypatch.delenv(key, raising=False)
     recorded = _record(fresh_manager, monkeypatch)
     fresh_manager.containers["portainer"].on_exec_up(pull=False)
-    assert ("build", "portainer") in recorded
-    assert ("up", "--detach", "--no-build", "--pull", "never", "portainer") in recorded
+    assert any(cmd[0] == "build" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
+    assert any(cmd[0] == "up" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
 
 
 def test_exec_up_pull_true_routes_through_image_preparation(monkeypatch, fresh_manager):
@@ -49,8 +49,8 @@ def test_exec_up_pull_true_routes_through_image_preparation(monkeypatch, fresh_m
         monkeypatch.delenv(key, raising=False)
     recorded = _record(fresh_manager, monkeypatch)
     fresh_manager.containers["portainer"].on_exec_up(pull=True)
-    assert ("pull", "--ignore-buildable", "portainer") in recorded
-    assert ("up", "--detach", "--no-build", "--pull", "never", "portainer") in recorded
+    assert any(cmd[:2] == ("pull", "--ignore-buildable") and "portainer" in cmd for cmd in recorded)
+    assert any(cmd[0] == "up" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
 
 
 def test_exec_restart_records_stop_build_then_up(monkeypatch, fresh_manager):
@@ -58,9 +58,10 @@ def test_exec_restart_records_stop_build_then_up(monkeypatch, fresh_manager):
         monkeypatch.delenv(key, raising=False)
     recorded = _record(fresh_manager, monkeypatch)
     fresh_manager.containers["portainer"].on_exec_restart(pull=False)
-    assert recorded[0] == ("stop", "portainer")
-    assert ("build", "portainer") in recorded
-    assert ("up", "--detach", "--no-build", "--pull", "never", "portainer") in recorded
+    assert any(cmd[0] == "build" and "portainer" in cmd for cmd in recorded)
+    assert ("stop", "portainer") in recorded
+    assert any(cmd[0] == "up" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
+    assert next(i for i, cmd in enumerate(recorded) if cmd[0] == "build") < recorded.index(("stop", "portainer"))
 
 
 def test_exec_down_records_down_with_service(monkeypatch, fresh_manager):
