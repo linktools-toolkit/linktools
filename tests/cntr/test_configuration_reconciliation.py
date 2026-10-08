@@ -88,6 +88,32 @@ def test_partial_up_does_not_prepare_unrelated_images(tmp_path, monkeypatch):
     assert planned == ["target"]
 
 
+def test_running_generated_owner_sync_does_not_build_stopped_sibling(tmp_path, monkeypatch):
+    operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
+    owner = manager.containers["other"]
+    manager.generated_configs = {"other": owner}
+    validated = []
+    owner.on_prepare_config = lambda context: validated.append("prepare")
+    owner.validate_config = lambda context, candidate: validated.append("validate")
+    owner.apply_config = lambda context, candidate, services: calls.append(("apply", tuple(services)))
+    monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate",
+                        lambda container, render: SimpleNamespace(
+                            container=container, generation_id="saved", previous_id="saved",
+                            changed=False, publish=lambda: None))
+    planned = []
+
+    def image_plan(model, services, force_pull=False):
+        planned.extend(services)
+        return SimpleNamespace(pull=(), build=())
+
+    manager.image_preparer.plan = image_plan
+    operations.up(["target"])
+    assert planned == ["target", "running"]
+    assert validated == ["prepare", "validate"]
+    assert ("apply", ("running",)) in calls
+    assert not any("stopped" in call[1] for call in calls)
+
+
 def test_partial_up_applies_pending_running_config_without_starting_stopped_sibling(tmp_path, monkeypatch, changed):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed)
     operations.up(["target"])
