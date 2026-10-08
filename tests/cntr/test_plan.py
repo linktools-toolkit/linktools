@@ -371,6 +371,29 @@ def test_plan_up_command_matches_runtime_builder_exactly(fresh_manager):
         assert command.args[-len(expected_tail):] == expected_tail
 
 
+def test_restart_plan_with_named_config_only_target_has_no_stop(monkeypatch, fresh_manager):
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
+
+    plan = fresh_manager.planner.plan("restart", names=["portainer"])
+
+    assert plan.targets == ("portainer",)
+    assert plan.services == ()
+    assert all(command.phase != "stop" for command in plan.commands)
+    assert all(hook.phase not in ("before-stop", "after-stop") for hook in plan.hooks)
+
+
+def test_restart_plan_mixed_targets_only_stops_explicit_services(monkeypatch, fresh_manager):
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
+
+    plan = fresh_manager.planner.plan("restart", names=["portainer", "nginx"])
+
+    stops = [command for command in plan.commands if command.phase == "stop"]
+    assert len(stops) == 1
+    assert stops[0].args[-2:] == ("stop", "nginx")
+
+
 def test_plan_restart_up_command_matches_runtime_builder_exactly(fresh_manager):
     plan = fresh_manager.planner.plan("restart", names=["portainer"])
     assert plan.commands[0].phase == "stop"
