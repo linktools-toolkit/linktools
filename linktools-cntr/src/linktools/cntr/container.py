@@ -10,11 +10,11 @@ from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import BooleanOptionalAction
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
-from linktools.errors import Error
 from linktools.rich import choose
 from linktools.runtime import lazy_load
 from linktools.types import MISSING
 from linktools.utils import get_md5
+from .errors import ContainerError, ContainerTemplateError, NoContainerInstalledError
 from ._container import actions as _actions
 from ._container import compose as _compose
 from ._container import template as _template
@@ -35,23 +35,6 @@ if TYPE_CHECKING:
     from .runtime.process import RuntimeProcessFactory
     from .lifecycle.dispatcher import LifecycleDispatcher
     from .state.running import RunningStateStore
-
-
-class ContainerError(Error):
-    pass
-
-
-class ContainerTemplateError(ContainerError):
-    pass
-
-
-class NoContainerInstalledError(ContainerError):
-    """No container is installed -- raised only by the full-prepare path
-    (``prepare_installed_containers``), never by the metadata-only path
-    (``load_installed_config_metadata``), so a metadata-only caller (config
-    commands, Root ``list``, Plan, Doctor) can still run against a fresh,
-    nothing-installed project instead of hard-failing."""
-    pass
 
 
 class AbstractMetaClass(type):

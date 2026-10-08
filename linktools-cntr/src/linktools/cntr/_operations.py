@@ -262,9 +262,10 @@ class ComposeOperations:
 
             bootstrap_candidates = {}
             available_after_stop = set(running_services)
-            if restart:
-                available_after_stop.difference_update(
-                    service for container in explicit.target_containers for service in container.services)
+            stopped_services = ({service for container in explicit.target_containers
+                                 for service in container.services} if explicit.full
+                                else set(explicit.services)) if restart else set()
+            available_after_stop.difference_update(stopped_services)
             for container in sync:
                 services = set(container.bootstrap_services) & required_services
                 if services and not services.issubset(available_after_stop):
@@ -279,7 +280,7 @@ class ComposeOperations:
                     with record_phase(context, "stop", command=("stop", *explicit.services), logger=manager.logger):
                         runner.stop(stop_context, explicit.services)
                         manager.running_state.mark_stopped(stop_context)
-                running_services.difference_update(explicit.services)
+                running_services.difference_update(stopped_services)
 
             bootstrap_available = set()
             for container in sync:

@@ -30,7 +30,7 @@ class ResolvedSite:
         self._declaration = declaration
 
     def _error(self, message: str) -> None:
-        from ..container import ContainerError
+        from ..errors import ContainerError
         raise ContainerError("Nginx site %s/%s: %s" % (self.producer.name, self.local_id, message))
 
     def _text(self, value: "Any", field: str, optional: bool = False) -> "Optional[str]":

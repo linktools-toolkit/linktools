@@ -3,7 +3,7 @@
 """Nginx declarations, lazy domain configuration, and site resolution."""
 from typing import TYPE_CHECKING
 
-from ..container import ContainerError
+from ..errors import ContainerError
 from ._base import Integration
 from ._nginx_site import ResolvedSite
 

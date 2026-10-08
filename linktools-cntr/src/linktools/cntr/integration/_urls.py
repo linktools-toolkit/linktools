@@ -42,7 +42,7 @@ def load_port_url(container: "BaseContainer", key: "ConfigKeyType",
 
 def load_nginx_url(container: "BaseContainer", local_id: str, *path: str,
                    queries: "QueryType | None" = None) -> "Proxy":
-    from ..container import ContainerError
+    from ..errors import ContainerError
     if not isinstance(local_id, str) or not local_id:
         raise ContainerError("Nginx site ID must be a nonempty string")
 
