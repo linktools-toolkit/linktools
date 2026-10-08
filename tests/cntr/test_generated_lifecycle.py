@@ -20,7 +20,8 @@ class _Generated:
     def __init__(self, path):
         self.path = path
         self.manager = SimpleNamespace(data_path=path.parent,
-                                       artifact_index=SimpleNamespace(record=lambda entries: None))
+                                       artifact_index=SimpleNamespace(record=lambda entries: None),
+                                       running_state=SimpleNamespace(mark_started=lambda context: None))
         self.content = "first"
 
     def get_app_path(self, *parts):

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from .container import ContainerError
 from .context import EventContext
 from .execution.model import get_records, record_phase, render_report
+from .runtime.compose import service_dependencies
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -98,10 +99,13 @@ class ComposeOperations:
             full=False,
         )
 
-    def start_selection(self, selection: ComposeSelection) -> ComposeSelection:
+    def start_selection(self, selection: ComposeSelection,
+                        model: "dict | None" = None) -> ComposeSelection:
         """Resolve runtime providers without starting unrelated sibling services."""
         installed = {container.name: container for container in selection.project_containers}
         owners = {service: container for container in selection.project_containers for service in container.services}
+        definitions = model["services"] if model is not None else {
+            name: container.services[name] for name, container in owners.items()}
         required = set(selection.target_containers)
         services = set(selection.services) if selection.services else {
             service for container in required for service in container.services}
@@ -123,14 +127,14 @@ class ComposeOperations:
                     services.update(nginx.services)
             for name in tuple(services):
                 owner = owners[name]
-                for dependency in owner.services[name].get("depends_on") or ():
+                for dependency in service_dependencies(definitions[name]):
                     provider = owners.get(dependency)
                     if provider is None:
                         raise ContainerError(f"Compose dependency {dependency!r} for {owner.name} is not installed")
                     required.add(provider)
                     services.add(dependency)
             if installed.get("nginx") in required:
-                from ._nginx import NginxSite
+                from .integration import NginxSite
                 for producer, local_id, site in self.manager.iter_integrations("nginx"):
                     if not isinstance(site, NginxSite):
                         raise ContainerError(f"Invalid nginx integration {producer.name}/{local_id}")
@@ -160,7 +164,7 @@ class ComposeOperations:
             for dependency in owners[name].dependencies:
                 for service in installed[dependency].services:
                     visit(service)
-            for dependency in owners[name].services[name].get("depends_on") or ():
+            for dependency in service_dependencies(definitions[name]):
                 visit(dependency)
             visiting.remove(name)
             ordered_services.append(name)
@@ -186,7 +190,8 @@ class ComposeOperations:
                 services.update(pending)
                 targets.add(container)
         return self.start_selection(ComposeSelection(explicit.project_containers, tuple(targets),
-                                                     tuple(services), explicit.full))
+                                                     tuple(services), explicit.full),
+                                    getattr(context, "compose_model", None))
 
     def _make_context(self, commands, selection: ComposeSelection) -> "EventContext":
         context = EventContext()
@@ -256,6 +261,7 @@ class ComposeOperations:
         # candidate only after startup preparation, and before any target stops.
         with manager.lifecycle.notify_start(context):
             model = runner.final_model(context)
+            context.compose_model = model
             context.service_models = AppliedServiceModels(manager, model)
             context.changed_compose_services = set(context.service_models.changed_services)
             selection = self._reconcile_selection(explicit, context, generations)
@@ -288,7 +294,8 @@ class ComposeOperations:
                         generations[container.name].validate(candidate, context)
 
             selection = self._reconcile_selection(explicit, context,
-                {name for name, candidate in candidates.items() if candidate.changed})
+                {name for name, candidate in candidates.items() if candidate.changed or
+                 (name == "nginx" and getattr(context, "nginx_certificate_replaced", False))})
             required_services = set(selection.services)
 
             if restart:
@@ -302,7 +309,11 @@ class ComposeOperations:
             nginx = next((c for c in sync if c.name == "nginx"), None)
             if nginx is not None and "nginx" in required_services and nginx.name not in running:
                 with record_phase(context, "bootstrap", container="nginx", logger=manager.logger):
-                    generations["nginx"].bootstrap(context)
+                    try:
+                        generations["nginx"].bootstrap(context)
+                    except Exception as error:
+                        self._rollback_candidate(nginx, candidates["nginx"], context, ("nginx",), error)
+                        raise
                     running.add("nginx")
                     if candidates.get("nginx") and not candidates["nginx"].previous_id:
                         candidates["nginx"].previous_id = context.nginx_bootstrap_id
@@ -405,7 +416,6 @@ class ComposeOperations:
             raise
 
     def _publish_candidate(self, container, candidate, context, services) -> None:
-        from copy import copy
         context.generated_candidates[container.name] = candidate
         candidate.publish()
         if not services:
@@ -416,45 +426,53 @@ class ComposeOperations:
             applied = getattr(context, "applied_generation_services", {})
             applied.setdefault(container.name, []).extend(services)
         except Exception as error:
-            try:
-                candidate.restore()
-            except Exception as rollback_error:
-                raise ContainerError("{} apply failed: {}; rollback publication failed: {}".format(
-                    container.name, error, rollback_error)) from error
-            if candidate.previous_id:
-                previous = copy(candidate)
-                previous.generation_id = candidate.previous_id
-                previous.path = __import__("os").path.join(candidate.root, candidate.previous_id)
-                previous.changed = True
-                old_compose = {path: content for path, content in getattr(context, "saved_compose", {}).items()
-                               if context.compose_owners[path] == container.name}
-                try:
-                    context.generated_candidates[container.name] = previous
-                    if hasattr(context, "service_models"):
-                        context.rollback_service_models = context.service_models.previous
-                    if old_compose:
-                        context.rollback_compose_files = dict(context.compose_files)
-                        context.rollback_compose_files.update(old_compose)
-                    affected = tuple(getattr(context, "applied_generation_services", {}).get(container.name, ())) + tuple(services)
-                    restore_services = tuple(dict.fromkeys(service for service in affected
-                                                          if service in context.initial_running_services))
-                    if restore_services:
-                        self.manager.generated_configs[container.name].apply(previous, context, restore_services)
-                        if hasattr(context, "service_models"):
-                            context.service_models.restore(restore_services)
-                        self._restore_applied_compose(container, context, old_compose)
-                except Exception as rollback_error:
-                    raise ContainerError("{} apply failed: {}; rollback failed: {}".format(
-                        container.name, error, rollback_error)) from error
-                finally:
-                    if hasattr(context, "rollback_compose_files"):
-                        del context.rollback_compose_files
-                    if hasattr(context, "rollback_service_models"):
-                        del context.rollback_service_models
-                    from .artifacts import atomic_write_text_if_changed
-                    for path, content in old_compose.items():
-                        atomic_write_text_if_changed(path, content)
+            self._rollback_candidate(container, candidate, context, services, error)
             raise
+
+    def _rollback_candidate(self, container, candidate, context, services, error) -> None:
+        from copy import copy
+        try:
+            candidate.restore()
+        except Exception as rollback_error:
+            raise ContainerError("{} apply failed: {}; rollback publication failed: {}".format(
+                container.name, error, rollback_error)) from error
+        if candidate.previous_id:
+            previous = copy(candidate)
+            previous.generation_id = candidate.previous_id
+            previous.path = __import__("os").path.join(candidate.root, candidate.previous_id)
+            previous.changed = True
+            old_compose = {path: content for path, content in getattr(context, "saved_compose", {}).items()
+                           if context.compose_owners[path] == container.name}
+            try:
+                context.generated_candidates[container.name] = previous
+                if hasattr(context, "service_models"):
+                    context.rollback_service_models = context.service_models.previous
+                if old_compose:
+                    context.rollback_compose_files = dict(context.compose_files)
+                    context.rollback_compose_files.update(old_compose)
+                affected = tuple(getattr(context, "applied_generation_services", {}).get(container.name, ())) + tuple(services)
+                restore_services = tuple(dict.fromkeys(service for service in affected
+                                                      if service in context.initial_running_services))
+                if restore_services:
+                    self.manager.generated_configs[container.name].apply(previous, context, restore_services)
+                    if hasattr(context, "service_models"):
+                        context.service_models.restore(restore_services)
+                    self._restore_applied_compose(container, context, old_compose)
+                    restored_context = copy(context)
+                    restored_context.target_containers = [container]
+                    restored_context.is_full_containers = False
+                    self.manager.running_state.mark_started(restored_context)
+            except Exception as rollback_error:
+                raise ContainerError("{} apply failed: {}; rollback failed: {}".format(
+                    container.name, error, rollback_error)) from error
+            finally:
+                if hasattr(context, "rollback_compose_files"):
+                    del context.rollback_compose_files
+                if hasattr(context, "rollback_service_models"):
+                    del context.rollback_service_models
+                from .artifacts import atomic_write_text_if_changed
+                for path, content in old_compose.items():
+                    atomic_write_text_if_changed(path, content)
 
     def down(self, names: "Sequence[str] | None" = None, report: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):

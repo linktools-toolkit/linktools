@@ -1,130 +1,93 @@
-# Refactor validation and deployment gates
+# Integration validation and deployment gates
 
 Date: 2026-10-08.
 
-## Code baselines and scope
+## Scope and compatibility
 
-- Implementation base: `linktools-toolkit/linktools`,
-  `refactor/cntr-integrations@023eb9cc3b367049e0bc896c1001b83a99040c4d`
-- Read-only compatibility reference: `linktools-toolkit/linktools-homelab`,
-  `refactor/cntr-integrations@15e3dfe070c3a26cfd6a75b615cda946c984dd0c`
-- This change implements the cntr side and the minimal core read-only resolution
-  API required by dry-run. It does not migrate or publish the homelab repository
-- No version bump, remote push, live service deployment, or real credential
-  rotation was performed
+The paired cntr and homelab changes use one public declaration contract:
+`Integration`, `Integrations`, `NginxSite`, `ExposeCategory`, and `ExposeLink` in
+`linktools.cntr.integration`. Named mappings retain stable local IDs; finite
+iterables are available to consumers that do not require names. Nginx requires
+named sites. Flare accepts ordered unnamed links and site-attached navigation.
+See [integrations.md](integrations.md) for the authoring API and lazy URL helpers.
 
-## Navigation protocol addendum
+The authoring surface remains `configs`, `dependencies`, and `integrations`.
+The removed BaseContainer generation hooks, `config_sources`, exposure helpers,
+and URL mixins are not compatibility APIs. Four internal builtin owners handle
+configuration generation. Complete candidate comparison deliberately allows a
+partial `up` or `restart` to apply pending changes to other running services;
+unrelated stopped services stay stopped unless required by runtime dependencies.
 
-The navigation follow-on moves the five builtin `exposes` getters into Flare
-integrations, removes eager navigation loading, and pairs with a local homelab
-migration of 25 getters and 65 links. It does not publish or deploy either
-repository. The Site baseline and its deployment limitations below remain
-applicable; the original specification retained `exposes`.
+This pass starts from the paired published trees at main `f1fdab242fbd1ab89e8693173fb68f949fa7790b`
+and homelab `d126d9bf6ea5ce6e374336588653619e10c71636`. Source-level compatibility
+comparisons use main `4609177edc035a23c676b2bdf893e2930a110ae4` and homelab
+`c918917e7a346ea223bb007659dec761705cf4a0`. No package version bump is included.
+Both repositories must be updated together; their existing version constraints
+do not distinguish this unversioned protocol change.
 
-The authoring surface is reduced to `integrations`: `config_sources`, the
-integration-start policy, generation paths and lifecycle methods, and the
-nginx template wrapper are removed from `BaseContainer`. Four internal builtin
-owners implement generation. Complete candidate comparison replaces authored
-configuration-source edges, including GitLab/LiteLLM OIDC reads. This deliberately
-allows a partial command to apply pending changes to other running services;
-stopped services remain stopped unless explicitly selected or required at runtime.
+## Local check procedure
 
-Navigation regressions cover lazy values, absent Flare, explicit versus implicit
-starts, running versus stopped Flare, full installed snapshots during partial
-updates, deleted final declarations, producer/link order, category conflicts,
-empty URLs and direct/external/non-HTTP links. The optional native nginx suite
-is not required for this declaration-only change and was not rerun. Real Docker,
-SafeLine, Authelia/OIDC, ACME and Unix-socket acceptance remain unverified here.
-
-## Reproducible local checks
-
-Run the normal gate with the repository's installed dependencies:
+Use current source paths explicitly when the environment contains another
+editable checkout. Run repository checks through `manage.py`:
 
 ```sh
+PYTHONPATH="$PWD/linktools/src:$PWD/linktools-cntr/src" \
+PYTEST_ADDOPTS='--ignore=tests/cntr/test_nginx_native_request_contract.py' \
 python manage.py check linktools linktools-cntr
-python manage.py build linktools linktools-cntr
-python manage.py verify linktools linktools-cntr
 ```
 
-The optional real-nginx request test uses an explicitly provided nginx binary:
+The excluded native request module requires separate target-environment
+validation. Source checks, mock process tests, and deterministic template renders
+do not launch Docker, issue certificates, or establish deployment acceptance.
+Package build and artifact verification have not been performed for this pass.
 
-```sh
-CNTR_TEST_NGINX=/path/to/nginx python manage.py check linktools-cntr
-```
+## Regression coverage
 
-This environment compiled official nginx **1.28.0**, with HTTP SSL, HTTP/2,
-real-IP and auth-request modules. It disallows Unix-domain listeners. Local
-request tests therefore set `CNTR_NGINX_TEST_TCP_HEALTH=1`, an explicit test-only
-transformation from the production Unix health listener to loopback TCP.
-Production generated configuration continues to use the Unix socket.
+- Declaration snapshots: pure types, named and unnamed collections, one-time
+  finite-iterator consumption, immutable structure, insertion order, disabled
+  consumers, and lazy values that are not read while declarations are collected
+- URL factories: delayed configuration/host/site reads, immediate local-ID
+  validation, missing and disabled values, per-producer site identities, and
+  unchanged path/query composition
+- Navigation: original 65 homelab and seven builtin links, site-attached before
+  standalone links, standard category order, and the Authelia `/auth-admin` link
+- Native templates: explicit namespaces, no removed snippet references, runtime
+  Docker DNS, preserved prefix/capture/query routing, and complete header macros
+- Lifecycle: restoration after failed nginx bootstrap, matching applied Compose
+  snapshots, certificate replacement despite unchanged config IDs, aligned ACME
+  cron configuration, and explicit/implicit Compose dependency ordering
+- Runtime arguments: literal-dollar decoding only at the raw Docker boundary,
+  retaining correctly escaped persisted Compose files for later rollback
+- Paired commands: MCP Playwright and MCP Push `show` handlers, including Push's
+  optional channel argument
 
-The normal native request regression covers HTTP/TLS, the four auth/WAF bypass
-combinations with counted mock providers, binary POST and encoded URI/query,
-request metadata, conventional client/service credentials, numeric captures,
-401/403/provider errors, public fallback, rejected origin sources/metadata,
-SSE delivery, and a real WebSocket handshake plus binary-frame echo. It does
-not certify real SafeLine behavior. An additional alternate-authentication
-provenance follow-up test was not completed; its code change remains a
-specifically unverified boundary.
+## Remaining acceptance gates
 
-Focused regressions cover lazy declarations and disabled sites; strict URL and
-OIDC rules; literal data and Jinja namespaces; custom Flare categories; immutable
-candidate reuse; publish/apply/rollback failure; partial target/provider/config
-source ordering; per-service Compose drift; read-only planning and missing
-secret handling; persistent data preservation; Flare migration rollback and
-service-group permissions; and stopped legacy nginx certificate preservation.
+| Area | Remaining target-environment validation |
+| --- | --- |
+| Native nginx | Full migrated homelab route set, HTTP/2 gRPC, SSE/WebSocket, and unusual custom headers |
+| Authentication | Real Authelia sessions, OIDC flows, and alternate-authentication provenance assurance |
+| SafeLine | Actual target images, Docker networks, request metadata, and forwarding behavior |
+| Certificates | Real ACME issuance, renewal/cron reload, provider credentials, and persisted account reuse |
+| Lifecycle | HTTP/WAF and HTTPS/auth cold starts, bind mounts, Unix health socket permissions, reload/rollback acknowledgements, and concurrent Docker operations |
+| Persistent state | Legacy migration copy/mount behavior and real LDAP/password interoperability |
+| Packaging | Built artifacts and artifact verification |
 
-## Spec disposition
+Earlier native nginx request results do not verify the changed paired templates.
+The production health endpoint continues to use a Unix socket. No native
+request, authentication-provenance, live Docker, or deployment check was rerun
+for this pass.
 
-| Acceptance area | Local evidence | Remaining gate |
-| --- | --- | --- |
-| Declarations and ownership | Shared lazy snapshot, pure URL lookup, removed old Python registration APIs, focused tests | Complete homelab migration |
-| Switches, URL and OIDC | Resolution/provider/HTTPS tests, immutable rebuilt callbacks | Real browser session and OIDC flows |
-| Jinja and headers | Strict namespaces, literal-dollar data, same-level macros, single business render | Unusual custom native header configurations |
-| Request paths | Real nginx normal request matrix, SSE and WebSocket | HTTP/2 gRPC and full homelab route set |
-| Authorization boundaries | Normal denial/bypass/fallback tests | Additional alternate-authentication provenance follow-up |
-| SafeLine | Generated addresses and metadata contract, mock routing | Target image IDs, actual Docker network and SafeLine forwarding |
-| Derived data | ACL/OIDC reconstruction and candidate/password/database preservation tests | Real LDAP/password interoperability; changing a config value does not reset an existing LDAP administrator password |
-| Lifecycle | Selection, ordering, isolated command model, cold bootstrap and readiness mocks | Actual HTTP/WAF and HTTPS/auth cold starts, DNS/IP changes |
-| Failure and rollback | Immutable trees, atomic symlink, saved applied Compose, failure injection | Real bind mounts, Unix socket permissions, reload/rollback acknowledgements and concurrent Docker operations |
-| Delivery | Repository tests/static checks and local packaging checks | All target-environment gates before deployment acceptance |
-
-LLDAP has no standalone configuration-validation subcommand in its upstream
-CLI. Its fixed builtin TOML and derived password are staged without touching
-`/data`, then service health is required after application. Native nginx and
-Authelia candidate validators use isolated target-image containers in the
-implementation; those Docker invocations were not run in this environment.
-
+LLDAP has no standalone upstream configuration-validation command. Its fixed
+builtin TOML and derived password are staged without touching `/data`, then
+service health is required after application. Changing a configured LDAP
+administrator password does not reset an existing LDAP database password.
 Legacy nginx migration preserves certificate/ACME/config backups without
-replacing an earlier backup, including existing stopped containers. Real Docker
-copy/mount behavior and ACME issuance/renewal still require deployment testing.
+replacing earlier backups, including existing stopped containers.
 
-## Known homelab migration blockers
+Compose `service_completed_successfully` handling remains a separate known
+coverage gap; no current paired-repository caller uses it. It is not established
+by the dependency-ordering regressions above.
 
-At the reference commit, enabled custom sites in these files still include
-removed `/etc/nginx/conf.d/snippets/*` native files:
-
-- `2xx-homelab/221-fnos/nginx.conf`
-- `3xx-proxy/380-sublink/nginx.conf`
-- `5xx-ai/500-vscode/proxy.conf` (wildcard proxy site)
-- `5xx-ai/501-aionui/nginx.conf`
-- `5xx-ai/510-hermes-agent/nginx.conf`
-- `5xx-ai/520-multica-server/nginx.conf`
-- `5xx-ai/550-mcp-playwright/nginx.conf`
-- `5xx-ai/551-mcp-push/nginx.conf`
-
-The MCP Playwright and MCP Push show commands also still call removed
-`load_exist_nginx_url`. Nextcloud, qBittorrent and pypiserver retain static Docker
-upstreams; those templates and Xray need the new metadata/header macros.
-Xray's configured service/path normalization is not yet shared between routes
-and bypass declarations. GitLab and LiteLLM already use `oidc_client`, but lack
-`config_sources=("authelia",)` for partial configuration propagation.
-
-Because candidates include all installed enabled sites, an incompatible site
-also blocks a partial nginx update. Pair the repository migration explicitly;
-`>=0.10.0` does not distinguish these unversioned protocol changes. Existing
-homelab documentation still describes removed behavior and needs updating.
-
-**Local tests are not deployment acceptance.** Do not publish these configurations
-to an existing homelab until its callers are migrated and the real Docker,
-SafeLine, Authelia/OIDC, certificate and Unix health gates above are verified.
+**Local tests are not deployment acceptance.** Complete the remaining gates in
+an authorized target environment before deploying the paired changes.

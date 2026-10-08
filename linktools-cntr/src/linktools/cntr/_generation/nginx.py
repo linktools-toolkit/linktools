@@ -156,11 +156,15 @@ class NginxGeneration:
         # Existing certificate/account volumes are reused; issuance is never a
         # build step and credentials are never baked into an image layer.
         domains = " ".join("--domain " + shlex.quote(item) for item in self._acme_ssl_domains)
-        command = "acme.sh --config-home /root/.acme.sh --issue {} --dns {} && acme.sh --config-home /root/.acme.sh --install-cert {} {}".format(
+        reload_command = ("if [ -s /var/run/nginx.pid ]; then "
+                          "nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t && "
+                          "nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; fi")
+        command = "acme.sh --config-home /root/.acme.sh --issue {} --dns {} && acme.sh --config-home /root/.acme.sh --install-cert {} {} --reloadcmd {}".format(
             domains, shlex.quote(self.container.get_config("ACME_DNS_API")), domains,
-            self.acme_ssl_certificate_args)
+            self.acme_ssl_certificate_args, shlex.quote(reload_command))
         self.container.manager.compose_runner.validate_service(
             context, "nginx", ("sh", "-c", command), network=True)
+        context.nginx_certificate_replaced = True
 
     def _preserve_legacy_files(self) -> None:
         import shutil
@@ -240,8 +244,10 @@ class NginxGeneration:
         result = runner.exec_service(context, "nginx", (
             "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
             "/run/nginx-cntr-health.sock", "http://localhost/__cntr/health"), check=False)
-        if result.succeeded and result.stdout.strip() == candidate.generation_id:
+        if (not getattr(context, "nginx_certificate_replaced", False) and
+                result.succeeded and result.stdout.strip() == candidate.generation_id):
             return
         runner.exec_service(context, "nginx", (
             "nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/current/nginx.conf", "-s", "reload"))
         self.confirm(context, candidate.generation_id)
+        context.nginx_certificate_replaced = False

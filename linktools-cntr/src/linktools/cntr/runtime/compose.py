@@ -25,6 +25,26 @@ if TYPE_CHECKING:
 _PROXY_ENV_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
 
 
+def service_dependencies(spec: "dict[str, Any]") -> "dict[str, dict[str, Any]]":
+    """Normalize Compose's explicit and implicit service dependency edges."""
+    declared = spec.get("depends_on") or {}
+    if isinstance(declared, dict):
+        result = {name: dict(options) if isinstance(options, dict) else {}
+                  for name, options in declared.items()}
+    else:
+        result = {name: {} for name in declared}
+    implicit = [value.split(":", 1)[0] for value in spec.get("links") or ()]
+    implicit.extend(value.split(":", 1)[0] for value in spec.get("volumes_from") or ()
+                    if not value.startswith("container:"))
+    for key in ("network_mode", "ipc", "pid"):
+        value = spec.get(key) or ""
+        if value.startswith("service:"):
+            implicit.append(value[len("service:"):])
+    for name in implicit:
+        result.setdefault(name, {})
+    return result
+
+
 @dataclass
 class ComposeOptions:
     """Resolved options for a single compose build/up invocation."""
@@ -170,7 +190,13 @@ class ComposeRunner:
                               network: bool = False) -> "list[str]":
         """Target image/env/mounts, deliberately excluding ports, IPs and dependencies."""
         spec = model["services"][service]
-        image = spec.get("image") or (self.manager.project_name + "-" + service)
+
+        def raw(value: "Any") -> "Any":
+            # `compose config` serializes dollars for another Compose load.
+            # Raw Docker arguments have no interpolation pass of their own.
+            return value.replace("$$", "$") if isinstance(value, str) else value
+
+        image = raw(spec.get("image")) or (self.manager.project_name + "-" + service)
         args = ["run", "--rm", "--network", "bridge" if network else "none"]
         for mount in spec.get("volumes", ()):
             if not isinstance(mount, dict) or mount.get("type") not in ("bind", "volume"):
@@ -178,7 +204,7 @@ class ComposeRunner:
             source = mount.get("source")
             if mount["type"] == "volume":
                 source = model.get("volumes", {}).get(source, {}).get("name", source)
-            value = "type={},source={},target={}".format(mount["type"], source, mount["target"])
+            value = "type={},source={},target={}".format(mount["type"], raw(source), raw(mount["target"]))
             if mount.get("read_only"):
                 value += ",readonly"
             args.extend(["--mount", value])
@@ -193,16 +219,16 @@ class ComposeRunner:
                 target = (item.get("target") if isinstance(item, dict) else None) or name
                 if not target.startswith("/"):
                     target = ("/run/secrets/" if category == "secrets" else "/") + target
-                args.extend(["--mount", "type=bind,source={},target={},readonly".format(source, target)])
-        values = dict(spec.get("environment") or {})
+                args.extend(["--mount", "type=bind,source={},target={},readonly".format(raw(source), raw(target))])
+        values = {key: raw(value) for key, value in (spec.get("environment") or {}).items()}
         values.update(environment or {})
         for key, value in values.items():
             if value is not None:
                 args.extend(["--env", "{}={}".format(key, value)])
         if spec.get("user"):
-            args.extend(["--user", str(spec["user"])])
+            args.extend(["--user", str(raw(spec["user"]))])
         if spec.get("working_dir"):
-            args.extend(["--workdir", spec["working_dir"]])
+            args.extend(["--workdir", raw(spec["working_dir"])])
         args.extend(["--entrypoint", command[0], image, *command[1:]])
         return args
 
@@ -319,23 +345,21 @@ class ComposeRunner:
             time.sleep(0.5)
 
     def apply_services(self, context: "EventContext", services: "Sequence[str]") -> None:
-        model = self.final_model(context)["services"]
-        pending, completed = set(services), set()
+        model = getattr(context, "compose_model", None) or self.final_model(context)
+        model = model["services"]
+        pending = set(services)
         while pending:
             ready = [name for name in services if name in pending and not
-                     (set(model[name].get("depends_on") or ()) & pending)]
+                     (set(service_dependencies(model[name])) & pending)]
             if not ready:
                 from ..container import ContainerError
                 raise ContainerError("Compose service dependency cycle")
             for name in ready:
-                dependencies = model[name].get("depends_on") or {}
-                if isinstance(dependencies, dict):
-                    for dependency, options in dependencies.items():
-                        if isinstance(options, dict) and options.get("condition") == "service_healthy":
-                            self.wait_service_healthy(context, dependency)
+                for dependency, options in service_dependencies(model[name]).items():
+                    if options.get("condition") == "service_healthy":
+                        self.wait_service_healthy(context, dependency)
                 self.apply_service(context, name)
                 pending.remove(name)
-                completed.add(name)
 
     def apply_saved_services(self, context: "EventContext", services: "Sequence[str]",
                              files: "dict[str, str]") -> None:
