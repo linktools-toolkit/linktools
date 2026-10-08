@@ -410,9 +410,7 @@ class Container(BaseContainer):
                         "Incompatible nginx routing policies on {}:{} for {}/{} and {}/{}".format(
                             domain, port, leader.producer.name, leader.local_id,
                             site.producer.name, site.local_id))
-            if len(sites) > 1:
-                sites.sort(key=lambda site: not site.default)
-                leader = sites[0]
+            leader = next((site for site in sites if site.default), leader)
             routes = []
             for site in sites:
                 source = site.template or self.get_source_path("templates", "default.conf")
