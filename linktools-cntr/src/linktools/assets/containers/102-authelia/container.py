@@ -10,7 +10,7 @@ import yaml
 
 from linktools import utils
 from linktools.cli import CommandError, subcommand
-from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr import BaseContainer, NginxSite, ContainerError
 from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
@@ -53,19 +53,23 @@ class Container(BaseContainer):
         )
 
     @cached_property
+    def integrations(self) -> "dict[str, dict[str, NginxSite]]":
+        return {
+            "nginx": {
+                "web": NginxSite(
+                    server_name=self.get_config_later("AUTHELIA_DOMAIN"),
+                    template=self.get_source_path("templates", "nginx.conf"),
+                    auth=None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False,
+                    auth_bypass=(r"\.(css|js)$",),
+                    auth_rule={"subject": ["group:lldap_admin"]} if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else None,
+                ),
+            },
+        }
+
+    @cached_property
     def exposes(self) -> "Iterable[ExposeLink]":
         return [
-            self.expose_public("Authelia", "account", "单点登录", self.load_nginx_url(
-                "AUTHELIA_DOMAIN", "auth-admin",
-                proxy_conf=self.get_source_path("templates", "nginx.conf"),
-                auth_enable=self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE"),
-                auth_extra={
-                    "acl_bypass": ["\\.(css|js)$"],
-                    "acl_rule": {
-                        "subject": ["group:lldap_admin"],
-                    }
-                }
-            )),
+            self.expose_public("Authelia", "account", "单点登录", self.load_nginx_url("web")),
         ]
 
     @cached_property
