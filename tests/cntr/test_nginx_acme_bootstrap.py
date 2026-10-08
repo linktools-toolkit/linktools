@@ -192,10 +192,13 @@ def test_build_issuance_failure_cannot_produce_runtime_seed(certificate_case):
         ("/opt/nginx-initial", build / "seed"),
     ):
         command = command.replace(source, str(target))
-    environment = dict(environment, FAIL_BUILD_ISSUE="1")
+    client = root / "bin/acme.sh"
+    client.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$MOCK_STATE"\nexit 7\n')
+    client.chmod(0o755)
     result = subprocess.run(["sh", "-ec", command], env=environment,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert result.returncode != 0
+    assert result.returncode == 7
+    assert "--issue" in (root / "issue.args").read_text()
     assert not (build / "seed").exists()
 
 
