@@ -171,6 +171,21 @@ class Container(BaseContainer):
             "Scopes": " ".join(client["scopes"]),
         }]
 
+    @cached_property
+    def acl_config(self) -> str:
+        policy = "two_factor" if self.get_config("AUTHELIA_MIN_AUTH_LEVEL") > 1 else "one_factor"
+        rules = list(self.acl_rules)
+        root = self.get_config("NGINX_ROOT_DOMAIN")
+        rules.append({
+            "domain": [root, "*." + root],
+            "subject": ["group:admin", "group:admins", "group:super-admin"],
+            "policy": policy,
+        })
+        return yaml.safe_dump(
+            {"access_control": {"default_policy": "deny", "rules": rules}},
+            sort_keys=False, allow_unicode=True,
+        )
+
     def on_init(self) -> None:
         self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
 
@@ -204,19 +219,6 @@ class Container(BaseContainer):
 
         self.runtime.chown(secret_path, "root", recursive=True)
         self.runtime.chown(config_path, "root", recursive=True)
-
-        with self.settings.transaction() as settings:
-            settings.set(f"{self._key_prefix}_acl_rules", self.acl_rules)
-            settings.set(f"{self._key_prefix}_oidc_clients", self._oidc_clients_json_safe(self.oidc_clients))
-
-    def on_stopped(self, context: "EventContext") -> None:
-        if context.is_full_containers:
-            self.on_removed(context)
-
-    def on_removed(self, context: "EventContext") -> None:
-        with self.settings.transaction() as settings:
-            settings.pop(f"{self._key_prefix}_acl_rules", None)
-            settings.pop(f"{self._key_prefix}_oidc_clients", None)
 
     @subcommand("show-notification", help="show notification")
     def on_show_notification(self) -> None:
