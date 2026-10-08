@@ -130,15 +130,14 @@ def test_mark_stopped_full_clears(fresh_manager):
     assert fresh_manager.running_state.get_persisted() == []
 
 
-def test_cli_partial_up_marks_only_target(monkeypatch, fresh_manager):
+def test_cli_partial_up_includes_required_dependencies(monkeypatch, fresh_manager):
     for key in _PROXY_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     _record(fresh_manager, monkeypatch)
     cntr_main.command.on_command_up(names=["portainer"], pull=False)
     running = set(fresh_manager.running_state.get_persisted())
-    assert "portainer" in running
-    assert "nginx" not in running
+    assert {"portainer", "nginx", "lldap", "authelia", "safeline"} <= running
 
 
 def test_cli_partial_down_marks_target_stopped(monkeypatch, fresh_manager):

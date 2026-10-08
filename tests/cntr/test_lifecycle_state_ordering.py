@@ -10,6 +10,7 @@ from linktools.types import MISSING
 
 
 def _neutralize_runtime(manager, monkeypatch):
+    manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
     monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {}})
     monkeypatch.setattr(
         manager.image_preparer,
@@ -86,7 +87,7 @@ def test_down_marks_stopped_before_after_stop_hook_failure(fresh_manager, monkey
     assert "portainer" not in fresh_manager.running_state.get_persisted()
 
 
-def test_restart_stop_success_build_failure_still_marks_stopped(fresh_manager, monkeypatch):
+def test_restart_build_failure_keeps_running_targets(fresh_manager, monkeypatch):
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer"})
     monkeypatch.setattr(
@@ -105,7 +106,7 @@ def test_restart_stop_success_build_failure_still_marks_stopped(fresh_manager, m
     with pytest.raises(RuntimeError, match="build boom"):
         fresh_manager.compose_operations.restart(names=["portainer"])
 
-    assert "portainer" not in fresh_manager.running_state.get_persisted()
+    assert "portainer" in fresh_manager.running_state.get_persisted()
 
 
 def test_restart_stop_success_up_failure_still_marks_stopped(fresh_manager, monkeypatch):
@@ -159,6 +160,7 @@ def test_partial_up_reconciles_a_container_removed_from_installed_set(fresh_mana
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer", "safeline"})
     fresh_manager.installed_state.remove("safeline")
+    fresh_manager.env_config.set("NGINX_WAF_ENABLE", False)
 
     fresh_manager.compose_operations.up(names=["portainer"])
 
@@ -170,6 +172,7 @@ def test_on_removed_hook_fires_exactly_once_per_removed_container(fresh_manager,
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer", "safeline"})
     fresh_manager.installed_state.remove("safeline")
+    fresh_manager.env_config.set("NGINX_WAF_ENABLE", False)
 
     calls = []
     original = LifecycleDispatcher._invoke_callback

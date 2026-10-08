@@ -175,4 +175,5 @@ def test_report_flag_does_not_change_running_state_writes(fresh_manager, monkeyp
     cntr_main.command.on_command_up(names=["portainer"], pull=False, report=False)
     without_report = set(fresh_manager.running_state.get_persisted())
 
-    assert with_report == without_report == {"portainer"}
+    assert with_report == without_report
+    assert {"portainer", "nginx", "lldap", "authelia", "safeline"} <= with_report
