@@ -246,6 +246,10 @@ class BaseContainer(metaclass=AbstractMetaClass):
                      services: "Iterable[str]") -> None:
         raise NotImplementedError
 
+    def rollback_config(self, context: "EventContext") -> None:
+        """Restore native state when no previously generated configuration exists."""
+        pass
+
     def generation_label(self, service: str, generation_id: str) -> "str | None":
         """Return the Compose generation marker for this native service."""
         return generation_id if self.generates_config and service == self.name else None
