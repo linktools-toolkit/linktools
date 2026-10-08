@@ -142,7 +142,7 @@ def _build_run(container, root):
     marker = "RUN --mount=type=secret,id=cntr_acme_account \\"
     if marker not in text:
         raise AssertionError("ACME issuance must run inside the builder stage")
-    command = "mkdir -p /root/.acme.sh /etc/certs && \\" + text.split(marker, 1)[1].split("FROM nginx:", 1)[0]
+    command = text.split(marker, 1)[1].split("FROM nginx:", 1)[0].strip()
     for source, target in (
         ("/etc/certs", root / "certs"),
         ("/root/.acme.sh", root / "acme"),
