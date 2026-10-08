@@ -120,8 +120,10 @@ def _run(path, environ, *args):
 def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_case):
     container, _, _, _ = certificate_case
     dockerfile = container.docker_file
-    assert "RUN acme.sh" in dockerfile and "--issue" in dockerfile
+    assert "AS acme-build" in dockerfile and "--issue" in dockerfile
     assert "COPY nginx-certificates nginx-reload" in dockerfile
+    assert "COPY --from=acme-build /opt/nginx-initial" in dockerfile
+    assert dockerfile.rfind("ENV CF_Token") < dockerfile.rfind("FROM nginx:")
     assert "/opt/nginx-initial/certs" in dockerfile
     assert "nginx-certificates renew" in dockerfile
     assert container.docker_compose["services"]["nginx"]["environment"]["CF_Token"] == "fake-token"
@@ -133,20 +135,29 @@ def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_cas
     assert container.docker_compose["services"]["nginx"]["image"] != old_image
 
 
+def _build_run(container, root):
+    text = container.docker_file
+    marker = "RUN mkdir -p /etc/certs && \\"
+    if marker not in text:
+        raise AssertionError("ACME issuance must run inside the builder stage")
+    command = "mkdir -p /etc/certs && \\" + text.split(marker, 1)[1].split("FROM nginx:", 1)[0]
+    for source, target in (
+        ("/etc/certs", root / "certs"),
+        ("/root/.acme.sh", root / "acme"),
+        ("/opt/nginx-initial", root / "seed"),
+        ("/opt/acme/acme.sh", root.parent / "bin/acme.sh"),
+    ):
+        command = command.replace(source, str(target))
+    return command
+
+
 def test_dockerfile_issues_certificate_and_seeds_account_at_build_time(certificate_case):
     container, root, _, environment = certificate_case
     build = root / "build"
     build.mkdir()
     for path in ("certs", "acme"):
         (build / path).mkdir()
-    script = container.docker_file.split("RUN acme.sh", 1)[1]
-    command = "acme.sh" + script.split("# {% endif %}", 1)[0]
-    for source, target in (
-        ("/etc/certs", build / "certs"),
-        ("/root/.acme.sh", build / "acme"),
-        ("/opt/nginx-initial", build / "seed"),
-    ):
-        command = command.replace(source, str(target))
+    command = _build_run(container, build)
     client = root / "bin/acme.sh"
     client.write_text("""#!/usr/bin/env python3
 import os
@@ -185,13 +196,7 @@ def test_build_issuance_failure_cannot_produce_runtime_seed(certificate_case):
     build.mkdir()
     (build / "certs").mkdir()
     (build / "acme").mkdir()
-    command = "acme.sh" + container.docker_file.split("RUN acme.sh", 1)[1].split("# {% endif %}", 1)[0]
-    for source, target in (
-        ("/etc/certs", build / "certs"),
-        ("/root/.acme.sh", build / "acme"),
-        ("/opt/nginx-initial", build / "seed"),
-    ):
-        command = command.replace(source, str(target))
+    command = _build_run(container, build)
     client = root / "bin/acme.sh"
     client.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$MOCK_STATE"\nexit 7\n')
     client.chmod(0o755)
