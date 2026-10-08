@@ -14,7 +14,7 @@ services:
       start_interval: 1s
     networks:
       nginx:
-#     {% if containers["safeline"].enable %}
+#     {% if "safeline" in manager.installed_state.load_names() %}
       safeline-ce:
         ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.253'
         aliases:
@@ -23,6 +23,6 @@ services:
 
 networks:
   nginx:
-# {% if containers["safeline"].enable %}
+# {% if "safeline" in manager.installed_state.load_names() %}
   safeline-ce:
 # {% endif %}
