@@ -1,51 +1,57 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""authelia's oidc_clients RedirectURLs must be persistable.
+"""Authelia client metadata and derived redirects never mutate saved state."""
 
-Regression: oidc_clients built client["RedirectURLs"] as a Python `set`
-(needed so nginx's write_conf, called by every OIDC-integrated homelab
-container, can `.add()` a redirect URI onto it in place) and then persisted
-the raw result via `settings.set(...)`. CacheStore's codec is JSON-only, and
-sets aren't JSON-serializable, so this raised CacheCodecError the moment
-oidc_clients (or _update_files, which re-persists it) ran.
-"""
+import pytest
+
+from linktools.cntr import NginxSite
 
 
-def test_oidc_clients_redirect_urls_is_a_set_in_memory(fresh_manager):
+def test_oidc_client_is_read_only_and_uses_saved_secret(fresh_manager):
     authelia = fresh_manager.containers["authelia"]
-    redirect_urls = authelia.oidc_clients[0]["RedirectURLs"]
-    assert isinstance(redirect_urls, set)
-    redirect_urls.add("https://example.com/callback")  # must not raise (AttributeError on a list)
+    client = authelia.oidc_client
+    assert client["client_id"] == fresh_manager.project_name + "-web-client"
+    assert client["client_secret"] == authelia.get_config("AUTHELIA_OIDC_CLIENT_SECRET")
+    assert client["issuer_url"].startswith("https://")
+    assert isinstance(client["scopes"], tuple)
+    with pytest.raises(TypeError):
+        client["client_id"] = "overwritten"
 
 
-def test_oidc_clients_persists_without_crashing(fresh_manager):
+def test_oidc_redirects_derive_only_from_current_sites(fresh_manager, monkeypatch):
     authelia = fresh_manager.containers["authelia"]
-    authelia.oidc_clients[0]["RedirectURLs"].add("https://example.com/callback")
-
-    with authelia.settings.transaction() as settings:
-        # Must not raise CacheCodecError (RedirectURLs is a set in memory).
-        settings.set(f"{authelia._key_prefix}_oidc_clients",
-                     authelia._oidc_clients_json_safe(authelia.oidc_clients))
-
-    persisted = authelia.settings.get(f"{authelia._key_prefix}_oidc_clients")
-    assert isinstance(persisted[0]["RedirectURLs"], list)
-    assert "https://example.com/callback" in persisted[0]["RedirectURLs"]
-
-
-def test_oidc_clients_reloaded_from_store_is_a_set_again(fresh_manager):
-    authelia = fresh_manager.containers["authelia"]
-    authelia.oidc_clients[0]["RedirectURLs"].add("https://example.com/callback")
-    with authelia.settings.transaction() as settings:
-        settings.set(f"{authelia._key_prefix}_oidc_clients",
-                     authelia._oidc_clients_json_safe(authelia.oidc_clients))
-
-    # A fresh authelia container instance (simulating the next CLI invocation)
-    # must restore RedirectURLs to a set, not leave it as the persisted list.
-    from linktools.cntr.registry.loader import ContainerLoader
-    from linktools.cntr.repo.context import RepositoryConfigContext
-    builtin_context = RepositoryConfigContext(
-        root_path=None, file_config=None, url=None, builtin=True,
+    producer = fresh_manager.containers["portainer"]
+    site = NginxSite(
+        server_name="service.example.com",
+        oidc_redirects=("", "/callback", "https://external.example.com/callback", "/callback"),
     )
-    fresh_containers = list(ContainerLoader(fresh_manager)._load_one(authelia.root_path, builtin_context))
-    reloaded = fresh_containers[0]
-    assert isinstance(reloaded.oidc_clients[0]["RedirectURLs"], set)
-    assert "https://example.com/callback" in reloaded.oidc_clients[0]["RedirectURLs"]
+    monkeypatch.setattr(
+        fresh_manager, "iter_integrations",
+        lambda consumer: iter([(producer, "web", site)]),
+    )
+    url = "https://service.example.com"
+    assert authelia.oidc_redirects == (
+        authelia.oidc_client["issuer_url"],
+        url,
+        url + "/callback",
+        "https://external.example.com/callback",
+    )
+    assert isinstance(authelia.oidc_clients[0]["RedirectURLs"], tuple)
+
+
+def test_acl_supports_native_optional_fields(fresh_manager, monkeypatch):
+    authelia = fresh_manager.containers["authelia"]
+    producer = fresh_manager.containers["portainer"]
+    site = NginxSite(
+        server_name="secure.example.com",
+        auth_rule={"policy": "one_factor", "networks": ["10.0.0.0/8"]},
+    )
+    monkeypatch.setattr(
+        fresh_manager, "iter_integrations",
+        lambda consumer: iter([(producer, "web", site)]),
+    )
+    assert authelia.acl_rules == [
+        {"policy": "one_factor", "networks": ["10.0.0.0/8"],
+         "domain": ["secure.example.com"]}
+    ]
+    assert "secure.example.com" in authelia.acl_config
