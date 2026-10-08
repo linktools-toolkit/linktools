@@ -345,7 +345,10 @@ async def test_pending_host_stdio_cleanup_failure_retains_ownership_and_cause(
     release.set()
     with pytest.raises(asyncio.CancelledError) as cancelled:
         await opening
-    assert cancelled.value.__cause__ is failure
+    cleanup_error: BaseException | None = cancelled.value
+    while isinstance(cleanup_error, asyncio.CancelledError):
+        cleanup_error = cleanup_error.__cause__ or cleanup_error.__context__
+    assert cleanup_error is failure
     assert process.returncode is None
     assert session.managed_process_ids() == frozenset({process.pid})
     with pytest.raises(AIError) as closing:
