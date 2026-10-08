@@ -228,8 +228,10 @@ def test_native_diagnostic_keeps_site_source_but_omits_secret():
     runner = ComposeRunner(manager)
     runner.final_model = lambda context: {}
     runner.isolated_service_args = lambda *args: []
+    manager.compose_runner = runner
+    container.manager = manager
     with pytest.raises(ContainerError) as raised:
-        runner.validate_service(SimpleNamespace(), "nginx", ["nginx", "-t"])
+        manager.integration_consumers["proxy"].validate(SimpleNamespace(generation_id="id"), SimpleNamespace())
     message = str(raised.value)
     assert "'app'/'web'" in message
     assert "/templates/app.j2" in message
@@ -248,7 +250,8 @@ def test_saved_generated_model_retains_previous_generation_label():
 
     manager = SimpleNamespace(project_name="test", runtime=SimpleNamespace(create_docker_process=process))
     context = SimpleNamespace(generated_candidates={"authelia": SimpleNamespace(
-        container=SimpleNamespace(name="authelia", integration_consumer=None), generation_id="previous")})
+        container=SimpleNamespace(name="authelia", integration_consumer=SimpleNamespace(uses_generation_label=True)),
+        generation_id="previous")})
     ComposeRunner(manager).apply_saved_services(
         context, ("authelia",), {"old.yml": "services:\n  authelia:\n    image: authelia:old\n"})
     assert captured[-1]["services"]["authelia"]["labels"] == {"io.linktools.cntr.generation": "previous"}
@@ -350,3 +353,27 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
     assert calls[-1] == (full.generation_id, ("test", "sidecar"))
     assert yaml.safe_load((tmp_path / "compose/applied/test.yml").read_text()) == old_model
     assert not AppliedServiceModels(owner.manager, old_model).changed_services
+
+
+@pytest.mark.parametrize("service,returncode,stderr", [
+    ("nginx", 0, "nginx: [warn] conflicting server name secret-token"),
+    ("authelia", 1, "invalid secret-token in /generated/id/configuration.yml:12"),
+])
+def test_asset_validator_interprets_raw_result_without_exposing_secrets(service, returncode, stderr):
+    from _harness import builtin_consumer_type
+
+    result = SimpleNamespace(succeeded=returncode == 0, returncode=returncode, stdout="", stderr=stderr)
+    manager = SimpleNamespace(
+        structured_runner=SimpleNamespace(execute=lambda *args, **kwargs: result),
+        runtime=SimpleNamespace(create_docker_process=lambda *args, **kwargs: None))
+    runner = ComposeRunner(manager)
+    manager.compose_runner = runner
+    runner.final_model = lambda context: {}
+    runner.isolated_service_args = lambda *args: []
+    context = SimpleNamespace()
+    assert runner.validate_service(context, service, [service], check=False) is result
+    consumer = builtin_consumer_type("100-nginx" if service == "nginx" else "102-authelia")(
+        SimpleNamespace(manager=manager))
+    with pytest.raises(ContainerError, match="Native validation failed") as raised:
+        consumer.validate(SimpleNamespace(generation_id="id"), context)
+    assert "secret-token" not in str(raised.value)

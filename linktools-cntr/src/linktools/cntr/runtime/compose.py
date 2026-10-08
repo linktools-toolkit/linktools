@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence, Mapping
-    from typing import Any
+    from typing import Any, Iterable
+    from ..container import BaseContainer
     from ..context import EventContext
     from ..artifacts import GeneratedCandidate
     from .structured import CommandResult
@@ -43,6 +44,15 @@ def service_dependencies(spec: "dict[str, Any]") -> "dict[str, dict[str, Any]]":
     for name in implicit:
         result.setdefault(name, {})
     return result
+
+
+def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[str]") -> "tuple[str, ...]":
+    priorities = {}
+    for container in containers:
+        consumer = container.integration_consumer
+        priority = consumer.application_order if consumer is not None else 0
+        priorities.update((service, priority) for service in container.services)
+    return tuple(sorted(services, key=priorities.__getitem__))
 
 
 @dataclass
@@ -234,19 +244,16 @@ class ComposeRunner:
 
     def validate_service(self, context: "EventContext", service: str,
                          command: "Sequence[str]", environment: "Mapping[str, object] | None" = None,
-                         network: bool = False) -> "CommandResult":
-        from ..container import ContainerError
+                         network: bool = False, check: bool = True) -> "CommandResult":
         model = self.final_model(context)
         args = self.isolated_service_args(model, service, command, environment, network)
         result = self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_process(*args, capture_output=True), check=False)
-        # Native error output can contain credentials expanded into the config.
-        from ..integration import consumer_for_service
-        consumer = consumer_for_service(self.manager, service)
-        if consumer.validation_failed(result):
-            diagnostic = consumer.validation_diagnostic(self.manager, result)
-            raise ContainerError("Native validation failed for service {}{} (exit {})".format(
-                service, diagnostic, result.returncode))
+        if check and not result.succeeded:
+            from ..container import ContainerError
+            # Command output can contain expanded credentials.
+            raise ContainerError("Native validation failed for service {} (exit {})".format(
+                service, result.returncode))
         return result
 
     def apply_service_args(self, service: str, recreate: bool = False, remove_orphans: bool = False) -> "list[str]":
@@ -271,8 +278,7 @@ class ComposeRunner:
         import yaml
         candidates = getattr(context, "generated_candidates", {})
         candidate = next((c for c in candidates.values() if service == c.container.name), None)
-        from ..integration import consumer_type
-        if candidate is None or not consumer_type(candidate.container).uses_generation_label:
+        if candidate is None or not candidate.container.integration_consumer.uses_generation_label:
             return self.manager.runtime.create_docker_compose_process(context.containers, *args).check_call()
         overlay = {"services": {service: {"labels": {
             "io.linktools.cntr.generation": candidate.generation_id}}}}
@@ -363,12 +369,11 @@ class ComposeRunner:
                 file_args.extend(["--file", path])
             import yaml
             candidates = getattr(context, "generated_candidates", {})
-            from ..integration import consumer_type
             labels = {
                 candidate.container.name: {"labels": {
                     "io.linktools.cntr.generation": candidate.generation_id}}
                 for candidate in candidates.values()
-                if candidate.container.name in services and consumer_type(candidate.container).uses_generation_label
+                if candidate.container.name in services and candidate.container.integration_consumer.uses_generation_label
             }
             if labels:
                 path = os.path.join(directory, "generation.yml")

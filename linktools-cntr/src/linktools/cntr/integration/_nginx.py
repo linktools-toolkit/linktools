@@ -94,26 +94,4 @@ class Nginx:
                 result[(producer_name, local_id)] = ResolvedSite(producer, local_id, declaration)
         return MappingProxyType(result)
 
-    @classmethod
-    def site(
-            cls, server_name: "Any", proxy: "Optional[Any]" = None,
-            template: "Optional[Any]" = None, https: "Optional[bool]" = None,
-            waf: "Optional[bool]" = None, auth: "Optional[bool]" = None,
-            waf_bypass: "Sequence[str]" = (), auth_bypass: "Sequence[str]" = (),
-            auth_headers: "Optional[Mapping[str, Any]]" = None,
-            auth_rule: "Optional[Mapping[str, Any]]" = None,
-            oidc_redirects: "Sequence[str]" = (), url: "Optional[Any]" = None,
-            cert_domains: "Sequence[str]" = (),
-            vars: "Optional[Mapping[str, Any]]" = None,
-            expose: "Optional[FlareLink]" = None,
-            *, local_id: str = "web",
-    ) -> NginxSite:
-        """Declare a site with a stable producer-local identity."""
-        return NginxSite(
-            server_name=server_name, proxy=proxy, template=template,
-            https=https, waf=waf, auth=auth,
-            waf_bypass=waf_bypass, auth_bypass=auth_bypass,
-            auth_headers=auth_headers, auth_rule=auth_rule,
-            oidc_redirects=oidc_redirects, url=url, cert_domains=cert_domains,
-            vars=vars, expose=expose, local_id=local_id,
-        )
+    site = NginxSite

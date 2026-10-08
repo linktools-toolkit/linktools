@@ -14,8 +14,7 @@ from typing import TYPE_CHECKING
 from .container import ContainerError
 from .context import EventContext
 from .execution.model import get_records, record_phase, render_report
-from .integration import consumer_type, order_services, runtime_requirements
-from .runtime.compose import service_dependencies
+from .runtime.compose import order_services, service_dependencies
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -121,10 +120,11 @@ class ComposeOperations:
                     owner = installed[dependency]
                     required.add(owner)
                     services.update(owner.services)
-            for provider, provider_services in runtime_requirements(
-                    self.manager, {container.name for container in required}).items():
-                required.add(installed[provider])
-                services.update(provider_services)
+            required_names = {container.name for container in required}
+            for consumer in self.manager.integration_consumers.values():
+                for provider, provider_services in consumer.runtime_requirements(self.manager, required_names).items():
+                    required.add(installed[provider])
+                    services.update(provider_services)
             for name in tuple(services):
                 owner = owners[name]
                 for dependency in service_dependencies(definitions[name]):
@@ -315,7 +315,9 @@ class ComposeOperations:
                 else:
                     with record_phase(context, "up", container=container.name, logger=manager.logger):
                         self._apply_services_with_rollback(container, context, (service,))
-                consumer_type(container).after_apply(manager, context, service)
+                consumer = manager.integration_consumers.get(container.name)
+                if consumer is not None:
+                    consumer.after_apply(manager, context, service)
                 state_context = self._make_context(context.commands, ComposeSelection(
                     selection.project_containers, (container,), (service,), False))
                 manager.running_state.mark_started(state_context)

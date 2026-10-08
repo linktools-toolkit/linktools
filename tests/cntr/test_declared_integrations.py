@@ -465,3 +465,33 @@ def test_general_templates_expose_url_functions(fresh_manager, tmp_path):
     template = tmp_path / "docker-compose.yml"
     template.write_text('{{ urls.load_nginx_url(container, "web", "settings", queries={"mode": "a b"}) }}')
     assert container.render_template(template) == "https://portainer.example.test:9443/settings?mode=a+b"
+
+
+def test_namespace_factories_preserve_typed_constructor_and_mixed_list():
+    import inspect
+    from linktools.cntr import Flare, FlareLink
+
+    assert inspect.signature(Nginx.site) == inspect.signature(NginxSite)
+    declarations = [Nginx.site("app.example.com"),
+                    Flare.bookmark("Tools", "web", "https://tools.example.com", category="tool")]
+    assert isinstance(declarations[0], NginxSite)
+    assert isinstance(declarations[1], FlareLink)
+    assert declarations[0].server_name == "app.example.com"
+    assert declarations[0].local_id == "web"
+
+
+def test_consumer_snapshot_reuses_instances_and_rejects_wrong_owner(fresh_manager, monkeypatch):
+    import pytest
+    from linktools.cntr import ContainerError
+    from linktools.cntr.integration import IntegrationConsumer
+
+    consumer = fresh_manager.containers["nginx"].integration_consumer
+    assert fresh_manager.integration_consumers["nginx"] is consumer
+    assert fresh_manager.generated_configs["nginx"] is consumer
+    with pytest.raises(TypeError):
+        fresh_manager.integration_consumers["nginx"] = consumer
+    fresh_manager.__dict__.pop("integration_consumers", None)
+    monkeypatch.setattr(fresh_manager.containers["nginx"], "integration_consumer",
+                        IntegrationConsumer(fresh_manager.containers["flare"]))
+    with pytest.raises(ContainerError, match="Invalid integration consumer in nginx"):
+        fresh_manager.integration_consumers

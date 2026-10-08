@@ -354,14 +354,24 @@ class ContainerManager:
     @cached_property
     def integration_consumers(self) -> "Mapping[str, IntegrationConsumer]":
         """Consumer implementations provided by the installed containers."""
-        from .integration import create_consumers
-        return create_consumers(self)
+        from types import MappingProxyType
+        from .integration import IntegrationConsumer
+        result = {}
+        for name in self.integration_snapshot:
+            container = self.containers[name]
+            consumer = container.integration_consumer
+            if consumer is not None:
+                if not isinstance(consumer, IntegrationConsumer) or consumer.container is not container:
+                    raise ContainerError("Invalid integration consumer in " + name)
+                result[name] = consumer
+        return MappingProxyType(result)
 
     @cached_property
     def generated_configs(self) -> "Mapping[str, IntegrationConsumer]":
         """Installed consumers that own generated configuration."""
-        from .integration import create_generations
-        return create_generations(self)
+        from types import MappingProxyType
+        return MappingProxyType({name: consumer for name, consumer in self.integration_consumers.items()
+                                 if consumer.generated})
 
     def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, Optional[str], Integration]]":
         """Yield read-only declaration inputs from the command's installed snapshot."""

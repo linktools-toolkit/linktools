@@ -16,8 +16,8 @@ from linktools.cntr.urls import load_port_url
 def integrations(self) -> "Integrations":
     return [
         Nginx.site(
+            self.get_config_later("APP_DOMAIN"),
             local_id="web",
-            server_name=self.get_config_later("APP_DOMAIN"),
             proxy="http://app:8080",
             auth=None,
             auth_bypass=(r"^/public/",),

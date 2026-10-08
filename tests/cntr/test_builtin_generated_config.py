@@ -280,14 +280,17 @@ def test_authelia_redis_only_scope_reconciles_without_starting_siblings(fresh_ma
 
 def test_native_owner_validators_use_candidate_paths_and_password_file():
     calls = []
-    runner = SimpleNamespace(validate_service=lambda *args, **kwargs: calls.append((args, kwargs)))
+    def validate_service(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0)
+    runner = SimpleNamespace(validate_service=validate_service)
     container = SimpleNamespace(manager=SimpleNamespace(compose_runner=runner))
     context = SimpleNamespace()
     candidate = SimpleNamespace(generation_id="candidate")
     NginxGeneration(container).validate(candidate, context)
     AutheliaGeneration(container).validate(candidate, context)
     assert calls[0] == ((context, "nginx", (
-        "nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/candidate/nginx.conf", "-t")), {})
+        "nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/candidate/nginx.conf", "-t")), {"check": False})
     assert calls[1][0][0:2] == (context, "authelia")
     assert calls[1][0][2] == [
         "authelia", "config", "validate", "--config=/generated/candidate/configuration.yml",
@@ -297,4 +300,4 @@ def test_native_owner_validators_use_candidate_paths_and_password_file():
     ]
     assert calls[1][1] == {"environment": {
         "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE":
-        "/generated/candidate/authentication_backend_ldap_password"}}
+        "/generated/candidate/authentication_backend_ldap_password"}, "check": False}

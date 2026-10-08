@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Shared declaration metadata and consumer lifecycle contract."""
-import re
 from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
@@ -10,7 +9,6 @@ if TYPE_CHECKING:
     from ..container import BaseContainer
     from ..context import EventContext
     from ..manager import ContainerManager
-    from ..runtime.structured import CommandResult
 
 
 class Integration:
@@ -43,16 +41,6 @@ class IntegrationConsumer:
     @classmethod
     def plan_warnings(cls) -> "tuple[str, ...]":
         return ()
-
-    @classmethod
-    def validation_failed(cls, result: "CommandResult") -> bool:
-        return not result.succeeded
-
-    @classmethod
-    def validation_diagnostic(cls, manager: "ContainerManager", result: "CommandResult") -> str:
-        """Keep the source location without exposing expanded configuration."""
-        match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
-        return " at {}:{}".format(*match.groups()) if match else ""
 
     @classmethod
     def after_apply(cls, manager: "ContainerManager", context: "EventContext", service: str) -> None:

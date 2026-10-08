@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Authelia container definition."""
 import os
+import re
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -191,11 +192,18 @@ class AutheliaGeneration(IntegrationConsumer):
         command.extend("--config=" + root + "/" + name for name in (
             "configuration.yml", "configuration.acl.yml",
             "configuration.2fa.yml", "configuration.oidc.yml"))
-        self.container.manager.compose_runner.validate_service(
+        result = self.container.manager.compose_runner.validate_service(
             context, "authelia", command,
             environment={"AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE":
-                         root + "/authentication_backend_ldap_password"},
+                         root + "/authentication_backend_ldap_password"}, check=False,
         )
+
+        if not result.succeeded:
+            # Do not expose credentials from the native validator's output.
+            match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
+            diagnostic = " at {}:{}".format(*match.groups()) if match else ""
+            raise ContainerError("Native validation failed for service authelia{} (exit {})".format(
+                diagnostic, result.returncode))
 
     def apply(self, candidate: "GeneratedCandidate", context: "EventContext",
               services: "Iterable[str]") -> None:

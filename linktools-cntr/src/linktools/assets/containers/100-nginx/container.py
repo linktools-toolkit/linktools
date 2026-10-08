@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from typing import AbstractSet, Any, Mapping
     from linktools.cntr import ContainerManager, EventContext
     from linktools.cntr.artifacts import GeneratedCandidate
-    from linktools.cntr.runtime.structured import CommandResult
     from linktools.types import PathType
 
 
@@ -293,26 +292,6 @@ class NginxGeneration(IntegrationConsumer):
         return ("nginx: first stable generated-parent mount requires container recreation; "
                 "cold starts use health-only bootstrap before provider readiness",)
 
-    @classmethod
-    def validation_failed(cls, result: "CommandResult") -> bool:
-        return super().validation_failed(result) or "conflicting server name" in (result.stdout + result.stderr).lower()
-
-    @classmethod
-    def validation_diagnostic(cls, manager: "ContainerManager", result: "CommandResult") -> str:
-        diagnostic = super().validation_diagnostic(manager, result)
-        match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
-        identity = re.search(r"(?:site|s)_([0-9a-f]+)_([0-9a-f]+)", match.group(1)) if match else None
-        if identity:
-            try:
-                producer, local_id = (bytes.fromhex(value).decode("utf-8") for value in identity.groups())
-                diagnostic += " (site {!r}/{!r})".format(producer, local_id)
-                site = manager.nginx_sites.get((producer, local_id))
-                if site is not None:
-                    diagnostic += " template {!r}".format(site.template or "nginx/default.conf")
-            except (ValueError, UnicodeDecodeError):
-                pass
-        return diagnostic
-
     def needs_apply(self, candidate: "GeneratedCandidate", context: "EventContext") -> bool:
         return candidate.changed or getattr(context, "nginx_certificate_replaced", False)
 
@@ -499,9 +478,28 @@ class NginxGeneration(IntegrationConsumer):
                     shutil.copy2(str(path), str(destination))
 
     def validate(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
-        self.container.manager.compose_runner.validate_service(context, "nginx", (
+        manager = self.container.manager
+        result = manager.compose_runner.validate_service(context, "nginx", (
             "nginx", "-p", "/etc/nginx/", "-c",
-            "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t"))
+            "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t"), check=False)
+
+        if result.succeeded and "conflicting server name" not in (result.stdout + result.stderr).lower():
+            return
+        # Native output may contain expanded secrets; expose only source identity.
+        match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
+        diagnostic = " at {}:{}".format(*match.groups()) if match else ""
+        identity = re.search(r"(?:site|s)_([0-9a-f]+)_([0-9a-f]+)", match.group(1)) if match else None
+        if identity:
+            try:
+                producer, local_id = (bytes.fromhex(value).decode("utf-8") for value in identity.groups())
+                diagnostic += " (site {!r}/{!r})".format(producer, local_id)
+                site = manager.nginx_sites.get((producer, local_id))
+                if site is not None:
+                    diagnostic += " template {!r}".format(site.template or "nginx/default.conf")
+            except (ValueError, UnicodeDecodeError):
+                pass
+        raise ContainerError("Native validation failed for service nginx{} (exit {})".format(
+            diagnostic, result.returncode))
 
     def confirm(self, context: "EventContext", generation_id: str,
                 timeout: int = 30) -> None:

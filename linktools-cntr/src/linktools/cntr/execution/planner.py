@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from ..artifacts import collect_candidates, sha256_of
 from ..container import ContainerError
-from ..integration import consumer_type, order_services
+from ..runtime.compose import order_services
 from ..runtime.structured import redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
 
@@ -117,7 +117,9 @@ class ExecutionPlanner:
                     warnings.append("{}: generated candidate native validation is pending execution; "
                                     "no hooks, secrets or generated files were prepared".format(container.name))
             for container in sync:
-                warnings.extend(consumer_type(container).plan_warnings())
+                consumer = manager.integration_consumers.get(container.name)
+                if consumer is not None:
+                    warnings.extend(consumer.plan_warnings())
         preflight = "skipped"
         if action in ("up", "restart") and candidate_files:
             preflight = manager.docker_inspector.preflight_candidates(candidate_files)

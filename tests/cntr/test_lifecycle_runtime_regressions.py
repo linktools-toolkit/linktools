@@ -278,9 +278,9 @@ def test_consumer_policy_adds_only_its_required_provider_services(tmp_path, monk
     class MetricsConsumer(IntegrationConsumer):
         application_order = 10
 
-        @classmethod
-        def runtime_requirements(cls, manager: "ContainerManager",
+        def runtime_requirements(self, manager: "ContainerManager",
                                  required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
+            assert self.container.name == "metrics"
             return {"storage": ("database",)} if "metrics" in required else {}
 
     app = Container("metrics", {"metrics": {}}, tmp_path / "metrics")
