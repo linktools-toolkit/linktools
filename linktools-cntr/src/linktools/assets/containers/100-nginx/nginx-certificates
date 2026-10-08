@@ -49,31 +49,27 @@ activate() {
     id=$1
     directory="$versions/$id"
     main=$(cat "$directory/primary")
-    port=${2:-${NGINX_HTTPS_PORT:?NGINX_HTTPS_PORT is required}}
+    port=${NGINX_HTTPS_PORT:?NGINX_HTTPS_PORT is required}
     verify "$directory" "$main" "$directory/domains"
     previous=$(readlink "$root/live" 2>/dev/null || :)
     if test "$previous" = "versions/$id" && ! test -s /var/run/nginx.pid; then
         return 0
     fi
     if test -z "$previous" && test -s /var/run/nginx.pid; then
-        echo 'Cannot change a running TLS certificate without a previous live version' >&2
+        echo 'Cannot switch running TLS certificate without a previous version' >&2
         return 1
     fi
+
     ln -s "versions/$id" "$root/.next-$$"
     mv -Tf "$root/.next-$$" "$root/live"
-    if test -s /var/run/nginx.pid; then
-        if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
-           ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
-            if test -n "$previous"; then
-                ln -s "$previous" "$root/.next-$$"
-                mv -Tf "$root/.next-$$" "$root/live"
-                if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
-                   ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
-                    echo 'Nginx certificate rollback reload failed' >&2
-                fi
-            fi
-            return 1
-        fi
+    if ! test -s /var/run/nginx.pid; then
+        return 0
+    fi
+
+    if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
+       ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
+        reason='Nginx rejected the new TLS certificate'
+    else
         expected=$(openssl x509 -in "$directory/${main}_fullchain.pem" -noout -fingerprint -sha256)
         deadline=$(($(date +%s) + 30))
         while :; do
@@ -86,17 +82,18 @@ activate() {
             test "$actual" = "$expected" && return 0
             test "$(date +%s)" -ge "$deadline" || sleep 1
         done
-        if test -n "$previous"; then
-            ln -s "$previous" "$root/.next-$$"
-            mv -Tf "$root/.next-$$" "$root/live"
-            if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
-               ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
-                echo 'Nginx certificate rollback reload failed' >&2
-            fi
-        fi
-        echo 'New TLS certificate was not served after reload' >&2
-        return 1
+        reason='Nginx did not serve the new TLS certificate'
     fi
+
+    if ! ln -s "$previous" "$root/.next-$$" ||
+       ! mv -Tf "$root/.next-$$" "$root/live" ||
+       ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
+       ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
+        echo "$reason; local certificate rollback failed" >&2
+        return 2
+    fi
+    echo "$reason; local certificate pointer restored" >&2
+    return 1
 }
 
 case "$1" in

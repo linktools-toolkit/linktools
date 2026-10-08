@@ -334,7 +334,21 @@ def test_failed_nginx_reload_restores_old_certificate(certificate_case):
     nginx.write_text("#!/bin/sh\nexit 1\n")
     nginx.chmod(0o755)
     result = _run(script, env, "activate", "pending")
-    assert result.returncode != 0
+    assert result.returncode == 2
+    assert "local certificate rollback failed" in result.stderr
+    assert (root / "certs/live").readlink() == Path("versions/legacy")
+
+
+def test_nginx_activation_failure_restores_previous_cert_when_reload_succeeds(certificate_case):
+    _, root, script, env = certificate_case
+    assert _run(script, env, "prepare", "pending", "example.test").returncode == 0
+    (root / "fake.pid").write_text("123")
+    nginx = root / "bin/nginx"
+    nginx.write_text('#!/bin/sh\ncase "$(readlink "$MOCK_CERTIFICATES/certs/live")" in\n  versions/pending) exit 1 ;;\n  *) exit 0 ;;\nesac\n')
+    nginx.chmod(0o755)
+    result = _run(script, env, "activate", "pending")
+    assert result.returncode == 1
+    assert "local certificate pointer restored" in result.stderr
     assert (root / "certs/live").readlink() == Path("versions/legacy")
 
 
@@ -366,7 +380,7 @@ def test_rollback_uses_previously_served_renewed_certificate(certificate_case, m
     monkeypatch.setattr(runner, "exec_service", lambda *args, **kwargs:
                         SimpleNamespace(succeeded=True, stdout="old"))
     container.apply_config(context, SimpleNamespace(path=candidate, generation_id="old"), ("nginx",))
-    assert calls[0] == ("activate", ("/usr/local/bin/nginx-certificates", "activate", "renewed", "443"))
+    assert calls[0] == ("activate", ("/usr/local/bin/nginx-certificates", "activate", "renewed"))
     assert calls[1] == ("apply", "nginx")
 
 

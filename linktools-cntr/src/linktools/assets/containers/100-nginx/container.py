@@ -644,8 +644,7 @@ class Container(BaseContainer):
             runner.run_isolated_service(context, "nginx",
                                         ("/usr/local/bin/nginx-certificates", "unpublish"))
         if changed:
-            command = ("/usr/local/bin/nginx-certificates", "activate", version,
-                       str(self.get_config("NGINX_HTTPS_PORT")))
+            command = ("/usr/local/bin/nginx-certificates", "activate", version)
             # A one-shot container switches the mount before Compose can start
             # nginx against a configuration referencing the new certificate.
             runner.run_isolated_service(context, "nginx", command)
