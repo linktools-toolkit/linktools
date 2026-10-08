@@ -223,6 +223,49 @@ def test_defaults_detect_collisions_on_optional_listeners(
         nginx.render_config("test")
 
 
+def test_shared_hostname_routes_merge_with_independent_auth_maps(fresh_manager, tmp_path):
+    nginx = fresh_manager.containers["nginx"]
+    api_template = tmp_path / "api.conf"
+    web_template = tmp_path / "web.conf"
+    api_template.write_text("location /api { return 204; }")
+    web_template.write_text("location /web { return 204; }")
+    api = generation_site(nginx, "api", template=api_template, https=True,
+                          auth=True, auth_bypass=(r"^/public/",))
+    web = generation_site(nginx, "web", template=web_template, https=True,
+                          auth=True, auth_bypass=(r"^/public/",))
+    nginx.__dict__["sites"] = {site.identity: site for site in (api, web)}
+    files = nginx.render_config("generation")
+    servers = [value for name, value in files.items() if name.startswith("sites/") and name != "sites/default.conf"]
+    assert len(servers) == 1
+    server = servers[0]
+    assert server.count("server_name app.example.test;") == 2
+    assert "location /api { return 204; }" in server
+    assert "location /web { return 204; }" in server
+    for site in (api, web):
+        assert "# site {}/{}".format(site.producer.name, site.local_id) in server
+        assert "$auth_verified_" + site.var_name in server
+        assert "auth_request_set $auth_status_" + site.var_name in server
+
+
+def test_shared_hostname_rejects_incompatible_security_policies(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    api = generation_site(nginx, "api", auth_bypass=(r"^/api/public/",))
+    web = generation_site(nginx, "web", auth_bypass=(r"^/web/public/",))
+    nginx.__dict__["sites"] = {site.identity: site for site in (api, web)}
+    with pytest.raises(ContainerError, match="Incompatible nginx routing policies"):
+        nginx.render_config("generation")
+
+
+def test_duplicate_locations_remain_visible_to_native_validator(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    first = generation_site(nginx, "first")
+    second = generation_site(nginx, "second")
+    nginx.__dict__["sites"] = {site.identity: site for site in (first, second)}
+    files = nginx.render_config("generation")
+    combined = files["sites/" + first.file_id + ".conf"]
+    assert combined.count("location / {") == 2
+
+
 def test_header_overrides_suppress_headers_without_losing_same_level_defaults(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
     headers = dict(nginx.header_items(make_site(auth_headers={}), {
