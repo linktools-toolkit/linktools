@@ -24,5 +24,6 @@ RUN acme.sh --home /opt/acme --config-home /root/.acme.sh --server {{ container.
         --reloadcmd /usr/local/bin/nginx-reload && \
     mkdir -p /opt/nginx-initial/certs /opt/nginx-initial/acme && \
     cp -a /etc/certs/. /opt/nginx-initial/certs/ && \
-    cp -a /root/.acme.sh/. /opt/nginx-initial/acme/
+    cp -a /root/.acme.sh/. /opt/nginx-initial/acme/ && \
+    chmod -R go-rwx /opt/nginx-initial
 # {% endif %}
