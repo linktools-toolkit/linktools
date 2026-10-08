@@ -12,6 +12,8 @@ from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
     from typing import Any
+    from pathlib import Path
+    from linktools.cntr.artifacts import GeneratedCandidate
     from collections.abc import Iterable
     from linktools.cntr import EventContext, ExposeLink
 
@@ -51,26 +53,34 @@ class Container(BaseContainer):
             raise ContainerError(f"Invalid domain `{domain}` for LDAP, "
                                  f"Please set NGINX_ROOT_DOMAIN to a valid domain (e.g., example.com).")
 
-    def on_starting(self, context: "EventContext") -> None:
+    @property
+    def generated_config_path(self) -> "Path":
+        return self.get_app_path("generated")
+
+    def prepare_generated_config(self, context: "EventContext") -> None:
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
-
-        data_path = self.get_app_path("data")
-        data_path.mkdir(parents=True, exist_ok=True)
-
-        template_path = self.get_source_path("templates")
-
-        self.runtime.chown(secret_path, self.user, recursive=True)
+        self.get_app_path("data").mkdir(parents=True, exist_ok=True)
         self.runtime.chmod(secret_path, 0o700, recursive=True)
-        self.runtime.chown(data_path, self.user, recursive=True)
-        self.runtime.chmod(data_path, 0o700, recursive=True)
-
         self._create_secret_file(secret_path / "jwt_secret", length=64)
-        utils.write_file(secret_path / "ldap_user_pass", self.get_config("LLDAP_ADMIN_PASSWORD"))
-        self.render_template(template_path / "lldap_config.toml", data_path / "lldap_config.toml")
 
-        self.runtime.chown(secret_path, "root", recursive=True)
-        self.runtime.chown(data_path, "root", recursive=True)
+    def render_generated_config(self, generation_id: str) -> "dict[str, str]":
+        return {
+            "lldap_config.toml": self.render_template(self.get_source_path("templates", "lldap_config.toml")),
+            "ldap_user_pass": str(self.get_config("LLDAP_ADMIN_PASSWORD")),
+        }
+
+    def validate_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+        # The builtin TOML contains only fixed database/key locations. LLDAP has
+        # no standalone config validator; readiness is checked after application.
+        if not self.get_config("LLDAP_ADMIN_PASSWORD"):
+            raise ContainerError("LLDAP administrator password must not be empty")
+
+    def apply_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+        runner = self.manager.compose_runner
+        recreate = candidate.changed or not runner.is_generation_current(context, "lldap", candidate)
+        runner.apply_service(context, "lldap", recreate=recreate)
+        runner.wait_service_healthy(context, "lldap")
 
     @classmethod
     def _create_secret_file(cls, path, length=48):

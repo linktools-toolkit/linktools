@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
+from linktools.runtime import lazy_load
 from linktools.cntr import BaseContainer, NginxSite
 
 if TYPE_CHECKING:
@@ -33,7 +34,9 @@ class Container(BaseContainer):
                     proxy="http://portainer:9000",
                     auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
                     auth_bypass=(r"\.(css|js)$",),
-                    oidc_redirects=("",) if self.get_config("PORTAINER_AUTH_ENABLE") else (),
+                    oidc_redirects=lazy_load(lambda: ("",) if (
+                        self.get_config("PORTAINER_AUTH_ENABLE")
+                        and self.get_config("NGINX_AUTH_ENABLE")) else ()),
                 ),
             },
         }

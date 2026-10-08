@@ -22,7 +22,7 @@ from .container import ContainerError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from typing import Any
+    from typing import Any, Callable
     from linktools.types import PathType
     from .container import BaseContainer
     from .manager import ContainerManager
@@ -194,3 +194,85 @@ class ArtifactIndex:
             path = self.path
             os.makedirs(os.path.dirname(path), exist_ok=True)
             return atomic_write_text_if_changed(path, content)
+
+
+class GeneratedCandidate:
+    """An immutable generated tree with an atomic, reversible current link."""
+
+    def __init__(self, container: "BaseContainer",
+                 render: "Callable[[str], dict[str, str]] | None" = None) -> None:
+        import uuid
+        self.container = container
+        self.root = str(container.generated_config_path)
+        self.previous_id = self.current_id(self.root)
+        self.generation_id = self.previous_id or uuid.uuid4().hex
+        render = render or container.render_generated_config
+        files = render(self.generation_id)
+        self.changed = not self.previous_id or not self.matches(files)
+        if self.changed and self.previous_id:
+            self.generation_id = uuid.uuid4().hex
+            files = render(self.generation_id)
+        self.path = os.path.join(self.root, self.generation_id)
+        self.changed_files = tuple(sorted(name for name, content in files.items()
+                                          if self.read_previous(name) != content))
+        if self.changed:
+            os.makedirs(self.path, mode=0o755)
+            entries = {}
+            for name, content in files.items():
+                if os.path.isabs(name) or '..' in name.split('/'):
+                    raise ContainerError("Generated file must stay within its candidate tree")
+                path = os.path.join(self.path, name)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                atomic_write_text_if_changed(path, content)
+                entries[os.path.relpath(path, str(container.manager.data_path))] = dict(
+                    kind="generated-config", container=container.name, sha256=sha256_of(content))
+            container.manager.artifact_index.record(entries)
+
+    @classmethod
+    def current_id(cls, root: str) -> "str | None":
+        link = os.path.join(root, "current")
+        if not os.path.lexists(link):
+            return None
+        if not os.path.islink(link):
+            raise ContainerError("Generated current must be a symbolic link")
+        value = os.readlink(link)
+        if not value or os.path.basename(value) != value or value in (".", ".."):
+            raise ContainerError("Invalid generated current target")
+        return value
+
+    def read_previous(self, name: str) -> "str | None":
+        if self.previous_id:
+            try:
+                with open(os.path.join(self.root, self.previous_id, name), encoding="utf-8") as stream:
+                    return stream.read()
+            except FileNotFoundError:
+                pass
+        return None
+
+    def matches(self, files: "dict[str, str]") -> bool:
+        root = os.path.join(self.root, self.generation_id)
+        actual = set()
+        for directory, _, names in os.walk(root):
+            actual.update(os.path.relpath(os.path.join(directory, name), root) for name in names)
+        return actual == set(files) and all(self.read_previous(name) == text for name, text in files.items())
+
+    def activate(self, generation_id: "str | None") -> None:
+        import uuid
+        current = os.path.join(self.root, "current")
+        if generation_id is None:
+            if os.path.lexists(current):
+                os.unlink(current)
+            return
+        temporary = os.path.join(self.root, ".current-" + uuid.uuid4().hex)
+        os.symlink(generation_id, temporary)
+        try:
+            os.replace(temporary, current)
+        finally:
+            if os.path.lexists(temporary):
+                os.unlink(temporary)
+
+    def publish(self) -> None:
+        self.activate(self.generation_id)
+
+    def restore(self) -> None:
+        self.activate(self.previous_id)

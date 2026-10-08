@@ -4,11 +4,10 @@
 import json
 import os
 import re
-from copy import copy
 from typing import TYPE_CHECKING
 
 from linktools import utils
-from linktools.cntr import BaseContainer, ContainerError, NginxSite
+from linktools.cntr import BaseContainer, ContainerError
 from linktools.core import (
     ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
 )
@@ -18,12 +17,17 @@ from linktools.rich import choose
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
-    from typing import Any
+    from typing import Any, Mapping
     from linktools.cntr import EventContext
+    from linktools.cntr.artifacts import GeneratedCandidate
     from linktools.types import PathType
 
 
 class Container(BaseContainer):
+
+    @property
+    def config_sources(self) -> "tuple[str, ...]":
+        return tuple(self.manager.installed_state.load_names())
 
     @staticmethod
     def _nginx_literal(value: "Any") -> str:
@@ -123,8 +127,9 @@ class Container(BaseContainer):
             env_vars = self.dnsapi.get(dns_api).get("env", {})
             for env_var, meta in env_vars.items():
                 configs[env_var] = ConfigField.chain(
-                    PromptProvider(cached=True, allow_empty=meta.get("required", True)),
-                    name=env_var,
+                    PromptProvider(cached=True, allow_empty=not meta.get("required", True)),
+                    name=env_var, secret=True,
+                    default=MISSING if meta.get("required", True) else "",
                 )
         return configs
 
@@ -135,14 +140,10 @@ class Container(BaseContainer):
         if domain:
             result.extend([domain, f"*.{domain}"])
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            for producer, local_id, site in self.manager.iter_integrations("nginx"):
-                if not isinstance(site, NginxSite):
-                    raise ContainerError(
-                        f"Invalid nginx site {producer.name}/{local_id}")
-                if not str(site.server_name) or site.https is False:
+            for site in self.sites.values():
+                if not site.enabled or not site.https:
                     continue
-                for cert_domain in site.cert_domains:
-                    value = str(cert_domain)
+                for value in site.cert_domains:
                     if value and value not in result:
                         result.append(value)
         return result
@@ -162,11 +163,6 @@ class Container(BaseContainer):
             ])
         return ""
 
-    def append_ssl_domains(self, *domians: str) -> None:
-        for domain in domians:
-            if domain and domain not in self._acme_ssl_domains:
-                self._acme_ssl_domains.append(domain)
-
     def _get_default_index_url(self):
         return utils.make_url(
             self.get_config("NGINX_DEFAULT_SCHEME"),
@@ -175,9 +171,6 @@ class Container(BaseContainer):
                 else self.get_config("NGINX_ROOT_DOMAIN"),
             self.get_config("NGINX_DEFAULT_PORT")
         )
-
-    def on_init(self) -> None:
-        self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
 
     def on_check(self, context: "EventContext") -> None:
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
@@ -190,140 +183,250 @@ class Container(BaseContainer):
     def quote(self, value: "Any") -> str:
         return self._nginx_literal(value)
 
-    def _write_site(self, producer: "BaseContainer", local_id: str, declaration: "NginxSite") -> None:
-        domain = str(declaration.server_name)
-        if not domain:
-            return
-        if declaration.proxy is None and declaration.template is None:
-            raise ContainerError(f"Nginx site {producer.name}/{local_id} has no proxy or template")
-        for capability, key in (
-                ("https", "NGINX_HTTPS_ENABLE"),
-                ("waf", "NGINX_WAF_ENABLE"),
-                ("auth", "NGINX_AUTH_ENABLE")):
-            if getattr(declaration, capability) is True and not self.get_config(key, type=bool):
-                raise ContainerError(
-                    f"Nginx site {producer.name}/{local_id} requires disabled {capability}")
-        https = self.get_config("NGINX_HTTPS_ENABLE", type=bool) if declaration.https is None else declaration.https
-        waf = self.get_config("NGINX_WAF_ENABLE", type=bool) if declaration.waf is None else declaration.waf
-        auth = self.get_config("NGINX_AUTH_ENABLE", type=bool) if declaration.auth is None else declaration.auth
-        if auth and not https:
-            raise ContainerError(f"Nginx site {producer.name}/{local_id} requires HTTPS")
-        if auth and not self.containers["authelia"].enable:
-            raise ContainerError(f"Nginx site {producer.name}/{local_id} requires Authelia")
-        if waf and not self.containers["safeline"].enable:
-            raise ContainerError(f"Nginx site {producer.name}/{local_id} requires SafeLine")
+    @cached_property
+    def sites(self) -> "Mapping[tuple[str, str], Any]":
+        return self.manager.nginx_sites
 
-        file_id = "site_" + producer.name.encode("utf-8").hex() + "_" + local_id.encode("utf-8").hex()
-        site = copy(declaration)
-        site.server_name = domain
-        site.https, site.waf, site.auth = https, waf, auth
-        site.waf_bypass = tuple(str(value) for value in declaration.waf_bypass) if waf else ()
-        site.auth_bypass = tuple(str(value) for value in declaration.auth_bypass) if auth else ()
-        site.auth_headers = self._validated_auth_headers(declaration.auth_headers) if auth else {}
-        site.file_id = file_id
-        site.var_name = file_id.encode("utf-8").hex()
+    def complex_value(self, value: str) -> str:
+        """Quote one native nginx complex value without interpreting its variables."""
+        if not isinstance(value, str) or any(ch in value for ch in ("\r", "\n", "\x00")):
+            raise ContainerError("Invalid nginx complex value")
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-        server_path = self.get_app_path("conf.d", file_id + ".conf", create_parent=True)
-        fragment_path = self.get_app_path("conf.d", file_id + "_confs", file_id + ".conf", create_parent=True)
-        source = declaration.template or self.get_source_path("templates", "default.conf")
-        utils.write_file(
-            server_path,
-            producer.render_nginx_template(self, self.get_source_path("templates", "server.conf"), site),
-        )
-        utils.write_file(fragment_path, producer.render_nginx_template(self, source, site))
-        if auth:
-            utils.write_file(
-                fragment_path.parent / "00-auth-location.conf",
-                producer.render_nginx_template(
-                    self, self.get_source_path("templates", "auth_location.conf"), site),
-            )
+    def header_items(self, site: "Any", overrides: "Mapping[str, str] | None" = None,
+                     authentication: bool = False) -> "tuple[tuple[str, str], ...]":
+        """Build a complete case-insensitive header set for one proxy location."""
+        headers = {
+            "Host": "$cntr_host", "Upgrade": "$http_upgrade",
+            "Connection": "$connection_upgrade", "X-Real-IP": "$cntr_client_ip",
+            "X-Original-URL": "$cntr_scheme://$cntr_host$cntr_uri",
+            "X-Original-Method": "$cntr_method", "X-Forwarded-Proto": "$cntr_scheme",
+            "X-Forwarded-Host": "$cntr_host", "X-Forwarded-URI": "$cntr_uri",
+            "X-Forwarded-Method": "$cntr_method", "X-Forwarded-For": "$cntr_client_ip",
+            "X-Forwarded-Port": "$cntr_port", "Forwarded": "",
+        }
+        for name in ("Scheme", "Host", "URI", "Method", "Client-IP"):
+            headers["X-Cntr-" + name] = ""
+        for name in ("User", "Groups", "Name", "Email"):
+            headers["X-Auth-" + name] = (
+                "$cntr_identity_" + site.var_name + "_" + name.lower()
+                if site.auth and not authentication else "")
+        auth_headers = self._validated_auth_headers(site.auth_headers) if site.auth else {}
+        if not authentication:
+            for index, key in enumerate(auth_headers):
+                headers[key] = "$cntr_credential_" + site.var_name + "_" + str(index)
+        seen = set()
+        protected = {key.lower() for key in auth_headers}
+        for key, value in (overrides or {}).items():
+            if not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
+                raise ContainerError("Invalid nginx header override name")
+            normalized = key.lower()
+            if (normalized in seen or normalized.startswith("x-cntr-") or
+                    normalized in {"x-auth-user", "x-auth-groups", "x-auth-name", "x-auth-email"} or
+                    (not authentication and normalized in protected)):
+                raise ContainerError("Duplicate or reserved nginx header override: " + key)
+            seen.add(normalized)
+            self.complex_value(value)
+            for original in tuple(headers):
+                if original.lower() == normalized:
+                    del headers[original]
+            headers[key] = value
+        if authentication:
+            headers.update({"Content-Length": "", "Connection": "", "Upgrade": ""})
+        return tuple((key, self.complex_value(value)) for key, value in headers.items())
 
-    def _update_files(self) -> None:
-        utils.clear_directory(self.get_app_path("conf.d"))
-        snippets_path = self.get_app_path("conf.d", "snippets")
-        snippets_path.mkdir(parents=True, exist_ok=True)
-        utils.write_file(
-            self.get_app_path("conf.d", "00-cntr-upgrade.conf"),
-            "map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n"
-            'geo $cntr_dollar { default "$"; }\n'
-            'map $realip_remote_addr $cntr_actual_socket {\n'
-            '    "" $remote_addr;\n'
-            '    default $realip_remote_addr;\n'
-            '}\n',
-        )
-        utils.write_file(
-            self.get_app_path("conf.d", "01-cntr-health.conf"),
-            'server { listen unix:/run/nginx-cntr-health.sock; '
-            'location = /__cntr/health { default_type text/plain; return 200 "cntr"; } }\n',
-        )
-        for name in ("header.conf", "header_all.conf", "params.conf", "auth.conf"):
-            self.render_template(
-                self.get_source_path("templates", name),
-                snippets_path / name,
-            )
-
-        domains = {}
-        explicit_default = False
-        for producer, local_id, site in self.manager.iter_integrations("nginx"):
-            if not isinstance(site, NginxSite):
-                raise ContainerError(
-                    f"Invalid nginx site {producer.name}/{local_id}: expected NginxSite")
-            domain = str(site.server_name)
-            if not domain:
+    def security_maps(self, site: "Any") -> str:
+        """Generate only maps whose inputs and evaluation phase are explicit."""
+        lines = []
+        for capability in ("waf", "auth"):
+            if not getattr(site, capability):
                 continue
-            key = domain.lower()
-            if key in domains:
-                raise ContainerError(
-                    f"Duplicate nginx server_name {domain!r}: "
-                    f"{domains[key]} and {(producer.name, local_id)}")
-            domains[key] = (producer.name, local_id)
-            explicit_default |= domain == "_"
-            self._write_site(producer, local_id, site)
-        if not explicit_default:
-            self._write_site(
-                self, "default",
-                NginxSite(
-                    server_name="_",
-                    template=self.get_source_path("templates", "index.conf"),
-                    https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
-                    waf=False, auth=False,
-                ),
-            )
+            lines.extend(["map $uri $cntr_" + capability + "_skip_" + site.var_name + " {", "    default 0;"])
+            for regex in getattr(site, capability + "_bypass"):
+                lines.append("    " + self.complex_value("~*" + regex) + " 1;")
+            lines.append("}")
+        if not site.auth:
+            return "\n".join(lines)
+        suffix = site.var_name
+        # Exact keys preserve business regex captures when evaluated at proxy time.
+        lines.append('map "$cntr_auth_status_' + suffix + ':$cntr_auth_skip_' + suffix + ':$cntr_auth_proof_' + suffix + '" $cntr_authorized_' + suffix + ' {')
+        lines.append("    volatile;")
+        lines.append("    default 0;")
+        lines.extend('    "' + str(status) + ':0:1" 1;' for status in range(200, 300))
+        lines.append("}")
+        for name in ("user", "groups", "name", "email"):
+            lines.extend([
+                "map $cntr_authorized_" + suffix + " $cntr_identity_" + suffix + "_" + name + " {",
+                '    volatile;', '    default "";', "    1 $cntr_auth_" + name + "_" + suffix + ";", "}",
+            ])
+        for index, (key, value) in enumerate(self._validated_auth_headers(site.auth_headers).items()):
+            # nginx ignores non-conventional incoming header names by default;
+            # its $http_* variable syntax cannot address their punctuation.
+            incoming = ("${http_" + key.lower().replace("-", "_") + "}"
+                        if re.fullmatch(r"[A-Za-z0-9_-]+", key) else '""')
+            lines.extend([
+                "map $cntr_authorized_" + suffix + " $cntr_credential_" + suffix + "_" + str(index) + " {",
+                "    volatile;", "    default " + incoming + ";", "    1 " + self.quote(value) + ";", "}",
+            ])
+        return "\n".join(lines)
 
-    def on_started(self, context: "EventContext") -> None:
-        # 更新证书（如果启用HTTPS）
-        if self.get_config("NGINX_HTTPS_ENABLE"):
-            self.logger.info("Renew nginx certificates if necessary.")
-            self.runtime.create_docker_process(
-                "exec", "-it", self.get_service_name("nginx"),
-                "sh", "-c", f"acme.sh --renew --issue "
-                            f"{self.acme_ssl_domains_args} "
-                            f"--dns {self.get_config('ACME_DNS_API')} "
-                            f"1>/dev/null"
-            ).call()
-            self.runtime.create_docker_process(
-                "exec", "-it", self.get_service_name("nginx"),
-                "sh", "-c", f"acme.sh --install-cert "
-                            f"{self.acme_ssl_domains_args} "
-                            f"{self.acme_ssl_certificate_args} "
-                            f"1>/dev/null"
-            ).call()
+    @cached_property
+    def _rendered_site_files(self) -> "tuple[dict[str, str], bool]":
+        """Evaluate business templates once for this declaration snapshot."""
+        from types import SimpleNamespace
+        result = {}
+        active = []
+        for site in self.sites.values():
+            if site.enabled:
+                active.append(site.resolve())
+        if not any(site.server_name == "_" for site in active):
+            active.append(SimpleNamespace(
+                producer=self, local_id="default", file_id="cntr_default", var_name="cntr_default",
+                server_name="_", https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
+                waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, vars={},
+                template=self.get_source_path("templates", "index.conf"), proxy=None,
+            ))
+        for site in active:
+            producer = site.producer
+            source = site.template or self.get_source_path("templates", "default.conf")
+            result["sites/" + site.file_id + "/business.conf"] = producer.render_nginx_template(self, source, site)
+            result["sites/" + site.file_id + ".conf"] = producer.render_nginx_template(
+                self, self.get_source_path("templates", "server.conf"), site)
+            if site.auth:
+                result["sites/" + site.file_id + "/auth.conf"] = producer.render_nginx_template(
+                    self, self.get_source_path("templates", "auth_location.conf"), site)
+        return result, any(site.waf for site in active)
 
-        self.runtime.create_docker_process(
-            "exec", self.get_service_name("nginx"), "nginx", "-t"
-        ).check_call()
-        self.runtime.create_docker_process(
-            "exec", self.get_service_name("nginx"), "nginx", "-s", "reload"
-        ).check_call()
+    def render_generated_config(self, generation_id: str) -> "dict[str, str]":
+        """Render a generation marker around the immutable business snapshot."""
+        from types import SimpleNamespace
+        files, waf = self._rendered_site_files
+        result = dict(files)
+        root_site = SimpleNamespace(vars={
+            "generation_id": generation_id, "waf": waf,
+            "site_files": tuple(name for name in files if name.count("/") == 1),
+        })
+        result["nginx.conf"] = self.render_nginx_template(
+            self, self.get_source_path("templates", "nginx.conf"), root_site)
+        return result
 
-    def on_stopped(self, context: "EventContext") -> None:
-        if context.is_full_containers:
-            self.on_removed(context)
+    @property
+    def generated_config_path(self) -> "PathType":
+        return self.get_app_path("generated")
+
+    def prepare_generated_config(self, context: "EventContext") -> None:
+        for name in ("generated", "certs", "acme"):
+            self.get_app_path(name).mkdir(parents=True, exist_ok=True)
+        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
-        for container in context.target_containers:
-            path = self.get_app_path("temporary", container.name)
-            if path.exists():
-                utils.remove_file(path)
+        import shlex
+        domain = self.get_config("NGINX_ROOT_DOMAIN")
+        certificate = self.get_app_path("certs", domain + "_fullchain.pem")
+        key = self.get_app_path("certs", domain + "_key.pem")
+        if ("nginx" in getattr(context, "initial_services", getattr(context, "initial_running", ())) and
+                not os.path.lexists(self.get_app_path("generated", "current"))):
+            self._preserve_legacy_files()
+        if certificate.exists() and key.exists():
+            checks = ["openssl x509 -checkend 2592000 -noout -in " +
+                      shlex.quote("/etc/certs/" + domain + "_fullchain.pem")]
+            for name in self._acme_ssl_domains:
+                if name.startswith("*."):
+                    checks.append(r"openssl x509 -noout -ext subjectAltName -in {} | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -Fx -- {}".format(
+                        shlex.quote("/etc/certs/" + domain + "_fullchain.pem"), shlex.quote("DNS:" + name)))
+                else:
+                    checks.append("openssl x509 -noout -checkhost {} -in {}".format(
+                        shlex.quote(name), shlex.quote("/etc/certs/" + domain + "_fullchain.pem")))
+            try:
+                self.manager.compose_runner.validate_service(context, "nginx", ("sh", "-c", " && ".join(checks)))
+                return
+            except ContainerError:
+                self.logger.info("Renew certificate for expiry or changed domain coverage")
+        # Existing certificate/account volumes are reused; issuance is never a
+        # build step and credentials are never baked into an image layer.
+        domains = " ".join("--domain " + shlex.quote(item) for item in self._acme_ssl_domains)
+        command = "acme.sh --config-home /root/.acme.sh --issue {} --dns {} && acme.sh --config-home /root/.acme.sh --install-cert {} {}".format(
+            domains, shlex.quote(self.get_config("ACME_DNS_API")), domains,
+            self.acme_ssl_certificate_args)
+        self.manager.compose_runner.validate_service(
+            context, "nginx", ("sh", "-c", command), network=True)
 
-    def on_removed(self, context: "EventContext") -> None:
-        pass
+    def _preserve_legacy_files(self) -> None:
+        import shutil
+        import tempfile
+        from pathlib import Path
+        backup = self.get_app_path("migration-backup")
+        if not backup.exists():
+            temporary = Path(tempfile.mkdtemp(
+                prefix="migration-backup-", dir=str(self.get_app_path())))
+            self.logger.info("Preserve legacy nginx certificates and ACME account before mount migration")
+            for source, name in (("/etc/certs/.", "certs"), ("/root/.acme.sh/.", "acme")):
+                destination = temporary / name
+                destination.mkdir()
+                self.runtime.create_docker_process("cp", "{}:{}".format(
+                    self.get_service_name("nginx"), source), str(destination)).check_call()
+            previous = self.get_app_path("conf.d")
+            if previous.exists():
+                shutil.copytree(str(previous), str(temporary / "conf.d"), symlinks=True)
+            os.rename(str(temporary), str(backup))
+        for name in ("certs", "acme"):
+            source = backup / name
+            if not source.is_dir():
+                raise ContainerError("Legacy nginx migration backup is incomplete")
+            for path in source.rglob("*"):
+                destination = self.get_app_path(name) / path.relative_to(source)
+                if os.path.lexists(destination):
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if path.is_symlink():
+                    os.symlink(os.readlink(str(path)), str(destination))
+                elif path.is_dir():
+                    destination.mkdir()
+                else:
+                    shutil.copy2(str(path), str(destination))
+
+    def validate_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+        self.manager.compose_runner.validate_service(context, "nginx", (
+            "nginx", "-p", "/etc/nginx/", "-c",
+            "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t"))
+
+    def confirm_generated_config(self, context: "EventContext", generation_id: str,
+                                 timeout: int = 30) -> None:
+        import time
+        deadline = time.monotonic() + timeout
+        while True:
+            result = self.manager.compose_runner.exec_service(context, "nginx", (
+                "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
+                "/run/nginx-cntr-health.sock", "http://localhost/__cntr/health"), check=False)
+            if result.succeeded and result.stdout.strip() == generation_id:
+                return
+            if time.monotonic() >= deadline:
+                raise ContainerError("Nginx did not acknowledge the generated configuration")
+            time.sleep(0.25)
+
+    def bootstrap_generated_config(self, context: "EventContext") -> None:
+        from linktools.cntr.artifacts import GeneratedCandidate
+        def render(generation_id: str) -> "dict[str, str]":
+            return {"nginx.conf": 'events {}\nhttp {\n'
+                    'server { listen unix:/run/nginx-cntr-health.sock; '
+                    'location = /__cntr/health { default_type text/plain; return 200 "' + generation_id + '"; }}\n'
+                    'server { listen ' + str(self.get_config("NGINX_HTTP_PORT")) + ' default_server; return 503; }\n}\n'}
+        candidate = GeneratedCandidate(self, render=render)
+        self.validate_generated_config(candidate, context)
+        candidate.publish()
+        self.manager.compose_runner.apply_service(context, "nginx", recreate=True)
+        self.confirm_generated_config(context, candidate.generation_id)
+        context.nginx_bootstrap_id = candidate.generation_id
+
+    def apply_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+        runner = self.manager.compose_runner
+        # This also handles the first stable-parent mount and target-image
+        # changes, using Compose's ordinary reconciliation.
+        runner.apply_service(context, "nginx")
+        result = runner.exec_service(context, "nginx", (
+            "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
+            "/run/nginx-cntr-health.sock", "http://localhost/__cntr/health"), check=False)
+        if result.succeeded and result.stdout.strip() == candidate.generation_id:
+            return
+        runner.exec_service(context, "nginx", (
+            "nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/current/nginx.conf", "-s", "reload"))
+        self.confirm_generated_config(context, candidate.generation_id)

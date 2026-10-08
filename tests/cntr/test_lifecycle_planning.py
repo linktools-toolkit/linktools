@@ -13,6 +13,9 @@ class _Container:
         self.events = events
         self.dependencies = dependencies
         self.order = order
+        self.services = {name: {}}
+        self.integrations = {}
+        self.generated_config_path = None
         self.hooks = HookRegistry(owner=self, scope="container")
 
     def on_check(self, context):
@@ -34,8 +37,10 @@ class _Container:
 @pytest.fixture
 def lifecycle_case(fresh_manager, monkeypatch):
     events = []
+    monkeypatch.setattr(fresh_manager, "config_source_snapshot", {})
     first = _Container("first", events, order=900)
     second = _Container("second", events, dependencies=("first",), order=100)
+    monkeypatch.setattr(fresh_manager, "integration_snapshot", {"first": {}, "second": {}})
     monkeypatch.setattr(fresh_manager, "containers", {c.name: c for c in (second, first)})
     monkeypatch.setattr(fresh_manager, "hooks", HookRegistry(owner=fresh_manager, scope="manager"))
     monkeypatch.setattr(

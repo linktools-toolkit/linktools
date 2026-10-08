@@ -29,6 +29,7 @@
       "restart": "unless-stopped",
       "user": "<DOCKER_UID>:<DOCKER_GID>",
       "volumes": [
+        "<APP_DATA>/flare/generated:/generated:ro",
         "<APP_DATA>/flare/app:/app"
       ]
     }

@@ -16,8 +16,8 @@ def render_nginx_template(
         source: "Any", site: "Any",
 ) -> str:
     """Render one location template with unambiguous local/nginx namespaces."""
-    source = Path(source)
-    nginx_root = nginx.get_source_path("templates")
+    source = Path(source).absolute()
+    nginx_root = Path(nginx.get_source_path("templates")).absolute()
     environment = Environment(
         loader=PrefixLoader({
             "local": FileSystemLoader(str(source.parent)),
@@ -26,7 +26,10 @@ def render_nginx_template(
         undefined=StrictUndefined,
         autoescape=False,
     )
-    template_name = ("nginx/" if source.parent == nginx_root else "local/") + source.name
+    try:
+        template_name = "nginx/" + source.relative_to(nginx_root).as_posix()
+    except ValueError:
+        template_name = "local/" + source.name
     try:
         return environment.get_template(template_name).render(
             site=site,
@@ -38,5 +41,5 @@ def render_nginx_template(
     except TemplateError as exc:
         from ..container import ContainerTemplateError
         raise ContainerTemplateError(
-            f"Invalid nginx template {source} for {container.name}: {exc}"
+            f"Invalid nginx template {source} for {container.name}/{getattr(site, 'local_id', '?')}: {exc}"
         ) from exc

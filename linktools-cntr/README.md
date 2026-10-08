@@ -341,3 +341,10 @@ sequenceDiagram
 
 - GitHub: <https://github.com/linktools-toolkit/linktools/tree/master/linktools-cntr>
 - homelab 容器仓库示例: <https://github.com/linktools-toolkit/linktools-homelab>
+
+## 声明式集成与配置发布
+
+内置 nginx 使用 `NginxSite` 声明站点，导航 URL 不再负责注册代理。
+`auth_bypass` 与 `waf_bypass` 分别控制认证和 WAF 路径旁路；自定义模板保留 nginx 原生路由语义。
+外部容器仓库需要同时迁移 Python 声明、模板和 OIDC 读取接口。
+详见 [集成协议与迁移说明](docs/integrations.md)。

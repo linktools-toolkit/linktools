@@ -3,8 +3,8 @@ FROM nginx:{{ NGINX_TAG }}
 # {% if NGINX_HTTPS_ENABLE %}
 RUN apk --no-cache add openssl socat coreutils
 
-RUN curl https://get.acme.sh | sh -s email=acme@google.com && \
-    ln -s ~/.acme.sh/acme.sh /usr/bin/acme.sh && \
+RUN curl https://get.acme.sh | sh -s email=acme@google.com --home /opt/acme && \
+    ln -s /opt/acme/acme.sh /usr/bin/acme.sh && \
     acme.sh --set-default-ca --server letsencrypt
 
 RUN mkdir -p /etc/certs && \
@@ -12,11 +12,4 @@ RUN mkdir -p /etc/certs && \
     echo "crond" >> /docker-entrypoint.d/99-start-crond.sh && \
     chmod +x /docker-entrypoint.d/99-start-crond.sh
 
-{%- for key, value in container.extend_configs.items() %}
-ENV {{ key }}={{ config.get(key, default=value) }}
-{%- endfor %}
-
-RUN acme.sh --issue {{ container.acme_ssl_domains_args }} --dns {{ ACME_DNS_API }} --debug 2
-RUN acme.sh --install-cert {{ container.acme_ssl_domains_args }} {{ container.acme_ssl_certificate_args }} \
-    --reloadcmd "killall nginx 2>/dev/null || true"
 # {% endif %}

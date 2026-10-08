@@ -126,6 +126,22 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def config_sources(self) -> "Iterable[str]":
         return []
 
+    @property
+    def generated_config_path(self) -> "PathType | None":
+        return None
+
+    def prepare_generated_config(self, context: "EventContext") -> None:
+        pass
+
+    def render_generated_config(self, generation_id: str) -> "dict[str, str]":
+        raise NotImplementedError
+
+    def validate_generated_config(self, candidate: "Any", context: "EventContext") -> None:
+        raise NotImplementedError
+
+    def apply_generated_config(self, candidate: "Any", context: "EventContext") -> None:
+        raise NotImplementedError
+
     @cached_property
     def settings(self) -> "ConfigNamespace":
         """Return this container's persistent operational settings namespace.
@@ -138,6 +154,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         """
         namespace_key = "cntr:app:" + self.name
         new_ns = self.manager.settings.namespace(namespace_key)
+        from linktools.core import Config
+        if Config.is_read_only_resolution():
+            return new_ns
 
         # One-time migration: this namespace used to live in the cache store
         # (regenerable/age-swept by design); anything a pre-existing

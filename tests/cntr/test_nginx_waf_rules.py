@@ -23,12 +23,12 @@ def test_site_waf_bypass_routes_through_named_location(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
     rendered = _render_site(nginx, True, (r"^/health$", r"\.(css|js)$"))
     assert "map $uri $cntr_waf_skip_123" in rendered
-    assert r"~*^/health$ 1;" in rendered
-    assert r"~*\.(css|js)$ 1;" in rendered
+    assert r'"~*^/health$" 1;' in rendered
+    assert r'"~*\\.(css|js)$" 1;' in rendered
     assert "if ($cntr_waf_skip_123 = 0)" in rendered
     assert "error_page 418 = @cntr_waf" in rendered
     assert "location @cntr_waf" in rendered
-    assert "include /etc/nginx/conf.d/site_123_confs/*.conf;" in rendered
+    assert "include sites/site_123/business.conf;" in rendered
     assert "real_ip_header X-Cntr-Client-IP;" in rendered
 
 

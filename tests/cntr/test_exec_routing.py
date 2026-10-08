@@ -10,6 +10,8 @@ _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
 
 
 def _record(manager, monkeypatch):
+    from _harness import stub_generated_runtime
+    stub_generated_runtime(manager, monkeypatch)
     recorded = []
 
     def fake(containers, *args, privilege=None, **kwargs):
@@ -41,7 +43,7 @@ def test_exec_up_prepares_images_then_starts(monkeypatch, fresh_manager):
     recorded = _record(fresh_manager, monkeypatch)
     fresh_manager.containers["portainer"].on_exec_up(pull=False)
     assert any(cmd[0] == "build" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
-    assert any(cmd[0] == "up" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
+    assert {"portainer", "nginx"} <= {cmd[-1] for cmd in recorded if cmd[0] == "up"}
 
 
 def test_exec_up_pull_true_routes_through_image_preparation(monkeypatch, fresh_manager):
@@ -50,7 +52,7 @@ def test_exec_up_pull_true_routes_through_image_preparation(monkeypatch, fresh_m
     recorded = _record(fresh_manager, monkeypatch)
     fresh_manager.containers["portainer"].on_exec_up(pull=True)
     assert any(cmd[:2] == ("pull", "--ignore-buildable") and "portainer" in cmd for cmd in recorded)
-    assert any(cmd[0] == "up" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
+    assert {"portainer", "nginx"} <= {cmd[-1] for cmd in recorded if cmd[0] == "up"}
 
 
 def test_exec_restart_records_stop_build_then_up(monkeypatch, fresh_manager):
@@ -60,7 +62,7 @@ def test_exec_restart_records_stop_build_then_up(monkeypatch, fresh_manager):
     fresh_manager.containers["portainer"].on_exec_restart(pull=False)
     assert any(cmd[0] == "build" and "portainer" in cmd for cmd in recorded)
     assert ("stop", "portainer") in recorded
-    assert any(cmd[0] == "up" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
+    assert {"portainer", "nginx"} <= {cmd[-1] for cmd in recorded if cmd[0] == "up"}
     assert next(i for i, cmd in enumerate(recorded) if cmd[0] == "build") < recorded.index(("stop", "portainer"))
 
 

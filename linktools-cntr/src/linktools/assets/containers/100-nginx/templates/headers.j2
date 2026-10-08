@@ -1,0 +1,16 @@
+{% macro proxy_headers(overrides=None) -%}
+{% if site.auth %}
+set $cntr_auth_proof_{{ site.var_name }} 0;
+{% endif %}
+{% for name, value in nginx.header_items(site, overrides) %}
+proxy_set_header {{ nginx.complex_value(name) }} {{ value }};
+{% endfor %}
+{%- endmacro %}
+{% macro grpc_headers(overrides=None) -%}
+{% if site.auth %}
+set $cntr_auth_proof_{{ site.var_name }} 0;
+{% endif %}
+{% for name, value in nginx.header_items(site, overrides) %}
+grpc_set_header {{ nginx.complex_value(name) }} {{ value }};
+{% endfor %}
+{%- endmacro %}

@@ -14,10 +14,10 @@
     "authelia": {
       "command": [
         "authelia",
-        "--config=/config/configuration.yml",
-        "--config=/config/configuration.acl.yml",
-        "--config=/config/configuration.2fa.yml",
-        "--config=/config/configuration.oidc.yml"
+        "--config=/generated/current/configuration.yml",
+        "--config=/generated/current/configuration.acl.yml",
+        "--config=/generated/current/configuration.2fa.yml",
+        "--config=/generated/current/configuration.oidc.yml"
       ],
       "container_name": "aio-authelia",
       "depends_on": [
@@ -32,7 +32,7 @@
         "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_ADDRESS=ldap://lldap:3890",
         "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_BASE_DN=dc=_",
         "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_USER=uid=admin,ou=people,dc=_",
-        "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/secrets/authentication_backend_ldap_password",
+        "AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/generated/current/authentication_backend_ldap_password",
         "X_AUTHELIA_CONFIG_FILTERS=template"
       ],
       "hostname": "authelia",
@@ -51,7 +51,8 @@
       "restart": "unless-stopped",
       "volumes": [
         "<APP_DATA>/authelia/config:/config",
-        "<APP_DATA>/authelia/secrets:/secrets:ro"
+        "<APP_DATA>/authelia/secrets:/secrets:ro",
+        "<APP_DATA>/authelia/generated:/generated:ro"
       ]
     },
     "authelia-admin": {
@@ -61,6 +62,7 @@
       ],
       "environment": [
         "AAD_LOGLEVEL=DEBUG",
+        "AAD_AUTHELIA_CONFIG_PATH=/generated/current/configuration.yml",
         "AAD_AUTHELIA_DOMAIN=_:443",
         "AAD_AUTHELIA_COOKIE_NAME=aio-auth-session",
         "AAD_AUTHELIA_MIN_AUTH_LEVEL=1",
@@ -91,7 +93,8 @@
       "user": "root",
       "volumes": [
         "<APP_DATA>/authelia/config:/config",
-        "<APP_DATA>/authelia/secrets:/secrets:ro"
+        "<APP_DATA>/authelia/secrets:/secrets:ro",
+        "<APP_DATA>/authelia/generated:/generated:ro"
       ]
     },
     "authelia-redis": {

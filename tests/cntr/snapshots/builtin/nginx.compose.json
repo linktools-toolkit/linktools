@@ -13,7 +13,23 @@
         "context": "<ASSETS>/100-nginx",
         "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile"
       },
+      "command": [
+        "nginx",
+        "-p",
+        "/etc/nginx/",
+        "-c",
+        "/etc/nginx/generated/current/nginx.conf",
+        "-g",
+        "daemon off;"
+      ],
       "container_name": "aio-nginx",
+      "environment": {
+        "CF_Account_ID": "",
+        "CF_Email": "",
+        "CF_Key": "",
+        "CF_Token": "",
+        "CF_Zone_ID": ""
+      },
       "healthcheck": {
         "interval": "5s",
         "start_interval": "1s",
@@ -51,7 +67,9 @@
       ],
       "restart": "unless-stopped",
       "volumes": [
-        "<APP_DATA>/nginx/conf.d:/etc/nginx/conf.d"
+        "<APP_DATA>/nginx/generated:/etc/nginx/generated:ro",
+        "<APP_DATA>/nginx/certs:/etc/certs",
+        "<APP_DATA>/nginx/acme:/root/.acme.sh"
       ]
     }
   }

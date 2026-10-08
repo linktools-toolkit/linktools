@@ -21,6 +21,8 @@ _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
 
 
 def _record(manager, monkeypatch, fail=False):
+    from _harness import stub_generated_runtime
+    stub_generated_runtime(manager, monkeypatch)
     def fake(containers, *args, privilege=None, **kwargs):
         class _Proc:
             def check_call(self):

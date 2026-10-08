@@ -17,7 +17,7 @@ from .runtime.process import DEFAULT_DOCKER_HOST
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import Any, Iterator, Tuple
+    from typing import Any, Iterator, Tuple, Mapping
     from linktools.core import CacheNamespace, ConfigStore, Environ
     from .registry.registry import ContainerResolver
     from .registry.loader import ContainerLoader
@@ -315,30 +315,80 @@ class ContainerManager:
         from .repo.service import RepoService
         return RepoService(self)
 
-    def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, str, Any]]":
-        """Yield stable declarations from the complete installed project."""
+    @cached_property
+    def integration_snapshot(self) -> "Mapping":
+        """Freeze declaration structure once without resolving its lazy values."""
+        from collections import OrderedDict
         from collections.abc import Mapping
+        from types import MappingProxyType
 
-        if consumer_name not in self.containers:
-            raise ContainerError(f"Unknown integration consumer: {consumer_name}")
+        result = OrderedDict()
         for producer in self.installed_state.get(resolve=True):
             integrations = producer.integrations
             if not isinstance(integrations, Mapping):
-                raise ContainerError(f"Invalid integrations in {producer.name}")
+                raise ContainerError("Invalid integrations in " + producer.name)
+            consumers = OrderedDict()
             for name, declarations in integrations.items():
-                if name not in self.containers:
-                    raise ContainerError(
-                        f"Unknown integration consumer {name!r} in {producer.name}")
-                if name != consumer_name:
-                    continue
+                if not isinstance(name, str) or name not in self.containers:
+                    raise ContainerError("Unknown integration consumer %r in %s" % (name, producer.name))
                 if not isinstance(declarations, Mapping):
-                    raise ContainerError(
-                        f"Invalid {name} integrations in {producer.name}")
+                    raise ContainerError("Invalid %s integrations in %s" % (name, producer.name))
+                entries = OrderedDict()
                 for local_id, declaration in declarations.items():
                     if not isinstance(local_id, str) or not local_id:
-                        raise ContainerError(
-                            f"Invalid {name} integration ID in {producer.name}")
-                    yield producer, local_id, declaration
+                        raise ContainerError("Invalid %s integration ID in %s" % (name, producer.name))
+                    entries[local_id] = declaration
+                consumers[name] = MappingProxyType(entries)
+            result[producer.name] = MappingProxyType(consumers)
+        return MappingProxyType(result)
+
+    @cached_property
+    def config_source_snapshot(self) -> "Mapping":
+        """Validate source names and retain only installed configuration sources."""
+        from collections.abc import Iterable
+        from types import MappingProxyType
+
+        result = {}
+        installed = self.integration_snapshot
+        for name in installed:
+            sources = self.containers[name].config_sources
+            if isinstance(sources, (str, bytes)) or not isinstance(sources, Iterable):
+                raise ContainerError("config_sources in %s must be an iterable of names" % name)
+            selected = []
+            for source in sources:
+                if not isinstance(source, str) or source not in self.containers:
+                    raise ContainerError("Unknown config source %r in %s" % (source, name))
+                if source in installed and source not in selected:
+                    selected.append(source)
+            result[name] = tuple(selected)
+        return MappingProxyType(result)
+
+    def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, str, Any]]":
+        """Yield read-only declaration inputs from the command's installed snapshot."""
+        if consumer_name not in self.containers:
+            raise ContainerError("Unknown integration consumer: " + consumer_name)
+        snapshot = self.integration_snapshot
+        if consumer_name not in snapshot:
+            return
+        for producer_name, consumers in snapshot.items():
+            for local_id, value in consumers.get(consumer_name, {}).items():
+                yield self.containers[producer_name], local_id, value
+
+    @cached_property
+    def nginx_sites(self) -> "Mapping":
+        from collections import OrderedDict
+        from types import MappingProxyType
+        from ._nginx import NginxSite, ResolvedSite
+
+        result = OrderedDict()
+        # Keep identities when nginx is absent so missing IDs never silently pass.
+        for producer_name, consumers in self.integration_snapshot.items():
+            producer = self.containers[producer_name]
+            for local_id, declaration in consumers.get("nginx", {}).items():
+                if not isinstance(declaration, NginxSite):
+                    raise ContainerError("Invalid nginx site %s/%s: expected NginxSite" % (producer_name, local_id))
+                result[(producer_name, local_id)] = ResolvedSite(producer, local_id, declaration)
+        return MappingProxyType(result)
 
     def load_installed_config_metadata(self) -> "list[BaseContainer]":
         """Load installed containers and register their own config fields,

@@ -3,7 +3,8 @@
 """Authelia container definition."""
 
 import os
-from typing import TYPE_CHECKING, Mapping, Any
+from typing import TYPE_CHECKING
+from types import MappingProxyType
 
 import rsa
 import yaml
@@ -15,7 +16,9 @@ from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvi
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
-    from typing import Any
+    from typing import Any, Mapping
+    from pathlib import Path
+    from linktools.cntr.artifacts import GeneratedCandidate
     from collections.abc import Iterable
     from linktools.cntr import EventContext, ExposeLink
 
@@ -25,6 +28,10 @@ class Container(BaseContainer):
     @property
     def dependencies(self) -> "Iterable[str]":
         return ["nginx", "lldap"]
+
+    @property
+    def config_sources(self) -> "Iterable[str]":
+        return ("nginx", "lldap")
 
     @cached_property
     def configs(self) -> "dict[str, Any]":
@@ -73,16 +80,14 @@ class Container(BaseContainer):
         ]
 
     @cached_property
-    def oidc_client(self) -> "Mapping[str, Any]":
-        """Read-only OIDC connection details, independent of site redirects."""
-        from types import MappingProxyType
-
-        domain = self.get_config("AUTHELIA_DOMAIN")
-        issuer = utils.make_url("https", domain, self.get_config("NGINX_HTTPS_PORT"))
+    def _oidc_identity(self) -> "Mapping[str, Any]":
+        issuer = str(self.load_nginx_url("web"))
+        if not issuer.startswith("https://"):
+            raise ContainerError("Authelia requires a concrete HTTPS public URL")
         return MappingProxyType({
             "client_id": f"{self.project_name}-web-client",
             "client_name": f"Web Client ({self.project_name})",
-            "client_secret": self.get_config("AUTHELIA_OIDC_CLIENT_SECRET"),
+            "client_secret": str(self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")),
             "issuer_url": issuer,
             "authorization_url": issuer + "/api/oidc/authorization",
             "token_url": issuer + "/api/oidc/token",
@@ -92,23 +97,19 @@ class Container(BaseContainer):
         })
 
     @cached_property
-    def acl_rules(self) -> "list[dict[str, Any]]":
-        """Regenerate native access rules from this project's current sites."""
-        from linktools.cntr import NginxSite
+    def oidc_client(self) -> "Mapping[str, Any]":
+        """Read-only identity and callbacks rebuilt from the current declarations."""
+        client = dict(self._oidc_identity)
+        client["redirect_uris"] = self.oidc_redirects
+        return MappingProxyType(client)
 
+    @cached_property
+    def acl_rules(self) -> "list[dict[str, Any]]":
         rules = []
-        for producer, site_id, site in self.manager.iter_integrations("nginx"):
-            if not isinstance(site, NginxSite):
-                raise ContainerError(f"Invalid nginx integration {producer.name}/{site_id}")
-            domain = str(site.server_name)
-            if not domain or not site.auth_rule:
+        for site in self.containers["nginx"].sites.values():
+            if not site.enabled or not site.auth or not site.auth_rule:
                 continue
             rule = dict(site.auth_rule)
-            if "domain" not in rule and "domain_regex" not in rule:
-                if domain.startswith("~") or "*" in domain or " " in domain or domain == "_":
-                    raise ContainerError(
-                        f"Authelia rule for {producer.name}/{site_id} requires a native domain")
-                rule["domain"] = [domain]
             rule.setdefault(
                 "policy",
                 "two_factor" if self.get_config("AUTHELIA_MIN_AUTH_LEVEL") > 1 else "one_factor",
@@ -118,58 +119,13 @@ class Container(BaseContainer):
 
     @cached_property
     def oidc_redirects(self) -> "tuple[str, ...]":
-        """Rebuild currently declared callbacks, never restoring stale derived state."""
-        from urllib.parse import urlsplit, urlunsplit
-        from linktools.cntr import NginxSite
-
-        redirects = [self.oidc_client["issuer_url"]]
-        for producer, site_id, site in self.manager.iter_integrations("nginx"):
-            if not isinstance(site, NginxSite):
-                raise ContainerError(f"Invalid nginx integration {producer.name}/{site_id}")
-            domain = str(site.server_name)
-            if not domain or not site.oidc_redirects:
-                continue
-            if domain == "_" or domain.startswith("~") or "*" in domain or " " in domain:
-                if not site.url:
-                    raise ContainerError(f"OIDC site {producer.name}/{site_id} requires a URL")
-            base = str(site.url) if site.url else utils.make_url(
-                "https" if site.https is not False else "http", domain,
-                self.get_config("NGINX_HTTPS_PORT" if site.https is not False else "NGINX_HTTP_PORT")
-            )
-            if "{{" in base or "}}" in base:
-                raise ContainerError(f"OIDC site {producer.name}/{site_id} has a template URL")
-            for redirect in site.oidc_redirects:
-                target = str(redirect)
-                if target.startswith("//"):
-                    raise ContainerError(f"OIDC site {producer.name}/{site_id} has a protocol-relative URI")
-                if not target:
-                    target = base
-                elif target.startswith("/"):
-                    parsed = urlsplit(base)
-                    target = urlunsplit((parsed.scheme, parsed.netloc, target, "", ""))
-                parsed = urlsplit(target)
-                if parsed.scheme != "https" or not parsed.netloc or parsed.fragment:
-                    raise ContainerError(f"OIDC site {producer.name}/{site_id} has an invalid redirect URI")
-                if target not in redirects:
-                    redirects.append(target)
+        redirects = [self._oidc_identity["issuer_url"]]
+        for site in self.containers["nginx"].sites.values():
+            if site.enabled:
+                for redirect in site.oidc_redirects:
+                    if redirect not in redirects:
+                        redirects.append(redirect)
         return tuple(redirects)
-
-    @cached_property
-    def oidc_clients(self) -> "list[dict[str, Any]]":
-        """Native Authelia authoring structure derived from one read-only client."""
-        client = self.oidc_client
-        return [{
-            "ClientID": client["client_id"],
-            "ClientName": client["client_name"],
-            "ClientSecret": client["client_secret"],
-            "IssuerURL": client["issuer_url"],
-            "AuthorizationURL": client["authorization_url"],
-            "AccessTokenURL": client["token_url"],
-            "ResourceURL": client["userinfo_url"],
-            "RedirectURLs": self.oidc_redirects,
-            "UserIdentifier": client["user_identifier"],
-            "Scopes": " ".join(client["scopes"]),
-        }]
 
     @cached_property
     def acl_config(self) -> str:
@@ -186,39 +142,51 @@ class Container(BaseContainer):
             sort_keys=False, allow_unicode=True,
         )
 
-    def on_init(self) -> None:
-        self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
-
     def on_check(self, context: "EventContext") -> None:
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
 
-    def _update_files(self):
+    @property
+    def generated_config_path(self) -> "Path":
+        return self.get_app_path("generated")
+
+    def prepare_generated_config(self, context: "EventContext") -> None:
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
-        config_path = self.get_app_path("config")
-        config_path.mkdir(parents=True, exist_ok=True)
-        template_path = self.get_source_path("templates")
-
-        self.runtime.chown(secret_path, self.user, recursive=True)
+        self.get_app_path("config").mkdir(parents=True, exist_ok=True)
         self.runtime.chmod(secret_path, 0o700, recursive=True)
-        self.runtime.chown(config_path, self.user, recursive=True)
-        self.runtime.chmod(config_path, 0o700, recursive=True)
-
-        self._create_secret_file(secret_path / "jwt_secret")
-        self._create_secret_file(secret_path / "session_secret")
-        self._create_secret_file(secret_path / "storage_encryption_key")
-        self._create_secret_file(secret_path / "oidc_hmac_secret")
+        for name in ("jwt_secret", "session_secret", "storage_encryption_key", "oidc_hmac_secret"):
+            self._create_secret_file(secret_path / name)
         self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
-        utils.write_file(secret_path / "authentication_backend_ldap_password", self.get_config("LLDAP_ADMIN_PASSWORD"))
 
-        self.render_template(template_path / "configuration.yml", config_path / "configuration.yml")
-        self.render_template(template_path / "configuration.acl.yml", config_path / "configuration.acl.yml")
-        self.render_template(template_path / "configuration.2fa.yml", config_path / "configuration.2fa.yml")
-        self.render_template(template_path / "configuration.oidc.yml", config_path / "configuration.oidc.yml")
+    def render_generated_config(self, generation_id: str) -> "dict[str, str]":
+        result = {
+            name: self.render_template(self.get_source_path("templates", name))
+            for name in ("configuration.yml", "configuration.acl.yml",
+                         "configuration.2fa.yml", "configuration.oidc.yml")
+        }
+        result["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
+        return result
 
-        self.runtime.chown(secret_path, "root", recursive=True)
-        self.runtime.chown(config_path, "root", recursive=True)
+    def validate_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+        root = "/generated/" + candidate.generation_id
+        command = ["authelia", "config", "validate"]
+        command.extend("--config=" + root + "/" + name for name in (
+            "configuration.yml", "configuration.acl.yml",
+            "configuration.2fa.yml", "configuration.oidc.yml"))
+        self.manager.compose_runner.validate_service(
+            context, "authelia", command,
+            environment={"AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE":
+                         root + "/authentication_backend_ldap_password"},
+        )
+
+    def apply_generated_config(self, candidate: "GeneratedCandidate", context: "EventContext") -> None:
+        runner = self.manager.compose_runner
+        recreate = candidate.changed or not runner.is_generation_current(context, "authelia", candidate)
+        runner.apply_service(context, "authelia", recreate=recreate)
+        runner.wait_service_healthy(context, "authelia")
+        base_changed = "configuration.yml" in candidate.changed_files
+        runner.apply_service(context, "authelia-admin", recreate=base_changed)
 
     @subcommand("show-notification", help="show notification")
     def on_show_notification(self) -> None:
@@ -231,7 +199,7 @@ class Container(BaseContainer):
     @subcommand("list-oidc-clients", help="list OIDC clients")
     def on_list_oidc_clients(self) -> None:
         self.logger.info(
-            yaml.dump(self.oidc_clients, sort_keys=False)
+            yaml.safe_dump(dict(self.oidc_client), sort_keys=False)
         )
 
     @subcommand("list-acl-rules", help="list acl rules")

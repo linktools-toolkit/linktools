@@ -3,10 +3,10 @@ services:
     image: 'authelia/authelia:{{ AUTHELIA_TAG }}'
     command:
       - 'authelia'
-      - '--config=/config/configuration.yml'
-      - '--config=/config/configuration.acl.yml'
-      - '--config=/config/configuration.2fa.yml'
-      - '--config=/config/configuration.oidc.yml'
+      - '--config=/generated/current/configuration.yml'
+      - '--config=/generated/current/configuration.acl.yml'
+      - '--config=/generated/current/configuration.2fa.yml'
+      - '--config=/generated/current/configuration.oidc.yml'
     environment:
       - AUTHELIA_LOG_LEVEL=debug
       - AUTHELIA_SESSION_SECRET_FILE=/secrets/session_secret
@@ -16,11 +16,12 @@ services:
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_ADDRESS={{ AUTHELIA_LDAP_ADDRESS }}
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_BASE_DN={{ AUTHELIA_LDAP_BASE_DN }}
       - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_USER=uid={{ AUTHELIA_LDAP_USER }},ou=people,{{ AUTHELIA_LDAP_BASE_DN }}
-      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/secrets/authentication_backend_ldap_password
+      - AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/generated/current/authentication_backend_ldap_password
       - X_AUTHELIA_CONFIG_FILTERS=template
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
+      - '{{ (APP_PATH/"generated") | mkdir | chown }}:/generated:ro'
     networks:
       authelia:
       nginx:
@@ -41,8 +42,10 @@ services:
     volumes:
       - '{{ (APP_PATH/"config") | mkdir | chown }}:/config'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
+      - '{{ (APP_PATH/"generated") | mkdir | chown }}:/generated:ro'
     environment:
       - AAD_LOGLEVEL=DEBUG
+      - AAD_AUTHELIA_CONFIG_PATH=/generated/current/configuration.yml
       - AAD_AUTHELIA_DOMAIN={{ AUTHELIA_DOMAIN }}:{{ NGINX_HTTPS_PORT }}
       - AAD_AUTHELIA_COOKIE_NAME={{ manager.project_name }}-auth-session
       - AAD_AUTHELIA_MIN_AUTH_LEVEL=1
@@ -52,7 +55,7 @@ services:
       - AAD_DIRECTORY_LLDAP_GRAPHQL_PASSWORD={{ AUTHELIA_LDAP_PASSWORD }}
       - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_HOST={{ AUTHELIA_LDAP_HOST }}
       - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_PORT={{ AUTHELIA_LDAP_PORT }}
-      - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_BASE_DN={{ LLDAP_BASE_DN }}
+      - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_BASE_DN={{ AUTHELIA_LDAP_BASE_DN }}
       - TRUSTED_ORIGINS={{ utils.make_url("https", AUTHELIA_DOMAIN, NGINX_HTTPS_PORT) }}
       - NODE_TLS_REJECT_UNAUTHORIZED=0
     networks:

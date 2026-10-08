@@ -81,7 +81,8 @@ def test_plan_up_full(fresh_manager):
     expected = {c.name for c in fresh_manager.prepare_installed_containers()}
     assert set(plan.resolved_containers) == expected
     assert expected
-    assert [c.phase for c in plan.commands] == ["up"]
+    assert plan.commands and all(c.phase == "up" for c in plan.commands)
+    assert all("--no-deps" in c.args for c in plan.commands)
 
 
 def test_plan_resolved_containers_include_dependencies_of_a_partial_target(fresh_manager):
@@ -100,7 +101,9 @@ def test_plan_up_partial_matches_real_selection(fresh_manager):
 
 def test_plan_restart_includes_stop_and_up(fresh_manager):
     plan = fresh_manager.planner.plan("restart", names=["portainer"])
-    assert [c.phase for c in plan.commands] == ["stop", "up"]
+    assert plan.commands[0].phase == "stop"
+    assert all(c.phase == "up" for c in plan.commands[1:])
+    assert plan.commands[0].args[-2:] == ("stop", "portainer")
 
 
 def test_plan_down_includes_down_command(fresh_manager):
@@ -110,7 +113,8 @@ def test_plan_down_includes_down_command(fresh_manager):
 
 def test_plan_pull_keeps_compose_side_pull_disabled(fresh_manager):
     plan = fresh_manager.planner.plan("up", names=["portainer"], pull=True)
-    assert [c.phase for c in plan.commands] == ["up"]
+    assert plan.commands and all(c.phase == "up" for c in plan.commands)
+    assert all("--no-deps" in c.args for c in plan.commands)
     up_command = plan.commands[0]
     assert "never" in up_command.args
     assert "always" not in up_command.args
@@ -362,23 +366,15 @@ def test_plan_text_render_never_contains_raw_proxy_secret(fresh_manager, monkeyp
 
 def test_plan_up_command_matches_runtime_builder_exactly(fresh_manager):
     plan = fresh_manager.planner.plan("up", names=["portainer"])
-    selection = fresh_manager.compose_operations.select(["portainer"])
-    options = ComposeOptions(
-        remove_orphans=selection.full,
-        services=list(selection.services),
-    )
-    expected_tail = tuple(fresh_manager.compose_runner.up_args(options))
-    up_command = plan.commands[0]
-    assert up_command.args[-len(expected_tail):] == expected_tail
+    for command in plan.commands:
+        expected_tail = tuple(fresh_manager.compose_runner.apply_service_args(command.args[-1]))
+        assert command.args[-len(expected_tail):] == expected_tail
 
 
 def test_plan_restart_up_command_matches_runtime_builder_exactly(fresh_manager):
     plan = fresh_manager.planner.plan("restart", names=["portainer"])
-    selection = fresh_manager.compose_operations.select(["portainer"])
-    options = ComposeOptions(
-        remove_orphans=selection.full,
-        services=list(selection.services),
-    )
-    expected_tail = tuple(fresh_manager.compose_runner.up_args(options))
-    up_command = next(command for command in plan.commands if command.phase == "up")
-    assert up_command.args[-len(expected_tail):] == expected_tail
+    assert plan.commands[0].phase == "stop"
+    assert plan.commands[0].args[-2:] == ("stop", "portainer")
+    for command in plan.commands[1:]:
+        expected_tail = tuple(fresh_manager.compose_runner.apply_service_args(command.args[-1]))
+        assert command.args[-len(expected_tail):] == expected_tail

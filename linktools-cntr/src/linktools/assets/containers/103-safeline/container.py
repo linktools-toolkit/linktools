@@ -20,6 +20,10 @@ class Container(BaseContainer):
     def dependencies(self) -> "Iterable[str]":
         return ["nginx"]
 
+    @property
+    def config_sources(self) -> "Iterable[str]":
+        return ("nginx",)
+
     @cached_property
     def configs(self) -> "dict[str, Any]":
         return dict(

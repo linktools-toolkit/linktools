@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 
 from ..artifacts import collect_candidates, sha256_of
 from ..container import ContainerError
-from ..runtime.compose import ComposeOptions
 from ..runtime.structured import redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
 
@@ -37,6 +36,16 @@ class ExecutionPlanner:
             names: "list[str] | None" = None,
             pull: bool = False,
     ) -> "ExecutionPlan":
+        from linktools.core import Config
+        with Config.read_only_resolution():
+            return self._plan(action, names=names, pull=pull)
+
+    def _plan(
+            self,
+            action: str,
+            names: "list[str] | None" = None,
+            pull: bool = False,
+    ) -> "ExecutionPlan":
         if action not in ("up", "restart", "down"):
             raise ContainerError(f"Unsupported plan action: {action!r}; expected up/restart/down")
 
@@ -45,7 +54,8 @@ class ExecutionPlanner:
         # a third-party container's on_prepare() (arbitrary file writes/
         # network access/hook registration) just to describe what a real
         # up/restart/down would do.
-        selection = manager.compose_operations.select(names, metadata_only=True)
+        selection = manager.compose_operations.select(names, metadata_only=True, for_start=action != "down")
+        start_selection = manager.compose_operations.start_selection(selection) if action != "down" else selection
 
         candidates = collect_candidates(manager, selection.project_containers)
         artifacts = [
@@ -69,9 +79,14 @@ class ExecutionPlanner:
         if action == "restart":
             commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
         if action in ("up", "restart"):
-            options = ComposeOptions(remove_orphans=selection.full, services=list(selection.services))
-            commands.append(self._planned_command(
-                "up", [*file_args, *manager.compose_runner.up_args(options)]))
+            ordered = list(start_selection.target_containers)
+            ordered = ([c for c in ordered if c.name not in ("nginx", "flare")] +
+                       [c for c in ordered if c.name == "nginx"] +
+                       [c for c in ordered if c.name == "flare"])
+            for container in ordered:
+                for service in container.services:
+                    commands.append(self._planned_command(
+                        "up", [*file_args, *manager.compose_runner.apply_service_args(service, remove_orphans=selection.full)]))
         elif action == "down":
             commands.append(self._planned_command("down", [*file_args, "down", *services]))
 
@@ -94,6 +109,15 @@ class ExecutionPlanner:
                 ))
 
         warnings = []
+        if action in ("up", "restart"):
+            sync = manager.compose_operations.sync_selection(start_selection)
+            for container in sync:
+                if container.generated_config_path is not None:
+                    warnings.append("{}: generated candidate native validation is pending execution; "
+                                    "no hooks, secrets or generated files were prepared".format(container.name))
+            if any(container.name == "nginx" for container in sync):
+                warnings.append("nginx: first stable generated-parent mount requires container recreation; "
+                                "cold starts use health-only bootstrap before provider readiness")
         preflight = "skipped"
         if action in ("up", "restart") and candidate_files:
             preflight = manager.docker_inspector.preflight_candidates(candidate_files)

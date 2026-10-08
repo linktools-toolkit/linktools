@@ -61,6 +61,7 @@ class ServiceRuntimeState:
     image: "str | None"
     exit_code: "int | None"
     labels: "dict[str, str]"
+    image_id: "str | None" = None
 
 
 _RUNNING_STATES = ("running", "restarting")
@@ -204,6 +205,7 @@ def _map_inspect_item(
         image=config.get("Image"),
         exit_code=_normalize_exit_code(state_data.get("ExitCode")),
         labels={str(k): str(v) for k, v in labels.items()},
+        image_id=item.get("Image"),
     )
 
 

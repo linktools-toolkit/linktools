@@ -1,104 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Verifies load_nginx_url's start-hook identity and idempotent registration.
+"""Navigation never owns proxy registration or mutates declaration identities."""
+from types import SimpleNamespace
 
-The dedup key must include every parameter that shapes the generated nginx
-conf, so two different domains proxying to the same backend each get their
-own conf written, while re-evaluating the same exposure still registers only
-one hook.
-"""
-from linktools.core import ConfigField
-from linktools.cntr._container.expose import _freeze
+from linktools.cntr import NginxSite
+from linktools.cntr._container.expose import ExposeMixin, NginxMixin
 
 
-def test_same_backend_with_different_domains_registers_two_hooks(fresh_manager, monkeypatch):
-    container = fresh_manager.containers["portainer"]
-    baseline = len(container.start_hooks)
-
-    written = []
-    monkeypatch.setattr(container, "write_nginx_conf", lambda **kwargs: written.append(kwargs))
-
-    container.load_nginx_url(
-        ConfigField(name="TEST_APP_DOMAIN", default="app.example.com"),
-        proxy_url="http://backend:8080",
-    )
-    container.load_nginx_url(
-        ConfigField(name="TEST_ADMIN_DOMAIN", default="admin.example.com"),
-        proxy_url="http://backend:8080",
-    )
-
-    added = container.start_hooks[baseline:]
-    assert len(added) == 2
-
-    for hook in added:
-        hook()
-
-    assert {call["domain"] for call in written} == {"app.example.com", "admin.example.com"}
+def test_same_site_can_have_many_navigation_links_without_hooks():
+    class Links(ExposeMixin):
+        name = "app"
+        start_hooks = []
+        manager = SimpleNamespace(nginx_sites={
+            ("app", "web"): SimpleNamespace(url="https://app.example.com"),
+        })
+    container = Links()
+    first = container.load_nginx_url("web")
+    second = container.load_nginx_url("web", "admin")
+    assert str(first) == "https://app.example.com"
+    assert str(second) == "https://app.example.com/admin"
+    assert not container.start_hooks
 
 
-def test_same_nginx_exposure_evaluated_twice_is_deduplicated(fresh_manager, monkeypatch):
-    container = fresh_manager.containers["portainer"]
-    baseline = len(container.start_hooks)
-
-    monkeypatch.setattr(container, "write_nginx_conf", lambda **kwargs: None)
-
-    field = ConfigField(name="TEST_SAME_DOMAIN", default="same.example.com")
-    container.load_nginx_url(field, proxy_url="http://backend:9090")
-    container.load_nginx_url(field, proxy_url="http://backend:9090")
-
-    assert len(container.start_hooks) - baseline == 1
+def test_sites_share_backends_without_sharing_identity():
+    one = NginxSite("app.example.com", proxy="http://backend:8080")
+    two = NginxSite("admin.example.com", proxy="http://backend:8080")
+    assert one is not two
+    assert one.proxy == two.proxy
 
 
-def test_freeze_sorts_sets_into_a_canonical_order():
-    # set iteration order is a function of insertion/deletion history, not
-    # just content, so _freeze must not rely on it: two sets built
-    # differently but holding the same elements must freeze identically.
-    assert _freeze({3, 1, 2}) == _freeze({1, 2, 3}) == ("set", (1, 2, 3))
-
-
-def test_freeze_does_not_conflate_list_and_set_of_same_elements():
-    assert _freeze(["a", "b"]) != _freeze({"a", "b"})
-
-
-def test_nginx_hook_uses_registration_time_auth_extra(fresh_manager, monkeypatch):
-    # auth_extra is caller-owned; mutating it after registration must not
-    # change what the hook writes, since the hook key was already derived
-    # from its contents at registration time.
-    container = fresh_manager.containers["portainer"]
-    baseline = len(container.start_hooks)
-
-    written = []
-    monkeypatch.setattr(container, "write_nginx_conf", lambda **kwargs: written.append(kwargs))
-
-    auth_extra = {"uris": ["/a"]}
-    field = ConfigField(name="TEST_SNAPSHOT_DOMAIN", default="snapshot.example.com")
-    container.load_nginx_url(field, proxy_url="http://backend:9092", auth_extra=auth_extra)
-
-    auth_extra["uris"].append("/b")
-
-    added = container.start_hooks[baseline:]
-    assert len(added) == 1
-    added[0]()
-
-    assert written[0]["auth_extra"] == {"uris": ["/a"]}
-
-
-def test_same_backend_with_equivalent_but_differently_built_auth_extra_sets_is_deduplicated(
-        fresh_manager, monkeypatch):
-    container = fresh_manager.containers["portainer"]
-    baseline = len(container.start_hooks)
-
-    monkeypatch.setattr(container, "write_nginx_conf", lambda **kwargs: None)
-
-    uris_a = {"/oauth/callback", "/login/callback"}
-    uris_b = set()
-    for item in ("/login/callback", "/oauth/callback", "/tmp1", "/tmp2"):
-        uris_b.add(item)
-    for item in ("/tmp1", "/tmp2"):
-        uris_b.discard(item)
-
-    field = ConfigField(name="TEST_AUTH_EXTRA_DOMAIN", default="auth.example.com")
-    container.load_nginx_url(field, proxy_url="http://backend:9091", auth_extra={"uris": uris_a})
-    container.load_nginx_url(field, proxy_url="http://backend:9091", auth_extra={"uris": uris_b})
-
-    assert len(container.start_hooks) - baseline == 1
+def test_legacy_mutating_entrypoints_are_absent():
+    assert not hasattr(ExposeMixin, "load_exist_nginx_url")
+    assert not hasattr(NginxMixin, "write_nginx_conf")

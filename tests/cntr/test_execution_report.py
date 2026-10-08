@@ -10,6 +10,8 @@ from linktools.cntr.runtime.images import ImagePlan
 
 
 def _record(manager, monkeypatch, build=False):
+    from _harness import stub_generated_runtime
+    stub_generated_runtime(manager, monkeypatch)
     def fake(containers, *args, privilege=None, **kwargs):
         class _Proc:
             def check_call(self):
@@ -57,7 +59,9 @@ def test_up_records_build_and_up_phases(fresh_manager, monkeypatch):
 
     records = get_records(context_holder[0])
     phases = [r.phase for r in records]
-    assert phases == ["build", "up"]
+    assert phases[0] == "build"
+    assert "up" in phases
+    assert phases.index("validate-config") < phases.index("bootstrap")
     assert all(isinstance(r, ExecutionRecord) and r.success for r in records)
 
 
@@ -121,6 +125,8 @@ def test_failure_diagnostic_is_logged_regardless_of_report_flag(fresh_manager, m
 
 
 def test_build_command_proxy_secrets_are_redacted(fresh_manager, monkeypatch):
+    from _harness import stub_generated_runtime
+    stub_generated_runtime(fresh_manager, monkeypatch)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
     monkeypatch.setenv("http_proxy", "http://user:super-secret@proxy:8080")

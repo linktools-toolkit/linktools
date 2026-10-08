@@ -161,3 +161,31 @@ def normalize_compose(data, manager) -> str:
     for value, token in _scrub_pairs(manager):
         text = text.replace(value, token)
     return text
+
+
+def stub_generated_runtime(manager, monkeypatch):
+    """Keep routing tests at the command boundary; native validation has its own tests."""
+    from types import SimpleNamespace
+    from linktools.cntr.runtime.inspect import ProjectRuntimeState
+    monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
+                        ProjectRuntimeState(manager.project_name, (), "docker"))
+    monkeypatch.setattr(manager.compose_runner, "wait_service_healthy", lambda *args: None)
+    monkeypatch.setattr(manager.compose_runner, "apply_service", lambda context, service, recreate=False:
+                        manager.runtime.create_docker_compose_process(context.containers,
+                            *manager.compose_runner.apply_service_args(service, recreate)).check_call())
+    monkeypatch.setattr(manager.compose_runner, "apply_services", lambda context, services:
+                        [manager.compose_runner.apply_service(context, service) for service in services])
+    def candidate(container):
+        return SimpleNamespace(container=container, changed=True, generation_id="candidate", previous_id=None,
+                               publish=lambda: None, restore=lambda: None)
+    monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate", candidate)
+    for container in manager.containers.values():
+        if container.generated_config_path is not None:
+            monkeypatch.setattr(container, "prepare_generated_config", lambda context: None)
+            monkeypatch.setattr(container, "validate_generated_config", lambda candidate, context: None)
+            monkeypatch.setattr(container, "apply_generated_config", lambda candidate, context:
+                                manager.compose_runner.apply_services(context, tuple(candidate.container.services)))
+    def bootstrap(context):
+        manager.compose_runner.apply_service(context, "nginx")
+        context.nginx_bootstrap_id = "bootstrap"
+    monkeypatch.setattr(manager.containers["nginx"], "bootstrap_generated_config", bootstrap)

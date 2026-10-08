@@ -6,14 +6,28 @@
   },
   "services": {
     "lldap": {
+      "command": [
+        "run",
+        "--config-file",
+        "/generated/current/lldap_config.toml"
+      ],
       "container_name": "aio-lldap",
       "environment": [
         "UID=0",
         "GID=0",
         "LLDAP_LDAP_BASE_DN=dc=_",
         "LLDAP_JWT_SECRET_FILE=/secrets/jwt_secret",
-        "LLDAP_LDAP_USER_PASS_FILE=/secrets/ldap_user_pass"
+        "LLDAP_LDAP_USER_PASS_FILE=/generated/current/ldap_user_pass"
       ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/app/lldap",
+          "healthcheck",
+          "--config-file",
+          "/generated/current/lldap_config.toml"
+        ]
+      },
       "hostname": "lldap",
       "image": "lldap/lldap:stable",
       "logging": {
@@ -27,6 +41,7 @@
       },
       "restart": "unless-stopped",
       "volumes": [
+        "<APP_DATA>/lldap/generated:/generated:ro",
         "<APP_DATA>/lldap/data:/data",
         "<APP_DATA>/lldap/secrets:/secrets:ro"
       ]

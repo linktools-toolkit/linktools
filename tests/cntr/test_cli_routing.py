@@ -12,6 +12,8 @@ _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
 
 
 def _record(manager, monkeypatch):
+    from _harness import stub_generated_runtime
+    stub_generated_runtime(manager, monkeypatch)
     recorded = []
 
     def fake(containers, *args, privilege=None, **kwargs):
@@ -46,7 +48,7 @@ def test_cli_up_partial_records_exact_args(monkeypatch, fresh_manager):
     cntr_main.command.on_command_up(names=["portainer"], pull=False)
 
     assert any(cmd[0] == "build" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
-    assert any(cmd[0] == "up" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
+    assert {"portainer", "nginx"} <= {cmd[-1] for cmd in recorded if cmd[0] == "up"}
 
 
 def test_cli_restart_partial_records_stop_build_and_up(monkeypatch, fresh_manager):
@@ -59,7 +61,7 @@ def test_cli_restart_partial_records_stop_build_and_up(monkeypatch, fresh_manage
 
     assert any(cmd[0] == "build" and "portainer" in cmd for cmd in recorded)
     assert ("stop", "portainer") in recorded
-    assert any(cmd[0] == "up" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
+    assert {"portainer", "nginx"} <= {cmd[-1] for cmd in recorded if cmd[0] == "up"}
     assert next(i for i, cmd in enumerate(recorded) if cmd[0] == "build") < recorded.index(("stop", "portainer"))
 
 
@@ -82,7 +84,7 @@ def test_cli_up_pull_true_routes_through_image_preparation(monkeypatch, fresh_ma
 
     assert any(cmd[:2] == ("pull", "--ignore-buildable") and "portainer" in cmd for cmd in recorded)
     assert not any(cmd[0] == "build" for cmd in recorded)
-    assert any(cmd[0] == "up" and "portainer" in cmd and "nginx" in cmd for cmd in recorded)
+    assert {"portainer", "nginx"} <= {cmd[-1] for cmd in recorded if cmd[0] == "up"}
 
 
 def test_only_one_manager_singleton_backs_the_cli():
