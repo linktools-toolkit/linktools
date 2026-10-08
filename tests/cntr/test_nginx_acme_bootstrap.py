@@ -414,6 +414,26 @@ def test_rollback_uses_previously_served_renewed_certificate(certificate_case, m
     assert calls[1] == ("apply", "nginx")
 
 
+@pytest.mark.parametrize("previous", ["versions/legacy", None])
+def test_initial_migration_rollback_restores_live_certificate_link(certificate_case, monkeypatch, previous):
+    container, root, _, _ = certificate_case
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
+    live = root / "certs/live"
+    live.unlink()
+    live.symlink_to("versions/pending")
+    container.rollback_config(SimpleNamespace(nginx_certificate_previous=previous))
+    assert live.is_symlink() is (previous is not None)
+    if previous is not None:
+        assert os.readlink(str(live)) == previous
+
+
+def test_initial_migration_without_certificate_switch_keeps_existing_link(certificate_case, monkeypatch):
+    container, root, _, _ = certificate_case
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
+    container.rollback_config(SimpleNamespace())
+    assert os.readlink(str(root / "certs/live")) == "versions/legacy"
+
+
 def test_preparation_reuses_matching_certificate_without_issuance(certificate_case, monkeypatch):
     container, root, _, _ = certificate_case
     monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
