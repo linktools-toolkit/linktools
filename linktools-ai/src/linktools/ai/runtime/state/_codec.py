@@ -85,6 +85,8 @@ from ._evaluation_records import (
 
 from ...agent import AgentInputCaptureRef, AgentBindingContract
 from ...core import (
+    BudgetUsage,
+    RunBudget,
     RUNTIME_OBJECT_STORE_ID,
     ApprovalDecision,
     ApprovalStatus,
@@ -201,6 +203,7 @@ from ._task_graph_binding_capture import (
     TASK_GRAPH_BINDING_CAPTURE_MANIFEST_KEYS,
     read_task_graph_binding_capture_declarations,
 )
+from ._budget_records import BudgetModelReservation, BudgetToolReservation
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._step_contracts import (
     AgentRunRecord,
@@ -221,6 +224,10 @@ DomainT = TypeVar("DomainT")
 _logger = environ.get_logger("ai.runtime.state.codec")
 
 _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
+    ("run_budget", RunBudget),
+    ("budget_usage", BudgetUsage),
+    ("budget_model_reservation", BudgetModelReservation),
+    ("budget_tool_reservation", BudgetToolReservation),
     ("evaluation_candidate_slot_ref", CandidateSlotRef),
     ("evaluation_score_selection", ScoreSelection),
     ("evaluation_score_comparison_selection", ScoreComparisonSelection),
@@ -405,6 +412,10 @@ _V1_ENUM_TYPES = MappingProxyType(
 
 _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
+        "run_budget": ("model_requests", "tool_calls", "total_tokens", "deadline_at"),
+        "budget_usage": ("scope_id", "limits", "model_requests", "tool_calls", "total_tokens", "in_flight_model_requests", "unknown_model_requests"),
+        "budget_model_reservation": ("scope_id", "request_id", "owner_id", "admission_id", "status", "total_tokens"),
+        "budget_tool_reservation": ("scope_id", "call_id", "admission_id"),
         "evaluation_candidate_slot_ref": ('experiment_id', 'slot_id'),
         "evaluation_score_selection": ('scorer_slot_id', 'dimension', 'scoring_experiment_id', 'decision_id'),
         "evaluation_score_comparison_selection": ('baseline', 'candidate'),
@@ -471,7 +482,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "execution_event": ("execution_id", "event_seq", "event_type", "payload"),
         "execution_history_head": ("execution_id", "state", "revision", "seal_digest"),
         "execution_history_seal": ("execution_id", "run_heads", "execution_event_high_water"),
-        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "previous_execution_id", "fork_base_execution_id", "lineage_kind", "status", "revision", "event_seq", "agent_run_seq", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_agent_run_id", "result", "repository_instructions", "input_context", "context_imported", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "requires_task_invocation_capture", "retention_closed", "started_at"),
+        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "previous_execution_id", "fork_base_execution_id", "lineage_kind", "status", "revision", "event_seq", "agent_run_seq", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_agent_run_id", "result", "repository_instructions", "input_context", "context_imported", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "requires_task_invocation_capture", "retention_closed", "started_at", "budget_scope_id"),
         "execution_run_seal_head": ("agent_run_id", "event_count", "checkpoint_count", "transcript_message_count", "projection_digest", "interaction_count"),
         "model_interaction": ("agent_run_id", "step_index", "model_request_seq", "purpose", "output_retry_index", "model", "request_context", "request_envelope", "response_context", "status", "error_code", "duration_ns", "usage", "started_at", "finished_at", "attachments"),
         "execution_start_claim": ("execution_id", "expected_revision", "expected_event_seq", "scope", "idempotency_key_digest", "request_digest", "started_at"),
@@ -512,7 +523,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "transcript_span_ref": ("source_domain", "owner_id", "start", "end"),
         "tool_operation_admission": ("execution_id", "tool_operation_id", "agent_run_id", "recovery_agent_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "owner", "lease_seconds", "arguments_payload"),
         "task_graph": ("graph_id", "nodes"),
-        "task_graph_admission": ("version", "graph_id", "principal", "limits", "operation_id", "initial_request_digest", "correlation"),
+        "task_graph_admission": ("version", "graph_id", "principal", "limits", "operation_id", "initial_request_digest", "correlation", "budget", "budget_scope_id"),
         "task_graph_submission": ("namespace", "admission", "graph"),
         "task_submission_ref": ("namespace", "tenant_id", "graph_id", "request_digest", "operation_id", "principal"),
         "task_graph_limits": ("max_concurrency", "max_depth", "max_nodes", "max_budget"),

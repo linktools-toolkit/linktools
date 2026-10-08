@@ -35,8 +35,8 @@ from ._sandbox import (
     ReadOnlySandboxPolicy,
     SandboxResource,
     SandboxResourcePath,
-    SandboxSession,
     SandboxStdioProcess,
+    StdioSandboxSession,
     _normalize_stdio_environment,
     _stdio_resource_root,
     normalize_workspace_input_path,
@@ -118,7 +118,7 @@ class LocalSandbox:
         *,
         root: Path,
         resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
+    ) -> StdioSandboxSession:
         policy = self._read_policy
         normalized_root = _normalize_root(root)
         workspace = Workspace(normalized_root, {})

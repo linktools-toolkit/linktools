@@ -152,12 +152,17 @@ class RuntimeEvaluations:
             principal=principal, now=now, exclusive=exclusive, limit=limit)
 
     async def close(self) -> None:
+        """Stop coordination and reject new execution and control requests."""
         self._closed = True
         tasks = tuple(self._watchers.values())
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._watchers.clear()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, retryable=False)
 
     async def _authorize(
         self, principal: Principal, action: AuthorizationAction, identity: str,
@@ -280,6 +285,7 @@ class RuntimeEvaluations:
     async def start(
         self, request: StartEvaluationRequest, *, engine: "TaskEngine[AppT]",
     ) -> "EvaluationRun":
+        self._ensure_open()
         bound = self._engine(engine)
         spec, principal = request.spec, request.principal
         identity = idempotency_key_digest(request.idempotency_key)
@@ -338,6 +344,7 @@ class RuntimeEvaluations:
         self, experiment_id: str, *, engine: "TaskEngine[AppT]", principal: Principal,
         idempotency_key: str,
     ) -> "EvaluationRun":
+        self._ensure_open()
         validate_idempotency_key(idempotency_key)
         record = await self._record(experiment_id, principal, AuthorizationAction.EVALUATION_RECONCILE)
         require_evaluation_content(record, now=_now())
@@ -385,8 +392,7 @@ class RuntimeEvaluations:
                     raise AIError(ErrorCode.BINDING_CONFLICT)
 
     def _watch(self, experiment_id: str, engine: "TaskEngine | None", principal: Principal) -> None:
-        if self._closed:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        self._ensure_open()
         current = self._watchers.get(experiment_id)
         if current is None or current.done():
             self._watchers[experiment_id] = asyncio.create_task(self._coordinate(experiment_id, engine, principal))
@@ -958,7 +964,7 @@ class RuntimeEvaluations:
                 cursor = None
                 while True:
                     page = await self._history.trace(execution_id, principal=principal, cursor=cursor,
-                                                     include_content=True, limit=100)
+                                                     limit=100)
                     for item in page.items:
                         trace[(item.execution_id, item.step_event_seq)] = {"execution_id": item.execution_id,
                             "step_event_seq": item.step_event_seq, "payload": item.payload}
@@ -1229,6 +1235,7 @@ class RuntimeEvaluations:
         return estimate_model_budget(policy, observations, usage_complete=complete, price_table=prices).stop
 
     async def _cancel(self, experiment_id: str, principal: Principal, key: str) -> EvaluationView:
+        self._ensure_open()
         validate_idempotency_key(key)
         await self._record(experiment_id, principal, AuthorizationAction.EVALUATION_CANCEL)
         view = await self._inspect(experiment_id, principal)
@@ -1245,6 +1252,7 @@ class RuntimeEvaluations:
     async def _rescore(
         self, experiment_id: str, principal: Principal, request: RescoreRequest, engine: "TaskEngine",
     ) -> "EvaluationRun":
+        self._ensure_open()
         source = await self._record(experiment_id, principal, AuthorizationAction.EVALUATION_RESCORE)
         if source.manifest.kind != "experiment":
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE, "rescore requires a target experiment")
@@ -1283,6 +1291,7 @@ class RuntimeEvaluations:
     async def _human_score(
         self, experiment_id: str, principal: Principal, request: HumanScoreRequest,
     ) -> ScoreAttemptView:
+        self._ensure_open()
         record = await self._record(experiment_id, principal, AuthorizationAction.EVALUATION_HUMAN_SCORE)
         await self._require_content(record, principal)
         intent = next((item for item in record.intents if item.trial.trial_id == request.trial_id and
@@ -1355,10 +1364,10 @@ class EvaluationRun:
 
     async def wait(
         self, *, on_event: Callable[[TaskGraphRunEvent], Awaitable[None]] | None = None,
-        cursor: str | None = None, include_content: bool = False,
+        cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
     ) -> WaitResult[EvaluationView]:
-        _validate_wait(on_event, cursor, include_content, timeout_seconds, close_timeout_seconds)
+        _validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds)
 
         async def authoritative() -> EvaluationView:
             while True:
@@ -1369,7 +1378,7 @@ class EvaluationRun:
 
         return await _wait(
             scope="evaluation", resource_id=self.experiment_id, waiter=authoritative,
-            watch=lambda ready: self._watch_prepared(cursor, include_content, ready),
+            watch=lambda ready: self._watch_prepared(cursor, include_event_content, ready),
             on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
             close_timeout_seconds=close_timeout_seconds,
             register=self._evaluations._register_observation,

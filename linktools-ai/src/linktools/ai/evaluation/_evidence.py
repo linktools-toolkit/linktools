@@ -12,7 +12,7 @@ from typing import Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from ..asset import AssetVersionRef
-from ..core import ImmutableJsonMapping, JsonValue, UsageMetrics, canonical_sha256
+from ..core import ImmutableJsonMapping, JsonValue, UsageMetrics, canonical_sha256, validate_idempotency_key
 from ..storage import ObjectRef
 from ._contracts import InlineValue, ScorerContract, TargetTrialRef
 
@@ -252,9 +252,10 @@ class HumanScoreRequest:
 
     def __post_init__(self) -> None:
         if not all(isinstance(value, str) and value.strip() for value in (
-            self.trial_id, self.scorer_slot_id, self.idempotency_key,
+            self.trial_id, self.scorer_slot_id,
         )):
             raise ValueError("human score request identity is incomplete")
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True, init=False)

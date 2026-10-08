@@ -31,11 +31,14 @@ from linktools.ai.runtime._event import (
     _LiveEvent,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from linktools.ai.runtime._watch_cursor import decode_graph_watch_cursor
 from linktools.ai.runtime.service_api import (
     ExecutionEvent,
     ExecutionTreeEvent,
     ExecutionView,
+    ModelInteractionReadBoundary,
+    TaskGraphProjection,
 )
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
 from linktools.ai.runtime.state._contracts import (
@@ -260,7 +263,7 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
                 graph_id,
                 "node",
                 (),
-                TaskStatus.WAITING,
+                TaskStatus.SUCCEEDED if waiter_release.is_set() else TaskStatus.WAITING,
                 None,
                 1,
                 None,
@@ -271,10 +274,10 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
             )
             return TaskGraphState(
                 graph_id,
-                TaskStatus.RUNNING,
+                TaskStatus.SUCCEEDED if waiter_release.is_set() else TaskStatus.RUNNING,
                 (TaskNode("node"),),
                 (state,),
-                1,
+                2 if waiter_release.is_set() else 1,
             )
 
         async def wait(
@@ -287,6 +290,15 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
             del principal, timeout_seconds
             await waiter_release.wait()
             return TaskGraphState(graph_id, TaskStatus.SUCCEEDED, (), ())
+
+        async def list_events(self, graph_id: str, *, principal: Principal,
+                              after_event_seq: int = 0, limit: int = 100):
+            values = (TaskEvent(1, graph_id, 1, TaskEventType.NODE_CHANGED, now,
+                TaskStatus.WAITING, previous_status=TaskStatus.RUNNING,
+                node_id="node", fence=1, execution_id="execution"),)
+            if waiter_release.is_set():
+                values = (*values, terminal_graph_event)
+            return Page(tuple(value for value in values if value.event_seq > after_event_seq)[:limit])
 
         async def stream_events(
             self,
@@ -341,21 +353,36 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
             return ExecutionView(
                 "execution",
                 "agent",
-                ExecutionStatus.STARTED,
+                executions.execution.status,
                 ExecutionLineageKind.RUN,
                 None,
                 "execution",
                 None,
-                event_seq=1,
+                event_seq=executions.execution.event_seq,
             )
+
+        async def list_children(self, execution_id: str, *, principal: Principal):
+            return ()
+
+    async def subscribe_model_interactions(execution_id: str, *, principal: Principal):
+        return None
+
+    async def capture_model_interaction_cutoffs(execution_id: str, *, principal: Principal):
+        return ModelInteractionReadBoundary((), (), True, True)
 
     runtime = SimpleNamespace(
         namespace="watch-test",
         graph=GraphService(),
         executions=ExecutionService(),
+        history=SimpleNamespace(subscribe_model_interactions=subscribe_model_interactions,
+            capture_model_interaction_cutoffs=capture_model_interaction_cutoffs),
+        _ensure_open=lambda: None,
         _register_observation=lambda session: None,
         _release_observation=lambda session: None,
     )
+    streamer = ExecutionTreeStreamer(runtime.executions, execution_service, ExecutionTreeBroker())
+    runtime._capture_execution_tree = streamer.capture
+    runtime._replay_execution_tree = streamer.replay
     run = TaskGraphRun(
         runtime,
         runtime.graph,
@@ -416,8 +443,12 @@ async def test_graph_wait_does_not_wait_for_observer_completion() -> None:
     await asyncio.wait_for(observing, 1)
 
     assert observed_terminal.is_set()
-    assert observed[-1].event == terminal_graph_event
+    assert terminal_graph_event in [item.event for item in observed if isinstance(item.event, TaskEvent)]
+    assert isinstance(observed[-1].event, TaskGraphProjection)
+    assert observed[-1].event.phase == "final"
     assert observed[-1].cursor is not None
+    assert decode_graph_watch_cursor("watch-test", "tenant", "graph", observed[-1].cursor,
+        include_content=False) == (2, {"node": {"execution": 2}})
 
 
 @pytest.mark.asyncio

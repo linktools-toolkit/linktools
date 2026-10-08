@@ -426,6 +426,7 @@ class DefaultSessionService:
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
         return await self._resume(
             agent_id,
@@ -435,6 +436,7 @@ class DefaultSessionService:
             binding_contract=binding_contract,
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id,
         )
 
     async def _resume(
@@ -447,6 +449,7 @@ class DefaultSessionService:
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(
@@ -479,6 +482,7 @@ class DefaultSessionService:
                 thinking=request.thinking,
                 correlation=request.correlation,
                 files=request.files,
+                budget=request.budget,
             )
             return await self._execution.start_for_session(
                 agent_id,
@@ -488,6 +492,7 @@ class DefaultSessionService:
                 binding_contract=binding_contract,
                 dependency_hold_id=dependency_hold_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id,
             )
 
     async def fork(

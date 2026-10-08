@@ -15,7 +15,7 @@ from ..agent import AgentInputCaptureRef
 from ..asset import AssetVersionRef
 from ..core import (
     ImmutableJsonMapping, JsonValue, Principal, WorkspaceFileInput,
-    canonical_sha256, principal_identity_payload,
+    canonical_sha256, principal_identity_payload, validate_idempotency_key,
 )
 from ..task import (
     TaskGraphCaptureRef, TaskGraphLimits, TaskGraphTemplate,
@@ -477,7 +477,7 @@ class StartEvaluationRequest:
     idempotency_key: str
 
     def __post_init__(self) -> None:
-        _name(self.idempotency_key)
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,7 +487,7 @@ class RescoreRequest:
     trial_ids: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
-        _name(self.idempotency_key)
+        validate_idempotency_key(self.idempotency_key)
         if not self.scorers or len({value.slot_id for value in self.scorers}) != len(self.scorers):
             raise ValueError("rescore requires unique scorer slots")
         object.__setattr__(self, "scorers", tuple(self.scorers))

@@ -29,6 +29,7 @@ class _Components:
     artifact = object()
     task_node_runtime = None
     task_admissions = None
+    budgets = None
     tree_streamer = None
     binding_resolver = None
     input_captures = None

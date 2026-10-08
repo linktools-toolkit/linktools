@@ -15,6 +15,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
+    ExecutionStatus,
     JsonValue,
     Principal,
     ResourceKind,
@@ -30,9 +31,10 @@ from linktools.ai.runtime import (
     Runtime,
     RuntimeStorage,
     TaskGraphRunEvent,
+    TaskGraphProjection,
 )
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
-from linktools.ai.runtime.service_api import ExecutionStreamEvent, ExecutionTreeEvent
+from linktools.ai.runtime.service_api import ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView, ModelInteractionReadBoundary
 from linktools.ai.runtime.state._sql import _SqlTransaction
 from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
@@ -472,9 +474,12 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
             execution_id: str,
             *,
             principal: Principal,
-        ) -> SimpleNamespace:
+        ) -> ExecutionView:
             assert principal == principal_arg
-            return SimpleNamespace(
+            return ExecutionView(
+                execution_id, "default",
+                ExecutionStatus.FAILED if execution_id == "execution-child-failed" else ExecutionStatus.SUCCEEDED,
+                ExecutionLineageKind.RUN, None, execution_id, None,
                 binding_kind=(
                     "agent"
                     if execution_id in {
@@ -482,7 +487,8 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
                         "execution-child-failed",
                     }
                     else "task"
-                )
+                ),
+                event_seq=1,
             )
 
         def watch_tree(
@@ -521,10 +527,36 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
 
             return events()
 
+        async def capture_tree(execution_id: str, *, principal: Principal, after_event_seqs=None):
+            view = await inspect_execution(execution_id, principal=principal)
+            return ((view, 0, view.event_seq),)
+
+        async def replay_tree(captured, *, principal: Principal, after_event_seqs=None, include_content=False):
+            for view, _, _ in captured:
+                async for event in watch_tree(
+                    view.execution_id, principal=principal, after_event_seqs=after_event_seqs,
+                    include_content=include_content,
+                ):
+                    yield event
+
+        async def model_cutoffs(*args, **kwargs):
+            return ModelInteractionReadBoundary((), (), False, True)
+
+        async def subscribe_models(*args, **kwargs):
+            return None
+
+        history = SimpleNamespace(
+            capture_model_interaction_cutoffs=model_cutoffs,
+            subscribe_model_interactions=subscribe_models,
+        )
+
         principal_arg = principal
         monkeypatch.setattr(RuntimeTaskNodeRunner, "run", run_child)
         monkeypatch.setattr(runtime.executions, "inspect", inspect_execution)
         monkeypatch.setattr(runtime, "_watch_execution_tree", watch_tree)
+        monkeypatch.setattr(runtime, "_capture_execution_tree", capture_tree)
+        monkeypatch.setattr(runtime, "_replay_execution_tree", replay_tree)
+        monkeypatch.setattr(runtime, "history", history)
         engine = runtime.tasks.bind(root_task, agent_task, expander)
         run = await engine.start(
             graph,
@@ -535,6 +567,10 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         await asyncio.wait_for(root_started.wait(), timeout=5)
         watch = run.watch()
         first = await asyncio.wait_for(anext(watch), timeout=5)
+        assert isinstance(first.event, TaskGraphProjection)
+        assert [node.node_id for node in first.event.graph.nodes] == ["root"]
+        while not isinstance(first.event, TaskEvent):
+            first = await asyncio.wait_for(anext(watch), timeout=5)
         assert isinstance(first.event, TaskEvent)
         assert first.event.event_type is TaskEventType.GRAPH_ADMITTED
         assert not expansion_started.is_set()
@@ -581,6 +617,9 @@ async def test_sqlite_dynamic_watch_resumes_after_runtime_reopen(
         )
         monkeypatch.setattr(runtime.executions, "inspect", inspect_execution)
         monkeypatch.setattr(runtime, "_watch_execution_tree", watch_tree)
+        monkeypatch.setattr(runtime, "_capture_execution_tree", capture_tree)
+        monkeypatch.setattr(runtime, "_replay_execution_tree", replay_tree)
+        monkeypatch.setattr(runtime, "history", history)
         reopened = await runtime.tasks.bind(root_task, agent_task, expander).get(
             graph.graph_id,
             principal=principal,

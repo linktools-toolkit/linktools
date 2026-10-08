@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import EvaluationRun
-from linktools.ai.runtime.service_api import TaskGraphRunEvent
+from linktools.ai.runtime.service_api import TaskGraphRunEvent, TaskGraphProjection, TaskModelProjection
 from linktools.ai.runtime._watch_cursor import (
     decode_evaluation_watch_cursor, decode_graph_watch_cursor, encode_graph_watch_cursor,
 )
@@ -243,9 +243,16 @@ async def test_evaluation_real_task_graphs_watch_and_wait_share_resumable_events
         assert outcome.observation_error is None
         remaining = [item async for item in handle.watch(cursor=outcome.cursor)]
         all_items = seen + remaining
-        identities = [(item.graph_id, item.event.event_seq) for item in all_items]
-        assert len(identities) == len(set(identities))
-        assert len({item.graph_id for item in all_items}) == 2
+        durable = [item for item in all_items if isinstance(item.event, TaskEvent)]
+        identities = [(item.graph_id, item.event.event_seq) for item in durable]
+        assert identities and len(identities) == len(set(identities))
+        assert len({item.graph_id for item in durable}) == 2
+        projections = [item for item in all_items if isinstance(item.event, (TaskGraphProjection, TaskModelProjection))]
+        assert projections
+        assert {item.graph_id for item in projections} <= {item.graph_id for item in durable}
+        assert all(item.event.graph.graph_id == item.graph_id
+                   for item in projections if isinstance(item.event, TaskGraphProjection))
+        assert all(item.event.observed_at.tzinfo is not None for item in projections)
         assert [item async for item in handle.watch(cursor=all_items[-1].cursor)] == []
 
 

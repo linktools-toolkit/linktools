@@ -6,8 +6,11 @@ import math
 import pytest
 
 from linktools.ai.agent import AgentInputCaptureRef
+from linktools.ai.core import service_principal
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     AgentCaseInput,
+    CandidateSpec,
     CaseContract,
     CaseRef,
     CaseSpec,
@@ -15,17 +18,22 @@ from linktools.ai.evaluation import (
     DatasetSpec,
     DimensionContract,
     EvaluationPolicy,
+    EvaluationSpec,
     EvidenceRef,
     EvidenceAttachmentRef,
     ExecutionSubjectRef,
     ExecutionTargetEvidence,
     GraphInputContract,
     GraphOutputItem,
+    HumanScoreRequest,
     InlineValue,
+    RescoreRequest,
     ScoreBundle,
     ScoreNotApplicable,
     ScorerContract,
+    ScorerSpec,
     ScoringInput,
+    StartEvaluationRequest,
     TargetTrialRef,
     TaskCaseInput,
 )
@@ -147,3 +155,29 @@ def test_runtime_attachment_semantics_do_not_depend_on_storage_locator() -> None
     assert first.to_mapping() == {
         "kind": "runtime_content", "attachment_id": "image", "media_type": "image/png", "digest": "a" * 64, "size": 3,
     }
+
+
+def evaluation_request(kind: str, key: str) -> StartEvaluationRequest | RescoreRequest | HumanScoreRequest:
+    scorer = ScorerSpec("score", TaskRef("test.score", 1), (DimensionContract("match", "boolean", "higher", 0, 1),))
+    if kind == "start":
+        return StartEvaluationRequest(EvaluationSpec(DatasetRef("dataset", 1),
+            (CandidateSpec("candidate", task=TaskRef("test.target", 1)),), (scorer,)),
+            service_principal("tenant", "owner"), key)
+    if kind == "rescore":
+        return RescoreRequest((scorer,), key)
+    return HumanScoreRequest("trial", "score", EvidenceRef("namespace", "tenant", "evidence", "a" * 64),
+                             ScoreBundle(dimensions={"match": 1.0}), key)
+
+
+@pytest.mark.parametrize("kind", ("start", "rescore", "human"))
+@pytest.mark.parametrize("key", ("", " invalid ", "invalid\nkey", "\ud800", "x" * 257, "é" * 129))
+def test_evaluation_requests_reject_invalid_idempotency_keys(kind: str, key: str) -> None:
+    with pytest.raises(AIError) as raised:
+        evaluation_request(kind, key)
+    assert raised.value.code is ErrorCode.IDEMPOTENCY_KEY_INVALID
+
+
+@pytest.mark.parametrize("kind", ("start", "rescore", "human"))
+@pytest.mark.parametrize("key", ("evaluation:key-1", "x" * 256, "é" * 128))
+def test_evaluation_requests_preserve_valid_idempotency_keys(kind: str, key: str) -> None:
+    assert evaluation_request(kind, key).idempotency_key == key

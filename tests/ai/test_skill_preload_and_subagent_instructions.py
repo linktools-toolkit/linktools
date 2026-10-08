@@ -4,15 +4,72 @@
 
 import pytest
 
-from linktools.ai.capability import SkillCapability, SkillDefinition, SubagentCapability
+from linktools.ai.agent import AgentCompiler
+from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
+from linktools.ai.capability import (
+    CapabilityGroup,
+    SkillCapability,
+    SkillDefinition,
+    SubagentCapability,
+)
 from linktools.ai.capability._skill_source import SkillSourceRegistry
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import ModelRegistry
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, SkillSpec, SubagentRef
+from linktools.ai.storage import StorageOverlay
 
 
 def _skill(identity: str, content: str) -> SkillDefinition:
     return SkillDefinition(SkillSpec(identity, content))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("available", (False, True))
+async def test_group_agent_preloads_survive_capture_and_require_selected_skills(
+    available: bool,
+) -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        if available:
+            await store.put(
+                AssetKey("skill", "guide/SKILL.md"),
+                b"---\nname: guide\ndescription: Follow the guide.\n---\nguide instructions",
+            )
+        group: CapabilityGroup[object] = CapabilityGroup("application", assets=store)
+        preloads = ["guide", "guide"]
+        declared = group.agent("agent", preload_skills=preloads)
+        preloads.clear()
+        capture = await group.capture()
+        captured = next(item.value for item in capture.contributions if item.kind == "agent")
+        assert isinstance(captured, AgentSpec)
+        assert captured.preload_skills == declared.preload_skills == ("guide",)
+        compiler = AgentCompiler(
+            model_resolver=ModelRegistry.openai(model="unused-offline-model").capture(),
+            candidates=capture.contributions,
+            agents={captured.id: captured},
+        )
+        if available:
+            compiled = compiler.compile(captured)
+            assert compiled.spec.preload_skills == ("guide",)
+            assert tuple(skill.id for skill in compiled.skill_definitions) == ("guide",)
+        else:
+            with pytest.raises(AIError) as raised:
+                compiler.compile(captured)
+            assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("preloads", (("*",), ("other",)))
+def test_group_agent_validates_preload_selectors(preloads: tuple[str, ...]) -> None:
+    with pytest.raises(AIError) as raised:
+        CapabilityGroup("application").agent(
+            "agent", allow_skills=("guide",), preload_skills=preloads,
+        )
+    assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 def test_agent_spec_preload_codec_keeps_v1_and_omits_empty_field() -> None:

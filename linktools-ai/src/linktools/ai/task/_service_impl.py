@@ -13,6 +13,7 @@ from linktools.core import environ
 
 from ..core import (
     AuthorizationAction,
+    RunBudget,
     AuthorizationPolicy,
     OperationKind,
     OperationLedgerInput,
@@ -98,6 +99,12 @@ class _LocalTaskWaiter(Protocol):
 
 
 class _TaskGraphPreflight(Protocol):
+    """Own resolved execution dependencies, including admitted run-budget scopes.
+
+    Capture creates a new scope before dispatch; load validates the existing
+    scope without resetting it. Implementations must honor admission.budget.
+    """
+
     def admit_request(self, graph: TaskGraph) -> TaskGraph: ...
 
     async def capture_admission(
@@ -368,6 +375,14 @@ class DefaultTaskGraphService(TaskGraphService):
         self._detached_finalizers: set[asyncio.Task[object]] = set()
         self._detached_finalizer_failure: AIError | None = None
 
+    def _require_budget_owner(self, budget: RunBudget | None) -> None:
+        if budget is not None and self._preflight is None:
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                safe_details={"reason": "run_budget_owner_missing"},
+                retryable=False,
+            )
+
     async def start(self, request: TaskGraphRequest) -> TaskGraphResult:
         return await self._start_graph(request)
 
@@ -386,6 +401,7 @@ class DefaultTaskGraphService(TaskGraphService):
     async def describe_submission(
         self, request: TaskGraphRequest
     ) -> TaskGraphSubmission:
+        self._require_budget_owner(request.budget)
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         await self._authorization.authorize(
@@ -396,7 +412,7 @@ class DefaultTaskGraphService(TaskGraphService):
         if self._preflight is not None:
             request = TaskGraphRequest(
                 self._preflight.admit_request(request.graph), request.principal,
-                request.idempotency_key, request.limits, request.correlation,
+                request.idempotency_key, request.limits, request.correlation, request.budget,
             )
         return TaskGraphSubmission(self._persistence.admissions.namespace,
                                    TaskGraphAdmission.from_request(request), request.graph)
@@ -404,6 +420,7 @@ class DefaultTaskGraphService(TaskGraphService):
     async def prepare_described(
         self, submission: TaskGraphSubmission
     ) -> TaskGraphSubmission:
+        self._require_budget_owner(submission.admission.budget)
         if submission.namespace != self._persistence.admissions.namespace:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         admission = submission.admission
@@ -418,6 +435,7 @@ class DefaultTaskGraphService(TaskGraphService):
     async def start_prepared(
         self, submission: TaskGraphSubmission
     ) -> TaskSubmissionResult:
+        self._require_budget_owner(submission.admission.budget)
         admission = submission.admission
         graph_id = admission.graph_id
         tenant_id = admission.principal.tenant_id
@@ -521,6 +539,7 @@ class DefaultTaskGraphService(TaskGraphService):
 
 
     async def _arm_graph(self, launch: TaskGraphLaunch) -> None:
+        self._require_budget_owner(launch.budget)
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         task = asyncio.create_task(
@@ -608,6 +627,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 )
                 if admission is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._require_budget_owner(admission.budget)
                 state = await self._persistence.tasks.scheduler_state(
                     launch.graph_id,
                     tenant_id=launch.principal.tenant_id,
@@ -934,6 +954,7 @@ class DefaultTaskGraphService(TaskGraphService):
             or admission.principal.tenant_id != tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._require_budget_owner(admission.budget)
         if self._preflight is not None:
             await self._preflight.load_admission(admission)
             self._preflight.validate_recovery(state)

@@ -5,7 +5,7 @@
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from ..core import Principal
+from ..core import BudgetUsage, Principal
 from ._wait import WaitResult
 from ._input_capture import CaptureInputRequest, ExecutionInputCaptureRef, RuntimeInputCaptures
 from .recovery import (
@@ -74,10 +74,13 @@ class RuntimeExecutions(Generic[AppT]):
         service: ExecutionService,
         get_execution: Callable[[str, Principal | None], Awaitable["Execution[AppT]"]],
         input_captures: RuntimeInputCaptures | None = None,
+        *,
+        ensure_open: Callable[[], None] = lambda: None,
     ) -> None:
         self._service = service
         self._get_execution = get_execution
         self._input_captures = input_captures
+        self._ensure_open = ensure_open
 
     async def get(
         self,
@@ -88,10 +91,15 @@ class RuntimeExecutions(Generic[AppT]):
         return await self._get_execution(execution_id, principal)
 
     async def capture_input(self, execution_id: str, request: CaptureInputRequest) -> ExecutionInputCaptureRef:
+        self._ensure_open()
         if self._input_captures is None:
             from ..errors import AIError, ErrorCode
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return await self._input_captures.capture_input(execution_id, request)
+
+    async def budget_usage(self, execution_id: str, *, principal: Principal) -> BudgetUsage | None:
+        self._ensure_open()
+        return await self._service.budget_usage(execution_id, principal=principal)
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         return await self._service.inspect(execution_id, principal=principal)
@@ -108,31 +116,36 @@ class RuntimeExecutions(Generic[AppT]):
     async def wait(
         self, execution_id: str, *, principal: Principal,
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
-        cursor: str | None = None, include_content: bool = False,
+        cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
     ) -> WaitResult[ExecutionResult]:
         execution = await self.get(execution_id, principal=principal)
         return await execution.wait(
-            on_event=on_event, cursor=cursor, include_content=include_content,
+            on_event=on_event, cursor=cursor, include_event_content=include_event_content,
             timeout_seconds=timeout_seconds, close_timeout_seconds=close_timeout_seconds,
         )
 
     async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
+        self._ensure_open()
         return await self._service.retry(execution_id, request)
 
     async def fork(self, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
+        self._ensure_open()
         return await self._service.fork(execution_id, request)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
+        self._ensure_open()
         return await self._service.cancel(execution_id, request)
 
     async def recovery_effects(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionRecoveryEffect, ...]:
         return await self._service.recovery_effects(execution_id, principal=principal)
 
     async def resolve_tool_effect(self, execution_id: str, request: ResolveToolEffectRequest) -> ToolEffectResolutionResult:
+        self._ensure_open()
         return await self._service.resolve_tool_effect(execution_id, request)
 
     async def recover(self, execution_id: str, *, principal: Principal) -> ExecutionHandle:
+        self._ensure_open()
         return await self._service.recover(execution_id, principal=principal)
 
     async def trace(
@@ -141,7 +154,6 @@ class RuntimeExecutions(Generic[AppT]):
         *,
         principal: Principal,
         cursor: str | None = None,
-        include_content: bool = False,
         limit: int = 100,
         agent_run_seq: int | None = None,
         model_request_seq: int | None = None,
@@ -152,7 +164,6 @@ class RuntimeExecutions(Generic[AppT]):
             execution_id,
             principal=principal,
             cursor=cursor,
-            include_content=include_content,
             limit=limit,
             agent_run_seq=agent_run_seq,
             model_request_seq=model_request_seq,
@@ -200,17 +211,22 @@ class RuntimeSessions(Generic[AppT]):
         self,
         service: SessionService,
         get_session: Callable[[str, Principal | None], Awaitable["Session[AppT]"]],
+        *,
+        ensure_open: Callable[[], None] = lambda: None,
     ) -> None:
         self._service = service
         self._get_session = get_session
+        self._ensure_open = ensure_open
 
     async def get(self, session_id: str, *, principal: Principal | None = None) -> "Session[AppT]":
         return await self._get_session(session_id, principal)
 
     async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
+        self._ensure_open()
         return await self._service.create(agent_id, request)
 
     async def reconcile(self, session_id: str, *, principal: Principal) -> SessionView:
+        self._ensure_open()
         return await self._service.reconcile(session_id, principal=principal)
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
@@ -223,12 +239,15 @@ class RuntimeSessions(Generic[AppT]):
         return await self._service.timeline(session_id, principal=principal, cursor=cursor, limit=limit)
 
     async def fork(self, agent_id: str, session_id: str, request: ForkSessionRequest) -> SessionView:
+        self._ensure_open()
         return await self._service.fork(agent_id, session_id, request)
 
     async def update(self, agent_id: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
+        self._ensure_open()
         return await self._service.update(agent_id, session_id, request)
 
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
+        self._ensure_open()
         return await self._service.close(session_id, request)
 
 

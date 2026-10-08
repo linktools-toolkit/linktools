@@ -30,9 +30,9 @@ from ._sandbox import (
     ReadOnlySandboxPolicy,
     SandboxResource,
     SandboxResourcePath,
-    SandboxSession,
     SandboxStdioProcess,
     StdioSandbox,
+    StdioSandboxSession,
     _normalize_stdio_environment,
     _stdio_resource_root,
     normalize_workspace_input_path,
@@ -116,7 +116,7 @@ class BubblewrapSandbox:
         *,
         root: Path,
         resources: tuple[SandboxResource, ...] = (),
-    ) -> SandboxSession:
+    ) -> StdioSandboxSession:
         if sys.platform != "linux" or os.geteuid() == 0:
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
         if not hasattr(os, "pidfd_open"):

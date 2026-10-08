@@ -23,6 +23,7 @@ from ._agent_executor import (
     LiveDelta,
     _AgentRunScope,
 )
+from ._budget import RunBudgetContext
 from ._input import CanonicalUserInput
 from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
@@ -127,6 +128,7 @@ class _AgentRunInput:
     repository_instructions: RepositoryInstructions | None
     repository_instruction_boundary: RepositoryInstructionBoundary | None
     deferred_tool_results: DeferredToolResults | None
+    budget: RunBudgetContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +163,7 @@ class _AgentRunRunner:
     ) -> "_AgentRunCompleted | _AgentRunDeferred | _AgentRunFailed | _AgentRunCancelled":
         scope = _AgentRunScope(
             binding=agent_run_input.binding,
+            budget=agent_run_input.budget,
             context=agent_run_input.context,
             workspace=agent_run_input.workspace,
             limits=agent_run_input.limits,

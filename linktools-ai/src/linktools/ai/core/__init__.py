@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Pure core values and errors."""
 
+from ._budget import BudgetUsage, RunBudget
 from ._correlation import (
     CorrelationData,
     CorrelationValue,
@@ -97,6 +98,8 @@ from ._value import (
 )
 
 __all__ = [
+    "BudgetUsage",
+    "RunBudget",
     "ApprovalDecision",
     "ApprovalStatus",
     "AuthorizationAction",

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime composition and ownership invariants."""
 
+import runpy
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -249,3 +250,12 @@ async def test_runtime_persists_model_usage_through_history_views() -> None:
     }
     assert history.items
     assert transcript.items
+
+
+@pytest.mark.asyncio
+async def test_minimal_runtime_example_returns_public_wait_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    example = runpy.run_path(str(Path(__file__).resolve().parents[2] / "examples" / "minimal_runtime.py"))
+    monkeypatch.setattr(ModelRegistry, "openai", lambda **kwargs: RuntimeUsageModels())
+    assert await example["run"](tmp_path) == {"text": "done"}

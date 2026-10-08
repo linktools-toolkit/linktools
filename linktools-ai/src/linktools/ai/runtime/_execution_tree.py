@@ -8,12 +8,13 @@ from collections import deque
 from collections.abc import AsyncIterator, Mapping
 from typing import Protocol
 
-from ..core import ExecutionEventType, ExecutionLineageKind, Principal
+from ..core import ExecutionEventType, ExecutionLineageKind, Page, Principal
 from ..errors import AIError, ErrorCode
 from ._event import project_event_payload
 from ._observation import _is_observation_cleanup, _drain_stream_tasks, _await_stream_cleanup, _report_observation_error
 from .service_api import (
     ExecutionStreamEvent,
+    ExecutionEvent,
     ExecutionTreeEvent,
     ExecutionView,
     _ExecutionStreamFailure,
@@ -40,6 +41,15 @@ class _ExecutionTreeReader(Protocol):
 
 
 class _ExecutionEventStreamer(Protocol):
+    async def list(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_event_seq: int = 0,
+        limit: int = 100,
+    ) -> Page[ExecutionEvent]: ...
+
     def stream(
         self,
         execution_id: str,
@@ -129,6 +139,123 @@ class ExecutionTreeStreamer:
         self._executions = executions
         self._events = events
         self._broker = broker
+
+    async def capture(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+    ) -> tuple[tuple[ExecutionView, int, int], ...]:
+        """Freeze one finite visible subtree and its per-execution durable cutoffs."""
+        sequences = _normalize_after_event_seqs(after_event_seqs)
+        root = await self._executions.inspect(execution_id, principal=principal)
+        _validate_root(root, execution_id)
+        views = {execution_id: root}
+        depths = {execution_id: 0}
+        scanned: set[str] = set()
+
+        def add_child(parent_id: str, child: ExecutionView) -> bool:
+            _validate_child(views[parent_id], child)
+            existing = views.get(child.execution_id)
+            if existing is not None:
+                if (
+                    existing.parent_execution_id != child.parent_execution_id
+                    or existing.root_execution_id != child.root_execution_id
+                    or existing.lineage_kind != child.lineage_kind
+                    or existing.parent_invocation_id != child.parent_invocation_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return False
+            views[child.execution_id] = child
+            depths[child.execution_id] = depths[parent_id] + 1
+            return True
+
+        async def discover(parent_ids: tuple[str, ...]) -> None:
+            remaining = deque(parent_ids)
+            while remaining:
+                parent_id = remaining.popleft()
+                if parent_id in scanned:
+                    continue
+                scanned.add(parent_id)
+                for child in await self._executions.list_children(parent_id, principal=principal):
+                    if add_child(parent_id, child):
+                        remaining.append(child.execution_id)
+
+        await discover((execution_id,))
+        for member_id in sequences:
+            chain: list[ExecutionView] = []
+            seen: set[str] = set()
+            current_id = member_id
+            while current_id not in views:
+                if current_id in seen:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                seen.add(current_id)
+                view = await self._executions.inspect(current_id, principal=principal)
+                if view.execution_id != current_id:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                if (
+                    view.lineage_kind is not ExecutionLineageKind.SUBAGENT
+                    or not view.parent_execution_id
+                    or view.root_execution_id != root.root_execution_id
+                ):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                chain.append(view)
+                current_id = view.parent_execution_id
+            for view in reversed(chain):
+                add_child(current_id, view)
+                current_id = view.execution_id
+            await discover(tuple(view.execution_id for view in reversed(chain)))
+        captured = []
+        for view in views.values():
+            cutoff = view.event_seq
+            if (
+                isinstance(cutoff, bool)
+                or not isinstance(cutoff, int)
+                or cutoff < sequences.get(view.execution_id, 0)
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            captured.append((view, depths[view.execution_id], cutoff))
+        return tuple(captured)
+
+    async def replay(
+        self,
+        captured: tuple[tuple[ExecutionView, int, int], ...],
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        """Read only the captured durable suffix, failing closed on any gap."""
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        sequences = _normalize_after_event_seqs(after_event_seqs)
+        if set(sequences) - {view.execution_id for view, _, _ in captured}:
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        for view, depth, cutoff in captured:
+            cursor = sequences.get(view.execution_id, 0)
+            if cursor > cutoff:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            while cursor < cutoff:
+                page = await self._events.list(
+                    view.execution_id, principal=principal, after_event_seq=cursor,
+                    limit=min(200, cutoff - cursor),
+                )
+                items = tuple(event for event in page.items if event.event_seq <= cutoff)
+                if not items:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for event in items:
+                    if event.execution_id != view.execution_id or event.event_seq != cursor + 1:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    cursor = event.event_seq
+                    yield ExecutionTreeEvent(
+                        view.execution_id, view.agent_id, view.lineage_kind,
+                        view.parent_execution_id, view.root_execution_id,
+                        view.parent_invocation_id, depth,
+                        _project_stream_event(ExecutionStreamEvent(
+                            event.execution_id, event.event_seq, event.event_type, event.payload,
+                        ), include_content),
+                    )
 
     def stream(
         self,

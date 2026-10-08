@@ -12,7 +12,7 @@ namespace
         -> captured capability/declaration candidates
         -> AgentCompiler
         -> CompiledAgent
-        -> Runtime.agent(id)
+        -> runtime.agents.get(id)
         -> per-execution AgentBinding
         -> Agent / Session / Execution / Task / Evaluation / Recovery
 ```
@@ -26,9 +26,16 @@ The main ownership rules are:
 - `AgentSpec` is a runtime-independent Agent declaration.
 - `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the captured Runtime candidate set.
 - `Runtime` is the composition root and owns the service graph.
-- `Runtime.agent(id)` returns a Runtime-bound `Agent`; it does not compile or register new definitions.
+- `runtime.agents.get(id)` returns a Runtime-bound `Agent`; it does not compile or register new definitions.
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
 - `Session` is bound to `AgentSpec.id`; retry/recovery remain pinned to the exact historical execution binding.
+
+## Shared run budgets
+
+Use `RunBudget` at Agent, Session, or TaskGraph admission to share request/tool
+counts, observed tokens, and an admission deadline across the execution tree.
+See [shared run budgets](docs/run-budgets.md) for concurrency, unknown usage,
+continuation, and durable recovery guarantees.
 
 ## Evaluation
 
@@ -881,13 +888,18 @@ Private modules prefixed with `_` are implementation details. Downstream applica
 Execution, TaskGraphRun and EvaluationRun expose `watch()` and
 `wait(on_event=...)`. All SDK waits and Agent/Session run/plan return
 `WaitResult` with `result`, the acknowledged `cursor`, and optional
-`observation_error`. See [operation observation and migration](docs/task-observation.md)
+`observation_error`. `include_event_content` controls callback payloads only;
+`watch` retains its `include_content` option. Graph wait additionally uses
+`include_content` to choose whether its authoritative result includes raw node
+inputs. Node outputs are read with `result()` or `results()`.
+See [operation observation and migration](docs/task-observation.md)
 for recursive execution trees, evaluation graphs, cleanup guarantees, and the
 breaking SDK and StepEvent durable-wire changes. Existing development data is
 not automatically migrated or deleted.
 
 `Agent.plan()` and `Session.plan()` start real planner executions and wait for
-an observation boundary. They are not dry-run previews and can invoke models
-and authorized tools. Evaluation `completion="complete"` means planned work
+an observation boundary, selecting plan-safe tools. They are not dry-run
+previews and can invoke models and authorized tools. `run(planning=True)` stays
+in run mode and enables the planning capability; it does not select plan mode. Evaluation `completion="complete"` means planned work
 has settled; it does not assert that every target succeeded or every score is
 valid. Inspect trial outcomes, score statuses, and report gates separately.

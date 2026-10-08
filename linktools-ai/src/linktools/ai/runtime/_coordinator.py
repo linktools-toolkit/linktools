@@ -6,10 +6,10 @@ from collections.abc import AsyncIterator
 
 from linktools.core import environ
 
-from ..core import ExecutionEventType, Principal
+from ..core import ExecutionEventType, Page, Principal
 from ._event import DefaultEventService
 from ._execution import DefaultExecutionService
-from .service_api import ExecutionStreamEvent
+from .service_api import ExecutionEvent, ExecutionStreamEvent
 
 _logger = environ.get_logger("ai.runtime.coordinator")
 
@@ -24,6 +24,14 @@ class _LocalRuntimeCoordinator:
     ) -> None:
         self._execution = execution
         self._event = event
+
+    async def list(
+        self, execution_id: str, *, principal: Principal,
+        after_event_seq: int = 0, limit: int = 100,
+    ) -> Page[ExecutionEvent]:
+        return await self._event.list(
+            execution_id, principal=principal, after_event_seq=after_event_seq, limit=limit,
+        )
 
     async def stream(
         self,

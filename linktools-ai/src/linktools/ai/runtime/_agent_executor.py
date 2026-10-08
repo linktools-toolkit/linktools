@@ -107,6 +107,7 @@ from ..workspace import (
     Workspace,
 )
 
+from ._budget import RunBudgetContext, RunBudgetCapability
 from ._capabilities import compose_platform_capabilities
 from ._agent_run_recorder import AgentRunRecorder
 from ._compaction import CompactionPolicy
@@ -216,6 +217,7 @@ class _AgentRunScope:
     event_sink: EventSink | None = None
     usage_sink: UsageSink | None = None
     tool_operations: ToolOperationBridge | None = None
+    budget: RunBudgetContext | None = None
     replace_history_system_prompt: bool = False
     context_target_tokens: int | None = None
     repository_instructions: RepositoryInstructions | None = None
@@ -941,6 +943,8 @@ async def _materialize_agent(
     )
     if tool_metrics is not None:
         capabilities.append(ToolMetricsCapability(tool_metrics))
+    if scope.budget is not None:
+        capabilities.append(RunBudgetCapability(scope.budget))
 
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
     workspace_toolset_values = tuple(
@@ -962,6 +966,7 @@ async def _materialize_agent(
                 sandbox_session=scope.sandbox_session,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
+                budget=scope.budget,
                 repository_boundary=repository_boundary,
             )
         )
@@ -977,6 +982,7 @@ async def _materialize_agent(
                 projections=scope.mcp_projections,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
+                budget=scope.budget,
             )
         )
     if business_tools:
@@ -989,6 +995,7 @@ async def _materialize_agent(
                 id="linktools.business",
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
+                budget=scope.budget,
             ),
         )
     async def publish_model_request_event(
@@ -1010,6 +1017,7 @@ async def _materialize_agent(
         journal=model_journal,
         interaction_recorder=run_recorder,
         event_sink=publish_model_request_event,
+        budget=scope.budget,
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
@@ -1032,6 +1040,7 @@ async def _materialize_agent(
         model_journal=model_journal,
         model_request_recorder=model_observation.record_external_model_request,
         recorder=run_recorder,
+        budget=scope.budget,
     )
     capabilities.extend(platform)
 

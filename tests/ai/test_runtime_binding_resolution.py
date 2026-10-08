@@ -97,10 +97,11 @@ class _RecordingExecution:
         request: ExecutionRequest,
         *,
         dependency_hold_id: str | None = None,
+        budget_scope_id: str | None = None,
         binding_contract: AgentBindingContract | None = None,
         requires_task_invocation_capture: bool = False,
     ) -> ExecutionHandle:
-        del request, dependency_hold_id
+        del request, dependency_hold_id, budget_scope_id
         self.binding_digest = binding_digest
         self.binding_contract = binding_contract
         self.requires_task_invocation_capture = requires_task_invocation_capture
