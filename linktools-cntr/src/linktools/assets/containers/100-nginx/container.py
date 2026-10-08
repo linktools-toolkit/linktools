@@ -484,10 +484,14 @@ class Container(BaseContainer):
             )
             return
 
-        runner.validate_service(
-            context, "nginx",
-            ("/usr/local/bin/nginx-certificates", "prepare", version, domain),
-        )
+        try:
+            runner.validate_service(
+                context, "nginx",
+                ("/usr/local/bin/nginx-certificates", "prepare", version, domain),
+            )
+        except Exception:
+            shutil.rmtree(str(directory))
+            raise
         self._certificate_version = version
         if not os.path.lexists(str(current)):
             os.symlink("versions/" + version, str(current))
