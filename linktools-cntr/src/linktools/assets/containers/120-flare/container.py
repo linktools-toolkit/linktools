@@ -8,7 +8,7 @@ import yaml
 from linktools import utils
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
-from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr import BaseContainer, NginxSite, ContainerError
 from linktools.cntr.container import ExposeLink
 from linktools.errors import ConfigNotFoundError
 from linktools.rich import prompt
@@ -56,6 +56,20 @@ class Container(BaseContainer):
         if not r.get("FLARE_LOGIN_ENABLE"):
             raise ConfigNotFoundError("FLARE_LOGIN_ENABLE is disabled")
         return prompt("FLARE_PASSWORD")
+
+    @cached_property
+    def integrations(self) -> "dict[str, dict[str, NginxSite]]":
+        return {
+            "nginx": {
+                "web": NginxSite(
+                    server_name=self.get_config_later("FLARE_DOMAIN"),
+                    proxy="http://flare:5005",
+                    auth=None if self.get_config("FLARE_AUTH_ENABLE") else False,
+                    auth_bypass=(r"\.(css|js)$",),
+                    auth_rule={"policy": "one_factor"} if self.get_config("FLARE_AUTH_ENABLE") else None,
+                ),
+            },
+        }
 
     @cached_property
     def exposes(self) -> "Iterable[ExposeLink]":
@@ -119,16 +133,4 @@ class Container(BaseContainer):
         utils.write_file(
             self.get_app_path("app", "bookmarks.yml", create_parent=True),
             yaml.dump(data),
-        )
-
-        self.write_nginx_conf(
-            domain=self.get_config("FLARE_DOMAIN"),
-            proxy_url="http://flare:5005",
-            auth_enable=self.get_config("FLARE_AUTH_ENABLE"),
-            auth_extra={
-                "acl_bypass": ["\\.(css|js)$"],
-                "acl_rule": {
-                    "policy": "one_factor",
-                }
-            }
         )
