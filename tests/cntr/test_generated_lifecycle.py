@@ -213,10 +213,15 @@ def test_compose_only_apply_failure_restores_previous_service_model(tmp_path):
                               service_models=AppliedServiceModels(SimpleNamespace(data_path=tmp_path),
                                                                  {"services": {"app": {}}}))
     owner = SimpleNamespace(name="app", services={"app": {}})
+    started = []
+    manager = SimpleNamespace(compose_runner=runner, running_state=SimpleNamespace(mark_started=started.append))
     with pytest.raises(RuntimeError, match="new process failed"):
-        ComposeOperations(SimpleNamespace(compose_runner=runner))._apply_services_with_rollback(owner, context, ("app",))
+        ComposeOperations(manager)._apply_services_with_rollback(owner, context, ("app",))
     assert config.read_text() == "old"
     assert applied == [{str(config): "old"}]
+    assert len(started) == 1
+    assert started[0].target_containers == [owner]
+    assert started[0].is_full_containers is False
 
 
 def test_changed_compose_environment_prevents_generation_reuse():

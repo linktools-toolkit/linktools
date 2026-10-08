@@ -94,7 +94,7 @@ def running_nginx():
     return ServiceRuntimeState(("nginx",), "nginx", "nginx-runtime", "running", "healthy", "nginx:old", None, {})
 
 
-@pytest.mark.parametrize("failure", ["acknowledgment", "application"])
+@pytest.mark.parametrize("failure", ["acknowledgment", "application", "readiness"])
 def test_restart_bootstrap_failure_restores_generation_and_exact_runtime_snapshot(tmp_path, monkeypatch, failure):
     nginx = NginxContainer("nginx", {"nginx": {"image": "nginx:new"}}, tmp_path / "nginx")
     old_model = {"services": {"nginx": {"image": "nginx:old", "environment": {"VALUE": "price$$USD"}}},
@@ -128,6 +128,15 @@ def test_restart_bootstrap_failure_restores_generation_and_exact_runtime_snapsho
 
     if failure == "application":
         runner.apply_service = apply
+    if failure == "readiness":
+        wait_healthy = runner.wait_service_healthy
+
+        def wait(context, service):
+            if context.generated_candidates["nginx"].generation_id != prior.generation_id:
+                raise ContainerError("bootstrap readiness failed")
+            return wait_healthy(context, service)
+
+        runner.wait_service_healthy = wait
     with pytest.raises(ContainerError, match="bootstrap " + failure + " failed"):
         operations.restart(["nginx"])
     assert calls[0] == ("stop", "nginx")
@@ -411,3 +420,121 @@ def test_cold_bootstrap_uses_shared_validation_application_and_final_accounting(
         assert (root / "current/config").read_text() == ("bootstrap" if failure else "final")
     models = AppliedServiceModels(manager, runner.final_model(None)).previous
     assert ("example" in models) is (failure is None)
+
+
+@pytest.mark.parametrize("rollback_fails", [False, True])
+def test_plain_restart_rollback_records_only_restored_owner(tmp_path, monkeypatch, rollback_fails):
+    app = Container("app", {"app": {"image": "app:new"}, "idle": {}}, tmp_path / "app")
+    later = Container("later", {"later": {}}, tmp_path / "later")
+    untouched = Container("untouched", {"untouched": {}}, tmp_path / "untouched")
+    states = tuple(ServiceRuntimeState((name,), name, name, "running", None, "old", None, {})
+                   for name in ("app", "later", "untouched"))
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (app, later, untouched), states)
+    old_model = runner.final_model(None)
+    old_model["services"]["app"]["image"] = "app:old"
+    AppliedServiceModels(manager, old_model).record(tuple(old_model["services"]))
+    previous = dict(AppliedServiceModels(manager, runner.final_model(None)).previous)
+    operations.select = lambda *args, **kwargs: ComposeSelection(
+        (app, later, untouched), (app, later), ("app", "later"), False)
+    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
+    applied = []
+
+    def fail_apply(context, services):
+        applied.append(tuple(services))
+        raise ContainerError("new runtime rejected")
+
+    runner.apply_services = fail_apply
+    original = runner.apply_saved_services
+    restored_services = []
+
+    def restore(context, services, files):
+        restored_services.append(tuple(services))
+        if rollback_fails:
+            raise ContainerError("old runtime rejected")
+        return original(context, services, files)
+
+    runner.apply_saved_services = restore
+    message = "new runtime rejected"
+    if rollback_fails:
+        message += ".*Compose rollback failed: old runtime rejected"
+    with pytest.raises(ContainerError, match=message):
+        operations.restart(["app", "later"])
+    assert calls == [("stop", "app", "later")]
+    assert applied == [("app",)]
+    assert restored_services == [("app",)]
+    assert restored == ([] if rollback_fails else [previous["app"]])
+    assert AppliedServiceModels(manager, runner.final_model(None)).previous == previous
+    assert manager.running_state.get_persisted() == (["untouched"] if rollback_fails else ["app", "untouched"])
+
+
+@pytest.mark.parametrize("loaded_generation", ["new", "old"])
+def test_nginx_waits_for_health_before_generation_probe_or_reload(tmp_path, monkeypatch, loaded_generation):
+    nginx = NginxContainer("nginx", {"nginx": {}}, tmp_path / "nginx")
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (nginx,))
+    clock, events = [0.0], []
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    statuses = iter(("starting", "starting", "healthy"))
+
+    def inspect(containers):
+        health = next(statuses)
+        events.append(health)
+        state = ServiceRuntimeState(("nginx",), "nginx", "nginx", "running", health, "image", None, {})
+        return ProjectRuntimeState("test", (state,), "docker")
+
+    manager.docker_inspector.get_project_state = inspect
+    runner.apply_service = lambda *args: events.append("apply")
+    responses = iter((loaded_generation, "old", "new"))
+
+    def execute(context, service, command, check=True):
+        assert events[:4] == ["apply", "starting", "starting", "healthy"]
+        if command[0] == "nginx":
+            assert check
+            events.append("reload")
+            return SimpleNamespace(succeeded=True)
+        assert not check
+        events.append("probe")
+        return SimpleNamespace(succeeded=True, stdout=next(responses))
+
+    runner.exec_service = execute
+    nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new"), ("nginx",))
+    assert events[4:] == (["probe"] if loaded_generation == "new" else ["probe", "reload", "probe", "probe"])
+    assert clock[0] == (1.0 if loaded_generation == "new" else 1.25)
+
+
+@pytest.mark.parametrize("state,health", [("running", "starting"), ("exited", "unhealthy")])
+def test_nginx_readiness_timeout_never_attempts_reload(tmp_path, monkeypatch, state, health):
+    nginx = NginxContainer("nginx", {"nginx": {}}, tmp_path / "nginx")
+    runtime = ServiceRuntimeState(("nginx",), "nginx", "nginx", state, health, "image", None, {})
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (nginx,), (runtime,))
+    clock = [0.0]
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    runner.apply_service = lambda *args: None
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("An unready nginx must not be probed or reloaded")
+
+    runner.exec_service = unexpected
+    with pytest.raises(ContainerError, match="Service nginx did not become healthy"):
+        nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new"), ("nginx",))
+    assert clock[0] == 30.0
+
+
+def test_nginx_healthy_old_generation_still_requires_bounded_acknowledgment(tmp_path, monkeypatch):
+    nginx = NginxContainer("nginx", {"nginx": {}}, tmp_path / "nginx")
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (nginx,), (running_nginx(),))
+    clock, commands = [0.0], []
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("time.sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    runner.apply_service = lambda *args: None
+
+    def execute(context, service, command, check=True):
+        commands.append(command[0])
+        return SimpleNamespace(succeeded=True, stdout="old")
+
+    runner.exec_service = execute
+    with pytest.raises(ContainerError, match="Nginx did not acknowledge the generated configuration"):
+        nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new"), ("nginx",))
+    assert commands.count("nginx") == 1
+    assert clock[0] == 30.0

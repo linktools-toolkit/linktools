@@ -365,6 +365,7 @@ class ComposeOperations:
                 "kind": "compose-applied", "container": container.name, "sha256": sha256_of(content)}})
 
     def _apply_services_with_rollback(self, container, context, services) -> None:
+        from copy import copy
         from .artifacts import atomic_write_text_if_changed
         runner = self.manager.compose_runner
         try:
@@ -388,6 +389,10 @@ class ComposeOperations:
                         runner.apply_saved_services(context, (service,), {"previous.yml": model} if model else files)
                     context.service_models.restore(running)
                     self._restore_applied_compose(container, context, previous)
+                    restored_context = copy(context)
+                    restored_context.target_containers = [container]
+                    restored_context.is_full_containers = False
+                    self.manager.running_state.mark_started(restored_context)
                 except Exception as rollback_error:
                     raise ContainerError("{} apply failed: {}; Compose rollback failed: {}".format(
                         container.name, error, rollback_error)) from error

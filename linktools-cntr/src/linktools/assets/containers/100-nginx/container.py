@@ -502,6 +502,7 @@ class Container(BaseContainer):
         # This also handles the first stable-parent mount and target-image
         # changes, using Compose's ordinary reconciliation.
         runner.apply_service(context, "nginx")
+        runner.wait_service_healthy(context, "nginx")
         result = runner.exec_service(context, "nginx", (
             "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
             "/run/nginx-health.sock", "http://localhost/health"), check=False)
