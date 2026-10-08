@@ -148,6 +148,13 @@ class Container(BaseContainer):
                 self.runtime.create_process("chgrp", str(group), str(path), privilege=True).check_call()
             path.chmod(0o640)
 
+    def rollback_config(self, context: "EventContext") -> None:
+        for path, backup in reversed(getattr(context, "flare_migrated_paths", ())):
+            if path.is_symlink():
+                path.unlink()
+            if backup is not None:
+                backup.rename(path)
+
     def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
                  services: "Iterable[str]") -> None:
         if "flare" not in services:
@@ -177,6 +184,7 @@ class Container(BaseContainer):
             recreate = candidate.changed or not runner.is_generation_current(context, "flare", candidate)
             runner.apply_service(context, "flare", recreate=recreate)
             runner.wait_service_running(context, "flare")
+            context.flare_migrated_paths = tuple(migrated)
         except Exception:
             for path, backup in reversed(migrated):
                 if path.is_symlink():
