@@ -110,6 +110,81 @@ def test_rollback_failure_reports_both_failures(tmp_path):
         ComposeOperations(owner.manager)._publish_candidate(owner, second, context, ("test",))
 
 
+def test_first_upgrade_failure_restores_running_service_without_previous_generation(tmp_path):
+    owner = _Generated(tmp_path / "generated")
+    candidate = GeneratedCandidate(owner, owner.render_config)
+    assert candidate.previous_id is None
+    old_compose = tmp_path / "legacy.yml"
+    old_compose.write_text("services:\n  test:\n    image: legacy:test\n")
+    calls = []
+    owner.manager.compose_runner = SimpleNamespace(
+        apply_saved_services=lambda context, services, files: calls.append(
+            ("restore", tuple(services), tuple(files.values()))),
+        wait_service_running=lambda context, service: calls.append(("running", service)),
+    )
+    owner.manager.running_state = SimpleNamespace(
+        mark_started=lambda context: calls.append(("state", context.target_containers[0].name)),
+    )
+    owner.rollback_config = lambda context: calls.append(("native",))
+    owner.apply_config = lambda context, candidate, services: (_ for _ in ()).throw(
+        RuntimeError("new failed"))
+    context = SimpleNamespace(
+        generated_candidates={}, initial_running_services={"test"},
+        saved_compose={str(old_compose): old_compose.read_text()},
+        compose_files={str(old_compose): "services:\n  test:\n    image: new:test\n"},
+        compose_owners={str(old_compose): "test"}, applied_compose={},
+        applied_generation_services={}, service_models=AppliedServiceModels(
+            owner.manager, {"services": owner.services}),
+    )
+    with pytest.raises(RuntimeError, match="new failed"):
+        ComposeOperations(owner.manager)._publish_candidate(owner, candidate, context, ("test",))
+    assert GeneratedCandidate.current_id(str(owner.path)) is None
+    assert calls == [
+        ("native",),
+        ("restore", ("test",), ("services:\n  test:\n    image: legacy:test\n",)),
+        ("running", "test"),
+        ("state", "test"),
+    ]
+
+
+def test_first_deployment_failure_does_not_start_unrelated_services(tmp_path):
+    owner = _Generated(tmp_path / "generated")
+    candidate = GeneratedCandidate(owner, owner.render_config)
+    calls = []
+    owner.rollback_config = lambda context: calls.append("native")
+    owner.apply_config = lambda context, candidate, services: (_ for _ in ()).throw(
+        RuntimeError("first failed"))
+    owner.manager.compose_runner = SimpleNamespace(
+        apply_saved_services=lambda *args: pytest.fail("unexpected rollback deployment"))
+    context = SimpleNamespace(
+        generated_candidates={}, initial_running_services=set(),
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
+        applied_generation_services={}, service_models=AppliedServiceModels(
+            owner.manager, {"services": owner.services}),
+    )
+    with pytest.raises(RuntimeError, match="first failed"):
+        ComposeOperations(owner.manager)._publish_candidate(owner, candidate, context, ("test",))
+    assert calls == ["native"]
+    assert GeneratedCandidate.current_id(str(owner.path)) is None
+
+
+def test_first_upgrade_reports_unrecoverable_missing_compose_snapshot(tmp_path):
+    owner = _Generated(tmp_path / "generated")
+    candidate = GeneratedCandidate(owner, owner.render_config)
+    owner.apply_config = lambda context, candidate, services: (_ for _ in ()).throw(
+        RuntimeError("new failed"))
+    owner.manager.compose_runner = SimpleNamespace()
+    context = SimpleNamespace(
+        generated_candidates={}, initial_running_services={"test"},
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
+        applied_generation_services={}, service_models=AppliedServiceModels(
+            owner.manager, {"services": owner.services}),
+    )
+    with pytest.raises(ContainerError, match="rollback failed: No previous Compose model"):
+        ComposeOperations(owner.manager)._publish_candidate(owner, candidate, context, ("test",))
+    assert GeneratedCandidate.current_id(str(owner.path)) is None
+
+
 def test_isolated_validation_preserves_image_env_and_mounts_without_network_identity():
     runner = ComposeRunner(SimpleNamespace(project_name="project"))
     model = {"services": {"nginx": {"image": "nginx:target", "ports": ["80:80"],
