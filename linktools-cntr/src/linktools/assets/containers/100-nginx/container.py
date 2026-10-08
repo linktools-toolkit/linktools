@@ -321,11 +321,12 @@ class Container(BaseContainer):
                             f"1>/dev/null"
             ).call()
 
-        # 重启nginx
         self.runtime.create_docker_process(
-            "exec", "-it", self.get_service_name("nginx"),
-            "sh", "-c", "killall nginx 1>/dev/null 2>&1"
-        ).call()
+            "exec", self.get_service_name("nginx"), "nginx", "-t"
+        ).check_call()
+        self.runtime.create_docker_process(
+            "exec", self.get_service_name("nginx"), "nginx", "-s", "reload"
+        ).check_call()
 
     def on_stopped(self, context: "EventContext") -> None:
         if context.is_full_containers:
