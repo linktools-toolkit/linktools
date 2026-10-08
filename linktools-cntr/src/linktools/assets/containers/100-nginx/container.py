@@ -3,6 +3,7 @@
 """Nginx reverse-proxy container definition."""
 import json
 import os
+import re
 import shutil
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,35 @@ if TYPE_CHECKING:
 
 
 class Container(BaseContainer):
+
+    @staticmethod
+    def _nginx_literal(value: "Any") -> str:
+        data = str(value)
+        if any(ch in data for ch in ("\r", "\n", "\x00")):
+            raise ContainerError("Nginx header value contains a control character")
+        data = data.replace("\\", "\\\\").replace('"', '\\"')
+        return '"' + data.replace("$", "$" + "{cntr_dollar}") + '"'
+
+    @staticmethod
+    def _validated_auth_headers(headers: "dict[str, Any]") -> "dict[str, Any]":
+        result = {}
+        seen = set()
+        forbidden = {
+            "host", "forwarded", "x-real-ip", "x-original-url",
+            "x-original-method", "x-forwarded-for", "x-forwarded-host",
+            "x-forwarded-method", "x-forwarded-proto", "x-forwarded-uri",
+            "x-forwarded-port", "x-auth-user", "x-auth-groups",
+            "x-auth-name", "x-auth-email",
+        }
+        for key, value in headers.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_\x60|~0-9A-Za-z-]+", key):
+                raise ContainerError("Invalid nginx auth header name")
+            normalized = key.lower()
+            if normalized in seen or normalized in forbidden or normalized.startswith("x-cntr-"):
+                raise ContainerError(f"Duplicate or reserved nginx auth header: {key}")
+            seen.add(normalized)
+            result[key] = value
+        return result
 
     @cached_property
     def dnsapi(self) -> "dict[str, Any]":
@@ -342,10 +372,11 @@ class Container(BaseContainer):
             HTTPS_ENABLE=https_enable,
             WAF_ENABLE=waf_enable,
             AUTH_ENABLE=auth_enable,
-            AUTH_HEADERS=auth_extra.get("auth_headers", None) if auth_extra else None,
+            AUTH_HEADERS=self._validated_auth_headers(auth_extra.get("auth_headers") or {}) if auth_enable else None,
             AUTH_BYPASS=auth_extra.get("acl_bypass", None) if auth_extra else None,
             WAF_BYPASS=waf_bypass,
             SITE_VAR=proxy_domain_name.encode("utf-8").hex(),
+            nginx_literal=self._nginx_literal,
         )
 
         conf_path.parent.mkdir(parents=True, exist_ok=True)
