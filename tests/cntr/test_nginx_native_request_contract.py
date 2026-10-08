@@ -123,7 +123,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
                   "SAFELINE_SUBNET_PREFIX": "127.0.0"}
         producer = SimpleNamespace(name="native-fixture", env_config=config)
         site = SimpleNamespace(server_name="app.test", file_id="native", var_name="native",
-                               local_id="web", https=True, waf=True, auth=True,
+                               local_id="web", default=False, https=True, waf=True, auth=True,
                                waf_bypass=(r"^/waf-public", r"^/both"),
                                auth_bypass=(r"^/auth-public", r"^/both"),
                                auth_headers={"Authorization": "Bearer secret$host"}, vars={},

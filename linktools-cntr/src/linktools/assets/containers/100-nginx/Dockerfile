@@ -18,9 +18,9 @@ RUN --mount=type=secret,id=nginx-acme,required=true \
     --mount=type=tmpfs,target=/root/.acme.sh \
     . /run/secrets/nginx-acme && \
     acme.sh --home /opt/acme --config-home /root/.acme.sh --server {{ container.shell_quote(ACME_SERVER) }} \
-        --issue {{ manager.integration_consumers['nginx'].acme_ssl_domains_args }} --dns {{ container.shell_quote(ACME_DNS_API) }}{% if ACME_ACCOUNT_EMAIL %} --accountemail {{ container.shell_quote(ACME_ACCOUNT_EMAIL) }}{% endif %} && \
+        --issue {{ container.acme_ssl_domains_args }} --dns {{ container.shell_quote(ACME_DNS_API) }}{% if ACME_ACCOUNT_EMAIL %} --accountemail {{ container.shell_quote(ACME_ACCOUNT_EMAIL) }}{% endif %} && \
     acme.sh --home /opt/acme --config-home /root/.acme.sh --server {{ container.shell_quote(ACME_SERVER) }} \
-        --install-cert {{ manager.integration_consumers['nginx'].acme_ssl_domains_args }} {{ manager.integration_consumers['nginx'].acme_ssl_certificate_args }} \
+        --install-cert {{ container.acme_ssl_domains_args }} {{ container.acme_ssl_certificate_args }} \
         --reloadcmd /usr/local/bin/nginx-reload && \
     rm -f /root/.acme.sh/account.conf && \
     for config in /root/.acme.sh/*/*.conf; do \

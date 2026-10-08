@@ -80,10 +80,9 @@ def build_fixture(fresh_manager, tmp_path):
     fresh_manager.env_config.set("ACME_DNS_API", "dns_cf")
     fresh_manager.env_config.set("CF_Key", "fake-key")
     fresh_manager.env_config.set("CF_Token", "fake-secret")
-    for name in ("docker_file", "docker_compose", "services", "extend_configs"):
+    for name in ("docker_file", "docker_compose", "services", "extend_configs",
+                 "acme_ssl_domains", "acme_ssl_domains_args", "acme_ssl_certificate_args"):
         container.__dict__.pop(name, None)
-    for name in ("_acme_ssl_domains", "acme_ssl_domains_args", "acme_ssl_certificate_args"):
-        container.manager.integration_consumers["nginx"].__dict__.pop(name, None)
     root = tmp_path / "build state"
     root.mkdir()
     binary = tmp_path / "bin"
@@ -102,6 +101,22 @@ def build_command(container, root):
         command = command.replace(source, shlex.quote(str(dest)))
     (root / "certs").mkdir(exist_ok=True)
     return command
+
+
+def test_build_parameters_are_owned_by_container(build_fixture, monkeypatch):
+    container, _, _ = build_fixture
+    container.__dict__["sites"] = {
+        "active": SimpleNamespace(enabled=True, https=True,
+                                  cert_domains=("app.example.test", "example.test", "app.example.test")),
+        "http": SimpleNamespace(enabled=True, https=False, cert_domains=("http.example.test",)),
+        "disabled": SimpleNamespace(enabled=False, https=True, cert_domains=("disabled.example.test",)),
+    }
+    monkeypatch.setattr(type(container.manager), "integration_consumers", property(
+        lambda self: pytest.fail("Build templates must not access the consumer registry")))
+    assert container.acme_ssl_domains == ["example.test", "*.example.test", "app.example.test"]
+    assert "--domain app.example.test" in container.docker_file
+    assert "--fullchain-file /etc/certs/example.test_fullchain.pem" in container.docker_file
+    assert container.docker_compose["secrets"]["nginx-acme"]["file"] == str(container.acme_build_secret_path)
 
 
 def test_initial_issuance_and_installation_are_build_steps(build_fixture):

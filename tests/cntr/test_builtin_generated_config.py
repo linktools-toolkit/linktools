@@ -199,7 +199,7 @@ def test_stopped_legacy_nginx_preserves_certificates_before_migration(tmp_path, 
     container = SimpleNamespace(
         get_app_path=lambda *parts: tmp_path.joinpath(*parts),
         get_config=lambda key, **kwargs: values[key],
-        sites={},
+        acme_ssl_domains=["example.test", "*.example.test"],
         manager=SimpleNamespace(compose_runner=SimpleNamespace(validate_service=lambda *args, **kwargs: None)),
     )
     owner = NginxGeneration(container)

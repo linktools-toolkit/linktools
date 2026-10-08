@@ -139,6 +139,36 @@ class Container(BaseContainer):
                 )
         return configs
 
+    @cached_property
+    def acme_ssl_domains(self) -> "list[str]":
+        result = []
+        domain = self.get_config("NGINX_ROOT_DOMAIN")
+        if domain:
+            result.extend([domain, f"*.{domain}"])
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            for site in self.sites.values():
+                if not site.enabled or not site.https:
+                    continue
+                for value in site.cert_domains:
+                    if value and value not in result:
+                        result.append(value)
+        return result
+
+    @cached_property
+    def acme_ssl_domains_args(self) -> str:
+        return " ".join("--domain " + shlex.quote(domain) for domain in self.acme_ssl_domains if domain)
+
+    @cached_property
+    def acme_ssl_certificate_args(self) -> str:
+        domain = self.get_config("NGINX_ROOT_DOMAIN")
+        if domain:
+            return " ".join([
+                "--cert-file", shlex.quote(f"/etc/certs/{domain}_cert.pem"),
+                "--key-file", shlex.quote(f"/etc/certs/{domain}_key.pem"),
+                "--fullchain-file", shlex.quote(f"/etc/certs/{domain}_fullchain.pem"),
+            ])
+        return ""
+
     def get_docker_compose_file(self) -> "Path | None":
         if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             self._acme_build_secret_cleanup
@@ -352,36 +382,6 @@ class Consumer(IntegrationConsumer):
             ) from exc
 
     @cached_property
-    def _acme_ssl_domains(self) -> "list[str]":
-        result = []
-        domain = self.container.get_config("NGINX_ROOT_DOMAIN")
-        if domain:
-            result.extend([domain, f"*.{domain}"])
-        if self.container.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            for site in self.container.sites.values():
-                if not site.enabled or not site.https:
-                    continue
-                for value in site.cert_domains:
-                    if value and value not in result:
-                        result.append(value)
-        return result
-
-    @cached_property
-    def acme_ssl_domains_args(self) -> str:
-        return " ".join("--domain " + shlex.quote(domain) for domain in self._acme_ssl_domains if domain)
-
-    @cached_property
-    def acme_ssl_certificate_args(self) -> str:
-        domain = self.container.get_config("NGINX_ROOT_DOMAIN")
-        if domain:
-            return " ".join([
-                "--cert-file", shlex.quote(f"/etc/certs/{domain}_cert.pem"),
-                "--key-file", shlex.quote(f"/etc/certs/{domain}_key.pem"),
-                "--fullchain-file", shlex.quote(f"/etc/certs/{domain}_fullchain.pem"),
-            ])
-        return ""
-
-    @cached_property
     def _rendered_site_files(self) -> "tuple[dict[str, str], bool]":
         """Evaluate business templates once for this declaration snapshot."""
         from types import SimpleNamespace
@@ -448,7 +448,7 @@ class Consumer(IntegrationConsumer):
         certificate = shlex.quote("/etc/certs/" + domain + "_fullchain.pem")
         checks = ["/usr/local/bin/nginx-init-certificates",
                   "openssl x509 -checkend 0 -noout -in " + certificate]
-        for name in self._acme_ssl_domains:
+        for name in self.container.acme_ssl_domains:
             if name.startswith("*."):
                 checks.append(r"openssl x509 -noout -ext subjectAltName -in {} | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -Fx -- {}".format(
                     certificate, shlex.quote("DNS:" + name)))
