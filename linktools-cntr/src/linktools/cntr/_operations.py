@@ -157,6 +157,19 @@ class ComposeOperations:
         container_scope = None if context.is_full_containers else ",".join(
             c.name for c in context.target_containers)
 
+        model = manager.compose_runner.final_model(context)
+        preparation = manager.image_preparer
+        image_plan = preparation.plan(model, selection.services, force_pull=pull)
+        if image_plan.pull:
+            with record_phase(context, "pull", command=tuple(manager.compose_runner.pull_args(image_plan.pull)),
+                              container=container_scope, logger=manager.logger):
+                manager.compose_runner.pull(context, image_plan.pull)
+        if image_plan.build:
+            build_options = manager.compose_runner.options_for_build(image_plan.build, pull=pull)
+            with record_phase(context, "build", command=tuple(manager.compose_runner.build_args(build_options)),
+                              container=container_scope, logger=manager.logger):
+                manager.compose_runner.build(context, build_options)
+
         with manager.lifecycle.notify_stop(context):
             with record_phase(context, "stop", command=("stop", *selection.services),
                               container=container_scope, logger=manager.logger):
@@ -169,18 +182,6 @@ class ComposeOperations:
             manager.running_state.mark_stopped(context)
 
         with manager.lifecycle.notify_start(context):
-            model = manager.compose_runner.final_model(context)
-            preparation = manager.image_preparer
-            image_plan = preparation.plan(model, selection.services, force_pull=pull)
-            if image_plan.pull:
-                with record_phase(context, "pull", command=tuple(manager.compose_runner.pull_args(image_plan.pull)),
-                                  container=container_scope, logger=manager.logger):
-                    manager.compose_runner.pull(context, image_plan.pull)
-            if image_plan.build:
-                build_options = manager.compose_runner.options_for_build(image_plan.build, pull=pull)
-                with record_phase(context, "build", command=tuple(manager.compose_runner.build_args(build_options)),
-                                  container=container_scope, logger=manager.logger):
-                    manager.compose_runner.build(context, build_options)
             with record_phase(context, "up", command=tuple(manager.compose_runner.up_args(options)),
                               container=container_scope, logger=manager.logger):
                 manager.compose_runner.up(context, options)
