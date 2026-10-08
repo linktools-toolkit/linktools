@@ -23,7 +23,7 @@ from linktools.types import MISSING
 if TYPE_CHECKING:
     from types import SimpleNamespace
     from linktools.cntr.integration import ResolvedSite
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
     from typing import AbstractSet, Any, Mapping
     from linktools.cntr import EventContext
     from linktools.cntr.artifacts import GeneratedCandidate
@@ -322,7 +322,8 @@ class Container(BaseContainer):
         return result
 
     def _render_site_template(self, container: "BaseContainer", source: "PathType",
-                        site: "ResolvedSite | SimpleNamespace", business: "str | None" = None) -> str:
+                        site: "ResolvedSite | SimpleNamespace", business: "str | None" = None,
+                        sites: "Sequence[ResolvedSite] | None" = None) -> str:
         """Render one location template with unambiguous local/nginx namespaces."""
         nginx = self
         source = Path(source).absolute()
@@ -342,6 +343,8 @@ class Container(BaseContainer):
         except ValueError:
             template_name = "local/" + source.name
         extra = {} if business is None else {"business": business}
+        if sites is not None:
+            extra["sites"] = sites
         try:
             return environment.get_template(template_name).render(
                 site=site,
@@ -387,12 +390,39 @@ class Container(BaseContainer):
                 waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, vars={},
                 template=self.get_source_path("templates", "index.conf"), proxy=None,
             ))
+        from collections import OrderedDict
+        groups = OrderedDict()
         for site in active:
-            producer = site.producer
-            source = site.template or self.get_source_path("templates", "default.conf")
-            business = self._render_site_template(producer, source, site)
-            result["sites/" + site.file_id + ".conf"] = self._render_site_template(
-                producer, self.get_source_path("templates", "server.conf"), site, business=business)
+            key = (site.producer.get_config("NGINX_HTTP_PORT"), site.server_name)
+            groups.setdefault(key, []).append(site)
+        for (port, domain), sites in groups.items():
+            leader = sites[0]
+            def routing_policy(site):
+                return (
+                    site.https, site.waf, site.auth, site.waf_bypass, site.auth_bypass,
+                    site.producer.get_config("NGINX_HTTPS_PORT") if site.https else None,
+                    site.producer.get_config("NGINX_WAF_PORT") if site.waf else None,
+                )
+            policy = routing_policy(leader)
+            for site in sites[1:]:
+                if routing_policy(site) != policy:
+                    raise ContainerError(
+                        "Incompatible nginx routing policies on {}:{} for {}/{} and {}/{}".format(
+                            domain, port, leader.producer.name, leader.local_id,
+                            site.producer.name, site.local_id))
+            if len(sites) > 1:
+                sites.sort(key=lambda site: not site.default)
+                leader = sites[0]
+            routes = []
+            for site in sites:
+                source = site.template or self.get_source_path("templates", "default.conf")
+                business = self._render_site_template(site.producer, source, site)
+                if len(sites) > 1:
+                    business = "# site {}/{}\n{}".format(site.producer.name, site.local_id, business)
+                routes.append(business)
+            result["sites/" + leader.file_id + ".conf"] = self._render_site_template(
+                leader.producer, self.get_source_path("templates", "server.conf"),
+                leader, business="\n".join(routes), sites=sites)
         return result, any(site.waf for site in active)
 
     def render_config(self, generation_id: str) -> "dict[str, str]":
