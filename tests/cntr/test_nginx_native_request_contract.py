@@ -18,10 +18,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from _harness import builtin_consumer_type
 
-
-NginxGeneration = builtin_consumer_type("100-nginx")
+def _native_site(port):
+    return SimpleNamespace(server_name="app.test", file_id="native", var_name="native",
+                           local_id="web", default=False, https=True, waf=True, auth=True,
+                           waf_bypass=(r"^/waf-public", r"^/both"),
+                           auth_bypass=(r"^/auth-public", r"^/both"),
+                           auth_headers={"Authorization": "Bearer secret$host"}, vars={},
+                           proxy="http://127.0.0.1:" + str(port))
 
 
 def _port():
@@ -122,15 +126,10 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
                   "NGINX_WAF_PORT": origin_port, "NGINX_ROOT_DOMAIN": "test",
                   "SAFELINE_SUBNET_PREFIX": "127.0.0"}
         producer = SimpleNamespace(name="native-fixture", env_config=config)
-        site = SimpleNamespace(server_name="app.test", file_id="native", var_name="native",
-                               local_id="web", default=False, https=True, waf=True, auth=True,
-                               waf_bypass=(r"^/waf-public", r"^/both"),
-                               auth_bypass=(r"^/auth-public", r"^/both"),
-                               auth_headers={"Authorization": "Bearer secret$host"}, vars={},
-                               proxy="http://127.0.0.1:" + str(app_port))
+        site = _native_site(app_port)
 
         def render(name, selected=site):
-            return NginxGeneration(nginx).render_template(producer, nginx.get_source_path("templates", name), selected)
+            return nginx._render_site_template(producer, nginx.get_source_path("templates", name), selected)
 
         root = render("nginx.conf", SimpleNamespace(vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
         # The fixture changes only sandbox resources and loopback endpoint addresses.
@@ -155,7 +154,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             "location /fallback { error_page 403 = /off; " + header_text + proxy + " }",
             "location ~ ^/capture/(.+)$ { " + header_text + "proxy_set_header X-Capture $1; " + proxy + " }",
         ))
-        server_text = NginxGeneration(nginx).render_template(
+        server_text = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
         server_text = server_text.replace("/etc/certs/", str(tmp_path) + "/")
         server_text = server_text.replace("listen " + str(origin_port) + " ",
@@ -280,3 +279,22 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             connection.request("GET", "/private", headers=headers)
             assert connection.getresponse().status == 400
             connection.close()
+
+
+
+def test_native_fixture_template_contract_without_native_processes(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    producer = SimpleNamespace(name="native-fixture", env_config={
+        "NGINX_HTTP_PORT": 8080, "NGINX_HTTPS_PORT": 8443,
+        "NGINX_WAF_PORT": 8081, "NGINX_ROOT_DOMAIN": "test",
+        "SAFELINE_SUBNET_PREFIX": "127.0.0",
+    })
+    site = _native_site(8082)
+    business = nginx._render_site_template(producer, nginx.get_source_path("templates", "default.conf"), site)
+    server = nginx._render_site_template(
+        producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
+    root = nginx._render_site_template(producer, nginx.get_source_path("templates", "nginx.conf"),
+        SimpleNamespace(vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
+    assert "app.test" in server
+    assert "sites/native.conf" in root
+    assert "http://127.0.0.1:8082" in business

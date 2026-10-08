@@ -4,11 +4,12 @@
 
 from linktools.cntr import Nginx, NginxSite
 from linktools.cntr.integration import load_nginx_url
+from linktools.cntr.lifecycle import HookPhase
 
 
 def test_portainer_site_is_independent_of_navigation(fresh_manager):
     portainer = fresh_manager.containers["portainer"]
-    baseline = len(portainer.start_hooks)
+    baseline = len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START)))
 
     first = next(value for value in portainer.integrations if isinstance(value, NginxSite))
     assert isinstance(first, NginxSite)
@@ -19,19 +20,19 @@ def test_portainer_site_is_independent_of_navigation(fresh_manager):
 
     load_nginx_url(portainer, "web")
     load_nginx_url(portainer, "web", "settings")
-    assert len(portainer.start_hooks) == baseline
+    assert len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START))) == baseline
 
 
 def test_nginx_consumes_sites_without_exposure_side_effects(fresh_manager):
     portainer = fresh_manager.containers["portainer"]
-    original_hooks = len(portainer.start_hooks)
+    original_hooks = len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START)))
 
     entries = list(fresh_manager.iter_integrations("nginx"))
     matches = [(producer, site_id, site) for producer, site_id, site in entries
                if producer is portainer and site_id == "web"]
     assert len(matches) == 1
     assert matches[0][2] in portainer.integrations
-    assert len(portainer.start_hooks) == original_hooks
+    assert len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START))) == original_hooks
 
 
 def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monkeypatch):
@@ -84,7 +85,7 @@ def test_partial_nginx_selection_refreshes_full_navigation_snapshot(fresh_manage
     synchronized = selection.project_containers
     flare = fresh_manager.containers["flare"]
     assert flare in synchronized
-    result = fresh_manager.generated_configs["flare"].on_render("candidate")
+    result = fresh_manager.generated_configs["flare"].render_config("candidate")
     links = yaml.safe_load(result["apps.yml"])["links"]
     portainer = next(link for link in links if link["name"] == "Portainer")
     assert ":9443" in portainer["link"]
@@ -142,13 +143,14 @@ def _site_navigation_manager(declarations, links=None, nginx=True):
 
 
 def _render_navigation(manager):
-    from types import SimpleNamespace
-    from _harness import builtin_consumer_type
-    FlareGeneration = builtin_consumer_type("120-flare")
+    from _harness import builtin_container_type
+    FlareContainer = builtin_container_type("120-flare")
     import yaml
 
+    container = object.__new__(FlareContainer)
+    container.manager = manager
     return {key: yaml.safe_load(value) for key, value in
-            FlareGeneration(SimpleNamespace(manager=manager)).on_render("candidate").items()}
+            container.render_config("candidate").items()}
 
 
 def test_site_navigation_inherits_only_omitted_url_lazily():
@@ -482,20 +484,22 @@ def test_namespace_factories_preserve_typed_constructor_and_mixed_list():
     assert declarations[0].local_id == "web"
 
 
-def test_consumer_snapshot_reuses_instances_without_container_field(fresh_manager):
+def test_generated_config_snapshot_reuses_actual_container_instances(fresh_manager):
     import pytest
     from linktools.cntr import BaseContainer
 
     assert not hasattr(BaseContainer, "integration_consumer")
-    consumer = fresh_manager.integration_consumers["nginx"]
-    assert consumer.container is fresh_manager.containers["nginx"]
-    assert fresh_manager.integration_consumers["nginx"] is consumer
-    assert fresh_manager.generated_configs["nginx"] is consumer
+    assert not hasattr(fresh_manager, "integration_consumers")
+    container = fresh_manager.containers["nginx"]
+    assert container.generates_config
+    assert fresh_manager.generated_configs["nginx"] is container
+    assert all(owner is fresh_manager.containers[name]
+               for name, owner in fresh_manager.generated_configs.items())
     with pytest.raises(TypeError):
-        fresh_manager.integration_consumers["nginx"] = consumer
+        fresh_manager.generated_configs["nginx"] = container
 
 
-def test_companion_consumers_preserve_container_dependencies(fresh_manager):
+def test_integration_containers_preserve_dependencies(fresh_manager):
     assert tuple(fresh_manager.containers["authelia"].dependencies) == ("nginx", "lldap")
     assert tuple(fresh_manager.containers["safeline"].dependencies) == ("nginx",)
     installed = fresh_manager.resolver.resolve_dependencies([fresh_manager.containers["authelia"]])

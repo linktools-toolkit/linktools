@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from _harness import builtin_consumer_type
 from linktools.cntr import ContainerError
 
 
@@ -62,8 +61,6 @@ else:
     parser.error("Expected issuance or installation")
 '''
 
-NginxGeneration = builtin_consumer_type("100-nginx")
-
 
 def run_shell(script, binary=None):
     environment = dict(os.environ)
@@ -112,8 +109,8 @@ def test_build_parameters_are_owned_by_container(build_fixture, monkeypatch):
         "http": SimpleNamespace(enabled=True, https=False, cert_domains=("http.example.test",)),
         "disabled": SimpleNamespace(enabled=False, https=True, cert_domains=("disabled.example.test",)),
     }
-    monkeypatch.setattr(type(container.manager), "integration_consumers", property(
-        lambda self: pytest.fail("Build templates must not access the consumer registry")))
+    monkeypatch.setattr(type(container.manager), "generated_configs", property(
+        lambda self: pytest.fail("Build templates must not access the generated config registry")))
     assert container.acme_ssl_domains == ["example.test", "*.example.test", "app.example.test"]
     assert "--domain app.example.test" in container.docker_file
     assert "--fullchain-file /etc/certs/example.test_fullchain.pem" in container.docker_file
@@ -228,7 +225,7 @@ def test_prepare_only_seeds_and_validates_without_network(build_fixture, monkeyp
     calls = []
     monkeypatch.setattr(container.manager.compose_runner, "validate_service",
                         lambda *args, **kwargs: calls.append((args, kwargs)))
-    container.manager.integration_consumers["nginx"].on_prepare(SimpleNamespace(initial_services=()))
+    container.on_prepare_config(SimpleNamespace(initial_services=()))
     assert len(calls) == 1
     args, kwargs = calls[0]
     assert not kwargs.get("network")
@@ -245,7 +242,7 @@ def test_http_does_not_resolve_acme_or_create_dns_environment(build_fixture, fre
         assert not str(key).startswith("ACME_")
         return original(key, **kwargs)
     monkeypatch.setattr(container, "get_config", config)
-    container.manager.integration_consumers["nginx"].on_prepare(SimpleNamespace(initial_services=()))
+    container.on_prepare_config(SimpleNamespace(initial_services=()))
     for name in ("docker_file", "docker_compose", "services"):
         container.__dict__.pop(name, None)
     assert "acme.sh" not in container.docker_file

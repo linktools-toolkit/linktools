@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand
 from linktools.cntr import BaseContainer, Flare, Nginx
-from linktools.cntr.integration import IntegrationConsumer, load_port_url
+from linktools.cntr.integration import load_port_url
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 
@@ -44,12 +44,12 @@ class Container(BaseContainer):
                 https=True
             ), category="container"),
             Nginx.site(
-                server_name=self.get_config_later("SAFELINE_DOMAIN"),
-                expose=Flare.public("Safeline", "alienOutline", "雷池WAF"),
+                self.get_config_later("SAFELINE_DOMAIN"),
                 proxy="https://safeline-mgt:1443",
                 auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,
                 auth_bypass=(r"\.(css|js)$",),
                 auth_headers={"X-SLCE-API-TOKEN": self.get_config_later("SAFELINE_API_TOKEN")},
+                expose=Flare.public("Safeline", "alienOutline", "雷池WAF"),
             ),
         ]
 
@@ -61,7 +61,6 @@ class Container(BaseContainer):
         ).call()
 
 
-class Consumer(IntegrationConsumer):
-    def on_applied(self, context: "EventContext", service: str) -> None:
+    def on_service_started(self, context: "EventContext", service: str) -> None:
         if service == "safeline-mgt":
-            self.container.manager.compose_runner.wait_service_healthy(context, service)
+            self.manager.compose_runner.wait_service_healthy(context, service)

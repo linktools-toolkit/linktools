@@ -46,7 +46,7 @@ services:
     environment:
       - AAD_LOGLEVEL=DEBUG
       - AAD_AUTHELIA_CONFIG_PATH=/generated/current/configuration.yml
-      - AAD_AUTHELIA_DOMAIN={{ AUTHELIA_DOMAIN }}:{{ NGINX_HTTPS_PORT }}
+      - AAD_AUTHELIA_DOMAIN={{ container.public_authority }}
       - AAD_AUTHELIA_COOKIE_NAME={{ manager.project_name }}-auth-session
       - AAD_AUTHELIA_MIN_AUTH_LEVEL=1
       - AAD_DIRECTORY_TYPE=lldap-graphql
@@ -56,7 +56,7 @@ services:
       - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_HOST={{ AUTHELIA_LDAP_HOST }}
       - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_PORT={{ AUTHELIA_LDAP_PORT }}
       - AAD_DIRECTORY_LLDAP_GRAPHQL_LDAP_BASE_DN={{ AUTHELIA_LDAP_BASE_DN }}
-      - TRUSTED_ORIGINS={{ utils.make_url("https", AUTHELIA_DOMAIN, NGINX_HTTPS_PORT) }}
+      - TRUSTED_ORIGINS={{ container.public_origin }}
       - NODE_TLS_REJECT_UNAUTHORIZED=0
     networks:
       authelia:

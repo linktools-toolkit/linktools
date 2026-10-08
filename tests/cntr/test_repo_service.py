@@ -75,7 +75,7 @@ def test_git_repo_update_still_calls_git(fresh_manager, monkeypatch, local_repo)
     def fake_update(url, repo_path, branch=None, reset=False):
         calls.append(url)
         from linktools.cntr.repo.git import RepoGitResult
-        return RepoGitResult(success=True, revision="deadbeef", dirty=False, error=None)
+        return RepoGitResult(success=True, revision="deadbeef", error=None)
 
     monkeypatch.setattr(fresh_manager.repos.git, "update", fake_update)
     fresh_manager.repos._dump({

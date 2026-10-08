@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from linktools.cntr import BaseContainer, Flare, FlareLink, Nginx, ContainerError
-from linktools.cntr.integration import IntegrationConsumer, load_port_url
+from linktools.cntr.integration import load_port_url
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
@@ -77,14 +77,11 @@ class Container(BaseContainer):
         ]
 
 
-class Consumer(IntegrationConsumer):
-    """Own the builtin flare consumer without extending container hooks."""
-
-    generated = True
-    application_order = 200
+    generates_config = True
+    application_priority = 200
 
     def _iter_links(self) -> "Iterator[FlareLink]":
-        manager = self.container.manager
+        manager = self.manager
         snapshot = manager.integration_snapshot
         producers = sorted(
             (name for name, declarations in snapshot.items() if declarations),
@@ -102,7 +99,7 @@ class Consumer(IntegrationConsumer):
                 if declaration.consumer == "flare":
                     yield declaration
 
-    def on_render(self, generation_id: str) -> "dict[str, str]":
+    def render_config(self, generation_id: str) -> "dict[str, str]":
 
         categories = OrderedDict()
         apps = {"links": []}
@@ -140,22 +137,22 @@ class Consumer(IntegrationConsumer):
             "bookmarks.yml": yaml.safe_dump(bookmarks, allow_unicode=True),
         }
 
-    def on_validate(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
-        group = self.container.get_config("DOCKER_GID", type=int)
+    def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+        group = self.get_config("DOCKER_GID", type=int)
         for name in ("apps.yml", "bookmarks.yml"):
             path = Path(candidate.path) / name
             yaml.safe_load(path.read_text())
             # The service's configured group needs read access; the host owner
             # retains access for content comparison and future rollback.
             if path.stat().st_gid != group:
-                self.container.runtime.create_process("chgrp", str(group), str(path), privilege=True).check_call()
+                self.runtime.create_process("chgrp", str(group), str(path), privilege=True).check_call()
             path.chmod(0o640)
 
-    def on_apply(self, context: "EventContext", candidate: "GeneratedCandidate",
+    def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
                  services: "Iterable[str]") -> None:
         if "flare" not in services:
             return
-        app = self.container.get_app_path("app")
+        app = self.get_app_path("app")
         app.mkdir(parents=True, exist_ok=True)
         migrated = []
         try:
@@ -176,7 +173,7 @@ class Consumer(IntegrationConsumer):
                     temporary.unlink()
                 temporary.symlink_to(target)
                 os.replace(str(temporary), str(path))
-            runner = self.container.manager.compose_runner
+            runner = self.manager.compose_runner
             recreate = candidate.changed or not runner.is_generation_current(context, "flare", candidate)
             runner.apply_service(context, "flare", recreate=recreate)
             runner.wait_service_running(context, "flare")

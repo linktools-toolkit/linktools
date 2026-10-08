@@ -36,7 +36,7 @@ def _reload_container(manager, container):
     from linktools.cntr.repo.context import RepositoryConfigContext
 
     builtin_context = RepositoryConfigContext(root_path=None, file_config=None, url=None, builtin=True)
-    fresh_containers = list(ContainerLoader(manager)._load_one(container.root_path, builtin_context, [], {}))
+    fresh_containers = list(ContainerLoader(manager)._load_one(container.root_path, builtin_context, []))
     return next(c for c in fresh_containers if c.name == container.name)
 
 

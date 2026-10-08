@@ -310,9 +310,8 @@ class RepoService(object):
         successfully", not "its Git content changed".
 
         The repository root is validated *before* dispatching to Git, for
-        every type -- ``RepoGit.update()`` itself would clone into a missing
-        directory on demand, but ``update`` and ``add`` stay separate
-        responsibilities here: a missing/dangling checkout root is always a
+        every type. Update and add stay separate responsibilities: a
+        missing/dangling checkout root is always a
         hard failure the user re-``add``s, never an implicit self-heal.
         """
         results = []
@@ -474,13 +473,17 @@ class RepoService(object):
 
         try:
             file_config = ProjectProfile.for_root(repo_path)
-            info["requires"] = dict(file_config.get("requires", {}))
+            try:
+                ensure_requirement(file_config, "linktools-cntr", __cap_cntr__.version)
+                info["compatible"] = True
+            except ConfigValidationError as exc:
+                info["compatibility_issues"] = [str(exc)]
+            # Keep valid declarations visible even when the host does not
+            # satisfy them; malformed shapes are reported by the gate.
+            requires = file_config.get("requires", {})
+            if isinstance(requires, dict):
+                info["requires"] = dict(requires)
             info["ignored_environment_keys"] = self._find_reserved_environment_keys(file_config)
-            ensure_requirement(file_config, "linktools-cntr", __cap_cntr__.version)
-            info["compatible"] = True
-        except ConfigValidationError as exc:
-            info["compatible"] = False
-            info["compatibility_issues"] = [str(exc)]
         except ConfigError as exc:
             info["local_config_error"] = str(exc)
             info["compatible"] = False

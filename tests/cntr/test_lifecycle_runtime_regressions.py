@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 import pytest
 import yaml
 
-from linktools.cntr.integration import IntegrationConsumer
-from _harness import builtin_consumer_type
+from linktools.cntr import BaseContainer
+from _harness import builtin_container_type
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.artifacts import AppliedServiceModels, GeneratedCandidate
 from linktools.cntr.container import ContainerError
@@ -24,16 +24,16 @@ if TYPE_CHECKING:
     from linktools.cntr import ContainerManager, EventContext
 
 
-NginxGeneration = builtin_consumer_type("100-nginx")
+BuiltinNginxContainer = builtin_container_type("100-nginx")
 
 
-class Container:
+class Container(BaseContainer):
     dependencies = ()
     docker_file = None
     sites = {}
 
     def __init__(self, name, services, path):
-        self.name, self.services, self.path = name, services, path
+        self._name, self.services, self.path = name, services, path
         self.docker_compose = {"services": services}
         self.logger = SimpleNamespace(info=lambda *args: None)
 
@@ -60,7 +60,7 @@ def manager_at(root, containers, states=(), model=None):
 
     manager = SimpleNamespace(project_name="test", data_path=root, logger=None,
         containers={c.name: c for c in containers}, integration_snapshot={c.name: () for c in containers},
-        integration_consumers={}, generated_configs={}, iter_integrations=lambda consumer: iter(()),
+        generated_configs={}, iter_integrations=lambda consumer: iter(()),
         environ=SimpleNamespace(locks=SimpleNamespace(process_lock=lambda key: nullcontext())),
         lifecycle=SimpleNamespace(notify_start=lambda ctx: nullcontext(), notify_stop=lambda ctx: nullcontext(),
                                   notify_remove=lambda ctx: nullcontext()),
@@ -86,13 +86,17 @@ def manager_at(root, containers, states=(), model=None):
     return operations, manager, runner, calls, restored
 
 
+class NginxContainer(Container, BuiltinNginxContainer):
+    pass
+
+
 def running_nginx():
     return ServiceRuntimeState(("nginx",), "nginx", "nginx-runtime", "running", "healthy", "nginx:old", None, {})
 
 
 @pytest.mark.parametrize("failure", ["acknowledgment", "application"])
 def test_restart_bootstrap_failure_restores_generation_and_exact_runtime_snapshot(tmp_path, monkeypatch, failure):
-    nginx = Container("nginx", {"nginx": {"image": "nginx:new"}}, tmp_path / "nginx")
+    nginx = NginxContainer("nginx", {"nginx": {"image": "nginx:new"}}, tmp_path / "nginx")
     old_model = {"services": {"nginx": {"image": "nginx:old", "environment": {"VALUE": "price$$USD"}}},
                  "volumes": {"certs": {"name": "certs-old"}}}
     new_model = {"services": {"nginx": {"image": "nginx:new", "environment": {"VALUE": "new$$VALUE"}}}}
@@ -100,13 +104,12 @@ def test_restart_bootstrap_failure_restores_generation_and_exact_runtime_snapsho
         tmp_path, (nginx,), (running_nginx(),), new_model)
     AppliedServiceModels(manager, old_model).record(("nginx",))
     previous = AppliedServiceModels(manager, new_model).previous["nginx"]
-    owner = manager.generated_configs["nginx"] = NginxGeneration(nginx)
-    manager.integration_consumers["nginx"] = owner
-    owner.on_render = lambda generation: {"nginx.conf": "serving " + generation}
-    prior = GeneratedCandidate(nginx, owner.on_render)
+    owner = manager.generated_configs["nginx"] = nginx
+    owner.render_config = lambda generation: {"nginx.conf": "serving " + generation}
+    prior = GeneratedCandidate(nginx, owner.render_config)
     prior.publish()
-    owner.on_prepare = lambda context: None
-    owner.on_validate = lambda context, candidate: None
+    owner.on_prepare_config = lambda context: None
+    owner.validate_config = lambda context, candidate: None
     monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     runner.exec_service = lambda *args, **kwargs: SimpleNamespace(succeeded=True, stdout=prior.generation_id)
     confirmed = []
@@ -119,7 +122,7 @@ def test_restart_bootstrap_failure_restores_generation_and_exact_runtime_snapsho
     original = runner.apply_service
 
     def apply(context, service, recreate=False):
-        if recreate:
+        if context.generated_candidates["nginx"].generation_id != prior.generation_id:
             raise ContainerError("bootstrap application failed")
         return original(context, service, recreate)
 
@@ -136,26 +139,60 @@ def test_restart_bootstrap_failure_restores_generation_and_exact_runtime_snapsho
     assert (bool(confirmed)) is (failure == "acknowledgment")
 
 
-def test_restart_bootstrap_and_rollback_failures_are_both_reported(tmp_path, monkeypatch):
-    nginx = Container("nginx", {"nginx": {}}, tmp_path / "nginx")
+def test_restart_bootstrap_validation_failure_preserves_running_generation_and_model(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    nginx = NginxContainer("nginx", {"nginx": {"image": "nginx:new"}}, tmp_path / "nginx")
+    old_model = {"services": {"nginx": {"image": "nginx:old", "environment": {"VALUE": "old$$value"}}}}
     operations, manager, runner, calls, restored = manager_at(tmp_path, (nginx,), (running_nginx(),))
-    owner = manager.generated_configs["nginx"] = NginxGeneration(nginx)
-    manager.integration_consumers["nginx"] = owner
-    owner.on_render = lambda generation: {"nginx.conf": "serving " + generation}
-    prior = GeneratedCandidate(nginx, owner.on_render)
+    manager.generated_configs["nginx"] = nginx
+    AppliedServiceModels(manager, old_model).record(("nginx",))
+    previous_models = dict(AppliedServiceModels(manager, runner.final_model(None)).previous)
+    nginx.render_config = lambda generation: {"nginx.conf": "full " + generation}
+    nginx.render_bootstrap = lambda generation: {"nginx.conf": "bootstrap " + generation}
+    previous = GeneratedCandidate(nginx, nginx.render_config)
+    previous.publish()
+    nginx.on_prepare_config = lambda context: None
+    validated = []
+
+    def validate(context, candidate):
+        content = Path(candidate.path, "nginx.conf").read_text()
+        validated.append(content.split()[0])
+        if content.startswith("bootstrap "):
+            raise ContainerError("bootstrap validation failed")
+
+    def unexpected(*args):
+        raise AssertionError("Validation failure must not apply any generation")
+
+    nginx.validate_config = validate
+    nginx.apply_config = unexpected
+    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
+    with pytest.raises(ContainerError, match="bootstrap validation failed"):
+        operations.restart(["nginx"])
+    assert validated == ["full", "bootstrap"]
+    assert calls == []
+    assert restored == []
+    assert GeneratedCandidate.current_id(str(nginx.get_app_path("generated"))) == previous.generation_id
+    assert AppliedServiceModels(manager, runner.final_model(None)).previous == previous_models
+    assert manager.running_state.get_persisted() == ["nginx"]
+
+
+def test_restart_bootstrap_and_rollback_failures_are_both_reported(tmp_path, monkeypatch):
+    nginx = NginxContainer("nginx", {"nginx": {}}, tmp_path / "nginx")
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (nginx,), (running_nginx(),))
+    owner = manager.generated_configs["nginx"] = nginx
+    owner.render_config = lambda generation: {"nginx.conf": "serving " + generation}
+    prior = GeneratedCandidate(nginx, owner.render_config)
     prior.publish()
-    owner.on_prepare = lambda context: None
-    owner.on_validate = lambda context, candidate: None
+    owner.on_prepare_config = lambda context: None
+    owner.validate_config = lambda context, candidate: None
     monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
 
-    def failed_bootstrap(context, generation_id):
+    def apply(context, candidate, services):
+        if candidate.generation_id == prior.generation_id:
+            raise ContainerError("old runtime rejected")
         raise ContainerError("bootstrap rejected")
 
-    def failed_rollback(*args):
-        raise ContainerError("old runtime rejected")
-
-    owner.confirm = failed_bootstrap
-    owner.on_apply = failed_rollback
+    owner.apply_config = apply
     with pytest.raises(ContainerError, match="bootstrap rejected.*rollback failed: old runtime rejected"):
         operations.restart(["nginx"])
     assert GeneratedCandidate.current_id(str(nginx.get_app_path("generated"))) == prior.generation_id
@@ -183,6 +220,8 @@ def test_acme_install_and_runtime_share_config_home():
 def test_final_model_dependencies_start_before_consumer_without_stopped_siblings(tmp_path, monkeypatch, relation):
     app = Container("app", {"app": {}}, tmp_path / "app")
     providers = Container("providers", {"database": {}, "unrelated": {}}, tmp_path / "providers")
+    app.application_priority = -100
+    providers.application_priority = 100
     model = {"services": {"app": relation, "database": {}, "unrelated": {}}}
     operations, manager, runner, calls, restored = manager_at(tmp_path, (app, providers), model=model)
     operations.select = lambda *args, **kwargs: ComposeSelection((app, providers), (app,), ("app",), False)
@@ -201,18 +240,17 @@ def test_dependency_normalization_preserves_explicit_conditions_and_external_lin
         "external_links": ["external"]}) == {"database": {"condition": "service_healthy"}}
 
 
-def test_consumer_policy_adds_only_its_required_provider_services(tmp_path, monkeypatch) -> None:
-    class MetricsConsumer(IntegrationConsumer):
-        application_order = 10
+def test_container_policy_adds_only_its_required_provider_services(tmp_path, monkeypatch) -> None:
+    class MetricsContainer(Container):
+        application_priority = 10
 
         def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
-            assert self.container.name == "metrics"
+            assert self.name == "metrics"
             return {"storage": ("database",)} if "metrics" in required else {}
 
-    app = Container("metrics", {"metrics": {}}, tmp_path / "metrics")
+    app = MetricsContainer("metrics", {"metrics": {}}, tmp_path / "metrics")
     storage = Container("storage", {"database": {}, "idle": {}}, tmp_path / "storage")
     operations, manager, runner, calls, restored = manager_at(tmp_path, (storage, app))
-    manager.integration_consumers["metrics"] = MetricsConsumer(app)
     operations.select = lambda *args, **kwargs: ComposeSelection((storage, app), (app,), ("metrics",), False)
     monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     operations.up(["metrics"])
@@ -220,62 +258,65 @@ def test_consumer_policy_adds_only_its_required_provider_services(tmp_path, monk
 
 
 @pytest.mark.parametrize("running", [False, True])
-def test_consumer_policy_controls_bootstrap_order_and_runtime_only_updates(tmp_path, monkeypatch, running) -> None:
+@pytest.mark.parametrize("changed", [False, True])
+def test_container_policy_controls_bootstrap_order_and_changed_running_updates(
+        tmp_path, monkeypatch, running, changed) -> None:
     events = []
 
-    class IndexConsumer(IntegrationConsumer):
-        generated = True
-        application_order = 100
-        uses_generation_label = False
+    class IndexContainer(Container):
+        generates_config = True
+        application_priority = 100
+        bootstrap_services = ("indexer",)
 
-        def on_prepare(self, context: "EventContext") -> None:
-            context.index_changed = True
+        def generation_label(self, service: str, generation_id: str) -> "str | None":
+            return None
 
-        def on_render(self, generation_id: str) -> "dict[str, str]":
-            return {"config": "serving " + generation_id}
-
-        def on_validate(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+        def on_prepare_config(self, context: "EventContext") -> None:
             pass
 
-        def needs_apply(self, candidate: "GeneratedCandidate", context: "EventContext") -> bool:
-            assert not candidate.changed
-            return context.index_changed
+        def render_config(self, generation_id: str) -> "dict[str, str]":
+            return {"config": self.content, "generation": generation_id}
 
-        def needs_bootstrap(self, services: "Iterable[str]", running_services: "AbstractSet[str]") -> bool:
-            return "indexer" in services and "indexer" not in running_services
+        def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+            pass
 
-        def on_bootstrap(self, context: "EventContext") -> str:
-            candidate = GeneratedCandidate(self.container, lambda generation: {"config": "bootstrap " + generation})
-            candidate.publish()
-            self.container.manager.compose_runner.apply_service(context, "indexer", recreate=True)
-            events.append("bootstrap")
-            return candidate.generation_id
+        def render_bootstrap(self, generation_id: str) -> "dict[str, str]":
+            return {"config": "bootstrap " + generation_id}
 
-        def on_apply(self, context: "EventContext", candidate: "GeneratedCandidate",
+        def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
                   services: "Iterable[str]") -> None:
             for service in services:
-                self.container.manager.compose_runner.apply_service(context, service)
-                events.append("apply")
+                self.manager.compose_runner.apply_service(context, service)
+                content = Path(candidate.path, "config").read_text()
+                events.append("bootstrap" if content.startswith("bootstrap ") else "apply")
 
     app = Container("target", {"target": {}}, tmp_path / "target")
-    indexer = Container("indexer", {"indexer": {}}, tmp_path / "indexer")
+    indexer = IndexContainer("indexer", {"indexer": {}}, tmp_path / "indexer")
     state = ServiceRuntimeState(("indexer",), "indexer", "index-runtime", "running", None, "image", None, {})
     operations, manager, runner, calls, restored = manager_at(tmp_path, (indexer, app), (state,) if running else ())
-    owner = IndexConsumer(indexer)
-    manager.integration_consumers["indexer"] = owner
+    healthy = []
+    runner.wait_service_healthy = lambda context, service: healthy.append(service)
+    owner = indexer
+    owner.content = "old runtime input"
     manager.generated_configs["indexer"] = owner
-    previous = GeneratedCandidate(indexer, owner.on_render)
+    previous = GeneratedCandidate(indexer, owner.render_config)
     previous.publish()
+    if changed:
+        owner.content = "new runtime input"
     AppliedServiceModels(manager, runner.final_model(None)).record(("indexer", "target"))
     selected = (app,) if running else (app, indexer)
     selected_services = ("target",) if running else ("indexer", "target")
     operations.select = lambda *args, **kwargs: ComposeSelection((indexer, app), selected, selected_services, False)
     monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     operations.up([container.name for container in selected])
-    assert events == (["apply"] if running else ["bootstrap", "apply"])
-    assert [call[-1] for call in calls if call[0] == "up"] == (
-        ["target", "indexer"] if running else ["indexer", "target", "indexer"])
-    assert GeneratedCandidate.current_id(str(indexer.get_app_path("generated"))) == previous.generation_id
+    expected_events = (["apply"] if changed else []) if running else ["bootstrap", "apply"]
+    assert events == expected_events
+    assert healthy == (["indexer"] if running and changed else [])
+    expected_starts = (["target", "indexer"] if changed else ["target"]) if running else ["indexer", "target", "indexer"]
+    assert [call[-1] for call in calls if call[0] == "up"] == expected_starts
+    current = GeneratedCandidate.current_id(str(indexer.get_app_path("generated")))
+    assert (current != previous.generation_id) is changed
+    assert indexer.get_app_path("generated", "current", "config").read_text() == owner.content
 
 
 def test_isolated_raw_arguments_decode_only_compose_serialization_and_leave_snapshot_unchanged():
@@ -316,3 +357,57 @@ def test_isolated_raw_arguments_decode_only_compose_serialization_and_leave_snap
     runner.apply_saved_services(SimpleNamespace(), ("app",), {"previous.yml": serialized})
     assert persisted == [serialized]
     assert yaml.safe_load(persisted[0]) == previous
+
+
+@pytest.mark.parametrize("failure", ["validation", "bootstrap", "final", None])
+def test_cold_bootstrap_uses_shared_validation_application_and_final_accounting(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: "str | None") -> None:
+    events = []
+
+    class BootstrapContainer(Container):
+        generates_config = True
+        bootstrap_services = ("example",)
+
+        def render_config(self, generation_id: str) -> "dict[str, str]":
+            return {"config": "final", "generation": generation_id}
+
+        def render_bootstrap(self, generation_id: str) -> "dict[str, str]":
+            return {"config": "bootstrap", "generation": generation_id}
+
+        def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+            phase = Path(candidate.path, "config").read_text()
+            events.append(("validate", phase))
+            if failure == "validation" and phase == "bootstrap":
+                raise ContainerError("bootstrap validation failed")
+
+        def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
+                         services: "Iterable[str]") -> None:
+            phase = Path(candidate.path, "config").read_text()
+            events.append(("apply", phase))
+            assert "example" not in AppliedServiceModels(self.manager, context.compose_model).previous
+            if phase == failure:
+                raise ContainerError(phase + " application failed")
+            self.manager.compose_runner.apply_services(context, tuple(services))
+
+    container = BootstrapContainer("example", {"example": {"image": "example:new"}}, tmp_path / "example")
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (container,))
+    manager.generated_configs["example"] = container
+    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
+    if failure:
+        with pytest.raises(ContainerError, match="application failed|validation failed"):
+            operations.up(["example"])
+    else:
+        operations.up(["example"])
+
+    assert events[:2] == [("validate", "final"), ("validate", "bootstrap")]
+    expected_apply = {"validation": [], "bootstrap": ["bootstrap"],
+                      "final": ["bootstrap", "final", "bootstrap"], None: ["bootstrap", "final"]}
+    assert [phase for action, phase in events if action == "apply"] == expected_apply[failure]
+    root = container.get_app_path("generated")
+    if failure in ("validation", "bootstrap"):
+        assert GeneratedCandidate.current_id(str(root)) is None
+        assert not calls
+    else:
+        assert (root / "current/config").read_text() == ("bootstrap" if failure else "final")
+    models = AppliedServiceModels(manager, runner.final_model(None)).previous
+    assert ("example" in models) is (failure is None)

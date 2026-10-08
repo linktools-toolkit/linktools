@@ -5,6 +5,7 @@ import os
 import re
 from types import MappingProxyType
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
 
 import rsa
 import yaml
@@ -12,7 +13,7 @@ import yaml
 from linktools import utils
 from linktools.cli import CommandError, subcommand
 from linktools.cntr import BaseContainer, Flare, Nginx, ContainerError
-from linktools.cntr.integration import IntegrationConsumer, load_nginx_url
+from linktools.cntr.integration import load_nginx_url
 from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider
 from linktools.decorator import cached_property
 
@@ -71,8 +72,24 @@ class Container(BaseContainer):
         ]
 
     @cached_property
+    def public_url(self) -> str:
+        """Use the declared site URL for every externally visible endpoint."""
+        # Metadata may describe an unconfigured public identity; native OIDC
+        # generation below still requires a concrete HTTPS endpoint.
+        return self.manager.nginx_sites[(self.name, "web")].get_url(default="")
+
+    @cached_property
+    def public_authority(self) -> str:
+        return urlsplit(self.public_url).netloc
+
+    @cached_property
+    def public_origin(self) -> str:
+        url = urlsplit(self.public_url)
+        return urlunsplit((url.scheme, url.netloc, "", "", ""))
+
+    @cached_property
     def _oidc_identity(self) -> "Mapping[str, Any]":
-        issuer = str(load_nginx_url(self, "web"))
+        issuer = self.public_url
         if not issuer.startswith("https://"):
             raise ContainerError("Authelia requires a concrete HTTPS public URL")
         return MappingProxyType({
@@ -80,9 +97,9 @@ class Container(BaseContainer):
             "client_name": f"Web Client ({self.project_name})",
             "client_secret": str(self.get_config("AUTHELIA_OIDC_CLIENT_SECRET")),
             "issuer_url": issuer,
-            "authorization_url": issuer + "/api/oidc/authorization",
-            "token_url": issuer + "/api/oidc/token",
-            "userinfo_url": issuer + "/api/oidc/userinfo",
+            "authorization_url": utils.join_url(issuer, "api/oidc/authorization"),
+            "token_url": utils.join_url(issuer, "api/oidc/token"),
+            "userinfo_url": utils.join_url(issuer, "api/oidc/userinfo"),
             "user_identifier": "preferred_username",
             "scopes": ("openid", "profile", "groups", "email", "phone"),
         })
@@ -158,36 +175,33 @@ class Container(BaseContainer):
         )
 
 
-class Consumer(IntegrationConsumer):
-    """Own the builtin authelia consumer without extending container hooks."""
+    generates_config = True
 
-    generated = True
-
-    def on_prepare(self, context: "EventContext") -> None:
-        secret_path = self.container.get_app_path("secrets")
+    def on_prepare_config(self, context: "EventContext") -> None:
+        secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
-        self.container.get_app_path("config").mkdir(parents=True, exist_ok=True)
-        self.container.runtime.chmod(secret_path, 0o700, recursive=True)
+        self.get_app_path("config").mkdir(parents=True, exist_ok=True)
+        self.runtime.chmod(secret_path, 0o700, recursive=True)
         for name in ("jwt_secret", "session_secret", "storage_encryption_key", "oidc_hmac_secret"):
             self._create_secret_file(secret_path / name)
         self._create_pem_file(secret_path / "identity_providers_oidc_jwks")
 
-    def on_render(self, generation_id: str) -> "dict[str, str]":
+    def render_config(self, generation_id: str) -> "dict[str, str]":
         result = {
-            name: self.container.render_template(self.container.get_source_path("templates", name))
+            name: self.render_template(self.get_source_path("templates", name))
             for name in ("configuration.yml", "configuration.acl.yml",
                          "configuration.2fa.yml", "configuration.oidc.yml")
         }
-        result["authentication_backend_ldap_password"] = str(self.container.get_config("AUTHELIA_LDAP_PASSWORD"))
+        result["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
         return result
 
-    def on_validate(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+    def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
         root = "/generated/" + candidate.generation_id
         command = ["authelia", "config", "validate"]
         command.extend("--config=" + root + "/" + name for name in (
             "configuration.yml", "configuration.acl.yml",
             "configuration.2fa.yml", "configuration.oidc.yml"))
-        result = self.container.manager.compose_runner.validate_service(
+        result = self.manager.compose_runner.validate_service(
             context, "authelia", command,
             environment={"AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE":
                          root + "/authentication_backend_ldap_password"}, check=False,
@@ -200,9 +214,9 @@ class Consumer(IntegrationConsumer):
             raise ContainerError("Native validation failed for service authelia{} (exit {})".format(
                 diagnostic, result.returncode))
 
-    def on_apply(self, context: "EventContext", candidate: "GeneratedCandidate",
+    def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
                  services: "Iterable[str]") -> None:
-        runner = self.container.manager.compose_runner
+        runner = self.manager.compose_runner
         services = tuple(services)
         for service in services:
             if service not in ("authelia", "authelia-admin"):

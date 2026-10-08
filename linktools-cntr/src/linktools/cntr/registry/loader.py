@@ -4,8 +4,7 @@
 
 Scans builtin assets (depth 1) and each configured repo (depth 2), importing
 the first concrete BaseContainer subclass in a ``container.py`` or falling
-back to a SimpleContainer for a compose file. An explicit module-level
-``Consumer`` export supplies its integration companion.
+back to a SimpleContainer for a compose file.
 """
 import os
 from dataclasses import dataclass, field
@@ -15,8 +14,7 @@ from linktools.core import ProjectProfile
 from linktools.errors import ConfigError, ConfigValidationError
 from linktools.runtime import import_module_file
 
-from ..container import BaseContainer, ContainerError, SimpleContainer
-from ..integration import IntegrationConsumer
+from ..container import BaseContainer, SimpleContainer
 from ..repo.context import RepositoryConfigContext
 from ..repo.requirements import ensure_requirement
 from ..repo.service import safe_display_url
@@ -45,13 +43,12 @@ class ContainerLoadError:
 @dataclass(frozen=True)
 class ContainerLoadResult:
     """``ContainerLoader.load_all()``'s return value: the containers that
-    loaded successfully and their optional consumer companions, plus every
+    loaded successfully, plus every
     load failure as a structured
     ``ContainerLoadError`` instead of a log-only warning that leaves
     callers unable to tell "not installed" apart from "failed to load"."""
     containers: "list[BaseContainer]"
     errors: "list[ContainerLoadError]" = field(default_factory=list)
-    consumers: "dict[str, IntegrationConsumer]" = field(default_factory=dict)
 
 
 def _guess_container_name(path: "PathType") -> "str | None":
@@ -71,14 +68,13 @@ class ContainerLoader:
         manager = self.manager
         containers: "list[BaseContainer]" = []
         errors: "list[ContainerLoadError]" = []
-        consumers: "dict[str, IntegrationConsumer]" = {}
 
         manager.logger.debug("Load containers from assets")
         asset_path = __cap_cntr__.get_asset_path("containers")
         builtin_context = RepositoryConfigContext(
             root_path=asset_path, file_config=None, url=None, builtin=True,
         )
-        for container in self._walk(asset_path, max_level=1, repository=builtin_context, errors=errors, consumers=consumers):
+        for container in self._walk(asset_path, max_level=1, repository=builtin_context, errors=errors):
             containers.append(container)
 
         # Builtin container fields form the manager's base schema. Register
@@ -118,28 +114,26 @@ class ContainerLoader:
                 url=url, builtin=False,
                 repo_name=meta.get("repo_name"),
             )
-            for container in self._walk(repo_path, max_level=2, repository=repo_context, errors=errors, consumers=consumers):
+            for container in self._walk(repo_path, max_level=2, repository=repo_context, errors=errors):
                 containers.append(container)
 
-        return ContainerLoadResult(containers=containers, errors=errors, consumers=consumers)
+        return ContainerLoadResult(containers=containers, errors=errors)
 
     def _walk(
             self, path: "PathType", max_level: int, repository: "RepositoryConfigContext",
             errors: "list[ContainerLoadError]",
-            consumers: "dict[str, IntegrationConsumer]",
     ) -> "Iterator[BaseContainer]":
         if not os.path.isdir(path):
             return
-        yield from self._load_one(path, repository, errors, consumers)
+        yield from self._load_one(path, repository, errors)
         if max_level <= 0:
             return
         for name in os.listdir(path):
-            yield from self._walk(os.path.join(path, name), max_level - 1, repository, errors, consumers)
+            yield from self._walk(os.path.join(path, name), max_level - 1, repository, errors)
 
     def _load_one(
             self, path: "PathType", repository: "RepositoryConfigContext",
             errors: "list[ContainerLoadError]",
-            consumers: "dict[str, IntegrationConsumer]",
     ) -> "Iterator[BaseContainer]":
         manager = self.manager
         container_path = os.path.join(path, manager.docker_container_name)
@@ -160,11 +154,6 @@ class ContainerLoader:
                             container.repo_context = repository
                             manager.logger.debug(f"Load container {container.name} in {path}")
                             container.on_init()
-                            if "Consumer" in module.__dict__:
-                                consumer_type = module.Consumer
-                                if not isinstance(consumer_type, type) or not issubclass(consumer_type, IntegrationConsumer):
-                                    raise ContainerError("Consumer must subclass IntegrationConsumer")
-                                consumers[container.name] = consumer_type(container)
                             yield container
                             return
             except Exception as e:

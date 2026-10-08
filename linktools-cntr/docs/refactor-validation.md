@@ -13,18 +13,42 @@ local IDs. Flare accepts ordered unnamed links and site-attached navigation.
 See [integrations.md](integrations.md) for the authoring API and lazy URL helpers.
 
 The producer authoring surface remains `configs`, `dependencies`, and
-`integrations`. Consumers additionally provide `integration_consumer`.
-The removed BaseContainer generation hooks, `config_sources`, exposure helpers,
-and URL mixins are not compatibility APIs. Concrete consumer implementations
-and lifecycle policies live in their asset `container.py` files. The
-`integration/` package owns the shared declarations and consumer protocol; the
-manager collects container-provided instances instead of using a builtin-name
-registry. The shared core orchestrates dependency, bootstrap, validation,
-publication and rollback operations. Domain configuration uses
-`Nginx.domain(container, name)` instead
-of `BaseContainer.get_nginx_domain`. Complete candidate comparison allows a
-partial `up` or `restart` to apply pending changes to other running services;
-unrelated stopped services stay stopped unless required by runtime dependencies.
+`integrations`. Native behavior belongs to the same `Container(BaseContainer)`:
+`generates_config=True` explicitly enables `render_config`, `validate_config`
+and `apply_config`, with optional `on_prepare_config`. There is no separate
+consumer class, discovery contract or generated callback map. The manager's
+`generated_configs` contains the installed owning containers themselves.
+The `integration/` package owns shared declarations, factories and site
+resolution; native lifecycle policies live on the asset container definitions.
+Removed `config_sources`, exposure helpers and URL mixins are not compatibility
+APIs. Domain configuration uses `Nginx.domain(container, name)` instead of
+`BaseContainer.get_nginx_domain`.
+
+The shared core orchestrates startup checks/hooks, resolved Compose capture,
+image preparation, generated-input preparation/rendering, validation, bootstrap,
+publication, application and rollback. Pull/build completes before
+`on_prepare_config`; every final generated candidate is validated before restart
+stops explicit targets. Pure `render_bootstrap(generation_id)` returns an
+intermediate file mapping; the core reuses candidate validation, publication,
+application and rollback rather than handing orchestration to a container.
+Bootstrap application does not record final applied Compose snapshots.
+Acknowledged bootstrap services can satisfy dependency availability and can be
+restored after a cold final-application failure. On cold starts, unacknowledged
+bootstrap services and unrelated stopped siblings are not rollback restore
+targets. The service topological order preserves container, Compose and native
+runtime edges, with `application_priority` breaking ready-node ties only.
+`on_service_started` runs after each applied service and before dependents,
+including native readiness checks where required. Preparation checks and
+`BEFORE_START` hooks may include other running owners because their hooks affect
+inputs; `on_started`/`AFTER_START` are restricted to the final application targets.
+Planning describes this scope without executing callbacks or writing output;
+it shares pure Compose/Dockerfile
+serializers and service-ordering semantics with execution.
+
+Complete candidate comparison allows a partial `up` or `restart` to apply
+pending changes to other running services; unrelated stopped services stay
+stopped unless required by runtime dependencies. Validated generated trees may
+still be published for stopped owners without starting their services.
 
 This pass starts from the paired published trees at main `f1fdab242fbd1ab89e8693173fb68f949fa7790b`
 and homelab `d126d9bf6ea5ce6e374336588653619e10c71636`. Source-level compatibility
@@ -63,9 +87,16 @@ Package build and artifact verification have not been performed for this pass.
   Docker DNS, preserved prefix/capture/query routing, and complete header macros
 - Lifecycle: restoration after failed nginx bootstrap, matching applied Compose
   snapshots, certificate replacement despite unchanged config IDs, aligned ACME
-  cron configuration, and explicit/implicit Compose dependency ordering
+  cron configuration, explicit/implicit Compose dependency ordering, native
+  container capability ownership, image-before-config preparation, dependency-safe
+  priority ordering, pure bootstrap rendering through the shared candidate path,
+  acknowledged bootstrap availability and cold rollback, per-service readiness,
+  and post-start callbacks restricted to final application targets
 - ACME bootstrap: a local client substitute covers empty config mounts, explicit
   CA/contact arguments, account reuse, and failed issuance without a live CA
+- Candidate serialization: shared pure Compose/Dockerfile destinations and text,
+  read-only collection, byte parity with writers, single model reads and rejection
+  of invalid Compose values before destination creation
 - Runtime arguments: literal-dollar decoding only at the raw Docker boundary,
   retaining correctly escaped persisted Compose files for later rollback
 - Paired commands: MCP Playwright and MCP Push `show` handlers, including Push's

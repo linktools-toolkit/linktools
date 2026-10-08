@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""A ConfigField a third-party repository declares for itself -- secret=True,
-a custom cast/validator -- lives ONLY in that repository's own Config
-schema, never in Manager Config's. `config set/get/explain/validate/list`
-must discover it there, not assume "absent from Manager's schema" means
-"not a secret" / "no repository-specific cast or validator applies".
-
-Regression: `on_command_set`/`on_command_get`/`on_command_explain`/
-`on_command_validate` only ever consulted `_shared.manager.env_config`
-(Manager Config) -- a repository-only secret field with an innocuous
-persisted value sailed straight through as plain text, and `validate` never
-applied a repository's own cast/validator at all.
-"""
+"""Repository metadata defines secret fields on the shared manager Config."""
 import logging
 
 import _harness
@@ -289,3 +278,27 @@ def test_set_get_explain_validate_work_before_any_container_is_installed(monkeyp
     ConfigCommand().on_command_validate(as_json=True)
     result = json.loads(capsys.readouterr().out)
     assert result["valid"] is True
+
+
+def test_validate_reports_invalid_repo_secret_without_disclosure(monkeypatch, tmp_path, capsys):
+    import json
+    import pytest
+
+    import linktools.cntr.commands._shared as cntr_shared
+    from linktools.cntr.commands.config import ConfigCommand
+    from linktools.cntr.container import ContainerError
+
+    repo = _repo_with_port_field(tmp_path, "repo", "ConfigField(cast=int, secret=True)")
+    manager = _fresh_standalone_manager(tmp_path)
+    manager.repos.add(str(repo))
+    manager.installed_state.add("repo")
+    manager.env_config.persist("PORT", _SECRET_VALUE)
+    monkeypatch.setattr(cntr_shared, "manager", manager)
+
+    with pytest.raises(ContainerError):
+        ConfigCommand().on_command_validate(as_json=True)
+    output = capsys.readouterr().out
+    assert _SECRET_VALUE not in output
+    result = json.loads(output)
+    assert result["valid"] is False
+    assert [entry["key"] for entry in result["errors"]] == ["PORT"]

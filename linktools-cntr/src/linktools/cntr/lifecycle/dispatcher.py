@@ -58,6 +58,7 @@ class LifecycleDispatcher:
             action: str,
             containers: "Sequence[BaseContainer]",
             after: "bool | None" = None,
+            stop_containers: "Sequence[BaseContainer] | None" = None,
     ) -> "Iterator[LifecycleStep]":
         """Describe dispatch order without preparing containers or calling hooks.
 
@@ -66,8 +67,11 @@ class LifecycleDispatcher:
         consumed, including hooks registered by earlier callbacks.
         """
         if action == "restart":
-            yield from cls.iter_steps("down", containers, after=after)
-            yield from cls.iter_steps("up", containers, after=after)
+            if after is not True:
+                yield from cls.iter_steps("up", containers, after=False)
+                yield from cls.iter_steps("down", containers if stop_containers is None else stop_containers)
+            if after is not False:
+                yield from cls.iter_steps("up", containers, after=True)
         elif action == "up":
             if after is not True:
                 yield from cls._iter_start_steps(lambda: containers)

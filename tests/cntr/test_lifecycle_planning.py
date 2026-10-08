@@ -3,20 +3,24 @@
 """Lifecycle plans describe exactly the registered hooks dispatch will visit."""
 import pytest
 
+from linktools.cntr.container import BaseContainer
 from linktools.cntr.context import EventContext
 from linktools.cntr.lifecycle import HookCycleError, HookPhase, HookRegistry, HookValidationError
 
 
-class _Container:
+class _Container(BaseContainer):
 
-    def __init__(self, name, events, dependencies=(), order=500):
-        self.name = name
+    def __init__(self, manager, root_path, name, events, dependencies=(), order=500):
+        super().__init__(manager, root_path, name=name)
         self.events = events
-        self.dependencies = dependencies
-        self.order = order
+        self._dependencies = dependencies
+        self._order = order
         self.services = {name: {}}
-        self.integrations = []
         self.hooks = HookRegistry(owner=self, scope="container")
+
+    @property
+    def dependencies(self):
+        return self._dependencies
 
     def on_check(self, context):
         self.events.append(("callback", self.name, "check"))
@@ -35,11 +39,11 @@ class _Container:
 
 
 @pytest.fixture
-def lifecycle_case(fresh_manager, monkeypatch):
+def lifecycle_case(fresh_manager, monkeypatch, tmp_path):
     events = []
     monkeypatch.setattr(fresh_manager, "generated_configs", {})
-    first = _Container("first", events, order=900)
-    second = _Container("second", events, dependencies=("first",), order=100)
+    first = _Container(fresh_manager, tmp_path, "first", events, order=900)
+    second = _Container(fresh_manager, tmp_path, "second", events, dependencies=("first",), order=100)
     monkeypatch.setattr(fresh_manager, "integration_snapshot", {"first": (), "second": ()})
     monkeypatch.setattr(fresh_manager, "containers", {c.name: c for c in (second, first)})
     monkeypatch.setattr(fresh_manager, "hooks", HookRegistry(owner=fresh_manager, scope="manager"))
@@ -69,12 +73,14 @@ def _register(registry, phase, events, owner, key, **kwargs):
 
 
 def _execute(manager, context, action):
-    if action in ("restart", "down"):
+    if action == "down":
         with manager.lifecycle.notify_stop(context):
             pass
-    if action in ("restart", "up"):
+    else:
         with manager.lifecycle.notify_start(context):
-            pass
+            if action == "restart":
+                with manager.lifecycle.notify_stop(context):
+                    pass
 
 
 def _expected_hooks(action):
@@ -95,7 +101,7 @@ def _expected_hooks(action):
         ("after-stop", "second", "a"), ("after-stop", "second", "b"),
         ("after-stop", None, "a"), ("after-stop", None, "b"),
     ]
-    return {"up": start, "restart": stop + start, "down": stop}[action]
+    return {"up": start, "restart": start[:-4] + stop + start[-4:], "down": stop}[action]
 
 
 @pytest.mark.parametrize("action", ["up", "restart", "down"])
@@ -225,3 +231,44 @@ def test_start_phases_reread_reassigned_targets(lifecycle_case, reassign_at):
         ("runtime", None, "up"),
         ("callback", "second", "started"),
     ]
+
+
+def test_partial_restart_starts_runtime_provider_without_stopping_it(lifecycle_case, monkeypatch) -> None:
+    manager, containers, _, events = lifecycle_case
+    provider, target = containers
+    target._dependencies = ()
+    monkeypatch.setattr(
+        provider, "get_runtime_requirements",
+        lambda names: {provider.name: tuple(provider.services)} if target.name in names else {},
+    )
+    for container in containers:
+        for phase in (HookPhase.CHECK, HookPhase.BEFORE_START, HookPhase.AFTER_START,
+                      HookPhase.BEFORE_STOP, HookPhase.AFTER_STOP):
+            _register(container.hooks, phase, events, container.name, phase.value)
+
+    plan = manager.planner.plan("restart", names=[target.name])
+    assert events == []
+    planned = [(hook.phase, hook.container, hook.name) for hook in plan.hooks]
+    provider_phases = [phase for phase, name, _ in planned if name == provider.name]
+    assert provider_phases == ["check", "before-start", "after-start"]
+    assert [(phase, name) for phase, name, _ in planned if phase.endswith("stop")] == [
+        ("before-stop", target.name), ("after-stop", target.name),
+    ]
+
+    selection = manager.compose_operations.select([target.name], metadata_only=True, for_start=True)
+    start_selection = manager.compose_operations.start_selection(selection)
+    start_context = EventContext()
+    start_context.target_containers = start_selection.target_containers
+    stop_context = EventContext()
+    stop_context.target_containers = selection.target_containers
+    with manager.lifecycle.notify_start(start_context):
+        with manager.lifecycle.notify_stop(stop_context):
+            events.append(("runtime", None, "stop"))
+        events.append(("runtime", None, "up"))
+
+    assert [event for event in events if event[0] not in ("callback", "runtime")] == planned
+    assert ("callback", provider.name, "stopping") not in events
+    assert ("callback", provider.name, "stopped") not in events
+    before_stop = next(index for index, event in enumerate(events) if event[0] == "before-stop")
+    assert all(index < before_stop for index, event in enumerate(events)
+               if event[0] in ("check", "before-start"))

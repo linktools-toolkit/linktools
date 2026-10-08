@@ -13,6 +13,8 @@ already registers some hooks (e.g. nginx-conf) via configs evaluation.
 """
 
 
+from linktools.cntr.lifecycle import HookPhase
+
 def _render(container, tmp_path, body):
     template = tmp_path / "t.j2"
     template.write_text(body, encoding="utf-8")
@@ -20,9 +22,9 @@ def _render(container, tmp_path, body):
 
 
 def _added(container, tmp_path, body):
-    baseline = len(container.start_hooks)
+    baseline = len(list(container.hooks.iter_phase(HookPhase.BEFORE_START)))
     _render(container, tmp_path, body)
-    return len(container.start_hooks) - baseline
+    return len(list(container.hooks.iter_phase(HookPhase.BEFORE_START))) - baseline
 
 
 def test_helpers_register_one_hook_each(fresh_manager, tmp_path):
@@ -44,9 +46,9 @@ def test_distinct_paths_are_not_deduped(fresh_manager, tmp_path):
 def test_re_rendering_same_template_does_not_duplicate(fresh_manager, tmp_path):
     container = fresh_manager.containers["portainer"]
     _render(container, tmp_path, "{{ mkdir('/x') }}{{ chmod('/x') }}")
-    after_first = len(container.start_hooks)
+    after_first = len(list(container.hooks.iter_phase(HookPhase.BEFORE_START)))
     _render(container, tmp_path, "{{ mkdir('/x') }}{{ chmod('/x') }}")
-    assert len(container.start_hooks) == after_first
+    assert len(list(container.hooks.iter_phase(HookPhase.BEFORE_START))) == after_first
 
 
 def test_chown_without_user_registers_nothing(fresh_manager, tmp_path):

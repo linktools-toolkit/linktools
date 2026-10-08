@@ -103,12 +103,18 @@ class ResolvedSite:
 
     @cached_property
     def url(self) -> str:
+        return self.get_url()
+
+    def get_url(self, default: str = MISSING) -> str:
+        """Resolve a public URL, optionally leaving a non-concrete identity unset."""
         if not self.enabled:
             return ""
         explicit = self._declaration.url
         if explicit is not None:
             return self._text(explicit, "url")
         if self.literal_domain is None:
+            if default is not MISSING:
+                return default
             self._error("requires an explicit public URL")
         https = self.https
         port = self.producer.get_config("NGINX_HTTPS_PORT" if https else "NGINX_HTTP_PORT")

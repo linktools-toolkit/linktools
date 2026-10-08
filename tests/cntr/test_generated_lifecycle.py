@@ -9,11 +9,12 @@ import pytest
 
 from linktools.cntr.artifacts import AppliedServiceModels, GeneratedCandidate
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
-from linktools.cntr.container import ContainerError
+from linktools.cntr.container import BaseContainer, ContainerError
 from linktools.cntr.runtime.compose import ComposeRunner
 
 
-class _Generated:
+class _Generated(BaseContainer):
+    generates_config = True
     name = "test"
     services = {"test": {}}
 
@@ -27,18 +28,18 @@ class _Generated:
     def get_app_path(self, *parts):
         return self.path
 
-    def on_render(self, generation_id):
+    def render_config(self, generation_id):
         return {"config": self.content, "health": generation_id}
 
 
 def test_candidate_does_not_publish_until_requested(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.on_render)
+    first = GeneratedCandidate(owner, owner.render_config)
     assert not os.path.lexists(tmp_path / "generated/current")
     first.publish()
     old_inode = (tmp_path / "generated").stat().st_ino
     owner.content = "second"
-    second = GeneratedCandidate(owner, owner.on_render)
+    second = GeneratedCandidate(owner, owner.render_config)
     assert (tmp_path / "generated/current/config").read_text() == "first"
     second.publish()
     assert (tmp_path / "generated/current/config").read_text() == "second"
@@ -49,10 +50,10 @@ def test_candidate_does_not_publish_until_requested(tmp_path):
 
 def test_unchanged_candidate_reuses_generation_and_inode(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.on_render)
+    first = GeneratedCandidate(owner, owner.render_config)
     first.publish()
     before = os.stat(first.path).st_ino
-    second = GeneratedCandidate(owner, owner.on_render)
+    second = GeneratedCandidate(owner, owner.render_config)
     assert not second.changed
     assert second.generation_id == first.generation_id
     assert os.stat(second.path).st_ino == before
@@ -61,7 +62,7 @@ def test_unchanged_candidate_reuses_generation_and_inode(tmp_path):
 
 def test_render_failure_preserves_current(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.on_render)
+    first = GeneratedCandidate(owner, owner.render_config)
     first.publish()
     def fail(generation):
         raise ValueError("bad template")
@@ -72,16 +73,17 @@ def test_render_failure_preserves_current(tmp_path):
 
 def test_apply_failure_restores_and_confirms_old_generation(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.on_render)
+    first = GeneratedCandidate(owner, owner.render_config)
     first.publish()
     owner.content = "second"
-    second = GeneratedCandidate(owner, owner.on_render)
+    second = GeneratedCandidate(owner, owner.render_config)
     calls = []
     def apply(context, candidate, services):
         calls.append(candidate.generation_id)
         if candidate.generation_id == second.generation_id:
             raise RuntimeError("new failed")
-    owner.manager.generated_configs = {"test": SimpleNamespace(on_apply=apply)}
+    owner.apply_config = apply
+    owner.manager.generated_configs = {"test": owner}
     context = SimpleNamespace(generated_candidates={}, initial_running_services={"test"},
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
         service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
@@ -93,13 +95,14 @@ def test_apply_failure_restores_and_confirms_old_generation(tmp_path):
 
 def test_rollback_failure_reports_both_failures(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    first = GeneratedCandidate(owner, owner.on_render)
+    first = GeneratedCandidate(owner, owner.render_config)
     first.publish()
     owner.content = "second"
-    second = GeneratedCandidate(owner, owner.on_render)
+    second = GeneratedCandidate(owner, owner.render_config)
     def apply(context, candidate, services):
         raise RuntimeError("new failed" if candidate.generation_id == second.generation_id else "old failed")
-    owner.manager.generated_configs = {"test": SimpleNamespace(on_apply=apply)}
+    owner.apply_config = apply
+    owner.manager.generated_configs = {"test": owner}
     context = SimpleNamespace(generated_candidates={}, initial_running_services={"test"},
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
         service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
@@ -138,7 +141,7 @@ def test_restart_validates_every_candidate_before_stopping(fresh_manager, monkey
     def fail(context, candidate):
         validated.append(candidate.container.name)
         raise ContainerError("native syntax failed")
-    monkeypatch.setattr(fresh_manager.generated_configs["nginx"], "on_validate", fail)
+    monkeypatch.setattr(fresh_manager.generated_configs["nginx"], "validate_config", fail)
     with pytest.raises(ContainerError, match="native syntax failed"):
         fresh_manager.compose_operations.restart(["portainer"])
     assert validated == ["nginx"]
@@ -149,11 +152,13 @@ def test_provider_failure_does_not_apply_full_nginx(fresh_manager, monkeypatch):
     from test_exec_routing import _record
     recorded = _record(fresh_manager, monkeypatch)
     full_nginx = []
-    monkeypatch.setattr(fresh_manager.generated_configs["nginx"], "on_apply",
-                        lambda context, candidate, services: full_nginx.append(candidate.generation_id))
+    monkeypatch.setattr(fresh_manager.generated_configs["nginx"], "apply_config",
+                        lambda context, candidate, services: (
+                            fresh_manager.compose_runner.apply_services(context, services)
+                            if candidate.generation_id == "bootstrap" else full_nginx.append(candidate.generation_id)))
     def fail(context, candidate, services):
         raise ContainerError("authentication unavailable")
-    monkeypatch.setattr(fresh_manager.generated_configs["authelia"], "on_apply", fail)
+    monkeypatch.setattr(fresh_manager.generated_configs["authelia"], "apply_config", fail)
     with pytest.raises(ContainerError, match="authentication unavailable"):
         fresh_manager.compose_operations.up(["portainer"])
     assert not full_nginx
@@ -221,12 +226,14 @@ def test_changed_compose_environment_prevents_generation_reuse():
 
 
 def test_native_diagnostic_keeps_site_source_but_omits_secret():
-    from _harness import builtin_consumer_type
+    from _harness import builtin_container_type
 
     error = 'nginx: [emerg] invalid secret-token in /etc/nginx/generated/id/sites/s_617070_776562.conf:12'
-    container = SimpleNamespace(name="proxy", services={"nginx": {}})
+    container = object.__new__(builtin_container_type("100-nginx"))
+    container._name = "proxy"
+    container.__dict__["services"] = {"nginx": {}}
     manager = SimpleNamespace(nginx_sites={("app", "web"): SimpleNamespace(template="/templates/app.j2")},
-        integration_consumers={"proxy": builtin_consumer_type("100-nginx")(container)},
+        containers={"proxy": container}, generated_configs={"proxy": container},
         structured_runner=SimpleNamespace(execute=lambda *args, **kwargs:
             SimpleNamespace(succeeded=False, stdout="", stderr=error, returncode=1)),
         runtime=SimpleNamespace(create_docker_process=lambda *args, **kwargs: None))
@@ -236,7 +243,7 @@ def test_native_diagnostic_keeps_site_source_but_omits_secret():
     manager.compose_runner = runner
     container.manager = manager
     with pytest.raises(ContainerError) as raised:
-        manager.integration_consumers["proxy"].on_validate(SimpleNamespace(), SimpleNamespace(generation_id="id"))
+        container.validate_config(SimpleNamespace(), SimpleNamespace(generation_id="id"))
     message = str(raised.value)
     assert "'app'/'web'" in message
     assert "/templates/app.j2" in message
@@ -253,10 +260,13 @@ def test_saved_generated_model_retains_previous_generation_label():
         captured.extend(yaml.safe_load(open(path).read()) for path in files)
         return SimpleNamespace(check_call=lambda: None)
 
+    from _harness import builtin_container_type
+    container = object.__new__(builtin_container_type("102-authelia"))
+    container._name = "authelia"
     manager = SimpleNamespace(project_name="test", runtime=SimpleNamespace(create_docker_process=process),
-                              integration_consumers={"authelia": SimpleNamespace(uses_generation_label=True)})
+                              containers={"authelia": container}, generated_configs={"authelia": container})
     context = SimpleNamespace(generated_candidates={"authelia": SimpleNamespace(
-        container=SimpleNamespace(name="authelia"),
+        container=container,
         generation_id="previous")})
     ComposeRunner(manager).apply_saved_services(
         context, ("authelia",), {"old.yml": "services:\n  authelia:\n    image: authelia:old\n"})
@@ -308,9 +318,9 @@ def test_partial_update_applies_navigation_only_if_flare_is_running(fresh_manage
 
 def test_unchanged_candidate_replaces_bootstrap_before_application(tmp_path):
     owner = _Generated(tmp_path / "generated")
-    full = GeneratedCandidate(owner, owner.on_render)
+    full = GeneratedCandidate(owner, owner.render_config)
     full.publish()
-    unchanged = GeneratedCandidate(owner, owner.on_render)
+    unchanged = GeneratedCandidate(owner, owner.render_config)
     assert not unchanged.changed
     bootstrap = GeneratedCandidate(owner, lambda generation: {"config": "health-only", "health": generation})
     bootstrap.publish()
@@ -320,7 +330,8 @@ def test_unchanged_candidate_replaces_bootstrap_before_application(tmp_path):
         applied.append(GeneratedCandidate.current_id(candidate.root))
         assert (Path(candidate.root) / "current/config").read_text() == "first"
 
-    owner.manager.generated_configs = {"test": SimpleNamespace(on_apply=apply)}
+    owner.apply_config = apply
+    owner.manager.generated_configs = {"test": owner}
     context = SimpleNamespace(generated_candidates={}, initial_running_services=set(),
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
         service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
@@ -337,10 +348,10 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
     old_model = {"services": {name: {"image": "old"} for name in owner.services}}
     new_model = {"services": {name: {"image": "new"} for name in owner.services}}
     AppliedServiceModels(owner.manager, old_model).record(owner.services)
-    full = GeneratedCandidate(owner, owner.on_render)
+    full = GeneratedCandidate(owner, owner.render_config)
     full.publish()
     owner.content = "new"
-    candidate = GeneratedCandidate(owner, owner.on_render)
+    candidate = GeneratedCandidate(owner, owner.render_config)
     calls = []
 
     def apply(context, value, services):
@@ -348,7 +359,8 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
         if value.generation_id == candidate.generation_id and services == ("sidecar",):
             raise RuntimeError("sidecar failed")
 
-    owner.manager.generated_configs = {"test": SimpleNamespace(on_apply=apply)}
+    owner.apply_config = apply
+    owner.manager.generated_configs = {"test": owner}
     path = str(tmp_path / "test.yml")
     context = SimpleNamespace(generated_candidates={}, initial_running_services=set(owner.services),
         applied_generation_services={}, applied_compose={},
@@ -368,7 +380,7 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
     ("authelia", 1, "invalid secret-token in /generated/id/configuration.yml:12"),
 ])
 def test_asset_validator_interprets_raw_result_without_exposing_secrets(service, returncode, stderr):
-    from _harness import builtin_consumer_type
+    from _harness import builtin_container_type
 
     result = SimpleNamespace(succeeded=returncode == 0, returncode=returncode, stdout="", stderr=stderr)
     manager = SimpleNamespace(
@@ -380,10 +392,10 @@ def test_asset_validator_interprets_raw_result_without_exposing_secrets(service,
     runner.isolated_service_args = lambda *args: []
     context = SimpleNamespace()
     assert runner.validate_service(context, service, [service], check=False) is result
-    consumer = builtin_consumer_type("100-nginx" if service == "nginx" else "102-authelia")(
-        SimpleNamespace(manager=manager))
+    container = object.__new__(builtin_container_type("100-nginx" if service == "nginx" else "102-authelia"))
+    container.manager = manager
     with pytest.raises(ContainerError, match="Native validation failed") as raised:
-        consumer.on_validate(context, SimpleNamespace(generation_id="id"))
+        container.validate_config(context, SimpleNamespace(generation_id="id"))
     assert "secret-token" not in str(raised.value)
 
 

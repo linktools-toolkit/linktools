@@ -5,10 +5,6 @@
 import pytest
 
 from linktools.cntr import ContainerError, Nginx
-from _harness import builtin_consumer_type
-
-
-NginxGeneration = builtin_consumer_type("100-nginx")
 
 
 def _render_site(nginx, waf, patterns):
@@ -18,7 +14,7 @@ def _render_site(nginx, waf, patterns):
     )
     site.file_id = "site_123"
     site.var_name = "123"
-    return NginxGeneration(nginx).render_template(
+    return nginx._render_site_template(
         nginx, nginx.get_source_path("templates", "server.conf"), site, business="location / { return 204; }",
     )
 

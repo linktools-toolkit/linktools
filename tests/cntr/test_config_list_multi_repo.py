@@ -1,21 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`ct-cntr config list` across multiple repositories with a colliding key
-name.
-
-Regression: `on_command_list` used to dedup purely by key name (a plain
-``set()``), so when two different repositories each declared their own
-``PORT`` field with a different value, only the first-seen repo's PORT ever
-made it into the listing -- the second repo's real, different value for the
-same key was silently dropped. Dedup must be per (Config identity, key).
-
-Per-repository local-file config isolation was intentionally removed since:
-every repository now shares this process's own merged profile AND the same
-repository Config object, so two repos declaring the identical field (same
-name, same definition) are no longer "different owners with different
-values" -- they resolve to one shared value and one listed entry, with no
-owner-disambiguation label needed.
-"""
+"""Repositories share config values while container selection limits listed keys."""
 import json
 
 import _harness
@@ -167,3 +152,46 @@ def test_same_repo_name_different_repos_share_one_value(monkeypatch, tmp_path, c
     lines = [line for line in out.splitlines() if "PORT=" in line]
     assert len(lines) == 1
     assert str(tmp_path) not in lines[0]  # never leak an absolute path
+
+
+def test_filtered_list_includes_only_selected_declarations_and_optional_dependencies(monkeypatch, tmp_path, capsys):
+    import linktools.cntr.commands._shared as cntr_shared
+    from linktools.cntr.commands.config import ConfigCommand
+
+    repo = tmp_path / "repo"
+    for name, dependencies, key in (
+            ("app", ["dependency"], "APP_VALUE"),
+            ("dependency", [], "DEPENDENCY_VALUE"),
+            ("other", [], "OTHER_VALUE")):
+        directory = repo / name
+        directory.mkdir(parents=True)
+        (directory / "container.py").write_text(
+            "from linktools.core import ConfigField\n"
+            "from linktools.cntr import BaseContainer\n"
+            "class Container(BaseContainer):\n"
+            "    @property\n"
+            "    def dependencies(self):\n"
+            "        return %r\n"
+            "    @property\n"
+            "    def configs(self):\n"
+            "        return {%r: ConfigField(default='value')}\n"
+            "    @property\n"
+            "    def extend_configs(self):\n"
+            "        return {'EXTENDED': ConfigField(default='extended'),\n"
+            "                'OPTIONAL': ConfigField(secret=True)}\n"
+            % (dependencies, key), encoding="utf-8")
+
+    manager = _fresh_standalone_manager(tmp_path)
+    manager.repos.add(str(repo))
+    manager.installed_state.add("app", "dependency", "other")
+    manager.env_config.persist_many({
+        "APP_VALUE": "persisted", "EXTENDED": "extended", "UNDECLARED": "extra"})
+    monkeypatch.setattr(cntr_shared, "manager", manager)
+
+    command = ConfigCommand()
+    command.on_command_list(names=["app"], show_secret=True)
+    assert capsys.readouterr().out.splitlines() == ["APP_VALUE=persisted", "EXTENDED=extended"]
+
+    command.on_command_list(names=["app"], with_dependencies=True, show_secret=True)
+    assert capsys.readouterr().out.splitlines() == [
+        "APP_VALUE=persisted", "DEPENDENCY_VALUE=value", "EXTENDED=extended"]

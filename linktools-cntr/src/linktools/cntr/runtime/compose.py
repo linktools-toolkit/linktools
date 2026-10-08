@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from ..artifacts import GeneratedCandidate
     from .structured import CommandResult
     from ..manager import ContainerManager
-    from ..integration import IntegrationConsumer
 
 
 _PROXY_ENV_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
@@ -48,13 +47,51 @@ def service_dependencies(spec: "dict[str, Any]") -> "dict[str, dict[str, Any]]":
 
 
 def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[str]",
-                   consumers: "Mapping[str, IntegrationConsumer]") -> "tuple[str, ...]":
-    priorities = {}
-    for container in containers:
-        consumer = consumers.get(container.name)
-        priority = consumer.application_order if consumer is not None else 0
-        priorities.update((service, priority) for service in container.services)
-    return tuple(sorted(services, key=priorities.__getitem__))
+                   model: "dict[str, Any] | None" = None,
+                   available_services: "Iterable[str]" = ()) -> "tuple[str, ...]":
+    """Topologically order applications; priority only breaks ready-node ties.
+
+    Availability is reserved for acknowledged bootstrap services, never the
+    general running set: ordinary dependencies must apply their new model first.
+    """
+    from ..container import ContainerError
+    containers = tuple(containers)
+    installed = {container.name: container for container in containers}
+    owners = {name: container for container in containers for name in container.services}
+    selected = tuple(dict.fromkeys(services))
+    pending = set(selected)
+    available = set(available_services)
+    definitions = model["services"] if model is not None else {
+        name: owner.services[name] for name, owner in owners.items()}
+    required = {owners[name].name for name in selected}
+    dependencies = {}
+    for name in selected:
+        owner = owners[name]
+        edges = set()
+        for dependency in owner.dependencies:
+            edges.update(service for service in installed[dependency].services
+                         if service in pending and service not in available)
+        for dependency, options in service_dependencies(definitions[name]).items():
+            condition = options.get("condition", "service_started")
+            if dependency in available and condition in ("service_started", "service_healthy"):
+                continue
+            if dependency not in pending:
+                raise ContainerError("Unselected Compose dependency {} for {}".format(dependency, name))
+            edges.add(dependency)
+        for provider, provider_services in owner.get_runtime_requirements(required).items():
+            if provider != owner.name:
+                edges.update(service for service in provider_services if service in pending)
+        dependencies[name] = edges
+    result = []
+    positions = {name: index for index, name in enumerate(selected)}
+    while pending:
+        ready = [name for name in pending if not (dependencies[name] & pending)]
+        if not ready:
+            raise ContainerError("Compose dependency cycle at " + ", ".join(sorted(pending)))
+        name = min(ready, key=lambda value: (owners[value].application_priority, positions[value]))
+        pending.remove(name)
+        result.append(name)
+    return tuple(result)
 
 
 @dataclass
@@ -273,15 +310,17 @@ class ComposeRunner:
         if saved is not None:
             self.apply_saved_services(context, (service,), saved)
             return 0
+        self.wait_service_dependencies(context, service)
         args = self.apply_service_args(service, recreate, context.is_full_containers)
         import tempfile
         import yaml
         candidates = getattr(context, "generated_candidates", {})
         candidate = next((c for c in candidates.values() if service == c.container.name), None)
-        if candidate is None or not self.manager.integration_consumers[candidate.container.name].uses_generation_label:
+        label = candidate.container.generation_label(service, candidate.generation_id) if candidate else None
+        if label is None:
             return self.manager.runtime.create_docker_compose_process(context.containers, *args).check_call()
         overlay = {"services": {service: {"labels": {
-            "io.linktools.cntr.generation": candidate.generation_id}}}}
+            "io.linktools.cntr.generation": label}}}}
         with tempfile.TemporaryDirectory(prefix="cntr-apply-") as directory:
             path = os.path.join(directory, "generation.yml")
             with open(path, "w", encoding="utf-8") as stream:
@@ -342,22 +381,42 @@ class ComposeRunner:
                 raise ContainerError("Service {} did not become healthy".format(service))
             time.sleep(0.5)
 
-    def apply_services(self, context: "EventContext", services: "Sequence[str]") -> None:
+    def wait_service_dependencies(self, context: "EventContext", service: str) -> None:
+        """Honor Compose readiness conditions for every native apply path."""
+        from ..container import ContainerError
         model = getattr(context, "compose_model", None) or self.final_model(context)
-        model = model["services"]
-        pending = set(services)
-        while pending:
-            ready = [name for name in services if name in pending and not
-                     (set(service_dependencies(model[name])) & pending)]
-            if not ready:
-                from ..container import ContainerError
-                raise ContainerError("Compose service dependency cycle")
-            for name in ready:
-                for dependency, options in service_dependencies(model[name]).items():
-                    if options.get("condition") == "service_healthy":
-                        self.wait_service_healthy(context, dependency)
-                self.apply_service(context, name)
-                pending.remove(name)
+        for dependency, options in service_dependencies(model["services"][service]).items():
+            condition = options.get("condition", "service_started")
+            if condition == "service_healthy":
+                self.wait_service_healthy(context, dependency)
+            elif condition == "service_completed_successfully":
+                self.wait_service_completed(context, dependency)
+            elif condition == "service_started":
+                # The ordered dependency's successful `up -d` acknowledged
+                # startup; one-shot services may already have exited by now.
+                continue
+            else:
+                raise ContainerError("Unsupported Compose dependency condition: " + str(condition))
+
+    def wait_service_completed(self, context: "EventContext", service: str, timeout: int = 30) -> None:
+        import time
+        from ..container import ContainerError
+        deadline = time.monotonic() + timeout
+        while True:
+            state = self.manager.docker_inspector.get_project_state(context.containers)
+            matches = [item for item in state.services if item.service == service]
+            if any(item.state in ("exited", "dead") and item.exit_code != 0 for item in matches):
+                raise ContainerError("Dependency service {} failed".format(service))
+            if matches and all(item.state == "exited" and item.exit_code == 0 for item in matches):
+                return
+            if time.monotonic() >= deadline:
+                raise ContainerError("Service {} did not complete successfully".format(service))
+            time.sleep(0.5)
+
+    def apply_services(self, context: "EventContext", services: "Sequence[str]") -> None:
+        """Apply the dependency-ordered selection supplied by the orchestrator."""
+        for service in services:
+            self.apply_service(context, service)
 
     def apply_saved_services(self, context: "EventContext", services: "Sequence[str]",
                              files: "dict[str, str]") -> None:
@@ -376,7 +435,8 @@ class ComposeRunner:
                 candidate.container.name: {"labels": {
                     "io.linktools.cntr.generation": candidate.generation_id}}
                 for candidate in candidates.values()
-                if candidate.container.name in services and self.manager.integration_consumers[candidate.container.name].uses_generation_label
+                if candidate.container.name in services and
+                candidate.container.generation_label(candidate.container.name, candidate.generation_id) is not None
             }
             if labels:
                 path = os.path.join(directory, "generation.yml")

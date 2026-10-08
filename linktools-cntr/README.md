@@ -278,9 +278,9 @@ sequenceDiagram
         loop 每个容器（正序）
             ContainerManager->>Container: on_check(ctx)
             ContainerManager->>Container: on_starting(ctx)
-            ContainerManager->>Container: start_hooks[i]()（mkdir / chown / 写 Nginx 配置…）
+            ContainerManager->>Container: hooks.call(BEFORE_START, ctx)（mkdir / chown / 写 Nginx 配置…）
         end
-        ContainerManager->>ContainerManager: manager.start_hooks[i]()
+        ContainerManager->>ContainerManager: manager.hooks.call(BEFORE_START, ctx)
         ContainerManager->>CLI: yield
         CLI->>CLI: docker compose build / up --detach
         loop 每个容器（逆序）
@@ -301,9 +301,9 @@ sequenceDiagram
         CLI->>CLI: docker compose stop / down
         loop 每个容器（正序）
             ContainerManager->>Container: on_stopped(ctx)
-            ContainerManager->>Container: stop_hooks[i]()
+            ContainerManager->>Container: hooks.call(AFTER_STOP, ctx)
         end
-        ContainerManager->>ContainerManager: manager.stop_hooks[i]()
+        ContainerManager->>ContainerManager: manager.hooks.call(AFTER_STOP, ctx)
         alt is_full_containers == True
             ContainerManager->>Container: on_removed(ctx)（孤立容器清理）
         end
@@ -319,15 +319,15 @@ sequenceDiagram
         CLI->>CLI: docker compose stop
         loop 每个容器（正序）
             ContainerManager->>Container: on_stopped(ctx)
-            ContainerManager->>Container: stop_hooks[i]()
+            ContainerManager->>Container: hooks.call(AFTER_STOP, ctx)
         end
-        ContainerManager->>ContainerManager: manager.stop_hooks[i]()
+        ContainerManager->>ContainerManager: manager.hooks.call(AFTER_STOP, ctx)
         loop 每个容器（正序）
             ContainerManager->>Container: on_check(ctx)
             ContainerManager->>Container: on_starting(ctx)
-            ContainerManager->>Container: start_hooks[i]()
+            ContainerManager->>Container: hooks.call(BEFORE_START, ctx)
         end
-        ContainerManager->>ContainerManager: manager.start_hooks[i]()
+        ContainerManager->>ContainerManager: manager.hooks.call(BEFORE_START, ctx)
         ContainerManager->>CLI: yield
         CLI->>CLI: docker compose build / up --detach
         loop 每个容器（逆序）
@@ -360,8 +360,8 @@ return [
 `Flare.public` 创建带描述的应用；`Flare.bookmark` 支持自定义分区。
 使用 `Flare.category("tool", "工具", order=5)` 可进一步设置分区标题和顺序。
 域名配置使用 `ConfigField(provider=Nginx.domain(self))`。
-共享声明和消费者协议位于 `integration/` 包中；具体配置生成、启动依赖和发布策略
-放在各自的 asset `container.py`，通过 `integration_consumer` 提供给 manager。
+共享声明位于 `integration/` 包中；具体配置生成、启动依赖和发布策略
+放在各自的 asset `container.py`，由 `Container` 的原生生命周期方法直接实现。
 导航 URL 不再负责注册代理。
 `auth_bypass` 与 `waf_bypass` 分别控制认证和 WAF 路径旁路；自定义模板保留 nginx 原生路由语义。
 外部容器仓库需要同时迁移 Python 声明、模板和 OIDC 读取接口。

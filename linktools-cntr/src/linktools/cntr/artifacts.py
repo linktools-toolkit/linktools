@@ -23,6 +23,7 @@ from .container import ContainerError
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Any, Callable
+    from pathlib import Path
     from linktools.types import PathType
     from .container import BaseContainer
     from .manager import ContainerManager
@@ -66,28 +67,44 @@ def sha256_of(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def collect_candidates(manager: "ContainerManager", containers: "Iterable[BaseContainer]") -> "dict[str, tuple[str, str, str]]":
-    """Render each container's compose/Dockerfile candidate content
-    in-memory -- never touching the real generated file on disk. Returns
-    ``{absolute_destination_path: (kind, container_name, content)}``.
+def docker_file_destination(container: "BaseContainer") -> "Path":
+    """Return the generated Dockerfile path without rendering or writing it."""
+    return utils.join_path(container.manager.data_path, "dockerfile", f"{container.name}.Dockerfile")
 
-    Shared by ExecutionPlanner (dry-run artifact hashing) and the real
-    up/restart write path, so the two can never compute a candidate's
-    destination or content differently.
-    """
+
+def compose_candidate(container: "BaseContainer") -> "tuple[Path, str] | None":
+    """Serialize the Compose model without creating its destination."""
     import yaml
 
+    compose = container.docker_compose
+    if not compose:
+        return None
+    destination = utils.join_path(container.manager.data_path, "compose", f"{container.name}.yml")
+    return destination, yaml.safe_dump(compose, sort_keys=True, allow_unicode=False)
+
+
+def docker_file_candidate(container: "BaseContainer") -> "tuple[Path, str] | None":
+    """Return a rendered Dockerfile and destination without writing either."""
+    content = container.docker_file
+    if not content:
+        return None
+    return docker_file_destination(container), content
+
+
+def collect_candidates(manager: "ContainerManager", containers: "Iterable[BaseContainer]") -> "dict[str, tuple[str, str, str]]":
+    """Collect pure Compose/Dockerfile serializations shared with file writers.
+
+    Returns ``{absolute_destination_path: (kind, container_name, content)}``.
+    The manager argument is retained for callers; each container owns its
+    destination through its manager, just as it does during execution.
+    """
     candidates: "dict[str, tuple[str, str, str]]" = {}
     for container in containers:
-        compose = container.docker_compose
-        if compose:
-            content = yaml.safe_dump(compose, sort_keys=True, allow_unicode=False)
-            dest = str(utils.join_path(manager.data_path, "compose", f"{container.name}.yml"))
-            candidates[dest] = ("compose", container.name, content)
-        docker_file = container.docker_file
-        if docker_file:
-            dest = str(utils.join_path(manager.data_path, "dockerfile", f"{container.name}.Dockerfile"))
-            candidates[dest] = ("dockerfile", container.name, docker_file)
+        for kind, candidate in (("compose", compose_candidate(container)),
+                                ("dockerfile", docker_file_candidate(container))):
+            if candidate is not None:
+                destination, content = candidate
+                candidates[str(destination)] = (kind, container.name, content)
     return candidates
 
 

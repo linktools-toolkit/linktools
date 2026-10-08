@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 
 from ..artifacts import collect_candidates, sha256_of
 from ..container import ContainerError
-from ..runtime.compose import order_services
 from ..runtime.structured import redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
 
@@ -82,8 +81,7 @@ class ExecutionPlanner:
         if action == "restart":
             commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
         if action in ("up", "restart"):
-            services_to_start = order_services(
-                start_selection.project_containers, start_selection.services, manager.integration_consumers)
+            services_to_start = start_selection.services
             for service in services_to_start:
                 commands.append(self._planned_command(
                     "up", [*file_args, *manager.compose_runner.apply_service_args(service, remove_orphans=selection.full)]))
@@ -91,7 +89,8 @@ class ExecutionPlanner:
             commands.append(self._planned_command("down", [*file_args, "down", *services]))
 
         hooks = []
-        for step in manager.lifecycle.iter_steps(action, selection.target_containers):
+        for step in manager.lifecycle.iter_steps(
+                action, start_selection.target_containers, stop_containers=selection.target_containers):
             if step.phase is None:
                 continue
             owner = step.container if step.container is not None else manager
@@ -113,16 +112,23 @@ class ExecutionPlanner:
             warnings.append("Configuration is reconciled across the complete installed project. "
                             "Other running services with pending configuration changes may also be updated; "
                             "unrelated stopped services stay stopped. Runtime inspection and native "
-                            "candidate validation determine those additional updates during execution.")
+                            "candidate validation determine those additional updates during execution. "
+                            "CHECK and BEFORE_START may also prepare installed owners with running services, "
+                            "because their hooks can change configuration inputs. AFTER_START runs only "
+                            "for the final application targets.")
             sync = start_selection.project_containers
             for container in sync:
                 if container.name in manager.generated_configs:
                     warnings.append("{}: generated candidate native validation is pending execution; "
                                     "no hooks, secrets or generated files were prepared".format(container.name))
             for container in sync:
-                consumer = manager.integration_consumers.get(container.name)
-                if consumer is not None:
-                    warnings.extend(consumer.plan_warnings)
+                if container.bootstrap_services:
+                    warnings.append("{}: cold starts acknowledge health-only bootstrap before provider "
+                                    "readiness and final configuration application".format(container.name))
+        if action == "restart":
+            warnings.append("Restart prepares start hooks, images and all generated candidates, then validates "
+                            "them before stopping only the explicitly selected services. Runtime providers "
+                            "are included in startup hooks and application, not in the explicit stop set.")
         preflight = "skipped"
         if action in ("up", "restart") and candidate_files:
             preflight = manager.docker_inspector.preflight_candidates(candidate_files)

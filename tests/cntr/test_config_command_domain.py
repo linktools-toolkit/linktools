@@ -97,3 +97,21 @@ def test_validate_does_not_prompt_for_unconfigured_fields(fresh_manager, monkeyp
     monkeypatch.setattr(rich, "prompt", fail)
     monkeypatch.setattr(rich, "choose", fail)
     ConfigCommand().on_command_validate()  # DOCKER_DOWNLOAD_PATH etc. are unset; must not prompt
+
+
+def test_unknown_key_round_trips_without_a_schema_field(fresh_manager, capsys):
+    ConfigCommand().on_command_set(configs={"UNDECLARED": "value"})
+    assert fresh_manager.env_config.schema.get("UNDECLARED") is None
+    ConfigCommand().on_command_get(keys=["UNDECLARED"], show_secret=True)
+    assert capsys.readouterr().out == "UNDECLARED=value\n"
+    ConfigCommand().on_command_explain(key="UNDECLARED", as_json=True)
+    assert json.loads(capsys.readouterr().out)["resolved_value"] == "value"
+    ConfigCommand().on_command_validate(as_json=True)
+    assert json.loads(capsys.readouterr().out) == {"valid": True, "errors": []}
+
+
+def test_get_missing_unknown_key_raises():
+    from linktools.errors import ConfigNotFoundError
+
+    with pytest.raises(ConfigNotFoundError):
+        ConfigCommand().on_command_get(keys=["UNDECLARED_MISSING"])

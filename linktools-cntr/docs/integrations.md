@@ -263,10 +263,13 @@ A partial command can therefore apply pending changes to other running services.
 When no resolved snapshot exists yet, a running service is reconciled once to
 establish it; rollback uses the previous saved Compose file where available.
 Historical external environment-file contents cannot be recovered retroactively.
-`restart app` stops only explicit targets, after all candidate validation passes.
-Preparation covers running services and their possible runtime dependencies;
-application still uses the final changed-service selection. Snapshots are captured
-after startup hooks, so hook-prepared environment files are included.
+`restart app` stops only explicit targets, after all final and required bootstrap candidate validation passes.
+Preparation covers running services and their possible runtime dependencies:
+`CHECK`, `on_starting` and `BEFORE_START` may therefore run for other running
+owners before their hook-dependent changes are known. Application uses the final
+changed-service selection, and `on_started`/`AFTER_START` use only that final
+application scope. Snapshots are captured after startup hooks, so hook-prepared
+environment files are included.
 The plan reports the full reconciliation scope and defers runtime-dependent
 update decisions until execution.
 
@@ -276,61 +279,124 @@ rendering. Aggregate consumers read the complete installed snapshot, including
 removal of a producer's final declaration. No historical dependency graph or
 runtime configuration-read tracking is needed.
 
-Producers declare their inputs through `integrations`. A container module may
-also export `Consumer(IntegrationConsumer)` beside `Container`. The existing
-container loader discovers both classes; the manager creates and caches one
-consumer per installed owning container. Construction must be side-effect free.
+Authelia reuses its resolved site URL for OIDC and session endpoints, joins
+`settings` to that URL for default redirection, and derives the admin origin and
+authority separately. Its cookie domain remains `NGINX_ROOT_DOMAIN`.
+`ResolvedSite.url` requires an explicit URL when the server name is nonliteral;
+metadata consumers may request `get_url(default="")` to leave only an absent
+concrete identity unset. Invalid explicit values and configuration errors still
+raise, and generated Authelia identity still requires HTTPS.
+
+Producers declare their inputs through `integrations`. The owning
+`Container(BaseContainer)` also implements its native runtime requirements,
+generated configuration, bootstrap and readiness behavior. The loader discovers
+one `Container` class; there is no separate consumer object or callback map.
+Container construction and declaration collection must remain side-effect free.
 
 ```python
-from linktools.cntr.integration import IntegrationConsumer
+from linktools.cntr import BaseContainer
 
 
 class Container(BaseContainer):
-    pass
+    generates_config = True
+    application_priority = 0
+    bootstrap_services = ()
 
-
-class Consumer(IntegrationConsumer):
-    generated = True
-    # Implement the generated-configuration lifecycle hooks below.
+    # Implement render_config, validate_config and apply_config here.
+    # Override on_prepare_config when native inputs need preparation.
 ```
 
-`Consumer` subclasses `IntegrationConsumer`. Set `generated=True` and
-implement `on_render(generation_id)`, `on_validate(context, candidate)`, and
-`on_apply(context, candidate, services)` when it owns generated configuration.
-Optional lifecycle hooks use the same instance style as `BaseContainer`:
-`on_prepare(context)`, `on_bootstrap(context)`, and `on_applied(context, service)`.
-`get_runtime_requirements(required)` reads the manager through `self.container`;
-`plan_warnings` is tuple data. A consumer without generated files can supply runtime policies
-and readiness handling alone. Each implementation must belong to the container
-that provides it. The manager freezes installed consumers once per command;
-unknown container names receive no special implementation.
+Set `generates_config=True` explicitly when the container owns generated files.
+Overriding a method alone does not opt into generation. The manager's
+`generated_configs` is a read-only mapping of installed names to those same
+container instances. It does not construct an adapter or another lifecycle owner.
+Implement these methods on the container:
 
-The `integration/` package contains the shared declaration types, factories,
-consumer protocol, and generic consumer collection. Concrete implementations
-live beside their container definitions in `assets/containers/*/container.py`.
-nginx owns runtime provider requirements, certificate preparation, bootstrap,
-native template validation, reload acknowledgement, and validation diagnostics.
-Flare owns category grouping, navigation generation, and application. Authelia
-and LLDAP own configuration generation and readiness; SafeLine owns its
-management readiness. Shared nginx site resolution remains part of the public
-declaration API.
+- `on_prepare_config(context)` prepares native inputs after required image
+  pulls/builds have finished. It is distinct from the existing zero-argument
+  `on_prepare()` used during execution setup
+- `render_config(generation_id)` returns a relative-path-to-text mapping for an
+  immutable candidate tree
+- `validate_config(context, candidate)` validates staged output before publication.
+  All final and required intermediate bootstrap candidates are validated before
+  any explicit restart target is stopped
+- `apply_config(context, candidate, services)` applies the published candidate to
+  the selected services and confirms it was loaded. It is also used to restore a
+  previous generation on rollback; a successful reload command alone is not an
+  acknowledgement
 
-`IntegrationConsumer` supplies runtime requirements, application order,
-bootstrap and update decisions, generation-label policy, and native diagnostics.
-Planning and execution use the same service-ordering operation. The core owns
-generic dependency closure, Compose execution, candidate publication and
-rollback. `ContainerManager.nginx_sites` only caches and delegates site
-resolution to `Nginx.resolve_sites`; it contains no nginx validation policy.
-The implementations are module-level `Consumer` classes discovered beside `Container`;
-individual generation stages are not BaseContainer lifecycle hooks. Concrete
-Generation classes are local to each asset, and are not exported by the main
-package. The former `linktools.cntr.generation` module is removed.
-This navigation and synchronization addendum
-supersedes the earlier Site protocol's separate `exposes` and `config_sources`
-properties. Migrate both repositories together; there is no fallback alias.
+Other native capabilities do not require generated files:
+
+- `get_runtime_requirements(required)` receives the selected container names and
+  returns a provider-name-to-service-names mapping. It must be safe during planning
+- `application_priority` defaults to zero; lower values win only among services
+  whose dependency edges are already satisfied
+- `on_service_started(context, service)` confirms native readiness after each
+  service's application and before its dependents are applied. The default is a
+  no-op, so containers with additional readiness requirements must implement it
+
+A generated owner may declare `bootstrap_services` and implement the pure
+`render_bootstrap(generation_id)` method, returning a relative-path-to-text mapping
+for an intermediate configuration. This method does not start services or publish
+files. The core creates the bootstrap candidate and uses the same
+`validate_config`, publication, `apply_config`, readiness and rollback path as
+for final candidates. Bootstrap application does not record a final applied
+Compose snapshot; that is recorded only after final application succeeds.
+
+An already-running bootstrap service must pass its health check. Otherwise the
+core applies and acknowledges the intermediate configuration. Only acknowledged
+bootstrap services count as available while ordering the complete application.
+An ordinary running dependency is still applied in dependency order before its
+dependents. On a cold start with no previous generation, a successfully
+acknowledged bootstrap becomes the fallback for a failed final application.
+Rollback can restore previously running services and those acknowledged bootstrap
+services; it must not start unrelated stopped siblings. A failed, unacknowledged
+bootstrap does not make its service a rollback restore target.
+`generation_label(service, generation_id)` controls the generated service marker;
+its default marks the same-named service of a generated owner.
+
+Startup follows one orchestration path:
+
+1. Run startup checks, `on_starting` and registered pre-start hooks for the
+   preparation scope, which can include other running owners. Then resolve the
+   authoritative Compose model so hook-prepared environment files are included
+2. Prepare required images, then call `on_prepare_config` and `render_config` for
+   every installed generated owner, including owners outside the explicit targets
+3. Validate all final generated candidates, reconcile the final changed-service
+   scope, and stage and validate any required intermediate bootstrap candidates
+4. For restart, stop only the explicit targets after successful validation
+5. Health-check already-running bootstrap services or publish and apply the
+   validated intermediate configurations through the core's candidate path
+6. Apply services in topological order across container, Compose and native
+   runtime dependencies. Priority breaks ready-service ties, never dependency
+   edges. Publish generated candidates before applying their services and confirm
+   per-service readiness before moving to dependents
+7. Publish validated candidates for generated owners with no selected services
+   without starting those services, then run `on_started`/`AFTER_START` only for
+   the final application targets
+
+Planning shares dependency and service-ordering semantics but does not execute
+these callbacks, prepare images or write candidates. Compose and Dockerfile
+candidate paths and text use the same pure serializers as execution's writers.
+
+The `integration/` package owns declaration types, factories and shared site
+resolution. Native implementations live on the container definitions in
+`assets/containers/*/container.py`. nginx owns runtime provider requirements,
+certificate preparation, bootstrap, native template validation, reload
+acknowledgement and validation diagnostics. Flare owns category grouping,
+navigation generation and application. Authelia and LLDAP own configuration
+generation and readiness; SafeLine owns its management readiness.
+
+The core owns generic dependency closure, Compose execution, candidate
+publication and rollback. `ContainerManager.nginx_sites` only caches and
+delegates site resolution to `Nginx.resolve_sites`; it contains no nginx
+validation policy. There is no separate generation class or exported generation
+module. This navigation and synchronization contract supersedes the earlier
+Site protocol's separate `exposes` and `config_sources` properties. Migrate both
+repositories together; there is no fallback alias.
 
 Generated configuration uses a stable mounted parent, immutable generation
-folders and an atomic `current` link. Candidates are rendered and validated
+folders and an atomic `current` link. Final candidates are rendered and validated
 before restart stops a target. nginx loads bootstrap health/rejection config
 when starting without a serving process; authentication/WAF providers become
 ready before the complete nginx config is activated. nginx health returns the

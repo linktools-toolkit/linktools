@@ -23,17 +23,23 @@ class NginxSite(Integration):
     requires_local_id = True
 
     def __init__(
-            self, server_name: str, proxy: "Optional[str]" = None,
-            template: "Optional[PathType]" = None, https: "Optional[bool]" = None,
-            waf: "Optional[bool]" = None, auth: "Optional[bool]" = None,
-            waf_bypass: "Sequence[str]" = (), auth_bypass: "Sequence[str]" = (),
+            self,
+            server_name: str,
+            proxy: "Optional[str]" = None,
+            template: "Optional[PathType]" = None,
+            https: "Optional[bool]" = None,
+            waf: "Optional[bool]" = None, waf_bypass: "Sequence[str]" = (),
+            auth: "Optional[bool]" = None, auth_bypass: "Sequence[str]" = (),
             auth_headers: "Optional[Mapping[str, str]]" = None,
             auth_rule: "Optional[Mapping[str, Any]]" = None,
-            oidc_redirects: "Sequence[str]" = (), url: "Optional[str]" = None,
+            oidc_redirects: "Sequence[str]" = (),
+            url: "Optional[str]" = None,
             cert_domains: "Sequence[str]" = (),
             vars: "Optional[Mapping[str, Any]]" = None,
             expose: "Optional[FlareLink]" = None,
-            *, local_id: str = "web", default: bool = False,
+            *,
+            local_id: str = "web",
+            default: bool = False,
     ) -> None:
         self.local_id = local_id
         self.expose = expose

@@ -8,11 +8,13 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from linktools.cntr import BaseContainer
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
 
 
-class Container:
+class Container(BaseContainer):
+    name = ""
     dependencies = ()
     integrations = ()
 
@@ -52,7 +54,7 @@ def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped")):
     manager = SimpleNamespace(
         project_name="test", data_path=tmp_path, logger=None,
         containers={c.name: c for c in containers}, integration_snapshot={c.name: () for c in containers},
-        integration_consumers={}, generated_configs={}, compose_runner=runner,
+        generated_configs={}, compose_runner=runner,
         environ=SimpleNamespace(locks=SimpleNamespace(process_lock=lambda key: nullcontext())),
         lifecycle=SimpleNamespace(notify_start=lambda context: nullcontext(), notify_remove=lambda context: nullcontext()),
         image_preparer=SimpleNamespace(plan=lambda *args, **kwargs: SimpleNamespace(pull=(), build=())),
@@ -210,7 +212,29 @@ def test_service_edge_preserves_its_owners_strong_group_dependencies():
     first.services["b"]["depends_on"] = {"a": {}}
     second.dependencies = ("c",)
     project = (first, second, dependency)
-    manager = SimpleNamespace(integration_snapshot={c.name: () for c in project}, integration_consumers={},
+    manager = SimpleNamespace(integration_snapshot={c.name: () for c in project},
         resolver=SimpleNamespace(resolve_dependencies=lambda selected: (first, dependency, second)))
     selected = ComposeOperations(manager).start_selection(ComposeSelection(project, (first,), ("b",), False))
     assert selected.services == ("c", "a", "b")
+
+
+def test_running_owner_prepares_inputs_but_after_start_only_visits_applied_targets(tmp_path, monkeypatch):
+    from linktools.cntr.lifecycle import HookRegistry, LifecycleDispatcher
+
+    operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
+    events = []
+    manager.environ.debug = False
+    manager.hooks = HookRegistry(owner=manager, scope="manager")
+    manager.lifecycle = LifecycleDispatcher(manager)
+    monkeypatch.setattr(manager.lifecycle, "notify_remove", lambda context: nullcontext())
+    for container in manager.containers.values():
+        container.manager = manager
+        container.on_check = lambda context, name=container.name: events.append(("check", name))
+        container.on_starting = lambda context, name=container.name: events.append(("prepare", name))
+        container.on_started = lambda context, name=container.name: events.append(("started", name))
+    operations.up(["target"])
+    assert ("check", "other") in events
+    assert ("prepare", "other") in events
+    assert ("started", "other") not in events
+    assert ("started", "target") in events
+    assert calls == [("apply", ("target",))]

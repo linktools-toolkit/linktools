@@ -32,7 +32,7 @@ import linktools.rich as _rich
 if TYPE_CHECKING:
     from types import ModuleType
     from typing import Type
-    from linktools.cntr.integration import IntegrationConsumer
+    from linktools.cntr.container import BaseContainer
 
 _INTERACTIVE_PATCHED = False
 
@@ -98,8 +98,8 @@ def builtin_module(name: str) -> "ModuleType":
     return module
 
 
-def builtin_consumer_type(name: str) -> "Type[IntegrationConsumer]":
-    return builtin_module(name).Consumer
+def builtin_container_type(name: str) -> "Type[BaseContainer]":
+    return builtin_module(name).Container
 
 
 def _reset_global_config() -> None:
@@ -209,15 +209,16 @@ def stub_generated_runtime(manager, monkeypatch):
     monkeypatch.setattr(manager.compose_runner, "apply_services", lambda context, services:
                         [manager.compose_runner.apply_service(context, service) for service in services])
     def candidate(container, render):
-        return SimpleNamespace(container=container, changed=True, generation_id="candidate", previous_id=None,
+        return SimpleNamespace(container=container, changed=True,
+                               generation_id="bootstrap" if render.__name__ == "render_bootstrap" else "candidate",
+                               previous_id=None,
                                publish=lambda: None, restore=lambda: None)
     monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate", candidate)
     for owner in manager.generated_configs.values():
-        monkeypatch.setattr(owner, "on_prepare", lambda context: None)
-        monkeypatch.setattr(owner, "on_validate", lambda context, candidate: None)
-        monkeypatch.setattr(owner, "on_apply", lambda context, candidate, services:
+        monkeypatch.setattr(owner, "on_prepare_config", lambda context: None)
+        monkeypatch.setattr(owner, "validate_config", lambda context, candidate: None)
+        monkeypatch.setattr(owner, "apply_config", lambda context, candidate, services:
                             manager.compose_runner.apply_services(context, services))
-    def bootstrap(context):
-        manager.compose_runner.apply_service(context, "nginx")
-        return "bootstrap"
-    monkeypatch.setattr(manager.generated_configs["nginx"], "on_bootstrap", bootstrap)
+    def render_bootstrap(generation_id):
+        return {"nginx.conf": "bootstrap " + generation_id}
+    monkeypatch.setattr(manager.generated_configs["nginx"], "render_bootstrap", render_bootstrap)

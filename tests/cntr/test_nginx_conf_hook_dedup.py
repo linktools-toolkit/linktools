@@ -5,12 +5,13 @@ from types import SimpleNamespace
 
 from linktools.cntr import BaseContainer, Nginx
 from linktools.cntr.integration import load_nginx_url
+from linktools.cntr.lifecycle import HookRegistry
 
 
 def test_same_site_can_have_many_navigation_links_without_hooks():
     class Links:
         name = "app"
-        start_hooks = []
+        hooks = HookRegistry()
         manager = SimpleNamespace(nginx_sites={
             ("app", "web"): SimpleNamespace(url="https://app.example.com"),
         })
@@ -19,7 +20,7 @@ def test_same_site_can_have_many_navigation_links_without_hooks():
     second = load_nginx_url(container, "web", "admin")
     assert str(first) == "https://app.example.com"
     assert str(second) == "https://app.example.com/admin"
-    assert not container.start_hooks
+    assert container.hooks.describe() == []
 
 
 def test_sites_share_backends_without_sharing_identity():

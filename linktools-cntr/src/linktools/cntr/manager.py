@@ -29,13 +29,13 @@ if TYPE_CHECKING:
     from .runtime.inspect import DockerInspector
     from .runtime.images import ImagePreparer
     from .lifecycle.dispatcher import LifecycleDispatcher
-    from .lifecycle.hooks import HookListView, HookRegistry
+    from .lifecycle.hooks import HookRegistry
     from .state.running import RunningStateStore
     from .state import InstalledStateStore
     from .repo.service import RepoService
     from .artifacts import ArtifactIndex
     from .execution.planner import ExecutionPlanner
-    from .integration import IntegrationConsumer, ResolvedSite
+    from .integration import ResolvedSite
 
 
 def describe_origin(container: "BaseContainer") -> str:
@@ -66,7 +66,6 @@ class ContainerManager:
         # were discovered, for callers (e.g. Doctor) that want to report
         # them instead of only the log-only warning.
         self.container_load_errors: "list[ContainerLoadError]" = []
-        self._loaded_consumers: "Mapping[str, IntegrationConsumer]" = {}
 
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
@@ -209,7 +208,6 @@ class ContainerManager:
         result = dict()
         load_result = self.loader.load_all()
         self.container_load_errors = load_result.errors
-        self._loaded_consumers = load_result.consumers
         for container in load_result.containers:
             existing = result.get(container.name)
             if existing is not None:
@@ -234,16 +232,6 @@ class ContainerManager:
     def hooks(self) -> "HookRegistry":
         from .lifecycle.hooks import HookRegistry
         return HookRegistry(owner=self, scope="manager")
-
-    @cached_property
-    def start_hooks(self) -> "HookListView":
-        from .lifecycle.hooks import HookPhase
-        return self.hooks.legacy_view(HookPhase.BEFORE_START)
-
-    @cached_property
-    def stop_hooks(self) -> "HookListView":
-        from .lifecycle.hooks import HookPhase
-        return self.hooks.legacy_view(HookPhase.AFTER_STOP)
 
     @cached_property
     def compose_runner(self) -> "ComposeRunner":
@@ -354,18 +342,11 @@ class ContainerManager:
         return MappingProxyType(result)
 
     @cached_property
-    def integration_consumers(self) -> "Mapping[str, IntegrationConsumer]":
-        """Consumer implementations provided by the installed containers."""
+    def generated_configs(self) -> "Mapping[str, BaseContainer]":
+        """Installed containers explicitly owning generated configuration."""
         from types import MappingProxyType
-        return MappingProxyType({name: self._loaded_consumers[name] for name in self.integration_snapshot
-                                 if name in self._loaded_consumers})
-
-    @cached_property
-    def generated_configs(self) -> "Mapping[str, IntegrationConsumer]":
-        """Installed consumers that own generated configuration."""
-        from types import MappingProxyType
-        return MappingProxyType({name: consumer for name, consumer in self.integration_consumers.items()
-                                 if consumer.generated})
+        return MappingProxyType({name: self.containers[name] for name in self.integration_snapshot
+                                 if self.containers[name].generates_config})
 
     def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, Optional[str], Integration]]":
         """Yield read-only declaration inputs from the command's installed snapshot."""

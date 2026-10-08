@@ -40,8 +40,6 @@ _DESCRIPTOR_TYPES = {
     "docker_file": _CachedProperty,
     "services": _CachedProperty,
     "hooks": _CachedProperty,
-    "start_hooks": _CachedProperty,
-    "stop_hooks": _CachedProperty,
 }
 
 
@@ -58,7 +56,7 @@ def _pick_container(fresh_manager):
 
 def test_cached_properties_store_on_the_container_instance(fresh_manager):
     container = _pick_container(fresh_manager)
-    for name in ("docker_compose", "docker_file", "services", "hooks", "start_hooks", "stop_hooks"):
+    for name in ("docker_compose", "docker_file", "services", "hooks"):
         first = getattr(container, name)
         second = getattr(container, name)
         assert first is second

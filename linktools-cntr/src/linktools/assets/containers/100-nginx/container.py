@@ -11,9 +11,8 @@ from typing import TYPE_CHECKING
 from jinja2 import Environment, FileSystemLoader, PrefixLoader, StrictUndefined, TemplateError
 
 from linktools import utils
-from linktools.cntr import BaseContainer, ContainerError, NginxSite
+from linktools.cntr import BaseContainer, ContainerError
 from linktools.cntr.container import ContainerTemplateError
-from linktools.cntr.integration import IntegrationConsumer
 from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
@@ -285,56 +284,34 @@ class Container(BaseContainer):
             ])
         return "\n".join(lines)
 
+    generates_config = True
+    application_priority = 100
+    bootstrap_services = ("nginx",)
 
-class Consumer(IntegrationConsumer):
-    """Own the builtin nginx consumer without extending container hooks."""
-
-    generated = True
-    application_order = 100
-    uses_generation_label = False
+    def generation_label(self, service: str, generation_id: str) -> "str | None":
+        return None
 
     def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
-        manager = self.container.manager
-        installed = manager.integration_snapshot
-        needs_nginx = "nginx" in required
-        if not needs_nginx:
-            for name in required:
-                for site in installed[name]:
-                    if site.consumer != "nginx":
-                        continue
-                    if not isinstance(site, NginxSite):
-                        raise ContainerError(f"Invalid nginx integration {name}/{site.local_id}")
-                    if str(site.server_name):
-                        needs_nginx = True
+        manager = self.manager
+        sites = self.sites
+        needs_nginx = self.name in required or any(
+            producer in required and site.enabled for (producer, _), site in sites.items())
         if not needs_nginx:
             return {}
-        result = {"nginx": tuple(manager.containers["nginx"].services)}
-        for producer, local_id, site in manager.iter_integrations("nginx"):
-            if not isinstance(site, NginxSite):
-                raise ContainerError(f"Invalid nginx integration {producer.name}/{local_id}")
-            if not str(site.server_name):
+        result = {self.name: tuple(self.services)}
+        for site in sites.values():
+            if not site.enabled:
                 continue
             for capability, provider in (("auth", "authelia"), ("waf", "safeline")):
-                configured = getattr(site, capability)
-                if configured is None:
-                    configured = manager.env_config.get("NGINX_" + capability.upper() + "_ENABLE", type=bool)
-                if configured:
-                    if provider not in installed:
-                        raise ContainerError(f"Nginx site {producer.name}/{local_id} requires {provider}")
+                if getattr(site, capability):
                     result[provider] = (("authelia",) if provider == "authelia"
                                         else tuple(manager.containers[provider].services))
         return result
 
-    plan_warnings = ("nginx: first stable generated-parent mount requires container recreation; "
-                     "cold starts use health-only bootstrap before provider readiness",)
-
-    def needs_bootstrap(self, services: "Iterable[str]", running_services: "AbstractSet[str]") -> bool:
-        return "nginx" in services and "nginx" not in running_services
-
-    def render_template(self, container: "BaseContainer", source: "PathType",
+    def _render_site_template(self, container: "BaseContainer", source: "PathType",
                         site: "ResolvedSite | SimpleNamespace", business: "str | None" = None) -> str:
         """Render one location template with unambiguous local/nginx namespaces."""
-        nginx = self.container
+        nginx = self
         source = Path(source).absolute()
         nginx_root = Path(nginx.get_source_path("templates")).absolute()
         environment = Environment(
@@ -372,7 +349,7 @@ class Consumer(IntegrationConsumer):
         from types import SimpleNamespace
         result = {}
         active = []
-        for site in self.container.sites.values():
+        for site in self.sites.values():
             if site.enabled:
                 active.append(site.resolve())
         defaults = {}
@@ -392,20 +369,20 @@ class Consumer(IntegrationConsumer):
                 defaults[port] = site
         if not any(site.default for site in active):
             active.append(SimpleNamespace(
-                producer=self.container, local_id="default", file_id="default", var_name="default",
-                server_name='""', default=True, https=self.container.get_config("NGINX_HTTPS_ENABLE", type=bool),
+                producer=self, local_id="default", file_id="default", var_name="default",
+                server_name='""', default=True, https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
                 waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, vars={},
-                template=self.container.get_source_path("templates", "index.conf"), proxy=None,
+                template=self.get_source_path("templates", "index.conf"), proxy=None,
             ))
         for site in active:
             producer = site.producer
-            source = site.template or self.container.get_source_path("templates", "default.conf")
-            business = self.render_template(producer, source, site)
-            result["sites/" + site.file_id + ".conf"] = self.render_template(
-                producer, self.container.get_source_path("templates", "server.conf"), site, business=business)
+            source = site.template or self.get_source_path("templates", "default.conf")
+            business = self._render_site_template(producer, source, site)
+            result["sites/" + site.file_id + ".conf"] = self._render_site_template(
+                producer, self.get_source_path("templates", "server.conf"), site, business=business)
         return result, any(site.waf for site in active)
 
-    def on_render(self, generation_id: str) -> "dict[str, str]":
+    def render_config(self, generation_id: str) -> "dict[str, str]":
         """Render a generation marker around the immutable business snapshot."""
         from types import SimpleNamespace
         files, waf = self._rendered_site_files
@@ -414,46 +391,46 @@ class Consumer(IntegrationConsumer):
             "generation_id": generation_id, "waf": waf,
             "site_files": tuple(files),
         })
-        result["nginx.conf"] = self.render_template(
-            self.container, self.container.get_source_path("templates", "nginx.conf"), root_site)
+        result["nginx.conf"] = self._render_site_template(
+            self, self.get_source_path("templates", "nginx.conf"), root_site)
         return result
 
-    def on_prepare(self, context: "EventContext") -> None:
+    def on_prepare_config(self, context: "EventContext") -> None:
         for name in ("generated", "certs", "acme"):
-            self.container.get_app_path(name).mkdir(parents=True, exist_ok=True)
-        if not self.container.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            self.get_app_path(name).mkdir(parents=True, exist_ok=True)
+        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
         if ("nginx" in getattr(context, "initial_services", getattr(context, "initial_running", ())) and
-                not os.path.lexists(self.container.get_app_path("generated", "current"))):
+                not os.path.lexists(self.get_app_path("generated", "current"))):
             self._preserve_legacy_files()
-        domain = self.container.get_config("NGINX_ROOT_DOMAIN")
+        domain = self.get_config("NGINX_ROOT_DOMAIN")
         certificate = shlex.quote("/etc/certs/" + domain + "_fullchain.pem")
         checks = ["/usr/local/bin/nginx-init-certificates",
                   "openssl x509 -checkend 0 -noout -in " + certificate]
-        for name in self.container.acme_ssl_domains:
+        for name in self.acme_ssl_domains:
             if name.startswith("*."):
                 checks.append(r"openssl x509 -noout -ext subjectAltName -in {} | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -Fx -- {}".format(
                     certificate, shlex.quote("DNS:" + name)))
             else:
                 checks.append("openssl x509 -noout -checkhost {} -in {}".format(shlex.quote(name), certificate))
-        self.container.manager.compose_runner.validate_service(
+        self.manager.compose_runner.validate_service(
             context, "nginx", ("sh", "-ec", " && ".join(checks)))
 
     def _preserve_legacy_files(self) -> None:
         import shutil
         import tempfile
         from pathlib import Path
-        backup = self.container.get_app_path("migration-backup")
+        backup = self.get_app_path("migration-backup")
         if not backup.exists():
             temporary = Path(tempfile.mkdtemp(
-                prefix="migration-backup-", dir=str(self.container.get_app_path())))
-            self.container.logger.info("Preserve legacy nginx certificates and ACME account before mount migration")
+                prefix="migration-backup-", dir=str(self.get_app_path())))
+            self.logger.info("Preserve legacy nginx certificates and ACME account before mount migration")
             for source, name in (("/etc/certs/.", "certs"), ("/root/.acme.sh/.", "acme")):
                 destination = temporary / name
                 destination.mkdir()
-                self.container.runtime.create_docker_process("cp", "{}:{}".format(
-                    self.container.get_service_name("nginx"), source), str(destination)).check_call()
-            previous = self.container.get_app_path("conf.d")
+                self.runtime.create_docker_process("cp", "{}:{}".format(
+                    self.get_service_name("nginx"), source), str(destination)).check_call()
+            previous = self.get_app_path("conf.d")
             if previous.exists():
                 shutil.copytree(str(previous), str(temporary / "conf.d"), symlinks=True)
             os.rename(str(temporary), str(backup))
@@ -462,7 +439,7 @@ class Consumer(IntegrationConsumer):
             if not source.is_dir():
                 raise ContainerError("Legacy nginx migration backup is incomplete")
             for path in source.rglob("*"):
-                destination = self.container.get_app_path(name) / path.relative_to(source)
+                destination = self.get_app_path(name) / path.relative_to(source)
                 if os.path.lexists(destination):
                     continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -473,8 +450,8 @@ class Consumer(IntegrationConsumer):
                 else:
                     shutil.copy2(str(path), str(destination))
 
-    def on_validate(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
-        manager = self.container.manager
+    def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+        manager = self.manager
         result = manager.compose_runner.validate_service(context, "nginx", (
             "nginx", "-p", "/etc/nginx/", "-c",
             "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t"), check=False)
@@ -502,7 +479,7 @@ class Consumer(IntegrationConsumer):
         import time
         deadline = time.monotonic() + timeout
         while True:
-            result = self.container.manager.compose_runner.exec_service(context, "nginx", (
+            result = self.manager.compose_runner.exec_service(context, "nginx", (
                 "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
                 "/run/nginx-health.sock", "http://localhost/health"), check=False)
             if result.succeeded and result.stdout.strip() == generation_id:
@@ -511,25 +488,17 @@ class Consumer(IntegrationConsumer):
                 raise ContainerError("Nginx did not acknowledge the generated configuration")
             time.sleep(0.25)
 
-    def on_bootstrap(self, context: "EventContext") -> str:
-        from linktools.cntr.artifacts import GeneratedCandidate
-        def render(generation_id: str) -> "dict[str, str]":
-            return {"nginx.conf": 'events {}\nhttp {\n'
-                    'server { listen unix:/run/nginx-health.sock; '
-                    'location = /health { default_type text/plain; return 200 "' + generation_id + '"; }}\n'
-                    'server { listen ' + str(self.container.get_config("NGINX_HTTP_PORT")) + ' default_server; return 503; }\n}\n'}
-        candidate = GeneratedCandidate(self.container, render=render)
-        self.on_validate(context, candidate)
-        candidate.publish()
-        self.container.manager.compose_runner.apply_service(context, "nginx", recreate=True)
-        self.confirm(context, candidate.generation_id)
-        return candidate.generation_id
+    def render_bootstrap(self, generation_id: str) -> "dict[str, str]":
+        return {"nginx.conf": 'events {}\nhttp {\n'
+                'server { listen unix:/run/nginx-health.sock; '
+                'location = /health { default_type text/plain; return 200 "' + generation_id + '"; }}\n'
+                'server { listen ' + str(self.get_config("NGINX_HTTP_PORT")) + ' default_server; return 503; }\n}\n'}
 
-    def on_apply(self, context: "EventContext", candidate: "GeneratedCandidate",
+    def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
               services: "Iterable[str]") -> None:
         if "nginx" not in services:
             return
-        runner = self.container.manager.compose_runner
+        runner = self.manager.compose_runner
         # This also handles the first stable-parent mount and target-image
         # changes, using Compose's ordinary reconciliation.
         runner.apply_service(context, "nginx")

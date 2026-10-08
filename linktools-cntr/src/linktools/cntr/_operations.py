@@ -121,8 +121,8 @@ class ComposeOperations:
                     required.add(owner)
                     services.update(owner.services)
             required_names = {container.name for container in required}
-            for consumer in self.manager.integration_consumers.values():
-                for provider, provider_services in consumer.get_runtime_requirements(required_names).items():
+            for container in selection.project_containers:
+                for provider, provider_services in container.get_runtime_requirements(required_names).items():
                     required.add(installed[provider])
                     services.update(provider_services)
             for name in tuple(services):
@@ -136,27 +136,9 @@ class ComposeOperations:
             if before == (required, services):
                 break
         ordered = tuple(self.manager.resolver.resolve_dependencies(required))
-        ordered_services = []
-        visiting = set()
-
-        def visit(name):
-            if name in ordered_services:
-                return
-            if name in visiting:
-                raise ContainerError("Compose dependency cycle at " + name)
-            visiting.add(name)
-            for dependency in owners[name].dependencies:
-                for service in installed[dependency].services:
-                    visit(service)
-            for dependency in service_dependencies(definitions[name]):
-                visit(dependency)
-            visiting.remove(name)
-            ordered_services.append(name)
-
-        for container in ordered:
-            for name in container.services:
-                if name in services:
-                    visit(name)
+        selected_services = tuple(name for container in ordered for name in container.services if name in services)
+        bootstrap = {name for container in ordered for name in container.bootstrap_services if name in services}
+        ordered_services = order_services(selection.project_containers, selected_services, model, bootstrap)
         if not ordered_services:
             names = ", ".join(c.name for c in selection.target_containers)
             raise ContainerError(f"No runnable service for {names}")
@@ -208,6 +190,7 @@ class ComposeOperations:
         context.saved_compose = {}
         context.applied_compose = {}
         context.applied_generation_services = {}
+        context.bootstrapped_services = set()
         context.compose_files = {}
         context.compose_owners = {}
         context.changed_compose_services = set()
@@ -229,8 +212,8 @@ class ComposeOperations:
         context.initial_running_services = frozenset(
             service.service for service in actual.services if service.state in ("running", "restarting"))
         context.initial_services = frozenset(service.service for service in actual.services)
-        # Image preparation may include running aggregate owners that later
-        # prove unchanged; only the final candidate closure is applied.
+        # Running owners prepare hook-dependent inputs before their changes
+        # are knowable; application and after-start use the final closure.
         generations = manager.generated_configs
         context.changed_compose_services = set(context.initial_running_services)
         selection = self._reconcile_selection(explicit, context, generations)
@@ -263,18 +246,32 @@ class ComposeOperations:
                 owner = generations.get(container.name)
                 if owner is not None:
                     with record_phase(context, "prepare-config", container=container.name, logger=manager.logger):
-                        owner.on_prepare(context)
-                        candidates[container.name] = GeneratedCandidate(container, owner.on_render)
+                        owner.on_prepare_config(context)
+                        candidates[container.name] = GeneratedCandidate(container, owner.render_config)
             context.generated_candidates = candidates
             for container in sync:
                 candidate = candidates.get(container.name)
                 if candidate is not None:
                     with record_phase(context, "validate-config", container=container.name, logger=manager.logger):
-                        generations[container.name].on_validate(context, candidate)
+                        generations[container.name].validate_config(context, candidate)
 
             selection = self._reconcile_selection(explicit, context,
-                {name for name, candidate in candidates.items() if generations[name].needs_apply(candidate, context)})
+                {name for name, candidate in candidates.items() if candidate.changed})
             required_services = set(selection.services)
+            context.target_containers = list(selection.target_containers)
+
+            bootstrap_candidates = {}
+            available_after_stop = set(running_services)
+            if restart:
+                available_after_stop.difference_update(
+                    service for container in explicit.target_containers for service in container.services)
+            for container in sync:
+                services = set(container.bootstrap_services) & required_services
+                if services and not services.issubset(available_after_stop):
+                    with record_phase(context, "validate-bootstrap", container=container.name, logger=manager.logger):
+                        bootstrap = GeneratedCandidate(container, container.render_bootstrap)
+                        container.validate_config(context, bootstrap)
+                        bootstrap_candidates[container.name] = bootstrap
 
             if restart:
                 stop_context = self._make_context(context.commands, explicit)
@@ -285,23 +282,29 @@ class ComposeOperations:
                 running_services.difference_update(
                     service for container in explicit.target_containers for service in container.services)
 
+            bootstrap_available = set()
             for container in sync:
-                owner = generations.get(container.name)
-                services = tuple(service for service in container.services if service in required_services)
-                if owner is None or not owner.needs_bootstrap(services, running_services):
+                services = tuple(service for service in container.bootstrap_services if service in required_services)
+                if not services:
+                    continue
+                if all(service in running_services for service in services):
+                    for service in services:
+                        runner.wait_service_healthy(context, service)
+                    bootstrap_available.update(services)
                     continue
                 with record_phase(context, "bootstrap", container=container.name, logger=manager.logger):
-                    try:
-                        bootstrap_id = owner.on_bootstrap(context)
-                    except Exception as error:
-                        self._rollback_candidate(container, candidates[container.name], context, services, error)
-                        raise
+                    final_candidate = candidates[container.name]
+                    bootstrap = bootstrap_candidates[container.name]
+                    self._publish_candidate(container, bootstrap, context, services, record_applied=False)
+                    context.generated_candidates[container.name] = final_candidate
                     running_services.update(services)
-                    if not candidates[container.name].previous_id:
-                        candidates[container.name].previous_id = bootstrap_id
+                    bootstrap_available.update(services)
+                    context.bootstrapped_services.update(services)
+                    if not final_candidate.previous_id:
+                        final_candidate.previous_id = bootstrap.generation_id
 
             owners = {service: container for container in sync for service in container.services}
-            services = order_services(sync, selection.services, manager.integration_consumers)
+            services = order_services(sync, selection.services, context.compose_model, bootstrap_available)
             for service in services:
                 container = owners[service]
                 candidate = candidates.get(container.name)
@@ -311,9 +314,6 @@ class ComposeOperations:
                 else:
                     with record_phase(context, "up", container=container.name, logger=manager.logger):
                         self._apply_services_with_rollback(container, context, (service,))
-                consumer = manager.integration_consumers.get(container.name)
-                if consumer is not None:
-                    consumer.on_applied(context, service)
                 state_context = self._make_context(context.commands, ComposeSelection(
                     selection.project_containers, (container,), (service,), False))
                 manager.running_state.mark_started(state_context)
@@ -369,6 +369,8 @@ class ComposeOperations:
         runner = self.manager.compose_runner
         try:
             runner.apply_services(context, services)
+            for service in services:
+                container.on_service_started(context, service)
             self._record_applied_compose(container, context, services)
         except Exception as error:
             previous = {path: content for path, content in context.saved_compose.items()
@@ -391,16 +393,19 @@ class ComposeOperations:
                         container.name, error, rollback_error)) from error
             raise
 
-    def _publish_candidate(self, container, candidate, context, services) -> None:
+    def _publish_candidate(self, container, candidate, context, services, record_applied=True) -> None:
         context.generated_candidates[container.name] = candidate
         candidate.publish()
         if not services:
             return
         try:
-            self.manager.generated_configs[container.name].on_apply(context, candidate, services)
-            self._record_applied_compose(container, context, services)
-            applied = context.applied_generation_services
-            applied.setdefault(container.name, []).extend(services)
+            container.apply_config(context, candidate, services)
+            for service in services:
+                container.on_service_started(context, service)
+            if record_applied:
+                self._record_applied_compose(container, context, services)
+                applied = context.applied_generation_services
+                applied.setdefault(container.name, []).extend(services)
         except Exception as error:
             self._rollback_candidate(container, candidate, context, services, error)
             raise
@@ -427,9 +432,10 @@ class ComposeOperations:
                     context.rollback_compose_files.update(old_compose)
                 affected = tuple(context.applied_generation_services.get(container.name, ())) + tuple(services)
                 restore_services = tuple(dict.fromkeys(service for service in affected
-                                                      if service in context.initial_running_services))
+                                                      if service in context.initial_running_services or
+                                                      service in getattr(context, "bootstrapped_services", ())))
                 if restore_services:
-                    self.manager.generated_configs[container.name].on_apply(context, previous, restore_services)
+                    container.apply_config(context, previous, restore_services)
                     context.service_models.restore(restore_services)
                     self._restore_applied_compose(container, context, old_compose)
                     restored_context = copy(context)

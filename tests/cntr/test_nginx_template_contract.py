@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from linktools.cntr import ContainerError, Nginx
-from _harness import builtin_consumer_type
 from linktools.cntr.container import ContainerTemplateError
 
 
@@ -17,8 +16,6 @@ if TYPE_CHECKING:
     from linktools.cntr.container import BaseContainer
     from linktools.cntr.integration import ResolvedSite
 
-
-NginxGeneration = builtin_consumer_type("100-nginx")
 
 
 def make_site(**kwargs):
@@ -37,7 +34,7 @@ def test_header_macros_merge_case_insensitively_and_preserve_native_values(fresh
     source.write_text('''{% from "nginx/headers.j2" import proxy_headers, grpc_headers with context %}
 {{ proxy_headers({"host": "$native_host", "Origin": "https://$original_host/a\\\\b"}) }}
 {{ grpc_headers({"Forwarded": "for=$original_client_ip"}) }}''')
-    rendered = NginxGeneration(nginx).render_template(nginx, source, make_site())
+    rendered = nginx._render_site_template(nginx, source, make_site())
     assert rendered.count('proxy_set_header "host" ') == 1
     assert 'proxy_set_header "Host" ' not in rendered
     assert 'proxy_set_header "host" "$native_host";' in rendered
@@ -74,7 +71,7 @@ def test_header_names_are_quoted_and_auth_data_is_not_reinterpreted(fresh_manage
     site = make_site(auth_headers={"#Odd": "{{not_jinja}} $value"})
     source = tmp_path / "business.conf"
     source.write_text('{% from "nginx/headers.j2" import proxy_headers with context %}{{ proxy_headers() }}')
-    assert 'proxy_set_header "#Odd" ' in NginxGeneration(nginx).render_template(nginx, source, site)
+    assert 'proxy_set_header "#Odd" ' in nginx._render_site_template(nginx, source, site)
     maps = nginx.security_maps(site)
     assert "{{not_jinja}} ${literal_dollar}value" in maps
 
@@ -89,7 +86,7 @@ def test_namespaced_single_pass_includes_comments_raw_and_literal_values(fresh_m
 {% include "local/child.conf" %}
 {% from "nginx/headers.j2" import proxy_headers with context %}{{ proxy_headers() }}
 {% raw %}{{port}}{% endraw %}''')
-    rendered = NginxGeneration(nginx).render_template(nginx, source, make_site(vars={
+    rendered = nginx._render_site_template(nginx, source, make_site(vars={
         "comment": "evaluated", "literal": "{{unexpanded}} $native",
     }))
     assert "# evaluated" in rendered
@@ -106,7 +103,7 @@ def test_template_errors_identify_owner_and_entrypoint(fresh_manager, tmp_path, 
     source = tmp_path / "business.conf"
     source.write_text(content)
     with pytest.raises(ContainerTemplateError) as error:
-        NginxGeneration(nginx).render_template(nginx, source, make_site())
+        nginx._render_site_template(nginx, source, make_site())
     assert "nginx/web" in str(error.value)
     assert str(source) in str(error.value)
 
@@ -122,9 +119,9 @@ def test_business_file_is_rendered_once_across_generation_markers(fresh_manager,
     site.enabled = True
     site.resolve = lambda: site
     nginx.__dict__["sites"] = {("nginx", "web"): site}
-    owner = NginxGeneration(nginx)
-    first = owner.on_render("first")
-    second = owner.on_render("second")
+    owner = nginx
+    first = owner.render_config("first")
+    second = owner.render_config("second")
     assert calls == ["render"]
     assert set(first) == {"nginx.conf", "sites/s_test.conf"}
     assert "include sites/" not in first["sites/s_test.conf"]
@@ -142,7 +139,7 @@ def test_default_listeners_are_explicit_and_independent_of_server_name(
         fresh_manager: "ContainerManager", server_name: str, default: bool) -> None:
     nginx = fresh_manager.containers["nginx"]
     site = make_site(server_name=server_name, default=default)
-    rendered = NginxGeneration(nginx).render_template(
+    rendered = nginx._render_site_template(
         nginx, nginx.get_source_path("templates", "server.conf"), site)
     assert rendered.count("default_server") == (3 if default else 0)
     assert rendered.count("server_name " + server_name + ";") == 3
@@ -172,7 +169,7 @@ def test_fallback_depends_on_explicit_default_not_underscore(fresh_manager: "Con
     nginx = fresh_manager.containers["nginx"]
     site = generation_site(nginx, server_name="_", default=default)
     nginx.__dict__["sites"] = {site.identity: site}
-    files = NginxGeneration(nginx).on_render("test")
+    files = nginx.render_config("test")
     assert ("sites/default.conf" in files) is not default
     assert ("default_server" in files["sites/" + site.file_id + ".conf"]) is default
     if not default:
@@ -191,7 +188,7 @@ def test_disabled_default_keeps_fallback_without_resolving_other_fields(fresh_ma
     nginx = fresh_manager.containers["nginx"]
     site = generation_site(nginx, server_name="", default=lazy_load(fail), proxy=lazy_load(fail))
     nginx.__dict__["sites"] = {site.identity: site}
-    files = NginxGeneration(nginx).on_render("test")
+    files = nginx.render_config("test")
     assert "sites/default.conf" in files
     assert "sites/" + site.file_id + ".conf" not in files
 
@@ -202,12 +199,12 @@ def test_explicit_defaults_only_conflict_on_shared_listeners(fresh_manager: "Con
     first = generation_site(nginx, "first", ports={"NGINX_HTTP_PORT": 8080}, default=True)
     second = generation_site(nginx, "second", ports={"NGINX_HTTP_PORT": 8080 if shared else 8081}, default=True)
     nginx.__dict__["sites"] = {site.identity: site for site in (first, second)}
-    owner = NginxGeneration(nginx)
+    owner = nginx
     if shared:
         with pytest.raises(ContainerError, match="[Dd]efault"):
-            owner.on_render("test")
+            owner.render_config("test")
     else:
-        files = owner.on_render("test")
+        files = owner.render_config("test")
         assert "listen 8080 default_server;" in files["sites/" + first.file_id + ".conf"]
         assert "listen 8081 default_server;" in files["sites/" + second.file_id + ".conf"]
         assert "sites/default.conf" not in files
@@ -223,7 +220,7 @@ def test_defaults_detect_collisions_on_optional_listeners(
                              default=True, **{capability: True})
     nginx.__dict__["sites"] = {site.identity: site for site in (first, second)}
     with pytest.raises(ContainerError, match="[Dd]efault"):
-        NginxGeneration(nginx).on_render("test")
+        nginx.render_config("test")
 
 
 def test_header_overrides_suppress_headers_without_losing_same_level_defaults(fresh_manager):
@@ -246,7 +243,7 @@ def test_generated_sites_are_self_contained_and_internal_names_are_purpose_speci
     site.enabled = True
     site.resolve = lambda: site
     nginx.__dict__["sites"] = {("nginx", "web"): site}
-    files = NginxGeneration(nginx).on_render("example")
+    files = nginx.render_config("example")
     assert set(files) == {"nginx.conf", "sites/s_test.conf"}
     rendered = files["sites/s_test.conf"]
     assert "location = /_internal/auth" in rendered
@@ -267,5 +264,5 @@ def test_embedded_business_preserves_multiline_quoted_values(fresh_manager, tmp_
     site.enabled = True
     site.resolve = lambda: site
     nginx.__dict__["sites"] = {("nginx", "web"): site}
-    rendered = NginxGeneration(nginx).on_render("example")["sites/s_test.conf"]
+    rendered = nginx.render_config("example")["sites/s_test.conf"]
     assert content in rendered
