@@ -2,6 +2,9 @@
   "networks": {
     "nginx": {
       "name": "aio-nginx"
+    },
+    "safeline-ce": {
+      "name": "aio-safeline-ce"
     }
   },
   "services": {
@@ -18,7 +21,11 @@
         "test": [
           "CMD",
           "curl",
-          "http://localhost:80/"
+          "--fail",
+          "--silent",
+          "--unix-socket",
+          "/run/nginx-cntr-health.sock",
+          "http://localhost/__cntr/health"
         ]
       },
       "hostname": "nginx",
@@ -29,9 +36,15 @@
           "max-size": "10m"
         }
       },
-      "networks": [
-        "nginx"
-      ],
+      "networks": {
+        "nginx": null,
+        "safeline-ce": {
+          "aliases": [
+            "nginx-origin"
+          ],
+          "ipv4_address": "172.22.242.253"
+        }
+      },
       "ports": [
         "80:80",
         "443:443"
