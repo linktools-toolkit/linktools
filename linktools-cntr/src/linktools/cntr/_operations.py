@@ -273,14 +273,13 @@ class ComposeOperations:
                         container.validate_config(context, bootstrap)
                         bootstrap_candidates[container.name] = bootstrap
 
-            if restart:
+            if restart and (explicit.full or explicit.services):
                 stop_context = self._make_context(context.commands, explicit)
                 with manager.lifecycle.notify_stop(stop_context):
                     with record_phase(context, "stop", command=("stop", *explicit.services), logger=manager.logger):
                         runner.stop(stop_context, explicit.services)
                         manager.running_state.mark_stopped(stop_context)
-                running_services.difference_update(
-                    service for container in explicit.target_containers for service in container.services)
+                running_services.difference_update(explicit.services)
 
             bootstrap_available = set()
             for container in sync:
