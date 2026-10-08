@@ -127,9 +127,11 @@ case "$1" in
         ;;
     renew)
         if test -L "$root/live"; then
-            "$acme" --home /opt/acme --config-home "$account" --cron >/dev/null
             main=$(cat "$root/live/primary")
-            if test -s "$renewal/${main}_fullchain.pem" &&
+            before=$(openssl x509 -in "$renewal/${main}_fullchain.pem" -noout -fingerprint -sha256 2>/dev/null || :)
+            "$acme" --home /opt/acme --config-home "$account" --cron >/dev/null
+            after=$(openssl x509 -in "$renewal/${main}_fullchain.pem" -noout -fingerprint -sha256 2>/dev/null || :)
+            if test -n "$after" && test "$after" != "$before" &&
                { ! cmp -s "$renewal/${main}_fullchain.pem" "$root/live/${main}_fullchain.pem" ||
                  ! cmp -s "$renewal/${main}_key.pem" "$root/live/${main}_key.pem"; }; then
                 id="renew-$(date +%s)-$$"
