@@ -50,7 +50,7 @@ class ResolvedSite:
             return None
         if not isinstance(value, FlareLink):
             self._error("expose must be a FlareLink or None")
-        return value.with_default_url(lazy_load(lambda: self.url))
+        return value.with_default_url(lazy_load(lambda: self.get_url(default="")))
 
     @cached_property
     def server_name(self) -> str:
