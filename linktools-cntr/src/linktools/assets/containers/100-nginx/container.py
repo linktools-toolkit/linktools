@@ -4,6 +4,7 @@
 import json
 import os
 import re
+from copy import copy
 from typing import TYPE_CHECKING
 
 from linktools import utils
@@ -186,24 +187,65 @@ class Container(BaseContainer):
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
             raise ContainerError("NGINX_AUTH_ENABLE is true but authelia container is not enabled.")
 
-    def _update_files(self):
-        utils.clear_directory(self.get_app_path("conf.d"))
+    def quote(self, value: "Any") -> str:
+        return self._nginx_literal(value)
 
-        # 初始化snippets
+    def _write_site(self, producer: "BaseContainer", local_id: str, declaration: "NginxSite") -> None:
+        domain = str(declaration.server_name)
+        if not domain:
+            return
+        if declaration.proxy is None and declaration.template is None:
+            raise ContainerError(f"Nginx site {producer.name}/{local_id} has no proxy or template")
+        for capability, key in (
+                ("https", "NGINX_HTTPS_ENABLE"),
+                ("waf", "NGINX_WAF_ENABLE"),
+                ("auth", "NGINX_AUTH_ENABLE")):
+            if getattr(declaration, capability) is True and not self.get_config(key, type=bool):
+                raise ContainerError(
+                    f"Nginx site {producer.name}/{local_id} requires disabled {capability}")
+        https = self.get_config("NGINX_HTTPS_ENABLE", type=bool) if declaration.https is None else declaration.https
+        waf = self.get_config("NGINX_WAF_ENABLE", type=bool) if declaration.waf is None else declaration.waf
+        auth = self.get_config("NGINX_AUTH_ENABLE", type=bool) if declaration.auth is None else declaration.auth
+        if auth and not https:
+            raise ContainerError(f"Nginx site {producer.name}/{local_id} requires HTTPS")
+        if auth and not self.containers["authelia"].enable:
+            raise ContainerError(f"Nginx site {producer.name}/{local_id} requires Authelia")
+        if waf and not self.containers["safeline"].enable:
+            raise ContainerError(f"Nginx site {producer.name}/{local_id} requires SafeLine")
+
+        file_id = "site_" + producer.name.encode("utf-8").hex() + "_" + local_id.encode("utf-8").hex()
+        site = copy(declaration)
+        site.server_name = domain
+        site.https, site.waf, site.auth = https, waf, auth
+        site.waf_bypass = tuple(str(value) for value in declaration.waf_bypass) if waf else ()
+        site.auth_bypass = tuple(str(value) for value in declaration.auth_bypass) if auth else ()
+        site.auth_headers = self._validated_auth_headers(declaration.auth_headers) if auth else {}
+        site.file_id = file_id
+        site.var_name = file_id.encode("utf-8").hex()
+
+        server_path = self.get_app_path("conf.d", file_id + ".conf", create_parent=True)
+        fragment_path = self.get_app_path("conf.d", file_id + "_confs", file_id + ".conf", create_parent=True)
+        source = declaration.template or self.get_source_path("templates", "default.conf")
+        utils.write_file(
+            server_path,
+            producer.render_nginx_template(self, self.get_source_path("templates", "server.conf"), site),
+        )
+        utils.write_file(fragment_path, producer.render_nginx_template(self, source, site))
+        if auth:
+            utils.write_file(
+                fragment_path.parent / "00-auth-location.conf",
+                producer.render_nginx_template(
+                    self, self.get_source_path("templates", "auth_location.conf"), site),
+            )
+
+    def _update_files(self) -> None:
+        utils.clear_directory(self.get_app_path("conf.d"))
         snippets_path = self.get_app_path("conf.d", "snippets")
         snippets_path.mkdir(parents=True, exist_ok=True)
-
-        waf_enable = self.get_config("NGINX_WAF_ENABLE")
-        auth_enable = self.get_config("NGINX_AUTH_ENABLE")
-        self.render_template(
-            self.get_source_path("templates", "header.conf"),
-            self.get_app_path("conf.d", "snippets", "header.conf"),
-            X_HEADER_ENABLE=not waf_enable
-        )
         utils.write_file(
             self.get_app_path("conf.d", "00-cntr-upgrade.conf"),
             "map $http_upgrade $connection_upgrade { default upgrade; '' close; }\n"
-            'geo $cntr_dollar { default "$"; }\n',
+            'geo $cntr_dollar { default "$"; }\n'
             'map $realip_remote_addr $cntr_actual_socket {\n'
             '    "" $remote_addr;\n'
             '    default $realip_remote_addr;\n'
@@ -214,27 +256,14 @@ class Container(BaseContainer):
             'server { listen unix:/run/nginx-cntr-health.sock; '
             'location = /__cntr/health { default_type text/plain; return 200 "cntr"; } }\n',
         )
-        self.render_template(
-            self.get_source_path("templates", "header_all.conf"),
-            self.get_app_path("conf.d", "snippets", "header_all.conf"),
-        )
-        self.render_template(
-            self.get_source_path("templates", "params.conf"),
-            self.get_app_path("conf.d", "snippets", "params.conf")
-        )
-        if waf_enable:
+        for name in ("header.conf", "header_all.conf", "params.conf", "auth.conf"):
             self.render_template(
-                self.get_source_path("templates", "waf.conf"),
-                self.get_app_path("conf.d", "snippets", "waf.conf"),
-            )
-        if auth_enable:
-            self.render_template(
-                self.get_source_path("templates", "auth.conf"),
-                self.get_app_path("conf.d", "snippets", "auth.conf"),
+                self.get_source_path("templates", name),
+                snippets_path / name,
             )
 
+        domains = {}
         explicit_default = False
-        seen_domains = {}
         for producer, local_id, site in self.manager.iter_integrations("nginx"):
             if not isinstance(site, NginxSite):
                 raise ContainerError(
@@ -242,58 +271,23 @@ class Container(BaseContainer):
             domain = str(site.server_name)
             if not domain:
                 continue
-            if not site.proxy and not site.template:
-                raise ContainerError(f"Nginx site {producer.name}/{local_id} has no upstream or template")
-            for capability, setting in (
-                    ("https", "NGINX_HTTPS_ENABLE"),
-                    ("waf", "NGINX_WAF_ENABLE"),
-                    ("auth", "NGINX_AUTH_ENABLE")):
-                if getattr(site, capability) is True and not self.get_config(setting, type=bool):
-                    raise ContainerError(
-                        f"Nginx site {producer.name}/{local_id} requires disabled {capability}")
-            https = self.get_config("NGINX_HTTPS_ENABLE", type=bool) if site.https is None else bool(site.https)
-            waf = self.get_config("NGINX_WAF_ENABLE", type=bool) if site.waf is None else bool(site.waf)
-            auth = self.get_config("NGINX_AUTH_ENABLE", type=bool) if site.auth is None else bool(site.auth)
-            if auth and not https:
-                raise ContainerError(
-                    f"Nginx site {producer.name}/{local_id} requires HTTPS for Authelia")
-            if site.vars:
-                raise ContainerError(
-                    f"Nginx site {producer.name}/{local_id} has unresolved template variables")
             key = domain.lower()
-            previous = seen_domains.setdefault(key, (producer.name, local_id))
-            if previous != (producer.name, local_id):
+            if key in domains:
                 raise ContainerError(
-                    f"Duplicate nginx server_name {domain!r}: {previous} and "
-                    f"{(producer.name, local_id)}")
-            explicit_default = explicit_default or domain == "_"
-            site_name = "site_" + producer.name.encode("utf-8").hex() + "_" + local_id.encode("utf-8").hex()
-            self.write_conf(
-                producer, domain, proxy_name=site_name,
-                proxy_domain_name=site_name,
-                proxy_conf=site.template,
-                proxy_url=site.proxy,
-                https_enable=https, waf_enable=waf,
-                waf_bypass=tuple(str(pattern) for pattern in site.waf_bypass) if waf else (),
-                auth_enable=auth,
-                auth_extra={
-                    "acl_bypass": site.auth_bypass,
-                    "auth_headers": site.auth_headers,
-                    "acl_rule": site.auth_rule,
-                    "oidc_redirect_uris": tuple(
-                        "{base_url}" if uri == "" else uri
-                        for uri in site.oidc_redirects
-                    ),
-                },
-                flush=True,
-            )
-
-        if not explicit_default and not self.get_app_path("conf.d", "_.conf").exists():
-            self.write_conf(
-                self, "_",
-                proxy_name="default",
-                proxy_conf=self.get_source_path("templates", "index.conf"),
-                flush=True,
+                    f"Duplicate nginx server_name {domain!r}: "
+                    f"{domains[key]} and {(producer.name, local_id)}")
+            domains[key] = (producer.name, local_id)
+            explicit_default |= domain == "_"
+            self._write_site(producer, local_id, site)
+        if not explicit_default:
+            self._write_site(
+                self, "default",
+                NginxSite(
+                    server_name="_",
+                    template=self.get_source_path("templates", "index.conf"),
+                    https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
+                    waf=False, auth=False,
+                ),
             )
 
     def on_started(self, context: "EventContext") -> None:
@@ -333,79 +327,3 @@ class Container(BaseContainer):
 
     def on_removed(self, context: "EventContext") -> None:
         pass
-
-    def write_conf(
-        self, container: "BaseContainer", domain: str, *,
-        proxy_name: str = MISSING, proxy_domain_name: str = MISSING,
-        proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
-        https_enable: bool = MISSING, waf_enable: bool = MISSING,
-        auth_enable: bool = False, auth_extra: "dict[str, Any]" = MISSING,
-        waf_bypass: "tuple[str, ...]" = (),
-        flush: bool = False,
-    ) -> None:
-
-        proxy_name = proxy_name or container.name
-        proxy_domain_name = proxy_domain_name or domain
-        if flush:
-            conf_path = self.get_app_path("conf.d", f"{proxy_domain_name}.conf")
-            sub_conf_path = self.get_app_path("conf.d", f"{proxy_domain_name}_confs", f"{proxy_name}.conf")
-        else:
-            conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}.conf")
-            sub_conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}_confs", f"{proxy_name}.conf")
-
-        if auth_extra is MISSING or auth_extra is None:
-            auth_extra = {}
-        if not domain:
-            raise ContainerError("not found domain")
-        if not proxy_conf:
-            if not proxy_url:
-                raise ContainerError("not found url")
-            proxy_conf = self.get_source_path("templates", "default.conf")
-
-        self.logger.debug(f"Write nginx conf for {container} {domain}")
-
-        https_enable = True if https_enable is MISSING else https_enable
-        https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
-
-        waf_enable = True if waf_enable is MISSING else waf_enable
-        waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
-
-        if auth_enable and not self.get_config("NGINX_AUTH_ENABLE", type=bool):
-            raise ContainerError(
-                f"Authelia auth is required for {container.name}, but NGINX_AUTH_ENABLE is disabled")
-
-        context = dict(
-            DOMAIN=domain,
-            DOMAIN_NAME=proxy_domain_name,
-            HTTPS_ENABLE=https_enable,
-            WAF_ENABLE=waf_enable,
-            AUTH_ENABLE=auth_enable,
-            AUTH_HEADERS=self._validated_auth_headers(auth_extra.get("auth_headers") or {}) if auth_enable else None,
-            AUTH_BYPASS=auth_extra.get("acl_bypass", None) if auth_extra else None,
-            WAF_BYPASS=waf_bypass,
-            SITE_VAR=proxy_domain_name.encode("utf-8").hex(),
-            nginx_literal=self._nginx_literal,
-        )
-
-        conf_path.parent.mkdir(parents=True, exist_ok=True)
-        sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
-        container.render_template(
-            self.get_source_path("templates", "server.conf"),
-            conf_path,
-            **context,
-        )
-        if proxy_conf is not MISSING or proxy_url is not MISSING:
-            container.render_template(
-                proxy_conf,
-                sub_conf_path,
-                PROXY_URL=proxy_url,
-                **context,
-            )
-        if auth_enable:
-            authelia = self.containers["authelia"]
-            container.render_template(
-                self.get_source_path("templates", "auth_location.conf"),
-                sub_conf_path.parent / "00-auth-location.conf",
-                **context,
-            )
-
