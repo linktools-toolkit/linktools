@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Generic TaskGraph service contracts."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -177,7 +177,15 @@ class TaskGraphService(TaskGraphQueryService, Protocol):
         self,
         graph_id: str,
         request: CancelGraphRequest,
-    ) -> TaskGraphView: ...
+        *,
+        admission_guard: Callable[[], None] | None = None,
+    ) -> TaskGraphView:
+        """Run the synchronous guard after authorization, before accepting control.
+
+        No await may separate a successful guard from finalizer ownership.
+        Raising prevents admission; accepted finalizers survive caller cancellation.
+        """
+        ...
 
     async def cancel_node(
         self,

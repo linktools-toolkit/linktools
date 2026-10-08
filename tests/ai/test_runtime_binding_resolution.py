@@ -73,7 +73,7 @@ from linktools.ai.task import (
     TaskNodeContext,
     TaskRef,
 )
-from linktools.ai.workspace import BubblewrapSandbox
+from linktools.ai.workspace import BubblewrapSandbox, LocalSandbox, ReadOnlySandboxPolicy
 
 
 @dataclass(frozen=True)
@@ -483,8 +483,10 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("bubblewrap", "local", "local_read_policy"))
 async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     tmp_path: Path,
+    backend: str,
 ) -> None:
     server = MCPServerSpec("server", "python")
     specification = AgentSpec(
@@ -502,10 +504,19 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     catalog = AgentCatalog(
         {specification.id: compiler.compile(specification)}
     )
-    sandbox = BubblewrapSandbox(
-        runtime_root=tmp_path,
-        bwrap_executable=tmp_path / "bwrap",
-    )
+    if backend == "bubblewrap":
+        sandbox = BubblewrapSandbox(
+            runtime_root=tmp_path,
+            bwrap_executable=tmp_path / "bwrap",
+        )
+    else:
+        sandbox = LocalSandbox(
+            read_policy=(
+                ReadOnlySandboxPolicy(("visible.txt",))
+                if backend == "local_read_policy" else None
+            ),
+            allow_host_stdio_with_read_policy=backend == "local_read_policy",
+        )
     resolver = _AgentBindingResolver(
         catalog,
         compiler,
@@ -518,6 +529,8 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
 
     pin = next(item for item in resolved.binding_contract.selected if item.kind == "mcp")
     assert pin.contract["execution_policy"] == sandbox.stdio_execution_policy()
+    if backend != "bubblewrap":
+        assert pin.contract["execution_policy"] == {"version": 1, "boundary": "host-stdio"}
 
 
 @pytest.mark.asyncio

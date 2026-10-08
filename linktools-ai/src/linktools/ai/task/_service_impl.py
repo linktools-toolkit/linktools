@@ -4,7 +4,7 @@
 
 import asyncio
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol, cast, runtime_checkable
@@ -1988,6 +1988,8 @@ class DefaultTaskGraphService(TaskGraphService):
         self,
         graph_id: str,
         request: CancelGraphRequest,
+        *,
+        admission_guard: Callable[[], None] | None = None,
     ) -> TaskGraphView:
         tenant_id = request.principal.tenant_id
         await self._authorize_graph(
@@ -2003,6 +2005,8 @@ class DefaultTaskGraphService(TaskGraphService):
                 "force": request.force,
             }
         )
+        if admission_guard is not None:
+            admission_guard()
         finalizer = asyncio.create_task(
             self._cancel_finalizer(
                 graph_id,

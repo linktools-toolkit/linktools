@@ -80,7 +80,7 @@ from ..task import (
 )
 from ._agent import Agent, Execution, Session
 from ._agent_binding_resolver import _AgentBindingResolver
-from ._task import TaskGraphRun
+from ._task import TaskGraphRun, _CancelSettlement
 from ._observation import _ObservationSession
 from ._tasks import RuntimeTasks, TaskEngine
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
@@ -365,6 +365,7 @@ class Runtime(Generic[AppT]):
         self._closed = False
         self._closing = False
         self._observation_sessions: set[_ObservationSession] = set()
+        self._cancel_settlements: set[_CancelSettlement] = set()
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         if evaluation is not None:
@@ -1391,6 +1392,8 @@ class Runtime(Generic[AppT]):
         )
         for session in sessions:
             await session.close(deadline=deadline)
+        for settlement in tuple(self._cancel_settlements):
+            await settlement.close()
         if self._close_callback is not None:
             await self._close_callback()
         async with self._close_lock:

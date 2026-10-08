@@ -94,19 +94,32 @@ _DANGEROUS_COMMANDS = frozenset(
 
 
 class LocalSandbox:
-    """Open local sessions rooted at the caller-provided directory."""
+    """Open local sessions rooted at the caller-provided directory.
 
-    def __init__(self, *, read_policy: ReadOnlySandboxPolicy | None = None) -> None:
+    ``allow_host_stdio_with_read_policy`` explicitly permits trusted host stdio
+    processes alongside restricted file APIs. The read policy does not constrain
+    those processes' OS access; this backend does not provide OS isolation.
+    """
+
+    def __init__(
+        self,
+        *,
+        read_policy: ReadOnlySandboxPolicy | None = None,
+        allow_host_stdio_with_read_policy: bool = False,
+    ) -> None:
         if read_policy is not None and not isinstance(
             read_policy,
             ReadOnlySandboxPolicy,
         ):
             raise TypeError("read_policy must be ReadOnlySandboxPolicy")
+        if not isinstance(allow_host_stdio_with_read_policy, bool):
+            raise TypeError("allow_host_stdio_with_read_policy must be bool")
         self._read_policy = read_policy
+        self._allow_host_stdio_with_read_policy = allow_host_stdio_with_read_policy
 
     def stdio_execution_policy(self) -> Mapping[str, JsonValue]:
         """Describe LocalSandbox stdio as an explicit host process boundary."""
-        if self._read_policy is not None:
+        if self._read_policy is not None and not self._allow_host_stdio_with_read_policy:
             raise AIError(
                 ErrorCode.SANDBOX_UNAVAILABLE,
                 safe_details={"reason": "local_stdio_read_policy_unsupported"},
@@ -134,6 +147,7 @@ class LocalSandbox:
             normalized_resources,
             lock_root=lock_root,
             read_policy=policy,
+            allow_host_stdio_with_read_policy=self._allow_host_stdio_with_read_policy,
             workspace=workspace,
         )
 
@@ -148,6 +162,7 @@ class _LocalSandboxSession:
         *,
         lock_root: Path | None = None,
         read_policy: ReadOnlySandboxPolicy | None = None,
+        allow_host_stdio_with_read_policy: bool = False,
         workspace: Workspace | None = None,
     ) -> None:
         self._root = root
@@ -160,6 +175,7 @@ class _LocalSandboxSession:
         self._resource_ids = frozenset(resource.id for resource in resources)
         self._lock_root = lock_root or self._workspace.locks_root
         self._read_policy = read_policy
+        self._allow_host_stdio_with_read_policy = allow_host_stdio_with_read_policy
         self._environment = _command_environment()
         self._state = "OPEN"
         self._state_lock = asyncio.Lock()
@@ -225,7 +241,8 @@ class _LocalSandboxSession:
         environment: "Mapping[str, str] | None" = None,
         cwd_resource_id: str | None = None,
     ) -> SandboxStdioProcess:
-        if self._read_policy is not None:
+        """Open a trusted host process outside the file API's read policy."""
+        if self._read_policy is not None and not self._allow_host_stdio_with_read_policy:
             raise AIError(
                 ErrorCode.SANDBOX_UNAVAILABLE,
                 safe_details={"reason": "local_stdio_read_policy_unsupported"},

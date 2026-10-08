@@ -7,13 +7,14 @@ from dataclasses import dataclass, replace
 import secrets
 import asyncio
 import sys
-from typing import TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVar
+from typing import Literal, overload, TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 from ..core import BudgetUsage, RunBudget, JsonValue, Page, Principal, ThinkingValue
 from ..errors import AIError, ErrorCode, ObservationError
 from ._wait import WaitResult
-from ._observation import _wait, _validate_wait, _await_stream_cleanup, _is_observation_cleanup
+from ._execution_observation import _ExecutionModelObservation
+from ._observation import _wait, _validate_wait, _await_stream_cleanup, _is_observation_cleanup, _owned_watch
 from ._execution_context import ExecutionInputContext
 from ._input_contract import UserPromptInput, validate_user_input
 from ._watch_cursor import (
@@ -34,6 +35,7 @@ from .service_api import (
     ExecutionResult,
     ExecutionTraceItem,
     ExecutionTreeEvent,
+    ExecutionObservationEvent,
     ModelInteractionItem,
     SessionHistoryItem,
     SessionTurn,
@@ -73,13 +75,54 @@ class Execution(Generic[AppT]):
         [str | None, bool], Awaitable[CancelExecutionResult]
     ] | None = None
 
+    @overload
     async def wait(
         self, *, on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        include_model_interactions: Literal[False] = False,
+    ) -> WaitResult[ExecutionResult]: ...
+
+    @overload
+    async def wait(
+        self, *, on_event: Callable[[ExecutionObservationEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_event_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        include_model_interactions: Literal[True],
+    ) -> WaitResult[ExecutionResult]: ...
+
+    @overload
+    async def wait(
+        self, *, on_event: Callable[[ExecutionTreeEvent | ExecutionObservationEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_event_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        include_model_interactions: bool,
+    ) -> WaitResult[ExecutionResult]: ...
+
+    async def wait(
+        self, *, on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | Callable[[ExecutionObservationEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_event_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        include_model_interactions: bool = False,
     ) -> WaitResult[ExecutionResult]:
         """Wait for the full execution result; include_event_content only selects callback payloads."""
         _validate_wait(on_event, cursor, include_event_content, timeout_seconds, close_timeout_seconds)
+        if not isinstance(include_model_interactions, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if include_model_interactions:
+            return await _wait(
+                scope="execution", resource_id=self.execution_id,
+                waiter=(lambda: self._task_wait(None)) if self._task_wait is not None else
+                    lambda: self._runtime._execution_service.wait(self.execution_id, principal=self._principal),
+                watch=lambda ready: self._watch_models(cursor, include_event_content, ready),
+                on_event=on_event, cursor=cursor, timeout_seconds=timeout_seconds,
+                close_timeout_seconds=close_timeout_seconds,
+                register=self._runtime._register_observation, release=self._runtime._release_observation,
+                finalize=lambda result, acknowledged: _ExecutionModelObservation(
+                    self._runtime, self.execution_id, self._principal, self._watch_tree,
+                    acknowledged, include_event_content,
+                ).final(),
+            )
 
         async def finalize(result: ExecutionResult, last_cursor: str | None) -> AsyncIterator[ExecutionTreeEvent]:
             sequences = None if last_cursor is None else decode_execution_watch_cursor(
@@ -109,11 +152,52 @@ class Execution(Generic[AppT]):
             finalize=finalize, drain_live=True,
         )
 
+    @overload
     def watch(
         self, *, cursor: str | None = None, include_content: bool = False,
-    ) -> AsyncIterator[ExecutionTreeEvent]:
-        """Watch this execution and all descendants; use event.execution_id for content reads."""
+        include_model_interactions: Literal[False] = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]: ...
+
+    @overload
+    def watch(
+        self, *, cursor: str | None = None, include_content: bool = False,
+        include_model_interactions: Literal[True],
+    ) -> AsyncIterator[ExecutionObservationEvent]: ...
+
+    @overload
+    def watch(
+        self, *, cursor: str | None = None, include_content: bool = False,
+        include_model_interactions: bool,
+    ) -> AsyncIterator[ExecutionTreeEvent | ExecutionObservationEvent]: ...
+
+    def watch(
+        self, *, cursor: str | None = None, include_content: bool = False,
+        include_model_interactions: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent | ExecutionObservationEvent]:
+        """Watch descendants, optionally combining metadata-only model projections."""
+        if not isinstance(include_model_interactions, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if include_model_interactions:
+            finalizing = asyncio.Event()
+            return _owned_watch(
+                self._watch_models(cursor, include_content, None, finalizing),
+                scope="execution", resource_id=self.execution_id, cursor=cursor,
+                finalizing=finalizing,
+                register=self._runtime._register_observation, release=self._runtime._release_observation,
+            )
         return self._watch_prepared(cursor, include_content, None)
+
+    def _watch_models(
+        self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,
+        finalizing: asyncio.Event | None = None,
+    ) -> AsyncIterator[ExecutionObservationEvent]:
+        self._runtime._ensure_open()
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return _ExecutionModelObservation(
+            self._runtime, self.execution_id, self._principal, self._watch_tree,
+            cursor, include_content, finalizing,
+        ).watch(ready)
 
     def _watch_prepared(
         self, cursor: str | None, include_content: bool, ready: asyncio.Event | None,

@@ -123,6 +123,7 @@ class _ObservationSession:
     def __init__(
         self, scope: str, resource_id: str, cursor: str | None, close_timeout: float,
         release: Callable[["_ObservationSession"], None],
+        on_stop: Callable[[], None] | None = None,
     ) -> None:
         self.scope = scope
         self.resource_id = resource_id
@@ -136,6 +137,7 @@ class _ObservationSession:
         self.cleanup_tasks: set[asyncio.Task[Any]] = set()
         self.cancelled_by_owner: set[asyncio.Task[Any]] = set()
         self._release = release
+        self._on_stop = on_stop
 
     def record_error(self, error: BaseException) -> None:
         if isinstance(error, GeneratorExit) or _is_observation_cleanup(error):
@@ -185,7 +187,10 @@ class _ObservationSession:
             if task in self.cleanup_tasks and error is not None:
                 self.record_error(error)
         if self.closing and all(task.done() for task in self.tasks):
-            self._release(self)
+            if self._on_stop is None or all(
+                not task.cancelled() and task.exception() is None for task in self.cleanup_tasks
+            ):
+                self._release(self)
 
     def _cancel(self, task: asyncio.Task[Any]) -> None:
         if (not task.done() and task not in self.cancelled_by_owner
@@ -195,6 +200,8 @@ class _ObservationSession:
 
     def stop(self) -> None:
         self.closing = True
+        if self._on_stop is not None:
+            self._on_stop()
         for task in self.tasks:
             self._cancel(task)
 
@@ -206,6 +213,9 @@ class _ObservationSession:
         while True:
             pending = {task for task in self.tasks if not task.done()}
             if not pending:
+                if self._on_stop is not None:
+                    for task in self.cleanup_tasks:
+                        task.result()
                 self._release(self)
                 return
             remaining = max(0.0, deadline - loop.time())
@@ -550,3 +560,72 @@ async def _consume_finalized_events(
                 await final_events.aclose()
 
         await _await_stream_cleanup(cleanup_remaining(), active_error)
+
+
+async def _owned_watch(
+    events: AsyncIterator[EventT], *, scope: str, resource_id: str, cursor: str | None,
+    finalizing: asyncio.Event,
+    register: Callable[[_ObservationSession], None],
+    release: Callable[[_ObservationSession], None],
+) -> AsyncIterator[EventT]:
+    """Keep standalone iterator cleanup owned even while its caller is paused."""
+    closing = asyncio.Event()
+    session = _ObservationSession(scope, resource_id, cursor, 5.0, release, closing.set)
+    register(session)
+    pending: asyncio.Task[EventT] | None = None
+
+    async def cleanup() -> None:
+        await closing.wait()
+        if pending is not None:
+            await _drain_stream_tasks((pending,), cancelled_by_owner=session.cancelled_by_owner)
+        await events.aclose()
+
+    cleanup_task = session.start_cleanup(cleanup(), name=f"watch-cleanup-{resource_id}")
+
+    async def drain_deadline() -> None:
+        await finalizing.wait()
+        await asyncio.sleep(_FINAL_DRAIN_TIMEOUT)
+
+    deadline = session.start(drain_deadline(), name=f"watch-drain-{resource_id}")
+    primary: BaseException | None = None
+    try:
+        while not session.closing:
+            if session._error_ready.done():
+                assert session.observer_error is not None
+                raise session.observer_error
+            if deadline.done():
+                deadline.result()
+                raise ObservationError("stream", cursor=session.cursor, safe_details={"phase": "drain"})
+            token = _active_observation.set(session)
+            try:
+                pending = session.start(events.__anext__(), name=f"watch-{resource_id}")
+            finally:
+                _active_observation.reset(token)
+            try:
+                done, _ = await asyncio.wait(
+                    {pending, deadline, session._error_ready}, return_when=asyncio.FIRST_COMPLETED,
+                )
+                if session._error_ready in done:
+                    assert session.observer_error is not None
+                    raise session.observer_error
+                if pending not in done:
+                    raise ObservationError("stream", cursor=session.cursor, safe_details={"phase": "drain"})
+                event = pending.result()
+            except StopAsyncIteration:
+                break
+            finally:
+                if pending.done():
+                    session.tasks.discard(pending)
+            session.cursor = event.cursor
+            yield event
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            await session.close()
+            cleanup_task.result()
+        except BaseException:
+            if (primary is None or isinstance(primary, GeneratorExit) or _is_observation_cleanup(primary)
+                    or isinstance(primary, ObservationError) and primary.origin == "stream"):
+                raise
