@@ -142,6 +142,20 @@ def test_failed_issuance_leaves_live_version_untouched(certificate_case):
     assert (root / "acme/account.key").read_text() == "existing-account-key"
 
 
+def test_renewal_promotes_only_validated_certificate_versions(certificate_case):
+    _, root, script, env = certificate_case
+    original = (root / "certs/live/example.test_fullchain.pem").read_bytes()
+    assert _run(script, env, "prepare", "pending", "example.test",
+                "letsencrypt", "dns_cf", "").returncode == 0
+
+    result = _run(script, env, "renew")
+    assert result.returncode == 0, result.stderr
+    live = (root / "certs/live").readlink()
+    assert str(live).startswith("versions/renew-")
+    assert (root / "certs/live/example.test_fullchain.pem").read_bytes() != original
+    assert (root / "certs/versions/legacy/example.test_fullchain.pem").read_bytes() == original
+
+
 def test_failed_nginx_reload_restores_old_certificate(certificate_case):
     _, root, script, env = certificate_case
     assert _run(script, env, "prepare", "pending", "example.test",
