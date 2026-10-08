@@ -76,6 +76,28 @@ def test_flare_first_migration_failure_restores_original_files(tmp_path, monkeyp
         assert (app / name).read_text() == "original " + name
 
 
+def test_flare_first_migration_rollback_after_successful_apply(tmp_path, monkeypatch):
+    module = builtin("120-flare")
+    runner = SimpleNamespace(
+        apply_service=lambda *args, **kwargs: None,
+        wait_service_running=lambda *args: None,
+        is_generation_current=lambda *args: False,
+    )
+    container = instance(module, compose_runner=runner)
+    app = tmp_path / "app"
+    app.mkdir()
+    for name in ("apps.yml", "bookmarks.yml"):
+        (app / name).write_text("original " + name)
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: tmp_path.joinpath(*parts))
+    context = SimpleNamespace()
+    container.apply_config(context, SimpleNamespace(changed=True), ("flare",))
+    assert all((app / name).is_symlink() for name in ("apps.yml", "bookmarks.yml"))
+    container.rollback_config(context)
+    for name in ("apps.yml", "bookmarks.yml"):
+        assert not (app / name).is_symlink()
+        assert (app / name).read_text() == "original " + name
+
+
 def test_authelia_never_rotates_existing_secret_or_jwks(tmp_path, monkeypatch):
     module = builtin("102-authelia")
     secret = tmp_path / "secret"
