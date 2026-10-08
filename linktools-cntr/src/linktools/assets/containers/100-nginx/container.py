@@ -450,8 +450,6 @@ class Container(BaseContainer):
         )
         self._certificate_version = version
         if not os.path.lexists(str(current)):
-            if "nginx" in getattr(context, "initial_services", ()):
-                raise ContainerError("Cannot replace a running nginx certificate without a previous live version")
             os.symlink("versions/" + version, str(current))
 
     def _preserve_legacy_files(self) -> None:
