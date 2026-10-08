@@ -50,7 +50,7 @@ def load_nginx_url(container: "BaseContainer", local_id: str, *path: str,
         site = container.manager.nginx_sites.get((container.name, local_id))
         if site is None:
             raise ContainerError("Unknown nginx site %s/%s" % (container.name, local_id))
-        url = site.url
+        url = site.get_url(default="")
         return utils.join_url(url, *path, queries=queries) if url else ""
 
     return lazy_load(make_url)
