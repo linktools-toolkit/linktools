@@ -415,46 +415,63 @@ class ComposeOperations:
 
     def _rollback_candidate(self, container, candidate, context, services, error) -> None:
         from copy import copy
+        from .artifacts import atomic_write_text_if_changed
+        runner = self.manager.compose_runner
         try:
             candidate.restore()
         except Exception as rollback_error:
             raise ContainerError("{} apply failed: {}; rollback publication failed: {}".format(
                 container.name, error, rollback_error)) from error
-        if candidate.previous_id:
-            previous = copy(candidate)
-            previous.generation_id = candidate.previous_id
-            previous.path = __import__("os").path.join(candidate.root, candidate.previous_id)
-            previous.changed = True
-            old_compose = {path: content for path, content in context.saved_compose.items()
-                           if context.compose_owners[path] == container.name}
-            try:
+
+        old_compose = {path: content for path, content in context.saved_compose.items()
+                       if context.compose_owners[path] == container.name}
+        affected = tuple(context.applied_generation_services.get(container.name, ())) + tuple(services)
+        restore_services = tuple(dict.fromkeys(service for service in affected
+                                              if service in context.initial_running_services or
+                                              service in getattr(context, "bootstrapped_services", ())))
+        try:
+            if candidate.previous_id:
+                previous = copy(candidate)
+                previous.generation_id = candidate.previous_id
+                previous.path = __import__("os").path.join(candidate.root, candidate.previous_id)
+                previous.changed = True
                 context.generated_candidates[container.name] = previous
-                context.rollback_service_models = context.service_models.previous
-                if old_compose:
-                    context.rollback_compose_files = dict(context.compose_files)
-                    context.rollback_compose_files.update(old_compose)
-                affected = tuple(context.applied_generation_services.get(container.name, ())) + tuple(services)
-                restore_services = tuple(dict.fromkeys(service for service in affected
-                                                      if service in context.initial_running_services or
-                                                      service in getattr(context, "bootstrapped_services", ())))
+            context.rollback_service_models = context.service_models.previous
+            if old_compose:
+                context.rollback_compose_files = dict(context.compose_files)
+                context.rollback_compose_files.update(old_compose)
+            if candidate.previous_id:
                 if restore_services:
                     container.apply_config(context, previous, restore_services)
-                    context.service_models.restore(restore_services)
-                    self._restore_applied_compose(container, context, old_compose)
-                    restored_context = copy(context)
-                    restored_context.target_containers = [container]
-                    restored_context.is_full_containers = False
-                    self.manager.running_state.mark_started(restored_context)
-            except Exception as rollback_error:
-                raise ContainerError("{} apply failed: {}; rollback failed: {}".format(
-                    container.name, error, rollback_error)) from error
-            finally:
-                if hasattr(context, "rollback_compose_files"):
-                    del context.rollback_compose_files
-                del context.rollback_service_models
-                from .artifacts import atomic_write_text_if_changed
-                for path, content in old_compose.items():
-                    atomic_write_text_if_changed(path, content)
+            else:
+                container.rollback_config(context)
+                saved_files = dict(context.compose_files)
+                saved_files.update(context.saved_compose)
+                for service in restore_services:
+                    model = context.service_models.previous.get(service)
+                    if model is not None:
+                        runner.apply_saved_services(context, (service,), {"previous.yml": model})
+                    elif context.saved_compose:
+                        runner.apply_saved_services(context, (service,), saved_files)
+                    else:
+                        raise ContainerError("No previous Compose model available for service " + service)
+                    runner.wait_service_running(context, service)
+            if restore_services:
+                context.service_models.restore(restore_services)
+                self._restore_applied_compose(container, context, old_compose)
+                restored_context = copy(context)
+                restored_context.target_containers = [container]
+                restored_context.is_full_containers = False
+                self.manager.running_state.mark_started(restored_context)
+        except Exception as rollback_error:
+            raise ContainerError("{} apply failed: {}; rollback failed: {}".format(
+                container.name, error, rollback_error)) from error
+        finally:
+            if hasattr(context, "rollback_compose_files"):
+                del context.rollback_compose_files
+            del context.rollback_service_models
+            for path, content in old_compose.items():
+                atomic_write_text_if_changed(path, content)
 
     def down(self, names: "Sequence[str] | None" = None, report: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):
