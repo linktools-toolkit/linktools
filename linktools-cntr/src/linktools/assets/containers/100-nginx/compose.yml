@@ -8,12 +8,21 @@ services:
       - '{{ NGINX_HTTPS_PORT }}:{{ NGINX_HTTPS_PORT }}'
 #     {% endif %}
     healthcheck:
-      test: [ "CMD", "curl", "http://localhost:{{ NGINX_HTTP_PORT }}/" ]
+      test: [ "CMD", "curl", "--fail", "--silent", "--unix-socket", "/run/nginx-cntr-health.sock", "http://localhost/__cntr/health" ]
       interval: 5s
       start_period: 1s
       start_interval: 1s
     networks:
-      - nginx
+      nginx:
+#     {% if containers["safeline"].enable %}
+      safeline-ce:
+        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.253'
+        aliases:
+          - nginx-origin
+#     {% endif %}
 
 networks:
   nginx:
+# {% if containers["safeline"].enable %}
+  safeline-ce:
+# {% endif %}
