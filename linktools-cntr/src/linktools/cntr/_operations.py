@@ -258,6 +258,12 @@ class ComposeOperations:
             required_services = set(selection.services)
             context.target_containers = list(selection.target_containers)
 
+            for container in sync:
+                candidate = candidates.get(container.name)
+                if candidate is not None:
+                    services = tuple(name for name in container.services if name in required_services)
+                    self._require_rollback_model(container, candidate, context, services)
+
             bootstrap_candidates = {}
             available_after_stop = set(running_services)
             stopped_services = ({service for container in explicit.target_containers
@@ -396,15 +402,19 @@ class ComposeOperations:
                         container.name, error, rollback_error)) from error
             raise
 
+    def _require_rollback_model(self, container, candidate, context, services) -> None:
+        if candidate.previous_id is not None:
+            return
+        saved_owner = any(owner == container.name and path in context.saved_compose
+                          for path, owner in context.compose_owners.items())
+        for service in services:
+            if (service in context.initial_running_services and
+                    service not in context.service_models.previous and not saved_owner):
+                raise ContainerError(
+                    "Cannot replace running service {} without a previous Compose model".format(service))
+
     def _publish_candidate(self, container, candidate, context, services, record_applied=True) -> None:
-        if candidate.previous_id is None:
-            saved_owner = any(owner == container.name and path in context.saved_compose
-                              for path, owner in context.compose_owners.items())
-            for service in services:
-                if (service in context.initial_running_services and
-                        service not in context.service_models.previous and not saved_owner):
-                    raise ContainerError(
-                        "Cannot replace running service {} without a previous Compose model".format(service))
+        self._require_rollback_model(container, candidate, context, services)
         context.generated_candidates[container.name] = candidate
         candidate.publish()
         if not services:
@@ -444,6 +454,8 @@ class ComposeOperations:
                 previous.path = __import__("os").path.join(candidate.root, candidate.previous_id)
                 previous.changed = True
                 context.generated_candidates[container.name] = previous
+            else:
+                context.generated_candidates.pop(container.name, None)
             context.rollback_service_models = context.service_models.previous
             if old_compose:
                 context.rollback_compose_files = dict(context.compose_files)
