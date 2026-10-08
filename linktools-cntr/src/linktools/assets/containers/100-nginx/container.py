@@ -432,6 +432,11 @@ class Container(BaseContainer):
             if source.is_file():
                 shutil.copy2(str(source), str(directory / source.name))
         os.chmod(str(directory / (domain + "_key.pem")), 0o600)
+        account = self.get_app_path("acme")
+        if account.is_dir():
+            import shutil
+            shutil.copytree(str(account), str(directory / "acme"), symlinks=True)
+            os.chmod(str(directory / "acme"), 0o700)
         (directory / "primary").write_text(domain + "\n", encoding="utf-8")
         (directory / "port").write_text(
             str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
@@ -481,10 +486,7 @@ class Container(BaseContainer):
 
         runner.validate_service(
             context, "nginx",
-            ("/usr/local/bin/nginx-certificates", "prepare", version, domain,
-             self.get_config("ACME_SERVER"), self.get_config("ACME_DNS_API"),
-             self.get_config("ACME_ACCOUNT_EMAIL")),
-            network=True,
+            ("/usr/local/bin/nginx-certificates", "prepare", version, domain),
         )
         self._certificate_version = version
         if not os.path.lexists(str(current)):
