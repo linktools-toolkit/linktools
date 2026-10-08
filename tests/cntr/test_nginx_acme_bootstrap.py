@@ -352,6 +352,20 @@ def test_nginx_activation_failure_restores_previous_cert_when_reload_succeeds(ce
     assert (root / "certs/live").readlink() == Path("versions/legacy")
 
 
+def test_nginx_load_failure_preserves_pointer_for_transaction_rollback(certificate_case):
+    _, root, script, env = certificate_case
+    assert _run(script, env, "prepare", "pending", "example.test").returncode == 0
+    assert _run(script, env, "activate", "pending").returncode == 0
+    (root / "fake.pid").write_text("123")
+    nginx = root / "bin/nginx"
+    nginx.write_text("#!/bin/sh\nexit 1\n")
+    nginx.chmod(0o755)
+    result = _run(script, env, "load", "pending")
+    assert result.returncode == 1
+    assert "rejected the new TLS certificate" in result.stderr
+    assert (root / "certs/live").readlink() == Path("versions/pending")
+
+
 def test_http_does_not_resolve_dns_secrets(certificate_case, monkeypatch):
     container, _, _, _ = certificate_case
     container.env_config.set("NGINX_HTTPS_ENABLE", False)

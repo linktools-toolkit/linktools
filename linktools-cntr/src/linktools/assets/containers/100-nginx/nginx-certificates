@@ -45,11 +45,44 @@ configure() {
         --reloadcmd ':' >/dev/null
 }
 
-activate() {
+load_tls() {
     id=$1
     directory="$versions/$id"
     main=$(cat "$directory/primary")
     port=${NGINX_HTTPS_PORT:?NGINX_HTTPS_PORT is required}
+    if test "$(readlink "$root/live" 2>/dev/null || :)" != "versions/$id"; then
+        echo 'The requested TLS certificate is not active' >&2
+        return 1
+    fi
+    if ! verify "$directory" "$main" "$directory/domains"; then
+        echo 'The active TLS certificate failed verification' >&2
+        return 1
+    fi
+    if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
+       ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
+        echo 'Nginx rejected the new TLS certificate' >&2
+        return 1
+    fi
+    expected=$(openssl x509 -in "$directory/${main}_fullchain.pem" -noout -fingerprint -sha256) || return 1
+    deadline=$(($(date +%s) + 30))
+    while :; do
+        remaining=$((deadline - $(date +%s)))
+        test "$remaining" -gt 0 || break
+        probe_timeout=$remaining
+        test "$probe_timeout" -le 2 || probe_timeout=2
+        actual=$(timeout "$probe_timeout" openssl s_client -connect "127.0.0.1:$port" -servername "$main" </dev/null 2>/dev/null |
+                 openssl x509 -noout -fingerprint -sha256 2>/dev/null || :)
+        test "$actual" = "$expected" && return 0
+        test "$(date +%s)" -ge "$deadline" || sleep 1
+    done
+    echo 'Nginx did not serve the new TLS certificate' >&2
+    return 1
+}
+
+activate() {
+    id=$1
+    directory="$versions/$id"
+    main=$(cat "$directory/primary")
     verify "$directory" "$main" "$directory/domains"
     previous=$(readlink "$root/live" 2>/dev/null || :)
     if test "$previous" = "versions/$id" && ! test -s /var/run/nginx.pid; then
@@ -59,40 +92,24 @@ activate() {
         echo 'Cannot switch running TLS certificate without a previous version' >&2
         return 1
     fi
-
     ln -s "versions/$id" "$root/.next-$$"
     mv -Tf "$root/.next-$$" "$root/live"
     if ! test -s /var/run/nginx.pid; then
         return 0
     fi
-
-    if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
-       ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
-        reason='Nginx rejected the new TLS certificate'
-    else
-        expected=$(openssl x509 -in "$directory/${main}_fullchain.pem" -noout -fingerprint -sha256)
-        deadline=$(($(date +%s) + 30))
-        while :; do
-            remaining=$((deadline - $(date +%s)))
-            test "$remaining" -gt 0 || break
-            probe_timeout=$remaining
-            test "$probe_timeout" -le 2 || probe_timeout=2
-            actual=$(timeout "$probe_timeout" openssl s_client -connect "127.0.0.1:$port" -servername "$main" </dev/null 2>/dev/null |
-                     openssl x509 -noout -fingerprint -sha256 2>/dev/null || :)
-            test "$actual" = "$expected" && return 0
-            test "$(date +%s)" -ge "$deadline" || sleep 1
-        done
-        reason='Nginx did not serve the new TLS certificate'
+    # Cron renewal owns rollback; orchestrated updates use load_tls and
+    # let ComposeOperations restore the previous generation on failure.
+    if load_tls "$id"; then
+        return 0
     fi
-
     if ! ln -s "$previous" "$root/.next-$$" ||
        ! mv -Tf "$root/.next-$$" "$root/live" ||
        ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
        ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
-        echo "$reason; local certificate rollback failed" >&2
+        echo 'Nginx TLS renewal failed; local certificate rollback failed' >&2
         return 2
     fi
-    echo "$reason; local certificate pointer restored" >&2
+    echo 'Nginx TLS renewal failed; local certificate pointer restored' >&2
     return 1
 }
 
@@ -129,6 +146,10 @@ case "$1" in
         shift
         activate "$1"
         ;;
+    load)
+        shift
+        load_tls "$1"
+        ;;
     unpublish)
         test ! -s /var/run/nginx.pid
         if test -L "$root/live"; then rm "$root/live"; fi
@@ -161,5 +182,5 @@ case "$1" in
             fi
         fi
         ;;
-    *) echo 'Usage: nginx-certificates {check|prepare|configure|activate|unpublish|renew}' >&2; exit 2 ;;
+    *) echo 'Usage: nginx-certificates {check|prepare|configure|activate|load|unpublish|renew}' >&2; exit 2 ;;
 esac

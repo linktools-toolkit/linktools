@@ -651,7 +651,8 @@ class Container(BaseContainer):
         runner.apply_service(context, "nginx")
         runner.wait_service_healthy(context, "nginx")
         if changed:
-            runner.exec_service(context, "nginx", command)
+            runner.exec_service(context, "nginx",
+                                ("/usr/local/bin/nginx-certificates", "load", version))
         result = runner.exec_service(context, "nginx", (
             "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
             "/run/nginx-health.sock", "http://localhost/health"), check=False)
