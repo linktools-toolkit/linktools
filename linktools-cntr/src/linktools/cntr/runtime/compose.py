@@ -232,7 +232,8 @@ class ComposeRunner:
 
     def isolated_service_args(self, model: "dict[str, Any]", service: str,
                               command: "Sequence[str]", environment: "Mapping[str, object] | None" = None,
-                              network: bool = False) -> "list[str]":
+                              network: bool = False,
+                              mount_overrides: "Mapping[str, str] | None" = None) -> "list[str]":
         """Target image/env/mounts, deliberately excluding ports, IPs and dependencies."""
         spec = model["services"][service]
 
@@ -243,16 +244,23 @@ class ComposeRunner:
 
         image = raw(spec.get("image")) or (self.manager.project_name + "-" + service)
         args = ["run", "--rm", "--network", "bridge" if network else "none"]
+        overrides = dict(mount_overrides or {})
         for mount in spec.get("volumes", ()):
             if not isinstance(mount, dict) or mount.get("type") not in ("bind", "volume"):
                 raise ValueError("Native validation requires resolved bind/volume mounts")
             source = mount.get("source")
             if mount["type"] == "volume":
                 source = model.get("volumes", {}).get(source, {}).get("name", source)
-            value = "type={},source={},target={}".format(mount["type"], raw(source), raw(mount["target"]))
-            if mount.get("read_only"):
-                value += ",readonly"
+            target = raw(mount["target"])
+            if target in overrides:
+                value = "type=bind,source={},target={},readonly".format(overrides.pop(target), target)
+            else:
+                value = "type={},source={},target={}".format(mount["type"], raw(source), target)
+                if mount.get("read_only"):
+                    value += ",readonly"
             args.extend(["--mount", value])
+        if overrides:
+            raise ValueError("No resolved service mount for " + ", ".join(overrides))
         for category in ("secrets", "configs"):
             for item in spec.get(category, ()):
                 name = item if isinstance(item, str) else item["source"]
@@ -279,11 +287,12 @@ class ComposeRunner:
 
     def validate_service(self, context: "EventContext", service: str,
                          command: "Sequence[str]", environment: "Mapping[str, object] | None" = None,
-                         network: bool = False, check: bool = True) -> "CommandResult":
+                         network: bool = False, check: bool = True,
+                         mount_overrides: "Mapping[str, str] | None" = None) -> "CommandResult":
         model = getattr(context, "compose_model", None)
         if model is None:
             model = self.final_model(context)
-        args = self.isolated_service_args(model, service, command, environment, network)
+        args = self.isolated_service_args(model, service, command, environment, network, mount_overrides)
         result = self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_process(*args, capture_output=True), check=False)
         if check and not result.succeeded:
@@ -292,6 +301,18 @@ class ComposeRunner:
             raise ContainerError("Native validation failed for service {} (exit {})".format(
                 service, result.returncode))
         return result
+
+    def run_isolated_service(self, context: "EventContext", service: str,
+                             command: "Sequence[str]") -> None:
+        """Run a one-shot service maintenance command with resolved mounts, no network or ports."""
+        model = getattr(context, "compose_model", None) or self.final_model(context)
+        args = self.isolated_service_args(model, service, command)
+        result = self.manager.structured_runner.execute(
+            self.manager.runtime.create_docker_process(*args, capture_output=True), check=False)
+        if not result.succeeded:
+            from ..container import ContainerError
+            raise ContainerError("Isolated service command failed for {} (exit {})".format(
+                service, result.returncode))
 
     def apply_service_args(self, service: str, recreate: bool = False, remove_orphans: bool = False) -> "list[str]":
         args = self.up_args(ComposeOptions(services=[], remove_orphans=remove_orphans))

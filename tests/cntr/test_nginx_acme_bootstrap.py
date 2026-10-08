@@ -345,7 +345,7 @@ def test_preparation_can_enable_https_on_running_http_only_nginx(certificate_cas
 
     monkeypatch.setattr(container.manager.compose_runner, "validate_service", validate)
     container.on_prepare_config(SimpleNamespace(initial_services=("nginx",)))
-    assert (root / "certs/live").readlink() == Path("versions") / container._certificate_version
+    assert not (root / "certs/live").exists()
 
 
 def test_preparation_stages_added_names_without_publishing(certificate_case, monkeypatch):

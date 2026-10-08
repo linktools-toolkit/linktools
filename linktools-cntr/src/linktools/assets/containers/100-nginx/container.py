@@ -494,8 +494,6 @@ class Container(BaseContainer):
             shutil.rmtree(str(directory))
             raise
         self._certificate_version = version
-        if not os.path.lexists(str(current)):
-            os.symlink("versions/" + version, str(current))
 
     def _preserve_legacy_files(self) -> None:
         import shutil
@@ -533,9 +531,27 @@ class Container(BaseContainer):
 
     def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
         manager = self.manager
-        result = manager.compose_runner.validate_service(context, "nginx", (
-            "nginx", "-p", "/etc/nginx/", "-c",
-            "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t"), check=False)
+        command = ("nginx", "-p", "/etc/nginx/", "-c",
+                   "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t")
+        marker = Path(candidate.path) / "certificate.version"
+        version = marker.read_text(encoding="utf-8").strip() if marker.exists() else None
+        root = self.get_app_path("certs")
+        live = root / "live"
+        if version and (not live.is_symlink() or os.readlink(str(live)) != "versions/" + version):
+            import shutil
+            import tempfile
+            domain = self.get_config("NGINX_ROOT_DOMAIN")
+            with tempfile.TemporaryDirectory(prefix=".validate-", dir=str(root)) as path:
+                certs = Path(path) / "live"
+                certs.mkdir()
+                for kind in ("fullchain", "key"):
+                    name = "{}_{}.pem".format(domain, kind)
+                    shutil.copy2(str(root / "versions" / version / name), str(certs / name))
+                result = manager.compose_runner.validate_service(
+                    context, "nginx", command, check=False,
+                    mount_overrides={"/etc/certs": path})
+        else:
+            result = manager.compose_runner.validate_service(context, "nginx", command, check=False)
 
         if result.succeeded and "conflicting server name" not in (result.stdout + result.stderr).lower():
             return
@@ -576,39 +592,31 @@ class Container(BaseContainer):
                 'server { listen ' + str(self.get_config("NGINX_HTTP_PORT")) + ' default_server; return 503; }\n}\n'}
 
     def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
-              services: "Iterable[str]") -> None:
+                     services: "Iterable[str]") -> None:
         if "nginx" not in services:
             return
         runner = self.manager.compose_runner
-        root = self.get_app_path("certs")
-        live = root / "live"
-        previous = os.readlink(str(live)) if live.is_symlink() else None
+        live = self.get_app_path("certs", "live")
         marker = Path(candidate.path) / "certificate.version"
         version = marker.read_text(encoding="utf-8").strip() if marker.exists() else None
-        changed = bool(version and previous != "versions/" + version)
-        try:
-            runner.apply_service(context, "nginx")
-            runner.wait_service_healthy(context, "nginx")
-            if changed:
-                runner.exec_service(
-                    context, "nginx",
-                    ("/usr/local/bin/nginx-certificates", "activate", version, str(self.get_config("NGINX_HTTPS_PORT"))))
-            result = runner.exec_service(context, "nginx", (
-                "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
-                "/run/nginx-health.sock", "http://localhost/health"), check=False)
-            if result.succeeded and result.stdout.strip() == candidate.generation_id:
-                return
-            runner.exec_service(context, "nginx", (
-                "nginx", "-p", "/etc/nginx/", "-c",
-                "/etc/nginx/generated/current/nginx.conf", "-s", "reload"))
-            self.confirm(context, candidate.generation_id)
-        except Exception:
-            if changed and previous:
-                original = os.path.basename(previous)
-                try:
-                    runner.exec_service(context, "nginx", (
-                        "/usr/local/bin/nginx-certificates", "activate", original, str(self.get_config("NGINX_HTTPS_PORT"))))
-                except Exception as rollback_error:
-                    raise ContainerError(
-                        "Nginx certificate rollback failed: {}".format(rollback_error)) from rollback_error
-            raise
+        changed = bool(version and (not live.is_symlink() or
+                                    os.readlink(str(live)) != "versions/" + version))
+        if changed:
+            command = ("/usr/local/bin/nginx-certificates", "activate", version,
+                       str(self.get_config("NGINX_HTTPS_PORT")))
+            # A one-shot container switches the mount before Compose can start
+            # nginx against a configuration referencing the new certificate.
+            runner.run_isolated_service(context, "nginx", command)
+        runner.apply_service(context, "nginx")
+        runner.wait_service_healthy(context, "nginx")
+        if changed:
+            runner.exec_service(context, "nginx", command)
+        result = runner.exec_service(context, "nginx", (
+            "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
+            "/run/nginx-health.sock", "http://localhost/health"), check=False)
+        if result.succeeded and result.stdout.strip() == candidate.generation_id:
+            return
+        runner.exec_service(context, "nginx", (
+            "nginx", "-p", "/etc/nginx/", "-c",
+            "/etc/nginx/generated/current/nginx.conf", "-s", "reload"))
+        self.confirm(context, candidate.generation_id)

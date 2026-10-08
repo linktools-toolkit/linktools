@@ -124,6 +124,19 @@ def test_isolated_validation_preserves_image_env_and_mounts_without_network_iden
     assert not any(value in " ".join(args) for value in ("10.0.0.2", "80:80", "depends_on"))
 
 
+def test_isolated_mount_override_replaces_only_certificate_volume():
+    runner = ComposeRunner(SimpleNamespace(project_name="project"))
+    model = {"services": {"nginx": {"image": "nginx:target", "volumes": [
+        {"type": "bind", "source": "/host/certs", "target": "/etc/certs"},
+        {"type": "bind", "source": "/host/generated", "target": "/etc/nginx/generated", "read_only": True},
+    ]}}}
+    args = runner.isolated_service_args(model, "nginx", ("nginx", "-t"),
+                                        mount_overrides={"/etc/certs": "/host/candidate"})
+    assert "type=bind,source=/host/candidate,target=/etc/certs,readonly" in args
+    assert "type=bind,source=/host/generated,target=/etc/nginx/generated,readonly" in args
+    assert "/host/certs" not in " ".join(args)
+
+
 def test_full_configuration_scope_does_not_expand_startup_selection():
     app = SimpleNamespace(name="app")
     stopped = SimpleNamespace(name="oidc-app")
