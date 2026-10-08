@@ -5,8 +5,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand
 from linktools.cntr import BaseContainer, Flare, Nginx
-from linktools.cntr.integration import IntegrationConsumer
-from linktools.cntr.urls import load_port_url
+from linktools.cntr.integration import IntegrationConsumer, load_port_url
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 

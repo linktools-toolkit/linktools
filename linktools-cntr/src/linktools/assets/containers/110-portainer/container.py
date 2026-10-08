@@ -7,7 +7,7 @@ from linktools.core import ConfigField
 from linktools.decorator import cached_property
 from linktools.runtime import lazy_load
 from linktools.cntr import BaseContainer, Flare, Nginx
-from linktools.cntr.urls import load_port_url
+from linktools.cntr.integration import load_port_url
 
 if TYPE_CHECKING:
     from linktools.cntr import Integrations

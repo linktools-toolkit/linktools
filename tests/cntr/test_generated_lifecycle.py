@@ -223,7 +223,7 @@ def test_changed_compose_environment_prevents_generation_reuse():
 def test_native_diagnostic_keeps_site_source_but_omits_secret():
     from _harness import builtin_consumer_type
 
-    error = 'nginx: [emerg] invalid secret-token in /etc/nginx/generated/id/sites/s_617070_776562/business.conf:12'
+    error = 'nginx: [emerg] invalid secret-token in /etc/nginx/generated/id/sites/s_617070_776562.conf:12'
     container = SimpleNamespace(name="proxy", services={"nginx": {}})
     manager = SimpleNamespace(nginx_sites={("app", "web"): SimpleNamespace(template="/templates/app.j2")},
         integration_consumers={"proxy": builtin_consumer_type("100-nginx")(container)},
@@ -240,7 +240,7 @@ def test_native_diagnostic_keeps_site_source_but_omits_secret():
     message = str(raised.value)
     assert "'app'/'web'" in message
     assert "/templates/app.j2" in message
-    assert "business.conf:12" in message
+    assert "s_617070_776562.conf:12" in message
     assert "secret-token" not in message
 
 

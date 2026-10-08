@@ -141,18 +141,12 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         root = root.replace("worker_processes auto", "worker_processes 1")
         if os.environ.get("CNTR_NGINX_TEST_TCP_HEALTH") == "1":
             # This opt-in never establishes the production Unix-socket health gate.
-            root = root.replace("unix:/run/nginx-cntr-health.sock", "127.0.0.1:" + str(health_port))
+            root = root.replace("unix:/run/nginx-health.sock", "127.0.0.1:" + str(health_port))
         else:
-            root = root.replace("/run/nginx-cntr-health.sock", str(tmp_path / "health.sock"))
+            root = root.replace("/run/nginx-health.sock", str(tmp_path / "health.sock"))
         (tmp_path / "logs").mkdir()
-        (tmp_path / "sites/native").mkdir(parents=True)
+        (tmp_path / "sites").mkdir()
         (tmp_path / "nginx.conf").write_text(root)
-        server_text = render("server.conf").replace("/etc/certs/", str(tmp_path) + "/")
-        server_text = server_text.replace("listen " + str(origin_port) + " ",
-                                          "listen 127.0.0.253:" + str(origin_port) + " ")
-        (tmp_path / "sites/native.conf").write_text(server_text)
-        auth_text = render("auth_location.conf").replace("http://authelia:9091", "http://127.0.0.1:" + str(auth_port))
-        (tmp_path / "sites/native/auth.conf").write_text(auth_text)
         header_text = "\n".join("proxy_set_header " + nginx.complex_value(key) + " " + value + ";"
                                 for key, value in nginx.header_items(site))
         proxy = "set $target http://127.0.0.1:" + str(app_port) + "; proxy_pass $target;"
@@ -161,7 +155,13 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             "location /fallback { error_page 403 = /off; " + header_text + proxy + " }",
             "location ~ ^/capture/(.+)$ { " + header_text + "proxy_set_header X-Capture $1; " + proxy + " }",
         ))
-        (tmp_path / "sites/native/business.conf").write_text(business)
+        server_text = NginxGeneration(nginx).render_template(
+            producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
+        server_text = server_text.replace("/etc/certs/", str(tmp_path) + "/")
+        server_text = server_text.replace("listen " + str(origin_port) + " ",
+                                          "listen 127.0.0.253:" + str(origin_port) + " ")
+        server_text = server_text.replace("http://authelia:9091", "http://127.0.0.1:" + str(auth_port))
+        (tmp_path / "sites/native.conf").write_text(server_text)
         subprocess.check_call(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                                "-subj", "/CN=app.test", "-keyout", str(tmp_path / "test_key.pem"),
                                "-out", str(tmp_path / "test_fullchain.pem"), "-days", "1"],
@@ -185,7 +185,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
 
         def request(path, headers=None):
             request_headers = {"Host": "app.test:" + str(https_port), "Authorization": "Bearer client",
-                               "X-Auth-User": "forged", "X-Cntr-Scheme": "forged",
+                               "X-Auth-User": "forged", "X-Proxy-Original-Scheme": "forged",
                                "X-Forwarded-For": "forged", "Forwarded": "forged"}
             request_headers.update(headers or {})
             connection = http.client.HTTPSConnection("127.0.0.1", https_port, timeout=3,
@@ -214,10 +214,10 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
             assert headers["X-Forwarded-For"] == "127.0.0.1"
             assert headers["X-Forwarded-Port"] == str(https_port)
             assert "Forwarded" not in headers
-            assert not any(key.startswith("X-Cntr-") for key in headers)
+            assert not any(key.startswith("X-Proxy-Original-") for key in headers)
             for kind, _, _, headers, _ in events:
                 if kind == "auth":
-                    assert not any(key.startswith(("X-Cntr-", "X-Auth-")) for key in headers)
+                    assert not any(key.startswith(("X-Proxy-Original-", "X-Auth-")) for key in headers)
                     assert headers["X-Original-Method"] == "POST"
             if path.startswith("/capture"):
                 assert response["headers"]["X-Capture"] == "hello"
@@ -272,9 +272,9 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         connection.request("GET", "/private", headers={"Host": "app.test"})
         assert connection.getresponse().status == 403
         connection.close()
-        for headers in ({"Host": "app.test"}, {"Host": "app.test", "X-Cntr-Scheme": "https",
-                        "X-Cntr-Host": "other.test", "X-Cntr-URI": "/private",
-                        "X-Cntr-Method": "GET", "X-Cntr-Client-IP": "127.0.0.1"}):
+        for headers in ({"Host": "app.test"}, {"Host": "app.test", "X-Proxy-Original-Scheme": "https",
+                        "X-Proxy-Original-Host": "other.test", "X-Proxy-Original-URI": "/private",
+                        "X-Proxy-Original-Method": "GET", "X-Proxy-Original-Client-IP": "127.0.0.1"}):
             connection = http.client.HTTPConnection("127.0.0.253", origin_port, timeout=3,
                                                     source_address=("127.0.0.254", 0))
             connection.request("GET", "/private", headers=headers)

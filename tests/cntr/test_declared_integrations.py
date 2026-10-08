@@ -3,7 +3,7 @@
 """Declarative integrations do not depend on navigation registration."""
 
 from linktools.cntr import Nginx, NginxSite
-from linktools.cntr.urls import load_nginx_url
+from linktools.cntr.integration import load_nginx_url
 
 
 def test_portainer_site_is_independent_of_navigation(fresh_manager):

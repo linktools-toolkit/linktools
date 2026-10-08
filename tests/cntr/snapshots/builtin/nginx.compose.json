@@ -2,27 +2,13 @@
   "networks": {
     "nginx": {
       "name": "aio-nginx"
-    },
-    "safeline-ce": {
-      "name": "aio-safeline-ce"
-    }
-  },
-  "secrets": {
-    "nginx-acme": {
-      "file": "<TEMP>/container/nginx/acme-build.env"
     }
   },
   "services": {
     "nginx": {
       "build": {
         "context": "<ASSETS>/100-nginx",
-        "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile",
-        "secrets": [
-          {
-            "source": "nginx-acme",
-            "target": "nginx-acme"
-          }
-        ]
+        "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile"
       },
       "command": [
         "nginx",
@@ -51,8 +37,8 @@
           "--fail",
           "--silent",
           "--unix-socket",
-          "/run/nginx-cntr-health.sock",
-          "http://localhost/__cntr/health"
+          "/run/nginx-health.sock",
+          "http://localhost/health"
         ]
       },
       "hostname": "nginx",

@@ -9,7 +9,7 @@ installed do not consume declarations.
 
 ```python
 from linktools.cntr import Flare, Integrations, Nginx
-from linktools.cntr.urls import load_port_url
+from linktools.cntr.integration import load_port_url
 
 
 @cached_property
@@ -133,10 +133,10 @@ APP_DOMAIN = ConfigField(provider=Nginx.domain(self))
 It keeps the shared nginx root-domain, wildcard and disabled-provider behavior.
 The former `BaseContainer.get_nginx_domain` method is removed.
 
-Import the URL factories from `linktools.cntr.urls` and pass the owning container:
+Import the URL factories from `linktools.cntr.integration` and pass the owning container:
 
 ```python
-from linktools.cntr.urls import load_config_url, load_nginx_url, load_port_url
+from linktools.cntr.integration import load_config_url, load_nginx_url, load_port_url
 
 load_config_url(self, "APP_URL", "ui", queries={"mode": "compact"})
 load_port_url(self, "APP_PORT", "ui", https=False)
@@ -153,8 +153,8 @@ These factories never register hooks or write configuration.
 
 `BaseContainer.load_config_url`, `load_port_url`, `load_nginx_url`, and the old
 exposure mixin are removed; no URL mixin or resolver wrapper replaces them.
-General Compose/Dockerfile templates expose the same module as `urls`, alongside
-`utils`, so they can use `urls.load_nginx_url(container, "web")`. Native nginx
+General Compose/Dockerfile templates expose the public URL factories as `urls`,
+alongside `utils`, so they can use `urls.load_nginx_url(container, "web")`. Native nginx
 templates retain only the explicit context described below.
 
 ## Site values
@@ -203,16 +203,43 @@ another template language.
 ```jinja
 {% from "nginx/headers.j2" import proxy_headers with context %}
 location / {
-    {{ proxy_headers({"Host": "$host"}) }}
+    {{ proxy_headers({"Host": "$host", "Authorization": "$http_authorization",
+                      "X-Forwarded-For": None}) }}
     set $upstream "http://app:8080";
     proxy_pass $upstream;
 }
 ```
 
-Header macros emit a complete same-level set. Overrides are single complex
-values, not directives or prequoted strings. Names are case-insensitive;
-framework identity/internal metadata headers and auth-header conflicts cannot
-be overridden. Custom `auth_request off`, `return`, rewrite and native location
+`proxy_headers` and `grpc_headers` share one default header definition and emit
+complete same-level sets. Override names are case-insensitive; values are native
+nginx complex values, not directives or prequoted strings. `None` or `""` emits
+an empty value so nginx suppresses that header. Adding a separate native
+`proxy_set_header` in a child location stops nginx from inheriting the parent's
+whole header set; call the macro in every location that needs customized headers.
+
+`Host` and ordinary `Authorization` can be overridden as above. If a header is
+explicitly configured in `auth_headers`, it is instead an authenticated credential:
+its override is rejected to preserve the successful-authentication requirement.
+`X-Auth-*` identity headers and `X-Proxy-Original-*` internal metadata are reserved.
+The WAF forwarding location sets the latter; application and auth locations strip
+them. Original request values are `$original_scheme`, `$original_host`,
+`$original_uri`, `$original_method`, `$original_client_ip`, and `$original_port`.
+
+Generated output consists of `nginx.conf` and one self-contained
+`sites/<site-id>.conf` per site (including `sites/default.conf` when needed).
+Read the root for shared request maps and the health listener; read one site file
+for its maps, listeners, WAF path, authentication endpoint, and business locations.
+Business templates are evaluated once and their text is embedded without another
+Jinja pass. There are no generated per-site auth/business include directories.
+
+For custom integrations migrating older generated names, replace `$cntr_*`
+request references with the corresponding `$original_*` values above. Private
+WAF metadata is now `X-Proxy-Original-*`, the internal auth URI is
+`/_internal/auth`, and reload acknowledgement uses `/run/nginx-health.sock`
+with `/health`. Producer and consumer must use the same generated configuration;
+there are no old-name aliases. CLI names are unchanged; URL-helper imports migrate as described above.
+
+Custom `auth_request off`, `return`, rewrite and native location
 selection retain nginx semantics. An early `return` is not protected by the
 access phase. Preserve URI replacement and captures when migrating static
 upstreams to Docker runtime DNS.
@@ -312,14 +339,13 @@ Cross-service state is not an atomic transaction; failures remain command errors
 
 nginx issues and installs its initial certificates while building the image, using
 `ACME_SERVER` (default `letsencrypt`), optional `ACME_ACCOUNT_EMAIL`, and the
-selected DNS API. Building requires BuildKit and Compose build secrets. DNS
-values are supplied through a mode-0600 temporary secret outside the build
-context and removed when the command process exits. They are not Dockerfile
-`ARG`/`ENV` values. ACME's credential-bearing `account.conf` is discarded before
-saving the image's initial state, and domain configs retain only ACME `Le_*`
-renewal fields; runtime DNS environment settings supply renewal
-credentials. Images still contain certificates, private keys and ACME account
-state: protect the image and its build cache as secrets; do not publish them.
+selected DNS API. DNS credentials are written directly as Dockerfile `ENV`
+values for initial issuance and retained in the image. DNS credential values must
+be single-line; CR or LF characters fail rendering with a clear error. Compose
+also supplies the configured values as runtime environment variables for cron renewal. ACME account
+and domain configuration is preserved with the initial certificate state.
+Images and build contexts contain DNS credentials, certificates, private keys and
+ACME account state: protect them and the build cache as secrets; do not publish them.
 
 Deployment seeds only empty certificate/ACME mounts from the image, then validates
 expiry and domain coverage offline. Existing mounts (including account keys and
@@ -331,7 +357,7 @@ migration. The ACME client lives in `/opt/acme`, outside the persisted config mo
 An explicit daily cron uses the persisted config and a reload script that validates
 the active generated configuration before reloading; legacy reload commands are
 updated without changing their account or certificate keys. HTTPS-disabled images
-skip ACME installation, issuance, secrets and cron.
+skip ACME installation, issuance, DNS environment variables and cron.
 
 Deployment migration must be coordinated with all external repository callers:
 
@@ -340,7 +366,7 @@ Deployment migration must be coordinated with all external repository callers:
 2. Migrate external Python declarations, native templates and OIDC consumers
 3. Recreate nginx for the stable generated-parent mount change
 4. Point this integration's SafeLine origin to
-   `http://nginx-origin:<NGINX_WAF_PORT>` and preserve all five `X-Cntr-*` headers
+   `http://nginx-origin:<NGINX_WAF_PORT>` and preserve all five `X-Proxy-Original-*` headers
 5. Validate real Docker, SafeLine and Authelia/OIDC behavior before deployment
 
 Only SafeLine's exact `.254` socket source is trusted at origin. nginx uses the

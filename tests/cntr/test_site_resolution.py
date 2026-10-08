@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.cntr import ContainerError, ContainerManager, Integration, Nginx
-from linktools.cntr.urls import load_nginx_url
+from linktools.cntr.integration import load_nginx_url
 from linktools.cntr.integration import ResolvedSite
 from linktools.runtime import lazy_load
 

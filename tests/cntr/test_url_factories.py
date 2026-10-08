@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Module URL factories retain lazy config, port and site-reference semantics."""
+"""Public URL factories retain lazy config, port and site-reference semantics."""
 from types import SimpleNamespace
 
 import pytest
 
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.cntr.urls import load_config_url, load_nginx_url, load_port_url
+from linktools.cntr.integration import load_config_url, load_nginx_url, load_port_url
 from linktools.runtime import Proxy
 
 

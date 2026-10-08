@@ -9,7 +9,6 @@ from jinja2 import Environment, FileSystemLoader, TemplateError
 
 from linktools import utils
 from linktools.runtime import lazy_load
-from .. import urls
 from ...capabilities.cntr import __cap_cntr__
 
 if TYPE_CHECKING:
@@ -19,6 +18,8 @@ if TYPE_CHECKING:
 
 
 def render_template(container: "BaseContainer", source: "PathType", destination: "PathType | None" = None, **kwargs: "Any") -> str:
+    from .. import integration
+
     config = container.env_config
 
     def mkdir(path: "PathType") -> str:
@@ -63,7 +64,7 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
         docker_user=container.get_config_later("DOCKER_USER"),
 
         utils=utils,
-        urls=urls,
+        urls=integration,
         mkdir=mkdir,
         chown=chown,
         chmod=chmod,

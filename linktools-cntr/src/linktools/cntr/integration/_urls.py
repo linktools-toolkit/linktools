@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Lazy, side-effect-free URL references for container integrations."""
+"""Lazy URL references exported through the integration package."""
 from typing import TYPE_CHECKING
 
 from linktools import utils
@@ -9,7 +9,7 @@ from linktools.runtime import lazy_load
 if TYPE_CHECKING:
     from linktools.runtime import Proxy
     from linktools.types import ConfigKeyType, QueryType
-    from .container import BaseContainer
+    from ..container import BaseContainer
 
 
 def load_config_url(container: "BaseContainer", key: "ConfigKeyType",
@@ -42,7 +42,7 @@ def load_port_url(container: "BaseContainer", key: "ConfigKeyType",
 
 def load_nginx_url(container: "BaseContainer", local_id: str, *path: str,
                    queries: "QueryType | None" = None) -> "Proxy":
-    from .container import ContainerError
+    from ..container import ContainerError
     if not isinstance(local_id, str) or not local_id:
         raise ContainerError("Nginx site ID must be a nonempty string")
 

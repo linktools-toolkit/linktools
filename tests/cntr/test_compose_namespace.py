@@ -106,6 +106,44 @@ def test_compose_with_dependencies_expands_selection(monkeypatch, fresh_manager)
     assert "nginx" in args and "lldap" in args
 
 
+@pytest.mark.parametrize("installed,waf", [(True, True), (True, False), (False, False)])
+def test_nginx_render_uses_safeline_owned_network(monkeypatch, fresh_manager, installed, waf):
+    if not installed:
+        fresh_manager.installed_state.remove("safeline")
+    fresh_manager.env_config.set("NGINX_WAF_ENABLE", waf)
+    monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
+    recorded = _record(fresh_manager, monkeypatch)
+
+    ComposeCommand().run(_Args(names=["nginx"]))
+
+    containers, args = recorded[0]
+    assert args == ("config", "nginx")
+    models = {container.name: container.docker_compose for container in containers}
+    nginx = models["nginx"]
+    assert "safeline-ce" not in nginx["networks"]
+    networks = {}
+    for model in models.values():
+        networks.update((model or {}).get("networks", {}))
+    attachments = nginx["services"]["nginx"]["networks"]
+    assert set(attachments).issubset(networks)
+    if installed:
+        owners = [name for name, model in models.items()
+                  if "safeline-ce" in (model or {}).get("networks", {})]
+        assert owners == ["safeline"]
+        prefix = fresh_manager.env_config.get("SAFELINE_SUBNET_PREFIX")
+        assert attachments["safeline-ce"] == {
+            "ipv4_address": prefix + ".253", "aliases": ["nginx-origin"],
+        }
+        assert networks["safeline-ce"]["ipam"]["config"] == [
+            {"gateway": prefix + ".1", "subnet": prefix + ".0/24"},
+        ]
+        assert "nginx" not in models["safeline"]["services"]
+    else:
+        assert "safeline" not in models
+        assert set(attachments) == {"nginx"}
+        assert "safeline-ce" not in networks
+
+
 def test_compose_format_json_is_forwarded(monkeypatch, fresh_manager):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     recorded = _record(fresh_manager, monkeypatch)

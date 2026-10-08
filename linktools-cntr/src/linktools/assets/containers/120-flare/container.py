@@ -9,8 +9,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from linktools.cntr import BaseContainer, Flare, FlareLink, Nginx, ContainerError
-from linktools.cntr.integration import IntegrationConsumer
-from linktools.cntr.urls import load_port_url
+from linktools.cntr.integration import IntegrationConsumer, load_port_url
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError

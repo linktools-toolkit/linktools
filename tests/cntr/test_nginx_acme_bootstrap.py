@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from _harness import builtin_consumer_type
+from linktools.cntr import ContainerError
 
 
 _ACME_CLIENT = '''#!/usr/bin/env python3
@@ -95,7 +96,7 @@ def build_fixture(fresh_manager, tmp_path):
 
 def build_command(container, root):
     text = container.render_template(container.get_source_path("Dockerfile"))
-    command = text.split("    . /run/secrets/nginx-acme &&", 1)[1].split("#", 1)[0]
+    command = "acme.sh" + text.split("RUN acme.sh", 1)[1].split("#", 1)[0]
     for source, dest in (("/root/.acme.sh", root / "acme"), ("/etc/certs", root / "certs"),
                          ("/opt/nginx-initial", root / "initial")):
         command = command.replace(source, shlex.quote(str(dest)))
@@ -116,7 +117,7 @@ def test_build_parameters_are_owned_by_container(build_fixture, monkeypatch):
     assert container.acme_ssl_domains == ["example.test", "*.example.test", "app.example.test"]
     assert "--domain app.example.test" in container.docker_file
     assert "--fullchain-file /etc/certs/example.test_fullchain.pem" in container.docker_file
-    assert container.docker_compose["secrets"]["nginx-acme"]["file"] == str(container.acme_build_secret_path)
+    assert "secrets" not in container.docker_compose
 
 
 def test_initial_issuance_and_installation_are_build_steps(build_fixture):
@@ -127,16 +128,14 @@ def test_initial_issuance_and_installation_are_build_steps(build_fixture):
     assert state["server"] == "letsencrypt"
     assert state["domains"][:2] == ["example.test", "*.example.test"]
     assert (root / "initial/certs/example.test_fullchain.pem").read_text() == "simulated-certificate"
-    assert "--mount=type=secret,id=nginx-acme,required=true" in container.docker_file
-    assert "fake-secret" not in container.docker_file
-    assert "ENV Ali_" not in container.docker_file
-    assert "rm -f /root/.acme.sh/account.conf" in container.docker_file
-    assert not (root / "initial/acme/account.conf").exists()
+    assert 'ENV CF_Token="fake-secret"' in container.docker_file
+    assert "--mount=" not in container.docker_file
+    assert (root / "initial/acme/account.conf").read_text() == "SAVED_CF_Token='account-secret'\n"
     domain = (root / "initial/acme/example.test_ecc/example.test.conf").read_text()
     assert "Le_Domain='example.test'" in domain
     assert "Le_API='letsencrypt'" in domain
-    assert "secret" not in domain
-    assert "CF_Token" not in domain and "ACMEDNS_PASSWORD" not in domain
+    assert "CF_Token='domain-secret'" in domain
+    assert "ACMEDNS_PASSWORD='other-provider-secret'" in domain
 
 
 def test_build_server_and_email_are_shell_quoted(build_fixture, fresh_manager):
@@ -160,20 +159,16 @@ def test_failed_build_issuance_does_not_install_or_seed(build_fixture, fresh_man
     assert not (root / "initial").exists()
 
 
-def test_build_secret_is_temporary_and_render_is_read_only(build_fixture):
+def test_build_and_renewal_share_dns_environment_without_secret_files(build_fixture):
     container, root, binary = build_fixture
-    path = container.acme_build_secret_path
     model = container.docker_compose
-    assert model["secrets"]["nginx-acme"]["file"] == str(path)
-    assert model["services"]["nginx"]["build"]["secrets"] == [
-        {"source": "nginx-acme", "target": "nginx-acme"}]
-    assert not path.exists()
+    assert "secrets" not in model
+    assert "secrets" not in model["services"]["nginx"]["build"]
+    assert model["services"]["nginx"]["environment"]["CF_Token"] == "fake-secret"
+    assert 'ENV CF_Token="fake-secret"' in container.docker_file
+    assert "--cron --home /opt/acme --config-home /root/.acme.sh" in container.docker_file
     container.get_docker_compose_file()
-    assert path.stat().st_mode & 0o777 == 0o600
-    assert "fake-secret" in path.read_text()
-    assert container.get_docker_context_path() not in path.parents
-    container._acme_build_secret_cleanup()
-    assert not path.exists()
+    assert not container.get_temp_path("acme-build.env").exists()
 
 
 @pytest.fixture
@@ -242,7 +237,7 @@ def test_prepare_only_seeds_and_validates_without_network(build_fixture, monkeyp
     assert "--issue" not in args[2][-1] and "--install-cert" not in args[2][-1]
 
 
-def test_http_does_not_resolve_acme_or_create_secret(build_fixture, fresh_manager, monkeypatch):
+def test_http_does_not_resolve_acme_or_create_dns_environment(build_fixture, fresh_manager, monkeypatch):
     container, root, binary = build_fixture
     fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", False)
     original = container.get_config
@@ -256,7 +251,7 @@ def test_http_does_not_resolve_acme_or_create_secret(build_fixture, fresh_manage
     assert "acme.sh" not in container.docker_file
     assert "secrets" not in container.docker_compose
     container.get_docker_compose_file()
-    assert not container.acme_build_secret_path.exists()
+    assert not container.get_temp_path("acme-build.env").exists()
 
 
 @pytest.mark.parametrize("running,valid,expected", [(False, True, []), (True, True, ["-t", "reload"]), (True, False, ["-t"])])
@@ -281,14 +276,20 @@ def test_renewal_reload_checks_config_and_never_stops_nginx(build_fixture, runni
     assert "killall" not in script
 
 
-def test_dns_secret_preserves_shell_and_compose_characters(build_fixture, fresh_manager):
+def test_dns_environment_preserves_dockerfile_and_compose_characters(build_fixture, fresh_manager):
     container, root, binary = build_fixture
-    value = "fake'o$reilly\nsecond-line"
+    value = "fake'o$reilly\\path\"suffix"
     fresh_manager.env_config.set("CF_Token", value)
     container.get_docker_compose_file()
-    script = ". " + shlex.quote(str(container.acme_build_secret_path)) + " && printf '%s' \"$CF_Token\""
-    result = run_shell(script)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == value
+    expected = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+    assert 'ENV CF_Token="' + expected + '"' in container.docker_file
     assert container.docker_compose["services"]["nginx"]["environment"]["CF_Token"] == value.replace("$", "$$")
-    assert value not in container.docker_file
+
+
+@pytest.mark.parametrize("value", ["first\nsecond", "first\rsecond"])
+def test_multiline_dns_environment_fails_without_exposing_value(build_fixture, fresh_manager, value):
+    container, root, binary = build_fixture
+    fresh_manager.env_config.set("CF_Token", value)
+    with pytest.raises(ContainerError, match="DNS credentials must be single-line") as caught:
+        container.docker_file
+    assert value not in str(caught.value)

@@ -4,7 +4,7 @@
 from types import SimpleNamespace
 
 from linktools.cntr import BaseContainer, Nginx
-from linktools.cntr.urls import load_nginx_url
+from linktools.cntr.integration import load_nginx_url
 
 
 def test_same_site_can_have_many_navigation_links_without_hooks():

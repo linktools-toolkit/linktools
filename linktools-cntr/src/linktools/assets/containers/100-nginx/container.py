@@ -22,7 +22,6 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from types import SimpleNamespace
-    from weakref import finalize
     from linktools.cntr.integration import ResolvedSite
     from collections.abc import Iterable
     from typing import AbstractSet, Any, Mapping
@@ -39,7 +38,7 @@ class Container(BaseContainer):
         if any(ch in data for ch in ("\r", "\n", "\x00")):
             raise ContainerError("Nginx header value contains a control character")
         data = data.replace("\\", "\\\\").replace('"', '\\"')
-        return '"' + data.replace("$", "$" + "{cntr_dollar}") + '"'
+        return '"' + data.replace("$", "$" + "{literal_dollar}") + '"'
 
     @staticmethod
     def _validated_auth_headers(headers: "Mapping[str, str]") -> "dict[str, str]":
@@ -56,7 +55,7 @@ class Container(BaseContainer):
             if not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_\x60|~0-9A-Za-z-]+", key):
                 raise ContainerError("Invalid nginx auth header name")
             normalized = key.lower()
-            if normalized in seen or normalized in forbidden or normalized.startswith("x-cntr-"):
+            if normalized in seen or normalized in forbidden or normalized.startswith("x-proxy-original-"):
                 raise ContainerError(f"Duplicate or reserved nginx auth header: {key}")
             seen.add(normalized)
             result[key] = value
@@ -169,30 +168,11 @@ class Container(BaseContainer):
             ])
         return ""
 
-    def get_docker_compose_file(self) -> "Path | None":
-        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            self._acme_build_secret_cleanup
-        return super().get_docker_compose_file()
-
-    @property
-    def acme_build_secret_path(self) -> Path:
-        return self.get_temp_path("acme-build.env")
-
-    @cached_property
-    def _acme_build_secret_cleanup(self) -> "finalize":
-        import weakref
-        path = self.acme_build_secret_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        content = "".join("export {}={}\n".format(key, shlex.quote(str(self.get_config(field))))
-                          for key, field in self.extend_configs.items())
-        utils.atomic_write(path, content, encoding="utf-8")
-        # Keep the build-only copy out of both the context and durable config.
-        def remove() -> None:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-        return weakref.finalize(self, remove)
+    def acme_dns_environment_value(self, field: ConfigField) -> str:
+        value = str(self.get_config(field))
+        if "\n" in value or "\r" in value:
+            raise ContainerError("DNS credentials must be single-line values for Dockerfile ENV")
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
 
     def shell_quote(self, value: object) -> str:
         return shlex.quote(str(value))
@@ -227,39 +207,40 @@ class Container(BaseContainer):
             raise ContainerError("Invalid nginx complex value")
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-    def header_items(self, site: "ResolvedSite | SimpleNamespace", overrides: "Mapping[str, str] | None" = None,
+    def header_items(self, site: "ResolvedSite | SimpleNamespace", overrides: "Mapping[str, str | None] | None" = None,
                      authentication: bool = False) -> "tuple[tuple[str, str], ...]":
         """Build a complete case-insensitive header set for one proxy location."""
         headers = {
-            "Host": "$cntr_host", "Upgrade": "$http_upgrade",
-            "Connection": "$connection_upgrade", "X-Real-IP": "$cntr_client_ip",
-            "X-Original-URL": "$cntr_scheme://$cntr_host$cntr_uri",
-            "X-Original-Method": "$cntr_method", "X-Forwarded-Proto": "$cntr_scheme",
-            "X-Forwarded-Host": "$cntr_host", "X-Forwarded-URI": "$cntr_uri",
-            "X-Forwarded-Method": "$cntr_method", "X-Forwarded-For": "$cntr_client_ip",
-            "X-Forwarded-Port": "$cntr_port", "Forwarded": "",
+            "Host": "$original_host", "Upgrade": "$http_upgrade",
+            "Connection": "$connection_upgrade", "X-Real-IP": "$original_client_ip",
+            "X-Original-URL": "$original_scheme://$original_host$original_uri",
+            "X-Original-Method": "$original_method", "X-Forwarded-Proto": "$original_scheme",
+            "X-Forwarded-Host": "$original_host", "X-Forwarded-URI": "$original_uri",
+            "X-Forwarded-Method": "$original_method", "X-Forwarded-For": "$original_client_ip",
+            "X-Forwarded-Port": "$original_port", "Forwarded": "",
         }
         for name in ("Scheme", "Host", "URI", "Method", "Client-IP"):
-            headers["X-Cntr-" + name] = ""
+            headers["X-Proxy-Original-" + name] = ""
         for name in ("User", "Groups", "Name", "Email"):
             headers["X-Auth-" + name] = (
-                "$cntr_identity_" + site.var_name + "_" + name.lower()
+                "$identity_" + site.var_name + "_" + name.lower()
                 if site.auth and not authentication else "")
         auth_headers = self._validated_auth_headers(site.auth_headers) if site.auth else {}
         if not authentication:
             for index, key in enumerate(auth_headers):
-                headers[key] = "$cntr_credential_" + site.var_name + "_" + str(index)
+                headers[key] = "$credential_" + site.var_name + "_" + str(index)
         seen = set()
         protected = {key.lower() for key in auth_headers}
         for key, value in (overrides or {}).items():
             if not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
                 raise ContainerError("Invalid nginx header override name")
             normalized = key.lower()
-            if (normalized in seen or normalized.startswith("x-cntr-") or
+            if (normalized in seen or normalized.startswith("x-proxy-original-") or
                     normalized in {"x-auth-user", "x-auth-groups", "x-auth-name", "x-auth-email"} or
                     (not authentication and normalized in protected)):
                 raise ContainerError("Duplicate or reserved nginx header override: " + key)
             seen.add(normalized)
+            value = "" if value is None else value
             self.complex_value(value)
             for original in tuple(headers):
                 if original.lower() == normalized:
@@ -275,7 +256,7 @@ class Container(BaseContainer):
         for capability in ("waf", "auth"):
             if not getattr(site, capability):
                 continue
-            lines.extend(["map $uri $cntr_" + capability + "_skip_" + site.var_name + " {", "    default 0;"])
+            lines.extend(["map $uri $" + capability + "_skip_" + site.var_name + " {", "    default 0;"])
             for regex in getattr(site, capability + "_bypass"):
                 lines.append("    " + self.complex_value("~*" + regex) + " 1;")
             lines.append("}")
@@ -283,15 +264,15 @@ class Container(BaseContainer):
             return "\n".join(lines)
         suffix = site.var_name
         # Exact keys preserve business regex captures when evaluated at proxy time.
-        lines.append('map "$cntr_auth_status_' + suffix + ':$cntr_auth_skip_' + suffix + ':$cntr_auth_proof_' + suffix + '" $cntr_authorized_' + suffix + ' {')
+        lines.append('map "$auth_status_' + suffix + ':$auth_skip_' + suffix + ':$auth_proof_' + suffix + '" $auth_verified_' + suffix + ' {')
         lines.append("    volatile;")
         lines.append("    default 0;")
         lines.extend('    "' + str(status) + ':0:1" 1;' for status in range(200, 300))
         lines.append("}")
         for name in ("user", "groups", "name", "email"):
             lines.extend([
-                "map $cntr_authorized_" + suffix + " $cntr_identity_" + suffix + "_" + name + " {",
-                '    volatile;', '    default "";', "    1 $cntr_auth_" + name + "_" + suffix + ";", "}",
+                "map $auth_verified_" + suffix + " $identity_" + suffix + "_" + name + " {",
+                '    volatile;', '    default "";', "    1 $auth_" + name + "_" + suffix + ";", "}",
             ])
         for index, (key, value) in enumerate(self._validated_auth_headers(site.auth_headers).items()):
             # nginx ignores non-conventional incoming header names by default;
@@ -299,7 +280,7 @@ class Container(BaseContainer):
             incoming = ("${http_" + key.lower().replace("-", "_") + "}"
                         if re.fullmatch(r"[A-Za-z0-9_-]+", key) else '""')
             lines.extend([
-                "map $cntr_authorized_" + suffix + " $cntr_credential_" + suffix + "_" + str(index) + " {",
+                "map $auth_verified_" + suffix + " $credential_" + suffix + "_" + str(index) + " {",
                 "    volatile;", "    default " + incoming + ";", "    1 " + self.quote(value) + ";", "}",
             ])
         return "\n".join(lines)
@@ -351,7 +332,7 @@ class Consumer(IntegrationConsumer):
         return "nginx" in services and "nginx" not in running_services
 
     def render_template(self, container: "BaseContainer", source: "PathType",
-                        site: "ResolvedSite | SimpleNamespace") -> str:
+                        site: "ResolvedSite | SimpleNamespace", business: "str | None" = None) -> str:
         """Render one location template with unambiguous local/nginx namespaces."""
         nginx = self.container
         source = Path(source).absolute()
@@ -363,11 +344,14 @@ class Consumer(IntegrationConsumer):
             }),
             undefined=StrictUndefined,
             autoescape=False,
+            trim_blocks=nginx_root in source.parents,
+            lstrip_blocks=nginx_root in source.parents,
         )
         try:
             template_name = "nginx/" + source.relative_to(nginx_root).as_posix()
         except ValueError:
             template_name = "local/" + source.name
+        extra = {} if business is None else {"business": business}
         try:
             return environment.get_template(template_name).render(
                 site=site,
@@ -375,6 +359,7 @@ class Consumer(IntegrationConsumer):
                 nginx=nginx,
                 config=container.env_config,
                 vars=site.vars,
+                **extra,
             )
         except TemplateError as exc:
             raise ContainerTemplateError(
@@ -407,7 +392,7 @@ class Consumer(IntegrationConsumer):
                 defaults[port] = site
         if not any(site.default for site in active):
             active.append(SimpleNamespace(
-                producer=self.container, local_id="default", file_id="cntr_default", var_name="cntr_default",
+                producer=self.container, local_id="default", file_id="default", var_name="default",
                 server_name='""', default=True, https=self.container.get_config("NGINX_HTTPS_ENABLE", type=bool),
                 waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, vars={},
                 template=self.container.get_source_path("templates", "index.conf"), proxy=None,
@@ -415,12 +400,9 @@ class Consumer(IntegrationConsumer):
         for site in active:
             producer = site.producer
             source = site.template or self.container.get_source_path("templates", "default.conf")
-            result["sites/" + site.file_id + "/business.conf"] = self.render_template(producer, source, site)
+            business = self.render_template(producer, source, site)
             result["sites/" + site.file_id + ".conf"] = self.render_template(
-                producer, self.container.get_source_path("templates", "server.conf"), site)
-            if site.auth:
-                result["sites/" + site.file_id + "/auth.conf"] = self.render_template(
-                    producer, self.container.get_source_path("templates", "auth_location.conf"), site)
+                producer, self.container.get_source_path("templates", "server.conf"), site, business=business)
         return result, any(site.waf for site in active)
 
     def on_render(self, generation_id: str) -> "dict[str, str]":
@@ -430,7 +412,7 @@ class Consumer(IntegrationConsumer):
         result = dict(files)
         root_site = SimpleNamespace(vars={
             "generation_id": generation_id, "waf": waf,
-            "site_files": tuple(name for name in files if name.count("/") == 1),
+            "site_files": tuple(files),
         })
         result["nginx.conf"] = self.render_template(
             self.container, self.container.get_source_path("templates", "nginx.conf"), root_site)
@@ -522,7 +504,7 @@ class Consumer(IntegrationConsumer):
         while True:
             result = self.container.manager.compose_runner.exec_service(context, "nginx", (
                 "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
-                "/run/nginx-cntr-health.sock", "http://localhost/__cntr/health"), check=False)
+                "/run/nginx-health.sock", "http://localhost/health"), check=False)
             if result.succeeded and result.stdout.strip() == generation_id:
                 return
             if time.monotonic() >= deadline:
@@ -533,8 +515,8 @@ class Consumer(IntegrationConsumer):
         from linktools.cntr.artifacts import GeneratedCandidate
         def render(generation_id: str) -> "dict[str, str]":
             return {"nginx.conf": 'events {}\nhttp {\n'
-                    'server { listen unix:/run/nginx-cntr-health.sock; '
-                    'location = /__cntr/health { default_type text/plain; return 200 "' + generation_id + '"; }}\n'
+                    'server { listen unix:/run/nginx-health.sock; '
+                    'location = /health { default_type text/plain; return 200 "' + generation_id + '"; }}\n'
                     'server { listen ' + str(self.container.get_config("NGINX_HTTP_PORT")) + ' default_server; return 503; }\n}\n'}
         candidate = GeneratedCandidate(self.container, render=render)
         self.on_validate(context, candidate)
@@ -553,7 +535,7 @@ class Consumer(IntegrationConsumer):
         runner.apply_service(context, "nginx")
         result = runner.exec_service(context, "nginx", (
             "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
-            "/run/nginx-cntr-health.sock", "http://localhost/__cntr/health"), check=False)
+            "/run/nginx-health.sock", "http://localhost/health"), check=False)
         if result.succeeded and result.stdout.strip() == candidate.generation_id:
             return
         runner.exec_service(context, "nginx", (
