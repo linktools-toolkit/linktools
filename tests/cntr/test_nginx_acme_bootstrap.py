@@ -293,6 +293,26 @@ def test_preparation_reuses_matching_certificate_without_issuance(certificate_ca
     assert (root / "certs/live").readlink() == Path("versions/legacy")
 
 
+def test_changed_build_identity_replaces_even_a_domain_valid_certificate(certificate_case, monkeypatch):
+    container, root, _, _ = certificate_case
+    (root / "certs/versions/legacy/build-revision").write_text("previous-issuer")
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
+    calls = []
+
+    def validate(context, service, command, **kwargs):
+        calls.append(command[1])
+        return SimpleNamespace(succeeded=True)
+
+    monkeypatch.setattr(container.manager.compose_runner, "validate_service", validate)
+    container.on_prepare_config(SimpleNamespace(initial_services=()))
+
+    assert calls == ["check", "prepare"]
+    assert container._certificate_version != "legacy"
+    assert (root / "certs/live").readlink() == Path("versions/legacy")
+    new = root / "certs/versions" / container._certificate_version
+    assert (new / "build-revision").read_text() == container.cert_image_revision
+
+
 def test_preparation_can_enable_https_on_running_http_only_nginx(certificate_case, monkeypatch):
     container, root, _, _ = certificate_case
     (root / "certs/live").unlink()
