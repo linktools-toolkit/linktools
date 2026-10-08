@@ -364,12 +364,10 @@ class Container(BaseContainer):
             )
         if auth_enable:
             authelia = self.containers["authelia"]
-            authelia.write_nginx_conf(
-                domain=domain,
-                proxy_name="auth_location",
-                proxy_domain_name=proxy_domain_name,
-                proxy_conf=self.get_source_path("templates", "auth_location.conf"),
-                waf_enable=waf_enable,
+            container.render_template(
+                self.get_source_path("templates", "auth_location.conf"),
+                sub_conf_path.parent / "00-auth-location.conf",
+                **context,
             )
             if auth_extra:
                 uris = auth_extra.get("oidc_redirect_uris", None)
