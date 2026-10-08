@@ -5,9 +5,9 @@ umask 077
 root=/etc/certs
 versions="$root/versions"
 renewal="$root/.renewal"
-account=/root/.acme.sh
+seed=/opt/nginx-initial
 acme=/opt/acme/acme.sh
-mkdir -p "$versions" "$renewal" "$account"
+mkdir -p "$versions" "$renewal"
 exec 9>"$root/.acme.lock"
 flock -x 9
 
@@ -36,6 +36,7 @@ verify() {
 
 configure() {
     main=$1
+    account=$2
     "$acme" --home /opt/acme --config-home "$account" --install-cert -d "$main" \
         --cert-file "$renewal/${main}_cert.pem" \
         --key-file "$renewal/${main}_key.pem" \
@@ -99,30 +100,23 @@ case "$1" in
         shift
         id=$1
         main=$2
-        server=$3
-        dns=$4
-        email=$5
-        shift 5
         directory="$versions/$id"
         test -f "$directory/domains"
-        set -- --home /opt/acme --config-home "$account" --issue --force --server "$server" --dns "$dns"
-        while IFS= read -r domain || test -n "$domain"; do
-            test -n "$domain" || continue
-            set -- "$@" -d "$domain"
-        done < "$directory/domains"
-        if test -n "$email"; then
-            set -- "$@" --accountemail "$email"
-        fi
-        "$acme" "$@" >/dev/null
-        configure "$main"
+        test -s "$seed/certs/${main}_fullchain.pem"
+        test -s "$seed/certs/${main}_key.pem"
         for name in cert key fullchain; do
-            cp "$renewal/${main}_${name}.pem" "$directory/${main}_${name}.pem"
+            if test -f "$seed/certs/${main}_${name}.pem"; then
+                cp "$seed/certs/${main}_${name}.pem" "$directory/${main}_${name}.pem"
+            fi
         done
+        mkdir "$directory/acme"
+        cp -a "$seed/acme/." "$directory/acme/"
         verify "$directory" "$main" "$directory/domains"
+        configure "$main" "$directory/acme"
         ;;
     configure)
         shift
-        configure "$1"
+        configure "$1" "$root/live/acme"
         ;;
     activate)
         shift
@@ -131,6 +125,7 @@ case "$1" in
     renew)
         if test -L "$root/live"; then
             main=$(cat "$root/live/primary")
+            account="$root/live/acme"
             before=$(openssl x509 -in "$renewal/${main}_fullchain.pem" -noout -fingerprint -sha256 2>/dev/null || :)
             "$acme" --home /opt/acme --config-home "$account" --cron >/dev/null
             after=$(openssl x509 -in "$renewal/${main}_fullchain.pem" -noout -fingerprint -sha256 2>/dev/null || :)
@@ -141,8 +136,11 @@ case "$1" in
                 directory="$versions/$id"
                 mkdir "$directory"
                 cp "$root/live/domains" "$root/live/primary" "$root/live/port" "$directory/"
+                cp -a "$account" "$directory/acme"
                 for name in cert key fullchain; do
-                    cp "$renewal/${main}_${name}.pem" "$directory/${main}_${name}.pem"
+                    if test -s "$renewal/${main}_${name}.pem"; then
+                        cp "$renewal/${main}_${name}.pem" "$directory/${main}_${name}.pem"
+                    fi
                 done
                 verify "$directory" "$main" "$directory/domains"
                 activate "$id"
