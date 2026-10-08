@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.cntr import ContainerError, ContainerManager, Integration, Nginx
+from linktools.cntr import ContainerError, ContainerManager, Flare, Integration, Nginx
 from linktools.cntr.integration import load_nginx_url
 from linktools.cntr.integration import ResolvedSite
 from linktools.runtime import lazy_load
@@ -82,6 +82,19 @@ def test_nonliteral_domain_requires_explicit_url(domain):
     producer = Producer(Nginx.site(domain, proxy="http://app"))
     with pytest.raises(ContainerError, match="explicit public URL"):
         producer.site.url
+
+
+def test_placeholder_domain_skips_navigation_but_not_required_oidc_url():
+    producer = Producer(Nginx.site(
+        "_", proxy="http://app",
+        expose=Flare.public("App", "app", "Application"),
+        oidc_redirects=("/callback",),
+    ))
+    assert producer.site.resolve() is producer.site
+    assert producer.site.expose.url is None
+    assert str(load_nginx_url(producer, "web")) == ""
+    with pytest.raises(ContainerError, match="explicit public URL"):
+        producer.site.oidc_redirects
 
 
 def test_literal_template_url_is_not_executed_or_relative_oidc_base():
