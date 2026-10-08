@@ -249,8 +249,10 @@ def test_shared_hostname_routes_merge_with_independent_auth_maps(fresh_manager, 
 
 def test_shared_hostname_rejects_incompatible_security_policies(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    api = generation_site(nginx, "api", auth_bypass=(r"^/api/public/",))
-    web = generation_site(nginx, "web", auth_bypass=(r"^/web/public/",))
+    api = generation_site(nginx, "api", auth=True, https=True,
+                          auth_bypass=(r"^/api/public/",))
+    web = generation_site(nginx, "web", auth=True, https=True,
+                          auth_bypass=(r"^/web/public/",))
     nginx.__dict__["sites"] = {site.identity: site for site in (api, web)}
     with pytest.raises(ContainerError, match="Incompatible nginx routing policies"):
         nginx.render_config("generation")
