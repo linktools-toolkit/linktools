@@ -106,7 +106,7 @@ else:
     path.chmod(0o755)
     environment = dict(os.environ, MOCK_CERTIFICATES=str(tmp_path),
                        MOCK_RENEWAL=str(certs / "live/renewal"),
-                       MOCK_STATE=str(tmp_path / "issue.args"),
+                       MOCK_STATE=str(tmp_path / "issue.args"), NGINX_HTTPS_PORT="443",
                        PATH=str(tmp_path / "bin") + os.pathsep + os.environ["PATH"])
     return container, tmp_path, path, environment
 
@@ -250,6 +250,17 @@ def test_renewal_promotes_only_validated_certificate_versions(certificate_case):
     assert str(live).startswith("versions/renew-")
     assert (root / "certs/live/example.test_fullchain.pem").read_bytes() != original
     assert (root / "certs/versions/legacy/example.test_fullchain.pem").read_bytes() == original
+
+
+def test_renewal_promotes_previously_generated_but_unapplied_certificate(certificate_case):
+    _, root, script, env = certificate_case
+    renewal = root / "certs/live/renewal"
+    for source, suffix in (("new.pem", "fullchain"), ("new.key", "key")):
+        shutil.copyfile(str(root / source), str(renewal / ("example.test_" + suffix + ".pem")))
+    original = (root / "certs/live/example.test_fullchain.pem").read_bytes()
+    result = _run(script, env, "renew")
+    assert result.returncode == 0, result.stderr
+    assert (root / "certs/live/example.test_fullchain.pem").read_bytes() != original
 
 
 def test_renewal_never_promotes_stale_installed_certificates(certificate_case):

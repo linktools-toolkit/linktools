@@ -11,6 +11,7 @@ services:
     command: ["nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/current/nginx.conf", "-g", "daemon off;"]
 #   {% if NGINX_HTTPS_ENABLE %}
     environment:
+      NGINX_HTTPS_PORT: '{{ NGINX_HTTPS_PORT }}'
 #     {% for key in container.extend_configs %}
       {{ key }}: {{ container.get_config(container.extend_configs[key]) | string | replace('$', '$$') | tojson }}
 #     {% endfor %}

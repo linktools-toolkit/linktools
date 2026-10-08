@@ -49,7 +49,7 @@ activate() {
     id=$1
     directory="$versions/$id"
     main=$(cat "$directory/primary")
-    port=$(cat "$directory/port")
+    port=${2:-${NGINX_HTTPS_PORT:?NGINX_HTTPS_PORT is required}}
     verify "$directory" "$main" "$directory/domains"
     previous=$(readlink "$root/live" 2>/dev/null || :)
     if test "$previous" = "versions/$id" && ! test -s /var/run/nginx.pid; then
@@ -67,23 +67,28 @@ activate() {
             if test -n "$previous"; then
                 ln -s "$previous" "$root/.next-$$"
                 mv -Tf "$root/.next-$$" "$root/live"
-                nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload || :
+                if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
+                   ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
+                    echo 'Nginx certificate rollback reload failed' >&2
+                fi
             fi
             return 1
         fi
         expected=$(openssl x509 -in "$directory/${main}_fullchain.pem" -noout -fingerprint -sha256)
-        attempt=0
-        while test "$attempt" -lt 30; do
-            actual=$(openssl s_client -connect "127.0.0.1:$port" -servername "$main" </dev/null 2>/dev/null |
+        deadline=$(($(date +%s) + 30))
+        while test "$(date +%s)" -lt "$deadline"; do
+            actual=$(timeout 3 openssl s_client -connect "127.0.0.1:$port" -servername "$main" </dev/null 2>/dev/null |
                      openssl x509 -noout -fingerprint -sha256 2>/dev/null || :)
             test "$actual" = "$expected" && return 0
             sleep 1
-            attempt=$((attempt + 1))
         done
         if test -n "$previous"; then
             ln -s "$previous" "$root/.next-$$"
             mv -Tf "$root/.next-$$" "$root/live"
-            nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload || :
+            if ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -t ||
+               ! nginx -p /etc/nginx/ -c /etc/nginx/generated/current/nginx.conf -s reload; then
+                echo 'Nginx certificate rollback reload failed' >&2
+            fi
         fi
         echo 'New TLS certificate was not served after reload' >&2
         return 1
@@ -128,16 +133,14 @@ case "$1" in
             main=$(cat "$root/live/primary")
             account="$root/live/acme"
             renewal="$root/live/renewal"
-            before=$(openssl x509 -in "$renewal/${main}_fullchain.pem" -noout -fingerprint -sha256 2>/dev/null || :)
             "$acme" --home /opt/acme --config-home "$account" --cron >/dev/null
-            after=$(openssl x509 -in "$renewal/${main}_fullchain.pem" -noout -fingerprint -sha256 2>/dev/null || :)
-            if test -n "$after" && test "$after" != "$before" &&
+            if test -s "$renewal/${main}_fullchain.pem" &&
                { ! cmp -s "$renewal/${main}_fullchain.pem" "$root/live/${main}_fullchain.pem" ||
                  ! cmp -s "$renewal/${main}_key.pem" "$root/live/${main}_key.pem"; }; then
                 id="renew-$(date +%s)-$$"
                 directory="$versions/$id"
                 mkdir "$directory"
-                cp "$root/live/domains" "$root/live/primary" "$root/live/port" "$directory/"
+                cp "$root/live/domains" "$root/live/primary" "$directory/"
                 if test -f "$root/live/build-revision"; then
                     cp "$root/live/build-revision" "$directory/build-revision"
                 fi
@@ -149,7 +152,7 @@ case "$1" in
                 done
                 verify "$directory" "$main" "$directory/domains"
                 configure "$main" "$directory/acme" "$directory/renewal"
-                activate "$id"
+                activate "$id" "$NGINX_HTTPS_PORT"
             fi
         fi
         ;;

@@ -438,8 +438,6 @@ class Container(BaseContainer):
             shutil.copytree(str(account), str(directory / "acme"), symlinks=True)
             os.chmod(str(directory / "acme"), 0o700)
         (directory / "primary").write_text(domain + "\n", encoding="utf-8")
-        (directory / "port").write_text(
-            str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
         (directory / "domains").write_text("", encoding="utf-8")
         (directory / "build-revision").write_text(self.cert_image_revision, encoding="utf-8")
         os.symlink("versions/" + directory.name, str(link))
@@ -465,8 +463,6 @@ class Container(BaseContainer):
         directory = root / "versions" / version
         directory.mkdir(parents=True, mode=0o700)
         (directory / "primary").write_text(domain + "\n", encoding="utf-8")
-        (directory / "port").write_text(
-            str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
         (directory / "domains").write_text(
             "\n".join(self.acme_ssl_domains) + "\n", encoding="utf-8")
         (directory / "build-revision").write_text(self.cert_image_revision, encoding="utf-8")
@@ -596,7 +592,7 @@ class Container(BaseContainer):
             if changed:
                 runner.exec_service(
                     context, "nginx",
-                    ("/usr/local/bin/nginx-certificates", "activate", version))
+                    ("/usr/local/bin/nginx-certificates", "activate", version, str(self.get_config("NGINX_HTTPS_PORT"))))
             result = runner.exec_service(context, "nginx", (
                 "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
                 "/run/nginx-health.sock", "http://localhost/health"), check=False)
@@ -611,7 +607,7 @@ class Container(BaseContainer):
                 original = os.path.basename(previous)
                 try:
                     runner.exec_service(context, "nginx", (
-                        "/usr/local/bin/nginx-certificates", "activate", original))
+                        "/usr/local/bin/nginx-certificates", "activate", original, str(self.get_config("NGINX_HTTPS_PORT"))))
                 except Exception as rollback_error:
                     raise ContainerError(
                         "Nginx certificate rollback failed: {}".format(rollback_error)) from rollback_error
