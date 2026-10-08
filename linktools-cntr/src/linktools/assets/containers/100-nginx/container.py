@@ -441,6 +441,7 @@ class Container(BaseContainer):
         (directory / "port").write_text(
             str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
         (directory / "domains").write_text("", encoding="utf-8")
+        (directory / "build-revision").write_text(self.cert_image_revision, encoding="utf-8")
         os.symlink("versions/" + directory.name, str(link))
 
     def on_prepare_config(self, context: "EventContext") -> None:
@@ -468,6 +469,7 @@ class Container(BaseContainer):
             str(self.get_config("NGINX_HTTPS_PORT")) + "\n", encoding="utf-8")
         (directory / "domains").write_text(
             "\n".join(self.acme_ssl_domains) + "\n", encoding="utf-8")
+        (directory / "build-revision").write_text(self.cert_image_revision, encoding="utf-8")
         runner = self.manager.compose_runner
         request = "/etc/certs/versions/{}/domains".format(version)
         valid = runner.validate_service(
@@ -475,7 +477,10 @@ class Container(BaseContainer):
             ("/usr/local/bin/nginx-certificates", "check", domain, request),
             check=False,
         )
-        if valid.succeeded:
+        revision_file = current / "build-revision"
+        if valid.succeeded and (
+                not revision_file.exists() or
+                revision_file.read_text(encoding="utf-8") == self.cert_image_revision):
             self._certificate_version = os.path.basename(os.readlink(str(current)))
             shutil.rmtree(str(directory))
             runner.validate_service(
