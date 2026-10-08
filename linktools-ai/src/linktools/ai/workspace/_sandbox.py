@@ -357,6 +357,13 @@ class SandboxStdioProcess(Protocol):
 
 @runtime_checkable
 class StdioSandbox(Sandbox, Protocol):
+    async def open(
+        self,
+        *,
+        root: Path,
+        resources: tuple[SandboxResource, ...] = (),
+    ) -> "StdioSandboxSession": ...
+
     def stdio_execution_policy(self) -> Mapping[str, JsonValue]: ...
 
 

@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import replace
 from time import monotonic
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from linktools.core import environ
@@ -53,7 +54,44 @@ from ._step_archive import (
 )
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent, AgentRunStore
 
+if TYPE_CHECKING:
+    from ..service_api import ModelInteractionSubscription
+
 _logger = environ.get_logger("ai.runtime.state.run_store")
+
+
+class _ModelInteractionSubscription:
+    def __init__(self, remove: Callable[["_ModelInteractionSubscription"], None]) -> None:
+        self._remove = remove
+        self._generation = 0
+        self._changed = asyncio.Event()
+        self._closed = False
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def publish(self) -> None:
+        if not self._closed:
+            self._generation += 1
+            self._changed.set()
+
+    async def wait(self, after_generation: int) -> int:
+        if (isinstance(after_generation, bool) or not isinstance(after_generation, int)
+                or after_generation < 0 or after_generation > self._generation):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        while self._generation <= after_generation and not self._closed:
+            self._changed.clear()
+            await self._changed.wait()
+        if self._closed:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, retryable=False)
+        return self._generation
+
+    async def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._remove(self)
+            self._changed.set()
 
 
 class RuntimeAgentRunStore(AgentRunStore):
@@ -81,6 +119,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._preflight = False
         self._projection_offsets: dict[str, _ProjectionOffset] = {}
         self._projection_dirty: set[str] = set()
+        self._model_interaction_subscriptions: dict[str, set[_ModelInteractionSubscription]] = {}
         self._durability_flights: dict[str, _AgentRunDurabilityFlight] = {}
         self._background_tasks: set[asyncio.Task[object]] = set()
         self._terminal_seals: dict[str, _LocalExecutionTerminalSeal] = {}
@@ -97,6 +136,7 @@ class RuntimeAgentRunStore(AgentRunStore):
         self._projection_dirty.clear()
         self._durability_flights.clear()
         self._terminal_seals.clear()
+        self._preflight = False
         self._initialized = True
 
     async def validate_integrity(self) -> None:
@@ -163,6 +203,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     self._staging.append_event_local(event)
                 if offset is not None:
                     self._projection_offsets[record.agent_run_id] = offset
+        self._publish_model_interaction_change(record.agent_run_id)
 
     async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
         await self._ensure_business()
@@ -329,12 +370,44 @@ class RuntimeAgentRunStore(AgentRunStore):
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise TypeError("staged model interaction has no AgentRun identity")
         self._projection_dirty.add(agent_run_id)
+        self._publish_model_interaction_change(agent_run_id)
 
     def prepare_model_interaction(self, interaction: object) -> None:
         self._staging.prepare_model_interaction(interaction)
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
         self._projection_dirty.add(interaction.agent_run_id)
+        self._publish_model_interaction_change(interaction.agent_run_id)
+
+    @property
+    def model_interaction_history_available(self) -> bool:
+        """Whether execution history has an archive separate from local staging."""
+        return RuntimeDomain.EXECUTION in self._archives
+
+    def subscribe_model_interactions(
+        self, agent_conversation_id: str,
+    ) -> "ModelInteractionSubscription":
+        if not self._initialized or self._preflight:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, retryable=False)
+        if not isinstance(agent_conversation_id, str) or not agent_conversation_id:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        def remove(subscription: _ModelInteractionSubscription) -> None:
+            subscribers = self._model_interaction_subscriptions.get(agent_conversation_id)
+            if subscribers is not None:
+                subscribers.discard(subscription)
+                if not subscribers:
+                    self._model_interaction_subscriptions.pop(agent_conversation_id, None)
+
+        subscription = _ModelInteractionSubscription(remove)
+        self._model_interaction_subscriptions.setdefault(agent_conversation_id, set()).add(subscription)
+        return subscription
+
+    def _publish_model_interaction_change(self, agent_run_id: str) -> None:
+        run = self._staging.get_agent_run_local(agent_run_id)
+        if run is not None and run.agent_conversation_id is not None:
+            for subscription in tuple(self._model_interaction_subscriptions.get(run.agent_conversation_id, ())):
+                subscription.publish()
 
     async def model_interaction_history_high_water(
         self,
@@ -348,9 +421,8 @@ class RuntimeAgentRunStore(AgentRunStore):
         )
         if any(not isinstance(item, StagedModelInteraction) for item in staged):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        archived = await self.read_store(RuntimeDomain.EXECUTION).model_interaction_count(
-            agent_run_id=agent_run_id
-        )
+        archive = self._archives.get(RuntimeDomain.EXECUTION)
+        archived = 0 if archive is None else await archive.model_interaction_count(agent_run_id=agent_run_id)
         return max(
             archived,
             max(
@@ -379,10 +451,9 @@ class RuntimeAgentRunStore(AgentRunStore):
         )
         if any(not isinstance(item, StagedModelInteraction) for item in staged):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        archived = await self.read_store(RuntimeDomain.EXECUTION).list_model_interactions(
-            agent_run_id=agent_run_id,
-            after_model_request_seq=after_model_request_seq,
-            limit=limit,
+        archive = self._archives.get(RuntimeDomain.EXECUTION)
+        archived = [] if archive is None else await archive.list_model_interactions(
+            agent_run_id=agent_run_id, after_model_request_seq=after_model_request_seq, limit=limit,
         )
         return archived, [
             item for item in staged if isinstance(item, StagedModelInteraction)
@@ -1267,6 +1338,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                 projection.target_interaction_offset,
             )
             self._projection_dirty.discard(agent_run_id)
+        self._publish_model_interaction_change(agent_run_id)
         if completion is not None and not completion.done():
             completion.set_result(None)
 
@@ -1432,6 +1504,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     target_transcript_message_count,
                 )
             self._projection_dirty.discard(flight.agent_run_id)
+        self._publish_model_interaction_change(flight.agent_run_id)
         if not flight.completion.done():
             flight.completion.set_result(None)
         _logger.debug(
@@ -1754,6 +1827,7 @@ class RuntimeAgentRunStore(AgentRunStore):
                     else:
                         if agent_run_id in self._projection_dirty:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        self._publish_model_interaction_change(agent_run_id)
                         self._staging.release_agent_run_local(agent_run_id)
                         self._projection_offsets.pop(agent_run_id, None)
                         self._projection_dirty.discard(agent_run_id)
@@ -1976,6 +2050,9 @@ class RuntimeAgentRunStore(AgentRunStore):
     async def close(self) -> None:
         if not self._preflight:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        for subscriptions in tuple(self._model_interaction_subscriptions.values()):
+            for subscription in tuple(subscriptions):
+                await subscription.close()
         await self._staging.close()
         for archive in self._archives.values():
             await archive.close()

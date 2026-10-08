@@ -24,6 +24,7 @@ from ..agent import (
     restore_output,
 )
 from ..core import (
+    BudgetUsage,
     AuthorizationAction,
     AuthorizationPolicy,
     CorrelationData,
@@ -112,6 +113,7 @@ from .state._contracts import (
     ResultRecord,
     SessionRepository,
     StoredUserInput,
+    TaskAdmissionRepository,
 )
 
 if TYPE_CHECKING:
@@ -355,10 +357,12 @@ class DefaultExecutionService:
         payload_policy: "PayloadPolicy | None" = None,
         input_materializer: "ExecutionInputMaterializer | None" = None,
         session_execution_ready: bool = True,
+        task_admissions: TaskAdmissionRepository | None = None,
     ) -> None:
         self._state = state
         self._object_store = object_store
         self._sessions = sessions
+        self._task_admissions = task_admissions
         self._catalog = catalog
         self._compiler = compiler
         self._authorization = authorization
@@ -561,9 +565,14 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> None:
+        expected_scope = budget_scope_id or (
+            None if request.budget is None else "execution:" + execution.execution_id
+        )
         if (
             execution.requires_task_invocation_capture is not requires_task_invocation_capture
+            or execution.budget_scope_id != expected_scope
             or execution.binding_digest != binding.binding_digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
@@ -682,11 +691,16 @@ class DefaultExecutionService:
         idempotency_key: str,
         correlation: Mapping[str, str | int],
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
         if not isinstance(requires_task_invocation_capture, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(binding, TaskBindingContract):
             raise TypeError("binding must be TaskBindingContract")
+        if budget_scope_id is not None and (
+            not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         normalized_input = normalize_json_value(dict(input))
         if not isinstance(normalized_input, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -697,6 +711,8 @@ class DefaultExecutionService:
             AuthorizationAction.EXECUTION_RUN,
             ResourceRef(ResourceKind.EXECUTION, execution_id, principal.tenant_id),
         )
+        if budget_scope_id is not None:
+            await self._authorize_budget_scope(budget_scope_id, principal)
         stored_input = StoredUserInput(
             "task-input-v1",
             StoredPayload.inline_json(normalized_input),
@@ -715,6 +731,7 @@ class DefaultExecutionService:
                 "principal": principal_identity_payload(principal),
                 "binding_digest": binding.binding_digest,
                 "input_digest": stored_input.digest,
+                **({"budget_scope_id": budget_scope_id} if budget_scope_id is not None else {}),
                 **({"requires_task_invocation_capture": True} if requires_task_invocation_capture else {}),
             }
         )
@@ -744,6 +761,7 @@ class DefaultExecutionService:
             stored_user_input=stored_input,
             correlation=normalized_correlation,
             requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -765,6 +783,7 @@ class DefaultExecutionService:
         current = reservation.execution
         if (
             current.requires_task_invocation_capture is not requires_task_invocation_capture
+            or current.budget_scope_id != budget_scope_id
             or current.binding_digest != binding.binding_digest
             or current.binding != binding
             or current.stored_user_input.digest != stored_input.digest
@@ -1562,6 +1581,7 @@ class DefaultExecutionService:
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1570,6 +1590,7 @@ class DefaultExecutionService:
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id,
             binding_contract=binding_contract,
         )
 
@@ -1580,7 +1601,13 @@ class DefaultExecutionService:
         *,
         binding_contract: "AgentBindingContract | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> "ExecutionHandle | None":
+        if budget_scope_id is not None and (
+            not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
+            or request.budget is not None
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(requires_task_invocation_capture, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
@@ -1588,6 +1615,8 @@ class DefaultExecutionService:
         binding = self._binding(binding_digest, binding_contract)
         context = await self._canonicalize_request(request)
         request = context.request
+        if budget_scope_id is not None:
+            await self._authorize_budget_scope(budget_scope_id, request.principal)
         scope = "execution.run"
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
         request_digest = _request_digest(
@@ -1602,6 +1631,7 @@ class DefaultExecutionService:
             lineage_kind=ExecutionLineageKind.RUN,
             request_intent_digest=context.request_intent_digest,
             requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id,
         )
         existing = await self._state.idempotency.get(
             scope,
@@ -1642,7 +1672,10 @@ class DefaultExecutionService:
         self._validate_replayed_execution(
             execution, binding, request,
             requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id,
         )
+        if execution.budget_scope_id is not None:
+            await self._state.budgets.read(execution.budget_scope_id)
         if existing.status is IdempotencyStatus.COMPLETED:
             if not _terminal_idempotency_matches(existing, execution):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1683,6 +1716,7 @@ class DefaultExecutionService:
         binding_contract: "AgentBindingContract | None" = None,
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1695,6 +1729,7 @@ class DefaultExecutionService:
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
             requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id,
             binding_contract=binding_contract,
         )
 
@@ -1810,6 +1845,7 @@ class DefaultExecutionService:
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
         if session_id is None:
             return await self._start_unlocked(
@@ -1828,6 +1864,7 @@ class DefaultExecutionService:
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id,
                 binding_contract=binding_contract,
             )
         async with self._session_guard(request.principal.tenant_id, session_id):
@@ -1847,6 +1884,7 @@ class DefaultExecutionService:
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id,
                 binding_contract=binding_contract,
             )
 
@@ -1869,7 +1907,13 @@ class DefaultExecutionService:
         dependency_hold_id: "str | None" = None,
         binding_contract: "AgentBindingContract | None" = None,
         requires_task_invocation_capture: bool = False,
+        budget_scope_id: str | None = None,
     ) -> ExecutionHandle:
+        if budget_scope_id is not None and (
+            not isinstance(budget_scope_id, str) or not budget_scope_id.strip()
+            or request.budget is not None
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(requires_task_invocation_capture, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
@@ -1893,6 +1937,9 @@ class DefaultExecutionService:
                 root_execution_id or parent.root_execution_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if request.budget is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            budget_scope_id = parent.budget_scope_id
             request = replace(request, correlation=parent.correlation)
         conversation_agent_run_id = conversation_agent_run_id
         session = None
@@ -1927,6 +1974,14 @@ class DefaultExecutionService:
         await self._authorization.authorize(
             request.principal, AuthorizationAction.EXECUTION_RUN, resource
         )
+        if budget_scope_id is not None:
+            await self._authorize_budget_scope(
+                budget_scope_id,
+                request.principal,
+                source_execution_id=(
+                    previous_execution_id or fork_base_execution_id or parent_execution_id
+                ),
+            )
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
         request_digest = _request_digest(
             request,
@@ -1940,6 +1995,7 @@ class DefaultExecutionService:
             lineage_kind=lineage_kind,
             request_intent_digest=context.request_intent_digest,
             requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id,
         )
         existing = await self._state.idempotency.get(
             scope,
@@ -1959,6 +2015,7 @@ class DefaultExecutionService:
                     self._validate_replayed_execution(
                         pending, binding, request,
                         requires_task_invocation_capture=requires_task_invocation_capture,
+                        budget_scope_id=budget_scope_id,
                     )
                 if pending is not None and pending.status is ExecutionStatus.STARTED:
                     request = await self._request_for_execution(request, pending)
@@ -1999,6 +2056,7 @@ class DefaultExecutionService:
                     self._validate_replayed_execution(
                         terminal, binding, request,
                         requires_task_invocation_capture=requires_task_invocation_capture,
+                        budget_scope_id=budget_scope_id,
                     )
                     if (
                         scope == "session.resume"
@@ -2025,6 +2083,7 @@ class DefaultExecutionService:
             self._validate_replayed_execution(
                 started, binding, request,
                 requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id,
             )
             if existing.status is IdempotencyStatus.COMPLETED:
                 if not _terminal_idempotency_matches(existing, started):
@@ -2142,6 +2201,7 @@ class DefaultExecutionService:
             principal_kind=request.principal.kind,
             stored_user_input=context.stored_user_input,
             requires_task_invocation_capture=requires_task_invocation_capture,
+            budget_scope_id=budget_scope_id or (None if request.budget is None else "execution:" + execution_id),
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
@@ -2158,6 +2218,7 @@ class DefaultExecutionService:
                     created_at=now,
                     updated_at=now,
                 ),
+                budget=request.budget,
             )
         )
         if not reservation.created:
@@ -2166,6 +2227,7 @@ class DefaultExecutionService:
             self._validate_replayed_execution(
                 reservation.execution, binding, request,
                 requires_task_invocation_capture=requires_task_invocation_capture,
+                budget_scope_id=budget_scope_id,
             )
             if (
                 reservation.execution.status is ExecutionStatus.PENDING_START
@@ -2277,6 +2339,8 @@ class DefaultExecutionService:
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if execution.budget_scope_id is not None:
+            await self._state.budgets.read(execution.budget_scope_id)
         identity = ExecutionStartIdentity(scope, idempotency_key_digest, request_digest)
         try:
             started = await self._backend.prepare_start(
@@ -2502,6 +2566,8 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         if launch_record.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if launch_record.budget_scope_id is not None:
+            await self._state.budgets.read(launch_record.budget_scope_id)
         prepared_local_stream = False
         try:
             if (
@@ -2566,6 +2632,16 @@ class DefaultExecutionService:
                 "execution start outcome unknown: execution=%s", execution.execution_id
             )
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN) from error
+
+    async def budget_usage(
+        self, execution_id: str, *, principal: Principal,
+    ) -> BudgetUsage | None:
+        execution = await self._load_authorized(
+            execution_id, principal, AuthorizationAction.EXECUTION_READ,
+        )
+        if execution.budget_scope_id is None:
+            return None
+        return await self._state.budgets.read(execution.budget_scope_id)
 
     @_observed_query
     async def inspect(
@@ -2848,6 +2924,7 @@ class DefaultExecutionService:
             fork_base_execution_id=previous.fork_base_execution_id,
             conversation_agent_run_id=previous.conversation_agent_run_id,
             binding_contract=previous.binding,
+            budget_scope_id=previous.budget_scope_id,
         )
 
     async def fork(
@@ -2877,6 +2954,7 @@ class DefaultExecutionService:
                 previous.correlation, request.correlation
             ),
             files=request.files,
+            budget=request.budget,
         )
         return await self._start(
             binding_digest,
@@ -2889,6 +2967,7 @@ class DefaultExecutionService:
             lineage_kind=ExecutionLineageKind.FORK,
             fork_base_execution_id=previous.execution_id,
             binding_contract=previous.binding,
+            budget_scope_id=previous.budget_scope_id if request.budget is None else None,
         )
 
     async def cancel(
@@ -3585,7 +3664,6 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
-        include_content: bool = False,
         limit: int = 100,
         agent_run_seq: int | None = None,
         model_request_seq: int | None = None,
@@ -3598,7 +3676,6 @@ class DefaultExecutionService:
             execution_id,
             principal=principal,
             cursor=cursor,
-            include_content=include_content,
             limit=limit,
             agent_run_seq=agent_run_seq,
             model_request_seq=model_request_seq,
@@ -3679,6 +3756,60 @@ class DefaultExecutionService:
             limit=limit,
             cutoffs=cutoffs,
         )
+
+    async def _authorize_budget_scope(
+        self,
+        scope_id: str,
+        principal: Principal,
+        *,
+        source_execution_id: str | None = None,
+    ) -> None:
+        if source_execution_id is not None or scope_id.startswith("execution:"):
+            source = await self._load_authorized(
+                source_execution_id or scope_id[len("execution:"):],
+                principal,
+                AuthorizationAction.EXECUTION_RUN,
+            )
+            await self._authorization.authorize(
+                principal,
+                AuthorizationAction.EXECUTION_RUN,
+                ResourceRef(
+                    ResourceKind.EXECUTION,
+                    source.execution_id,
+                    principal.tenant_id,
+                    source.principal_id,
+                ),
+            )
+            if source.budget_scope_id != scope_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._state.budgets.read(scope_id)
+            return
+        if scope_id.startswith("graph:"):
+            if self._task_admissions is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            graph_id = scope_id[len("graph:"):]
+            admission = await self._task_admissions.get(
+                graph_id, tenant_id=principal.tenant_id,
+            )
+            if admission is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self._authorization.authorize(
+                principal,
+                AuthorizationAction.TASK_RUN,
+                ResourceRef(
+                    ResourceKind.TASK_GRAPH,
+                    admission.graph_id,
+                    admission.principal.tenant_id,
+                    admission.principal.principal_id,
+                ),
+            )
+            if admission.graph_id != graph_id or admission.budget_scope_id != scope_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            usage = await self._state.budgets.read(scope_id)
+            if usage.limits != admission.budget:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
     async def _load_authorized(
         self, execution_id: str, principal: Principal, action: AuthorizationAction
@@ -3817,6 +3948,7 @@ def _request_digest(
     lineage_kind: ExecutionLineageKind,
     request_intent_digest: str | None = None,
     requires_task_invocation_capture: bool = False,
+    budget_scope_id: str | None = None,
 ) -> str:
     if request_intent_digest is None:
         user_prompt_identity = input_intent(
@@ -3828,6 +3960,8 @@ def _request_digest(
     return canonical_sha256(
         {
             "input_intent": user_prompt_identity,
+            **({"budget": request.budget.digest_payload()} if request.budget is not None else {}),
+            **({"budget_scope_id": budget_scope_id} if budget_scope_id is not None else {}),
             **({"requires_task_invocation_capture": True} if requires_task_invocation_capture else {}),
             **({"input_context_digest": request.input_context.digest} if request.input_context is not None else {}),
             "binding_digest": binding_digest,

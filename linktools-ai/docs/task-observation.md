@@ -13,11 +13,11 @@ async def publish(event: TaskGraphRunEvent) -> None:
 outcome = await run.wait(
     on_event=publish,
     cursor=saved_cursor,
-    include_content=False,
+    include_event_content=False,
     timeout_seconds=120.0,
     close_timeout_seconds=5.0,
 )
-await projection.refresh_graph(outcome.result, status=outcome.result.wait_status)
+await projection.record_wait_result(outcome.result, status=outcome.result.wait_status)
 await projection.save_cursor(outcome.cursor)
 if outcome.observation_error is not None:
     await projection.show_observation_gap()
@@ -60,12 +60,21 @@ This is a computed property, not persisted state. `result.node_states` replaces
 old wait payloads' `node_results`; node output content remains in
 `results()`, `result()`, and `result_ref()`.
 
+The returned graph includes all current nodes, including dynamically expanded
+ones. `await run.state()` reads safe current metadata; use
+`await run.state(include_content=True)` for raw node definitions and invocation
+inputs together with their current state. This replaces the redundant SDK
+`inspect()` read. It is a fresh snapshot, not the original submitted definition
+or necessarily the same stopping snapshot returned by wait.
+
 Evaluation stops at complete, cancelled, or needs_attention. A return is not
 necessarily business success. Ordinary human scoring may remain running while a
 graph is WAITING, until a score is supplied or the wait times out.
 
 Without a callback, cursor must be None. With a callback, cursor and
-include_content identify the same observation scope as watch. New Agent/Session
+include_event_content identify the same observation scope as watch's
+include_content. Graph wait's separate include_content controls only the result;
+it does not change cursor compatibility or callback payloads. New Agent/Session
 run/plan calls do not accept a cursor: resume observation on the existing handle.
 
 ## Delivery, preparation, and cleanup
@@ -87,23 +96,37 @@ interchangeable. Owner and known resumed-member validation completes before an
 already-finished authoritative waiter may short-circuit observation. Dynamic
 members are validated when discovered.
 
-Authoritative completion may close the observation before all final events, or
-any events, have been delivered. Wait does not promise final drain. Refresh the
-UI from the authoritative result and resume watch from the returned cursor to
-read remaining durable events. Stream EOF alone does not finish a wait.
+Execution and graph waits with a callback perform a bounded final drain after
+the authoritative waiter returns. Execution wait first drains its live stream,
+then replays a finite durable execution-tree boundary. Graph wait switches to a
+finite graph/execution replay and current graph/model metadata compensation;
+it does not promise delivery of every transient token or request transition.
+Stream EOF alone does not finish the authoritative wait. Evaluation wait keeps
+its own stopping behavior and can stop before its standalone watch finishes.
+
+Final drain has an internal five-second maximum, shortened to the remaining
+`timeout_seconds` budget. This maximum also applies when timeout is None. It
+does not borrow `close_timeout_seconds`, which remains a separate cleanup
+budget. If the authoritative result has already arrived but drain time or
+provable coverage is insufficient, the result is preserved with a stream
+`observation_error` whose `safe_details["phase"]` is `"drain"`. The returned
+cursor is still the last successful callback ACK. Reconnect from it to replay
+remaining durable facts and obtain a new current projection.
 
 Timeout must be a finite nonnegative number or None; close_timeout_seconds must
 be finite and positive. Booleans, NaN, infinity, non-callable on_event, invalid
 content mode, and cursor without a callback are rejected before tasks start.
 Agent/Session convenience methods validate these options before admission.
 
-SDK deadlines include observation preparation and raise `AIError(WAIT_TIMEOUT)`
-with scope, resource_id, and last ACK cursor. The deadline begins at the bound
+SDK deadlines include observation preparation. Before an authoritative result
+is available, expiry raises `AIError(WAIT_TIMEOUT)` with scope, resource_id,
+and last ACK cursor. A result available in the same completion round is retained;
+an unfinished drain becomes an observation diagnostic instead. The deadline begins at the bound
 handle wait; Agent/Session start and facade get are outside it. Raw services keep
 their own timeout contracts and do not receive user callbacks.
 
-Only explicitly identified optional presentation transport failures degrade to
-`observation_error`. Authorization, cursor, lineage, durable read, codec and
+Optional presentation transport failures and incomplete bounded final drain
+degrade to `observation_error`. Authorization, cursor, lineage, durable read, codec and
 integrity failures propagate. A callback's ordinary exception, including AIError
 or TimeoutError, becomes `ObservationError(origin="callback")` with its cause
 and previous ACK. Cancellation is not translated.
@@ -120,6 +143,79 @@ Timeout plus cleanup may take both budgets. Blocking synchronous code and
 cancellation-resistant coroutines cannot be forcibly stopped by Python; the
 bounds require a schedulable event loop. No automatic thread/process is created.
 Waiting, watching, timeout and caller cancellation do not cancel durable work.
+
+## Graph and model metadata on one stream
+
+`TaskGraphRunEvent.event` is a typed union of `TaskEvent`, `ExecutionTreeEvent`,
+`TaskGraphProjection`, and `TaskModelProjection`. Use the same graph `watch()`
+or `wait(on_event=...)` to consume all four; no second model-history observer is
+needed.
+
+- `TaskGraphProjection.graph` is a complete, content-safe `TaskGraphInfo`,
+  including node definitions, dependencies, node states, and execution bindings.
+  Initial connection and reconnect provide a current view; definition and
+  binding changes refresh it before dependent execution updates. Nodes without
+  Agent executions remain visible without invented execution identities
+- `TaskModelProjection.item` is a metadata-only `ModelInteractionItem`, with
+  execution/run/request identity, status, timestamps, duration, per-request
+  usage and error code. The projection preserves root, parent and invocation
+  lineage. `visibility` distinguishes `local_staging` from `durable_history`.
+  Request and response bodies remain omitted even when event content is enabled
+- `TaskGraphProjection.phase` is `initial`, `update`, or `final`. Only a
+  projection with a non-None `coverage` is a coverage checkpoint. A final-phase
+  graph view alone does not certify that replay or model compensation finished
+
+Graph projection ordering uses `graph.event_seq`, the position of the state
+read. It may be newer than raw Task events subsequently replayed from the input
+cursor. Keep the newer view while processing older events; never overwrite it
+with an older wait result or replayed state. A higher graph sequence may
+legitimately return to RUNNING after recovery.
+
+Model upserts use `(execution_id, agent_run_seq, model_request_seq)`. Terminal
+metadata dominates RUNNING for the same request, duplicate terminal delivery
+is idempotent, and conflicting terminal facts are integrity errors. Assign
+request usage when updating that identity; do not add it again on replay or
+confuse it with a parent's aggregate usage. RUNNING usage is unknown (`None`),
+not zero. A request can finish without advancing its request-sequence high water;
+the observer reconciles active identities as well as newly added requests.
+
+Synthetic views and checkpoints retain the current durable cursor position.
+Their graph and model cutoffs are source-read boundaries, not ACKs and not an
+atomic snapshot spanning owners. Initial compensation is repeated even with a
+saved cursor. The callback must commit its own idempotent state update before
+returning; only that successful return acknowledges the delivery.
+
+Coverage declares per-node execution event positions, visible model request
+cutoffs (`model_cutoffs`) and archived prefixes (`durable_model_cutoffs`),
+executions with locally available activity, unavailable active-request sources,
+unavailable history, and separate
+`durable_events_complete` and `state_complete` flags. An initial checkpoint can
+cover current metadata before durable replay has caught up. A successfully
+ACKed final checkpoint covers only its declared finite membership and cutoffs;
+later admissions belong to a subsequent observation. At WAITING or
+RECOVERY_REQUIRED, RUNNING requests can legitimately remain in that boundary.
+
+`unavailable_active_execution_ids` names nonterminal executions whose local
+request staging is unavailable; `unavailable_execution_ids` names unavailable
+retained history. Either restriction makes `state_complete` false. A final
+checkpoint with that restriction is followed by a drain observation diagnostic
+with reason `model_state_coverage_unavailable`; it does not discard the
+authoritative result.
+
+Active request compensation is available in the producing Runtime. Another
+Runtime or a reopened History reader sees committed retained history and cannot
+prove the absence of uncommitted active requests. Check coverage availability
+instead of interpreting an empty model list as no activity. Unflushed starts and
+transient deltas are not recoverable after a producer crash. No durable-start
+journal, globally ordered event bus, or exactly-once delivery is implied.
+
+Initial model reads scale with visible history. Subsequent reconciliation uses
+known executions, request suffixes and active identities, with coalesced local
+notifications and periodic durable checks. Definition/binding refreshes still
+read a complete graph view; there is no per-token full-graph/history scan or
+public graph-patch protocol. Store high-water reads can still inspect staged
+identities, so incremental delivery is not a constant-cost guarantee for the
+underlying storage reads.
 
 ## Recursive execution trees and evaluation graphs
 
@@ -160,6 +256,12 @@ watch does not silently change their ordering or paging contracts.
 For immediate same-Runtime content readback and event locators, see
 [Runtime history](runtime-history.md).
 
+Unified observation does not add shared actual-consumption budgets, selective
+graph reruns, cross-graph resource pools, or declarative result selection.
+Shared actual usage budgets are described in [run budgets](run-budgets.md).
+The other capabilities remain future work. Existing `TaskGraphLimits.max_budget`
+is a static node-cost limit, not a shared model-token or provider-billing budget.
+
 ## Cancellation and results paging
 
 Use a stable idempotency key for one explicit cancellation intent:
@@ -179,12 +281,47 @@ unpublished partial pages and restart, with a bounded application retry budget.
 Publish only after next_cursor is None. Respect content_included and byte limits;
 a result page and the earlier wait result are not a cross-store transaction.
 
+For example, collect a complete page set before publishing any of it:
+
+```python
+from linktools.ai.errors import AIError, ErrorCode
+
+for attempt in range(3):
+    items = []
+    cursor = None
+    try:
+        while True:
+            page = await run.results(cursor=cursor, include_content=True)
+            items.extend(page.items)
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+    except AIError as error:
+        if error.code not in {ErrorCode.CURSOR_INVALID, ErrorCode.STORAGE_CONFLICT}:
+            raise
+        if attempt == 2:
+            raise  # Leave the previous published view intact.
+    else:
+        await publish_results(items)  # Application-owned publication.
+        break
+```
+
+This retry applies to graph results, not every `Page`: history cursors continue
+a fixed high-water range; model-interaction cursors fix request identities but
+allow their lifecycle state to advance. See [Runtime history](runtime-history.md).
+
 ## Unreleased source and wire migration
 
 This is a breaking pre-release change with no compatibility aliases:
 
 - Replace observe callbacks with async iteration over watch, and wait_observed
   with wait(on_event=...). Replace TaskGraphWaitResult with WaitResult
+- Wait/run/plan observation content uses include_event_content; graph wait's
+  include_content selects only its result projection. Watch keeps include_content
+- Trace no longer accepts include_content; read bodies using history or
+  model_interactions with the returned execution/run locators
+- TaskGraphRun.inspect is consolidated into state(include_content=True), which
+  also returns node states and the graph event sequence
 - Old result.output/status access on SDK wait/run/plan becomes
   outcome.result.output/status. Graph display status is result.wait_status
 - RuntimeHistory.task_events/list_events become

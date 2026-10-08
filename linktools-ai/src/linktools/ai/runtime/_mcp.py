@@ -48,6 +48,7 @@ from ..workspace import (
     SandboxResourcePath,
     StdioSandbox,
 )
+from ._budget import RunBudgetContext
 from ._tool import ToolOperationBridge
 from ._tool_boundary import (
     BoundaryToolset,
@@ -446,6 +447,7 @@ async def materialize_mcp_capabilities(
     projections: Mapping[str, _MCPProjection],
     tool_operations: "ToolOperationBridge | None",
     tool_metrics: "_ToolMetricContext | None",
+    budget: "RunBudgetContext | None" = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Materialize compiler-selected MCP servers."""
     policy, required = _selector_policy(selectors)
@@ -494,6 +496,7 @@ async def materialize_mcp_capabilities(
                 descriptor=descriptor,
                 tool_operations=tool_operations,
                 tool_metrics=tool_metrics,
+                budget=budget,
             )
             values.append(
                 _MCPCapability(

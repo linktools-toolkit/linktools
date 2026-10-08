@@ -24,6 +24,7 @@ from ..agent import (
 )
 from ..capability import CapabilityGroup, CapabilityGroupCapture
 from ..core import (
+    RunBudget,
     CorrelationData,
     ExecutionMode,
     JsonValue,
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
     from ..task import TaskResultRecord
     from ._runtime_history import RuntimeHistory
     from .state._contracts import (
+        BudgetRepository,
         StoredUserInput,
         TaskAdmissionRepository,
         TaskPreparedInputRecord,
@@ -94,6 +96,7 @@ from ._metrics import (
     _disabled_metric_status,
 )
 from .service_api import (
+    ExecutionView,
     ApprovalService,
     ArtifactService,
     CancelExecutionRequest,
@@ -234,6 +237,23 @@ class _MetricControl(Protocol):
 
 
 class _ExecutionTreeStreamer(Protocol):
+    async def capture(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+    ) -> tuple[tuple[ExecutionView, int, int], ...]: ...
+
+    def replay(
+        self,
+        captured: tuple[tuple[ExecutionView, int, int], ...],
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]: ...
+
     def stream(
         self,
         execution_id: str,
@@ -284,6 +304,7 @@ class Runtime(Generic[AppT]):
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
         task_admissions: "TaskAdmissionRepository | None" = None,
+        budgets: "BudgetRepository | None" = None,
         tree_streamer: "_ExecutionTreeStreamer | None" = None,
         metric_control: "_MetricControl | None" = None,
         _binding_resolver: "_AgentBindingResolver | None" = None,
@@ -312,9 +333,11 @@ class Runtime(Generic[AppT]):
         self._task_owner_token = object()
         self._execution_service = execution
         self._input_captures = input_captures
-        self.executions = RuntimeExecutions(execution, self._get_execution, input_captures)
+        self.executions = RuntimeExecutions(
+            execution, self._get_execution, input_captures, ensure_open=self._ensure_open,
+        )
         self._session_service = session
-        self.sessions = RuntimeSessions(session, self._get_session)
+        self.sessions = RuntimeSessions(session, self._get_session, ensure_open=self._ensure_open)
         self._graph_service = graph
         self.evaluations = evaluation
         self.approvals = approval
@@ -332,6 +355,7 @@ class Runtime(Generic[AppT]):
         self._close_callback = close_callback
         self._task_node_runtime = task_node_runtime
         self._task_admissions = task_admissions
+        self._budgets = budgets
         self.tasks = RuntimeTasks(self, graph)
         self.agents = RuntimeAgents(self._get_agent)
         self.metrics = RuntimeMetrics(self._metric_status, self._flush_metrics)
@@ -437,6 +461,34 @@ class Runtime(Generic[AppT]):
             principal=principal,
             after_event_seqs=after_event_seqs,
             include_content=include_content, ready=ready,
+        )
+
+    async def _capture_execution_tree(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+    ) -> tuple[tuple[ExecutionView, int, int], ...]:
+        if self._tree_streamer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._tree_streamer.capture(
+            execution_id, principal=principal, after_event_seqs=after_event_seqs,
+        )
+
+    def _replay_execution_tree(
+        self,
+        captured: tuple[tuple[ExecutionView, int, int], ...],
+        *,
+        principal: Principal,
+        after_event_seqs: Mapping[str, int] | None = None,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        if self._tree_streamer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._tree_streamer.replay(
+            captured, principal=principal, after_event_seqs=after_event_seqs,
+            include_content=include_content,
         )
 
     @property
@@ -623,8 +675,12 @@ class Runtime(Generic[AppT]):
         dependency_hold_id: "str | None" = None,
         requires_task_invocation_capture: bool = False,
         input_context: ExecutionInputContext | None = None,
+        budget: RunBudget | None = None,
+        budget_scope_id: str | None = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
+        key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
+        validate_idempotency_key(key)
         if input_context is not None and session_id is not None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, safe_details={"reason": "imported_context_requires_new_execution"})
         resolved_principal = self._resolve_principal(principal)
@@ -640,13 +696,10 @@ class Runtime(Generic[AppT]):
             planning=planning,
             thinking=thinking,
         )
-        binding = await self._resolve_agent_binding(
-            self._compiler.bind(compiled_agent, output=output)
-        )
         request = ExecutionRequest(
             user_prompt=user_prompt,
             principal=resolved_principal,
-            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            idempotency_key=key,
             memory_scope=_validate_memory_scope(memory_scope),
             mode=resolved_mode,
             planning=resolved_planning,
@@ -654,18 +707,23 @@ class Runtime(Generic[AppT]):
             correlation=effective_correlation,
             files=resolved_files,
             input_context=input_context,
+            budget=budget,
+        )
+        if session_id is not None and (not isinstance(session_id, str) or not session_id.strip()):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        binding = await self._resolve_agent_binding(
+            self._compiler.bind(compiled_agent, output=output)
         )
         if session_id is None:
             handle = await self._execution_service.start(
                 binding.binding_digest,
                 request,
                 dependency_hold_id=dependency_hold_id,
+                budget_scope_id=budget_scope_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
                 binding_contract=binding.binding_contract,
             )
         else:
-            if not isinstance(session_id, str) or not session_id.strip():
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             await self._ensure_session(compiled_agent, session_id, resolved_principal)
             resume_request = ResumeSessionRequest(
                 principal=resolved_principal,
@@ -677,6 +735,7 @@ class Runtime(Generic[AppT]):
                 thinking=request.thinking,
                 correlation=effective_correlation,
                 files=request.files,
+                budget=request.budget,
             )
             handle = await self._session_service.resume(
                 compiled_agent.spec.id,
@@ -685,6 +744,7 @@ class Runtime(Generic[AppT]):
                 resume_request,
                 binding_contract=binding.binding_contract,
                 dependency_hold_id=dependency_hold_id,
+                budget_scope_id=budget_scope_id,
                 requires_task_invocation_capture=requires_task_invocation_capture,
             )
         _logger.info(
@@ -718,7 +778,7 @@ class Runtime(Generic[AppT]):
         request = RetryExecutionRequest(
             user_prompt=user_prompt,
             principal=principal,
-            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            idempotency_key=secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
             correlation=_request_correlation(correlation),
             files=normalize_input_files(files),
         )
@@ -736,6 +796,7 @@ class Runtime(Generic[AppT]):
         user_prompt: CanonicalUserInput,
         *,
         files: Sequence[str],
+        budget: RunBudget | None = None,
         principal: Principal,
         idempotency_key: "str | None",
         correlation: "Mapping[str, object] | None" = None,
@@ -744,9 +805,10 @@ class Runtime(Generic[AppT]):
         request = ForkExecutionRequest(
             user_prompt=user_prompt,
             principal=principal,
-            idempotency_key=idempotency_key or secrets.token_urlsafe(32),
+            idempotency_key=secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
             correlation=_request_correlation(correlation),
             files=normalize_input_files(files),
+            budget=budget,
         )
         handle = await self.executions.fork(execution_id, request)
         return Execution(
@@ -776,7 +838,7 @@ class Runtime(Generic[AppT]):
             CreateSessionRequest(
                 resolved_principal,
                 session_id,
-                idempotency_key or secrets.token_urlsafe(32),
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 cwd,
                 values,
             ),
@@ -801,7 +863,7 @@ class Runtime(Generic[AppT]):
             ForkSessionRequest(
                 resolved_principal,
                 new_session_id,
-                idempotency_key or secrets.token_urlsafe(32),
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 cwd,
             ),
         )
@@ -832,7 +894,7 @@ class Runtime(Generic[AppT]):
             UpdateSessionRequest(
                 resolved_principal,
                 expected_revision,
-                idempotency_key or secrets.token_urlsafe(32),
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 metadata,
                 cwd,
             ),
@@ -852,7 +914,7 @@ class Runtime(Generic[AppT]):
             session_id,
             CloseSessionRequest(
                 resolved_principal,
-                idempotency_key or secrets.token_urlsafe(32),
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
                 force,
                 wait_timeout_seconds,
             ),
@@ -908,6 +970,20 @@ class Runtime(Generic[AppT]):
                 or not issubclass(output_type, BaseModel)
             ):
                 output_type = restore_output(binding_contract.output_mode, binding_contract.output_schema)
+            admissions = self._task_admissions
+            if admissions is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            admission = await admissions.get(
+                invocation.graph_id, tenant_id=invocation.principal.tenant_id,
+            )
+            if admission is None or admission.graph_id != invocation.graph_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if admission.budget_scope_id is not None:
+                if self._budgets is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                usage = await self._budgets.read(admission.budget_scope_id)
+                if usage.limits != admission.budget:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             execution = await self._start_for_agent(
                 agent.id,
                 agent.revision,
@@ -924,6 +1000,7 @@ class Runtime(Generic[AppT]):
                 correlation=invocation.correlation,
                 compiled_agent=compiled,
                 dependency_hold_id=dependency_hold_id,
+                budget_scope_id=admission.budget_scope_id,
                 requires_task_invocation_capture=True,
                 input_context=None if invocation.node.input.get("capture_context") is None else ExecutionInputContext.from_payload(invocation.node.input["capture_context"]),
             )
@@ -1038,12 +1115,13 @@ class Runtime(Generic[AppT]):
         idempotency_key: str | None,
         force: bool,
     ) -> CancelExecutionResult:
+        self._ensure_open()
+        key = secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key
+        request = CancelGraphRequest(principal, key, force)
         view = await self.executions.inspect(
             execution_id,
             principal=principal,
         )
-        key = idempotency_key or secrets.token_urlsafe(32)
-        request = CancelGraphRequest(principal, key, force)
         if view.binding_kind == "task":
             await self._graph_service.settle_execution_cancellation(
                 graph_id,
@@ -1104,6 +1182,7 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None",
         idempotency_key: str,
         limits: "TaskGraphLimits | None",
+        budget: RunBudget | None = None,
         correlation: "Mapping[str, object] | None" = None,
     ) -> TaskGraphRequest:
         self._ensure_open()
@@ -1127,6 +1206,7 @@ class Runtime(Generic[AppT]):
             idempotency_key,
             selected_limits,
             effective_correlation,
+            budget,
         )
 
     async def _ensure_session(
@@ -1172,7 +1252,7 @@ class Runtime(Generic[AppT]):
 
     def _ensure_open(self) -> None:
         if self._closed or self._closing:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, retryable=False)
 
     def _validate_task_bindings(self, tasks: Sequence[Task[AppT]]) -> None:
         self._ensure_open()
@@ -1392,6 +1472,7 @@ async def _open_runtime(
             close_callback=components.close_callback,
             task_node_runtime=components.task_node_runtime,
             task_admissions=components.task_admissions,
+            budgets=components.budgets,
             tree_streamer=components.tree_streamer,
             metric_control=components.metric_control,
             _binding_resolver=components.binding_resolver,

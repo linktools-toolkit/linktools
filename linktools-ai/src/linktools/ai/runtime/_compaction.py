@@ -28,6 +28,7 @@ from pydantic_ai_harness.compaction import (
 from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ..workspace import validate_workspace_path
+from ._budget import RunBudgetContext
 from ._journal import ModelRequestFact, ModelRequestJournal, _await_request_handoff
 from ._message import binary_content_usage, project_transient_binary_content
 
@@ -93,6 +94,7 @@ class _ObservedCompactionModel(WrapperModel):
         observer: ExternalModelRequestObserver | None,
         recorder: ExternalModelRequestRecorder | None,
         source_messages: Sequence[ModelMessage],
+        budget: RunBudgetContext | None = None,
     ) -> None:
         super().__init__(wrapped)
         self._ctx = ctx
@@ -100,6 +102,7 @@ class _ObservedCompactionModel(WrapperModel):
         self._observer = observer
         self._recorder = recorder
         self._source_messages = tuple(source_messages)
+        self._budget = budget
 
     async def request(
         self,
@@ -120,11 +123,11 @@ class _ObservedCompactionModel(WrapperModel):
                 parameters=model_request_parameters,
             )
             try:
-                response = await self.wrapped.request(
-                    messages,
-                    model_settings,
-                    model_request_parameters,
-                )
+                async def request() -> ModelResponse:
+                    return await self.wrapped.request(messages, model_settings, model_request_parameters)
+
+                response = (await request() if self._budget is None else
+                            await self._budget.run_model(fact.observation_id, request))
             except asyncio.CancelledError as error:
                 await self._finish(
                     model_request_seq,
@@ -255,6 +258,7 @@ class CompactionCapability(AbstractCapability[None]):
         request_recorder: ExternalModelRequestRecorder | None = None,
         projection_sink: _ContextProjectionSink | None = None,
         policy: CompactionPolicy | None = None,
+        budget: RunBudgetContext | None = None,
     ) -> None:
         self.id = "linktools.ai.compaction"
         if target_tokens is not None and (
@@ -272,6 +276,7 @@ class CompactionCapability(AbstractCapability[None]):
         self._request_recorder = request_recorder
         self._projection_sink = projection_sink
         self._policy = policy
+        self._budget = budget
         self._keep_result_tools: frozenset[str] = frozenset()
         self._context_dedupe_by_tool: dict[str, str] = {}
         self._refresh_policy()
@@ -319,6 +324,7 @@ class CompactionCapability(AbstractCapability[None]):
                     observer=self._observer,
                     recorder=self._request_recorder,
                     source_messages=source,
+                    budget=self._budget,
                 )
             tiered = TieredCompaction(
                 tiers=(

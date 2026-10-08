@@ -20,7 +20,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import Runtime, RuntimeStorage
+from linktools.ai.runtime import Runtime, RuntimeHistory, RuntimeStorage
 from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state._codec import (
@@ -34,7 +34,7 @@ from linktools.ai.runtime.state._contracts import (
     ResultRecord,
 )
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, PayloadPolicy, StoredPayload
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -178,15 +178,40 @@ async def _durable_state(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
-async def test_failed_diagnostics_survive_restart_through_public_result_and_event(
+@pytest.mark.parametrize("status", (
+    ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+))
+async def test_terminal_results_survive_restart_through_live_and_read_only_apis(
     tmp_path: Path,
     backend: str,
+    status: ExecutionStatus,
 ) -> None:
-    diagnostics = ErrorDiagnostics.from_exception(
-        RuntimeError("provider disconnected")
-    )
     now = datetime.now(timezone.utc)
-    started, _result, commit = _failed_terminal(now, diagnostics)
+    if status is ExecutionStatus.FAILED:
+        diagnostics = ErrorDiagnostics.from_exception(RuntimeError("provider disconnected"))
+        started, _result, commit = _failed_terminal(now, diagnostics)
+    else:
+        started = _started_execution(now)
+        cancelled = status is ExecutionStatus.CANCELLED
+        commit = ExecutionTerminalCommit(
+            expected_revision=0,
+            expected_event_seq=0,
+            execution=replace(
+                started, status=status, revision=1, event_seq=1,
+                error_code=ErrorCode.EXECUTION_CANCELLED.value if cancelled else None,
+            ),
+            result=ResultRecord(
+                output=None if cancelled else StoredPayload.inline_json({"answer": "ok"}),
+                stop_reason=StopReason.CANCELLED if cancelled else StopReason.END_TURN,
+                usage=UsageMetrics(),
+                created_at=now,
+            ),
+            terminal_event_type=(
+                ExecutionEventType.EXECUTION_CANCELLED if cancelled
+                else ExecutionEventType.EXECUTION_SUCCEEDED
+            ),
+            terminal_event_payload={},
+        )
     state, durable_path = await _durable_state(tmp_path, backend)
     await state.initialize(namespace="default", tenant_id="default")
     try:
@@ -221,24 +246,52 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
             terminal = next(
                 event
                 for event in events.items
-                if event.event_type == ExecutionEventType.EXECUTION_FAILED
+                if event.event_type == commit.terminal_event_type
             )
-            expected_payload = {
-                "exception_type": diagnostics.exception_type,
-                "exception_message": diagnostics.exception_message,
-                "cause_digest": diagnostics.cause_digest,
-            }
-            assert result.status is ExecutionStatus.FAILED
-            assert result.error_code == ErrorCode.INTERNAL_ERROR.value
-            assert result.safe_error_details == {"phase": "agent_execution"}
-            assert result.error_diagnostics == diagnostics
-            assert terminal.payload["error_code"] == result.error_code
-            assert terminal.payload["safe_error_details"] == dict(
-                result.safe_error_details
-            )
-            assert terminal.payload["error_diagnostics"] == expected_payload
+            assert result.status is status
+            assert result.error_code == commit.execution.error_code
+            assert result.safe_error_details == commit.execution.safe_error_details
+            assert result.error_diagnostics == commit.execution.error_diagnostics
+            assert result.output == ({"answer": "ok"} if status is ExecutionStatus.SUCCEEDED else None)
+            assert await runtime.history.result(
+                started.execution_id,
+                principal=runtime.default_principal,
+            ) == result
+            if status is ExecutionStatus.FAILED:
+                summary = await runtime.history.inspect_execution(
+                    started.execution_id,
+                    principal=runtime.default_principal,
+                )
+                assert summary.error_diagnostics is None
+                assert terminal.payload["error_code"] == result.error_code
+                assert terminal.payload["safe_error_details"] == dict(result.safe_error_details)
+                assert terminal.payload["error_diagnostics"] == {
+                    "exception_type": diagnostics.exception_type,
+                    "exception_message": diagnostics.exception_message,
+                    "cause_digest": diagnostics.cause_digest,
+                }
     finally:
         await reopened.close()
+
+    history_storage = (
+        RuntimeStorage.filesystem(durable_path)
+        if backend == "filesystem"
+        else RuntimeStorage.sqlite(
+            durable_path,
+            object_store=FilesystemObjectStore(tmp_path / "objects"),
+        )
+    )
+    async with RuntimeHistory.open("default", storage=history_storage) as history:
+        assert await history.result(
+            started.execution_id,
+            principal=runtime.default_principal,
+        ) == result
+        if status is ExecutionStatus.FAILED:
+            summary = await history.inspect_execution(
+                started.execution_id,
+                principal=runtime.default_principal,
+            )
+            assert summary.error_diagnostics is None
 
 
 def test_execution_requires_error_diagnostics_field() -> None:

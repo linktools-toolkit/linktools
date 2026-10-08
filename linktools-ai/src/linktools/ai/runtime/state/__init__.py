@@ -18,9 +18,10 @@ from ._snapshot import (
 )
 from ._input_capture import input_capture_key, input_capture_expiry_key, input_capture_object_dependency, iter_input_capture_dependencies
 from ._root import RuntimeStorage
-from ._contracts import ArtifactRecord, ArtifactRepositories
+from ._contracts import ArtifactRecord, ArtifactRepositories, BudgetRepository
 
 __all__ = [
+    "BudgetRepository",
     "ObjectCleanupResult",
     "input_capture_key",
     "input_capture_expiry_key",

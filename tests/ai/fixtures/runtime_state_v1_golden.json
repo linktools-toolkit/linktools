@@ -1,6 +1,10 @@
 {
   "version": 1,
   "wire_type_ids": [
+    "run_budget",
+    "budget_usage",
+    "budget_model_reservation",
+    "budget_tool_reservation",
     "evaluation_candidate_slot_ref",
     "evaluation_score_selection",
     "evaluation_score_comparison_selection",

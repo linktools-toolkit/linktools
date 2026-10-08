@@ -160,7 +160,7 @@ async def test_graph_capture_ref_evaluates_new_inputs_after_reopen(tmp_path: Pat
             TaskNode("answer", ("prepare",), task=consumer, input_refs={"prepared": TaskNodeResultRef("prepare")}),
         )), principal=PRINCIPAL, idempotency_key="source-captured-graph")
         assert (await original.wait(timeout_seconds=10)).result.wait_status is TaskStatus.SUCCEEDED
-        original_view = await original.inspect()
+        original_view = await original.state(include_content=True)
         original_answer = await original.result("answer")
         original_ids = tuple([(await original.execution(node)).execution_id for node in ("prepare", "answer")])
         capture = await runtime.tasks.capture_graph(original.graph_id, CaptureGraphRequest(PRINCIPAL, "capture-whole-graph"))
@@ -187,6 +187,6 @@ async def test_graph_capture_ref_evaluates_new_inputs_after_reopen(tmp_path: Pat
         rerun = await engine.get(trial.graph_ref.graph_id, principal=PRINCIPAL)
         assert all([(await rerun.execution(node)).execution_id not in original_ids for node in ("prepare", "answer")])
         source = await engine.get(original.graph_id, principal=PRINCIPAL)
-        assert await source.inspect() == original_view
+        assert await source.state(include_content=True) == original_view
         assert await source.result("answer") == original_answer == {"answer": "OLD SOURCE INPUT"}
         assert seen == ["old source input", "new case input"]

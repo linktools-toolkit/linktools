@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Validate logical Runtime snapshot identities before restore."""
+"""Validate logical Runtime snapshot identities and cross-domain references."""
 
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import cast
 
-from ...core import OperationLedgerInput
+from ...core import BudgetUsage, OperationLedgerInput
+from ._budget_records import BudgetModelReservation, BudgetToolReservation
 from ...errors import AIError, ErrorCode
 from ...evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
 from ._evaluation_records import EvaluationCaseRecord, EvaluationDatasetRecord, EvaluationTombstone, EvaluationContentTombstone, EvaluationCleanupRecord
@@ -84,6 +85,9 @@ _ALLOWED_RECORD_KINDS = {
     ),
     RuntimeDomain.EXECUTION: frozenset(
         {
+            "budget_scope",
+            "budget_model",
+            "budget_tool",
             "execution",
             "execution_history_head",
             "execution_history_seal",
@@ -124,6 +128,9 @@ _ALLOWED_RECORD_KINDS = {
 }
 
 _RECORD_TYPES = {
+    "budget_scope": BudgetUsage,
+    "budget_model": BudgetModelReservation,
+    "budget_tool": BudgetToolReservation,
     "session": SessionRecord,
     "conversation_history": ConversationHistoryRecord,
     "conversation_index_node": ConversationHistoryIndexNodeRecord,
@@ -172,6 +179,7 @@ def canonical_snapshot_indexes(
 ) -> tuple[tuple[StoredAlias, ...], Mapping[bytes, int]]:
     """Rebuild derived snapshot indexes from their durable semantic owners."""
     _records_by_key, values = _decode_snapshot_records(domain, records)
+    _validate_budget_projections(values)
     aliases = _canonical_aliases(
         namespace,
         tenant_id,
@@ -202,6 +210,8 @@ def validate_snapshot_domain(
 ) -> None:
     """Reject physical identities that cannot represent the decoded v1 facts."""
     records_by_key, values = _decode_snapshot_records(domain, records)
+
+    _validate_budget_projections(values)
 
     graph_parents = _task_graph_parents(
         namespace,
@@ -250,6 +260,35 @@ def validate_snapshot_domain(
     )
     if dict(sequences) != dict(expected_sequences):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def validate_snapshot_references(
+    records: Mapping[RuntimeDomain, tuple[StoredRecord, ...]],
+) -> None:
+    """Validate cross-domain references against the snapshot's durable owners."""
+    budgets: dict[str, BudgetUsage] = {}
+    for record in records.get(RuntimeDomain.EXECUTION, ()):
+        if record.kind != "budget_scope":
+            continue
+        usage = _decode_enveloped_domain(record.data, BudgetUsage)
+        if usage.scope_id in budgets:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        budgets[usage.scope_id] = usage
+
+    for record in records.get(RuntimeDomain.TASK, ()):
+        if record.kind == "task_admission":
+            admission = _decode_enveloped_domain(record.data, TaskGraphAdmission)
+        elif record.kind == "task_submission_payload":
+            # Preparation captures a scope before persisting its payload;
+            # read-only descriptions persist neither payload nor scope.
+            admission = _decode_enveloped_domain(record.data, TaskGraphSubmission).admission
+        else:
+            continue
+        if admission.budget_scope_id is None:
+            continue
+        usage = budgets.get(admission.budget_scope_id)
+        if usage is None or usage.limits != admission.budget:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _decode_snapshot_records(
@@ -416,7 +455,15 @@ def _expected_record(
     state = record_state(value)
     sort_key: str | None = None
 
-    if isinstance(value, TaskGraphView):
+    if isinstance(value, BudgetModelReservation):
+        _require_anchor(namespace, tenant_id, domain, records, "budget_scope", value.scope_id)
+        scope = scope_digest(namespace, tenant_id, domain.value, kind, "budget", value.scope_id)
+        state = value.status
+    elif isinstance(value, BudgetToolReservation):
+        _require_anchor(namespace, tenant_id, domain, records, "budget_scope", value.scope_id)
+    elif isinstance(value, ExecutionRecord) and value.budget_scope_id is not None:
+        _require_anchor(namespace, tenant_id, domain, records, "budget_scope", value.budget_scope_id)
+    elif isinstance(value, TaskGraphView):
         state = value.status.value
     elif isinstance(value, ExecutionHistoryHeadRecord):
         state = value.state.value
@@ -624,6 +671,12 @@ def _record_identity(
     record: StoredRecord,
     graph_parents: Mapping[bytes, str],
 ) -> object:
+    if isinstance(value, BudgetUsage):
+        return value.scope_id
+    if isinstance(value, BudgetModelReservation):
+        return [value.scope_id, value.request_id]
+    if isinstance(value, BudgetToolReservation):
+        return [value.scope_id, value.call_id]
     if isinstance(value, ConversationHistoryRecord):
         return value.history_id
     if isinstance(value, ConversationHistoryIndexNodeRecord):
@@ -659,6 +712,29 @@ def _record_identity(
         return canonical_record_identity(kind, value)
     except TypeError as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
+
+
+def _validate_budget_projections(values: Mapping[bytes, object]) -> None:
+    scopes = {value.scope_id: value for value in values.values() if isinstance(value, BudgetUsage)}
+    observed = {scope_id: BudgetUsage(scope_id, value.limits) for scope_id, value in scopes.items()}
+    for value in values.values():
+        if not isinstance(value, (BudgetModelReservation, BudgetToolReservation)):
+            continue
+        usage = observed.get(value.scope_id)
+        if usage is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if isinstance(value, BudgetModelReservation):
+            usage = replace(
+                usage, model_requests=usage.model_requests + 1,
+                total_tokens=usage.total_tokens + (0 if value.total_tokens is None else value.total_tokens),
+                in_flight_model_requests=usage.in_flight_model_requests + int(value.status == "in_flight"),
+                unknown_model_requests=usage.unknown_model_requests + int(value.status == "unknown"),
+            )
+        else:
+            usage = replace(usage, tool_calls=usage.tool_calls + 1)
+        observed[value.scope_id] = usage
+    if observed != scopes:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 def _expected_session_turn_commit(
     namespace: str,
@@ -927,4 +1003,6 @@ def _validate_operations(
         positions.add(position)
 
 
-__all__ = ["canonical_snapshot_indexes", "validate_snapshot_domain"]
+__all__ = [
+    "canonical_snapshot_indexes", "validate_snapshot_domain", "validate_snapshot_references",
+]
