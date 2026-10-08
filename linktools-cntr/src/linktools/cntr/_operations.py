@@ -49,7 +49,7 @@ class ComposeOperations:
         self.manager = manager
 
     def select(self, names: "Sequence[str] | None" = None, with_dependencies: bool = False,
-              metadata_only: bool = False) -> ComposeSelection:
+              metadata_only: bool = False, for_start: bool = False) -> ComposeSelection:
         """Resolve the target selection. ``metadata_only=True`` (used by
         ExecutionPlanner, which must stay read-only) registers config
         fields without running any container's ``on_prepare()`` -- real
@@ -88,7 +88,7 @@ class ComposeOperations:
                 if service_name not in seen:
                     seen.add(service_name)
                     services.append(service_name)
-        if not services:
+        if not services and not for_start:
             names_desc = ", ".join(c.name for c in target_containers)
             raise ContainerError(f"No service found in container(s) `{names_desc}`")
 
@@ -98,6 +98,76 @@ class ComposeOperations:
             services=tuple(services),
             full=False,
         )
+
+    def _start_selection(self, selection: ComposeSelection) -> ComposeSelection:
+        """Expand a partial start to installed dependency and integration consumers."""
+        if selection.full:
+            return selection
+        installed = {container.name: container for container in selection.project_containers}
+        owners = {
+            service: container
+            for container in selection.project_containers
+            for service in container.services
+        }
+        required = set(selection.target_containers)
+
+        while True:
+            before = set(required)
+            for container in tuple(required):
+                for dependency in container.dependencies:
+                    if dependency not in installed:
+                        raise ContainerError(
+                            f"Required dependency {dependency!r} for {container.name} is not installed")
+                    required.add(installed[dependency])
+
+                for service in container.services.values():
+                    depends_on = service.get("depends_on") or ()
+                    for dependency in depends_on:
+                        owner = owners.get(dependency)
+                        if owner is None:
+                            raise ContainerError(
+                                f"Compose dependency {dependency!r} for {container.name} is not installed")
+                        required.add(owner)
+
+                for consumer_name, declarations in container.integrations.items():
+                    consumer = installed.get(consumer_name)
+                    if consumer is None:
+                        continue
+                    if consumer_name == "nginx":
+                        if not any(str(site.server_name) for site in declarations.values()):
+                            continue
+                    required.add(consumer)
+
+            nginx = installed.get("nginx")
+            if nginx in required:
+                from ._nginx import NginxSite
+                for producer, local_id, site in self.manager.iter_integrations("nginx"):
+                    if not isinstance(site, NginxSite):
+                        raise ContainerError(
+                            f"Invalid nginx integration {producer.name}/{local_id}")
+                    if not str(site.server_name):
+                        continue
+                    for capability, provider in (("auth", "authelia"), ("waf", "safeline")):
+                        configured = getattr(site, capability)
+                        if configured is None:
+                            configured = self.manager.env_config.get(
+                                "NGINX_" + capability.upper() + "_ENABLE", type=bool)
+                        if configured:
+                            if provider not in installed:
+                                raise ContainerError(
+                                    f"Nginx site {producer.name}/{local_id} requires {provider}")
+                            required.add(installed[provider])
+            if required == before:
+                break
+
+        ordered = tuple(self.manager.resolver.resolve_dependencies(required))
+        services = tuple(
+            name for container in ordered for name in container.services
+        )
+        if not services:
+            names = ", ".join(c.name for c in selection.target_containers)
+            raise ContainerError(f"No runnable service for {names}")
+        return ComposeSelection(selection.project_containers, ordered, services, False)
 
     def _make_context(self, commands, selection: ComposeSelection) -> "EventContext":
         context = EventContext()
@@ -110,7 +180,7 @@ class ComposeOperations:
     def up(self, names: "Sequence[str] | None" = None, pull: bool = False,
           report: bool = False) -> None:
         manager = self.manager
-        selection = self.select(names)
+        selection = self._start_selection(self.select(names, for_start=True))
         context = self._make_context(["up", pull and "pull"], selection)
         options = ComposeOptions(remove_orphans=selection.full, services=list(selection.services))
 
@@ -150,16 +220,17 @@ class ComposeOperations:
     def restart(self, names: "Sequence[str] | None" = None, pull: bool = False,
                report: bool = False) -> None:
         manager = self.manager
-        selection = self.select(names)
+        selection = self.select(names, for_start=True)
+        start_selection = self._start_selection(selection)
         context = self._make_context(["restart", pull and "pull"], selection)
-        options = ComposeOptions(remove_orphans=selection.full, services=list(selection.services))
+        options = ComposeOptions(remove_orphans=selection.full, services=list(start_selection.services))
 
         container_scope = None if context.is_full_containers else ",".join(
             c.name for c in context.target_containers)
 
         model = manager.compose_runner.final_model(context)
         preparation = manager.image_preparer
-        image_plan = preparation.plan(model, selection.services, force_pull=pull)
+        image_plan = preparation.plan(model, start_selection.services, force_pull=pull)
         if image_plan.pull:
             with record_phase(context, "pull", command=tuple(manager.compose_runner.pull_args(image_plan.pull)),
                               container=container_scope, logger=manager.logger):
@@ -170,17 +241,19 @@ class ComposeOperations:
                               container=container_scope, logger=manager.logger):
                 manager.compose_runner.build(context, build_options)
 
-        with manager.lifecycle.notify_stop(context):
-            with record_phase(context, "stop", command=("stop", *selection.services),
-                              container=container_scope, logger=manager.logger):
-                manager.compose_runner.stop(context, selection.services)
+        if selection.services:
+            with manager.lifecycle.notify_stop(context):
+                with record_phase(context, "stop", command=("stop", *selection.services),
+                                  container=container_scope, logger=manager.logger):
+                    manager.compose_runner.stop(context, selection.services)
             # Recorded immediately after stop succeeds, still inside this
             # `with` (before notify_stop's on_stopped/AFTER_STOP hooks) --
             # if build/up below then fails, persisted state must reflect
             # that the targets are actually stopped, not still show them
             # running from before this restart began.
-            manager.running_state.mark_stopped(context)
+                manager.running_state.mark_stopped(context)
 
+        context.target_containers = list(start_selection.target_containers)
         with manager.lifecycle.notify_start(context):
             with record_phase(context, "up", command=tuple(manager.compose_runner.up_args(options)),
                               container=container_scope, logger=manager.logger):
