@@ -15,7 +15,8 @@ def _neutralize_runtime(manager, monkeypatch):
     monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
                         ProjectRuntimeState(manager.project_name, (), "docker"))
     monkeypatch.setattr(manager, "generated_configs", {})
-    monkeypatch.setattr(manager.compose_operations, "start_selection", lambda selection, model=None: selection)
+    monkeypatch.setattr(manager.compose_operations, "start_selection",
+                        lambda selection, model=None, dependency_roots=None: selection)
     monkeypatch.setattr(manager.compose_runner, "apply_services", lambda context, services:
                         manager.compose_runner.up(context, None))
 

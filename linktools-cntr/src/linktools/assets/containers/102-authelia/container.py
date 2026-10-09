@@ -151,6 +151,9 @@ class Container(BaseContainer):
         )
 
     def on_check(self, context: "EventContext") -> None:
+        if context.target_services is not None and not any(
+                service in context.target_services for service in self.generation_services):
+            return
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
 

@@ -175,6 +175,8 @@ class ComposeOperations:
         context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
         context.containers = list(selection.project_containers)
         context.target_containers = list(selection.target_containers)
+        context.target_services = selection.services or tuple(
+            service for container in selection.target_containers for service in container.services)
         context.is_full_containers = selection.full
         return context
 
@@ -238,6 +240,7 @@ class ComposeOperations:
         context.changed_compose_services = set(context.initial_running_services)
         selection = self._reconcile_selection(explicit, context, generations)
         context.target_containers = list(selection.target_containers)
+        context.target_services = selection.services
 
         # Hooks may prepare env_file inputs; capture the authoritative resolved
         # candidate only after startup preparation, and before any target stops.
@@ -294,6 +297,7 @@ class ComposeOperations:
                 prepare_images(tuple(name for name in selection.services if name in additional))
             required_services = final_services
             context.target_containers = list(selection.target_containers)
+            context.target_services = selection.services
             for container in sync:
                 candidate = candidates.get(container.name)
                 if candidate is not None:
@@ -302,9 +306,8 @@ class ComposeOperations:
 
             for container in sync:
                 candidate = candidates.get(container.name)
-                if candidate is not None:
-                    services = tuple(name for name in container.services if name in required_services)
-                    self._require_rollback_model(container, candidate, context, services)
+                services = tuple(name for name in container.services if name in required_services)
+                self._require_rollback_model(container, candidate, context, services)
 
             bootstrap_candidates = {}
             available_after_stop = set(running_services)
@@ -397,7 +400,7 @@ class ComposeOperations:
             content = yaml.safe_dump(current, sort_keys=False)
             applied = os.path.join(str(self.manager.data_path), "compose", "applied", container.name + ".yml")
             os.makedirs(os.path.dirname(applied), exist_ok=True)
-            atomic_write_text_if_changed(applied, content)
+            atomic_write_text_if_changed(applied, content, mode=0o600)
             context.applied_compose[path] = content
             self.manager.artifact_index.record({os.path.relpath(applied, str(self.manager.data_path)): {
                 "kind": "compose-applied", "container": container.name, "sha256": sha256_of(content)}})
@@ -419,7 +422,7 @@ class ComposeOperations:
                 del applied[path]
                 continue
             content = original[path]
-            atomic_write_text_if_changed(destination, content)
+            atomic_write_text_if_changed(destination, content, mode=0o600)
             applied[path] = content
             self.manager.artifact_index.record({os.path.relpath(destination, str(self.manager.data_path)): {
                 "kind": "compose-applied", "container": container.name, "sha256": sha256_of(content)}})
@@ -457,7 +460,7 @@ class ComposeOperations:
                     files = dict(context.compose_files)
                     files.update(previous)
                     for path, content in previous.items():
-                        atomic_write_text_if_changed(path, content)
+                        atomic_write_text_if_changed(path, content, mode=0o600)
                     for service in running:
                         model = context.service_models.previous.get(service)
                         runner.apply_saved_services(context, (service,), {"previous.yml": model} if model else files)
@@ -473,7 +476,8 @@ class ComposeOperations:
             raise
 
     def _require_rollback_model(self, container, candidate, context, services) -> None:
-        if candidate.previous_id is not None:
+        running = tuple(service for service in services if service in context.initial_running_services)
+        if not running or (candidate is not None and candidate.previous_id is not None):
             return
         import yaml
         saved_services = set()
@@ -483,9 +487,8 @@ class ComposeOperations:
             old = yaml.safe_load(context.saved_compose[path]) or {}
             if isinstance(old, dict) and isinstance(old.get("services"), dict):
                 saved_services.update(old["services"])
-        for service in services:
-            if (service in context.initial_running_services and
-                    service not in context.service_models.previous and service not in saved_services):
+        for service in running:
+            if service not in context.service_models.previous and service not in saved_services:
                 raise ContainerError(
                     "Cannot replace running service {} without a previous Compose model".format(service))
 
@@ -589,7 +592,7 @@ class ComposeOperations:
                 del context.bootstrap_fallback_services
             del context.rollback_service_models
             for path, content in old_compose.items():
-                atomic_write_text_if_changed(path, content)
+                atomic_write_text_if_changed(path, content, mode=0o600)
 
     def down(self, names: "Sequence[str] | None" = None, report: bool = False) -> None:
         with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):

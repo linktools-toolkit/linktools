@@ -14,7 +14,8 @@ class EventContext:
 
     Plain (non-frozen, non-slots) dataclass so callers can set attributes
     dynamically. ``is_full_containers`` defaults to True; every caller sets
-    these fields explicitly.
+    these fields explicitly. ``target_services`` exposes the current service
+    selection to hooks; ``None`` means the caller has not narrowed it.
     """
 
     commands: "list[str] | None" = None
@@ -23,3 +24,5 @@ class EventContext:
     is_full_containers: bool = True
     # Optional, opt-in extension surface for hooks; legacy code ignores it.
     metadata: "dict[str, Any]" = field(default_factory=dict)
+    # None preserves container-wide checks for callers without service selection.
+    target_services: "tuple[str, ...] | None" = None

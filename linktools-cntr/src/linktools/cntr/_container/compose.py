@@ -163,7 +163,7 @@ def write_docker_compose_file(container: "BaseContainer") -> "Path | None":
         return None
     destination, content = candidate
     destination.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text_if_changed(destination, content)
+    atomic_write_text_if_changed(destination, content, mode=0o600)
     _record_artifact(container, destination, "compose", content, container.manager.docker_compose_names)
     # The model may reference a generated Dockerfile; execution needs that
     # file to exist alongside the Compose file.
@@ -186,6 +186,6 @@ def write_docker_file(container: "BaseContainer") -> "Path | None":
         return None
     destination, content = candidate
     destination.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text_if_changed(destination, content)
+    atomic_write_text_if_changed(destination, content, mode=0o600)
     _record_artifact(container, destination, "dockerfile", content, ("Dockerfile",))
     return destination
