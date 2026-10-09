@@ -60,7 +60,7 @@ def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped")):
         lifecycle=SimpleNamespace(notify_start=lambda context: nullcontext(), notify_remove=lambda context: nullcontext()),
         image_preparer=SimpleNamespace(plan=lambda model, services, **kwargs:
             ImagePlan(build=(), pull=(), targets=tuple(services))),
-        artifact_index=SimpleNamespace(record=lambda entries: None),
+        artifact_index=SimpleNamespace(record=lambda entries, remove=(): None),
         running_state=SimpleNamespace(mark_started=lambda context: None),
         resolver=SimpleNamespace(resolve_dependencies=lambda selected: [c for c in containers if c in selected]),
         docker_inspector=SimpleNamespace(get_project_state=lambda containers: ProjectRuntimeState("test", (
