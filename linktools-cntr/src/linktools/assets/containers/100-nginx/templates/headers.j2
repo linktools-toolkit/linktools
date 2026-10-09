@@ -1,15 +1,33 @@
-{% macro proxy_headers(overrides=None) -%}
+{% macro route_authorization() -%}
+{% if route_auth | default(false) -%}
 {% if site.auth -%}
+set $auth_endpoint_{{ site.var_name }} 0;
+set $auth_proof_{{ site.var_name }} 0;
+auth_request /_internal/auth/{{ site.var_name }};
+auth_request_set $auth_proof_{{ site.var_name }} $auth_endpoint_{{ site.var_name }};
+auth_request_set $auth_status_{{ site.var_name }} $upstream_status;
+{% for name in ['user', 'groups', 'name', 'email'] -%}
+auth_request_set $auth_{{ name }}_{{ site.var_name }} $upstream_http_remote_{{ name }};
+{% endfor -%}
+auth_request_set $auth_redirect_{{ site.var_name }} $upstream_http_location;
+error_page 401 =302 $auth_redirect_{{ site.var_name }};
+{% else -%}
+auth_request off;
+{% endif -%}
+{% elif site.auth -%}
 set $auth_proof_{{ site.var_name }} 0;
 {% endif -%}
+{%- endmacro %}
+{% macro proxy_headers(overrides=None) -%}
+{{ route_authorization() }}
+
 {% for name, value in nginx.header_items(site, overrides) -%}
 proxy_set_header {{ nginx.complex_value(name) }} {{ value }};
 {% endfor -%}
 {%- endmacro %}
 {% macro grpc_headers(overrides=None) -%}
-{% if site.auth -%}
-set $auth_proof_{{ site.var_name }} 0;
-{% endif -%}
+{{ route_authorization() }}
+
 {% for name, value in nginx.header_items(site, overrides) -%}
 grpc_set_header {{ nginx.complex_value(name) }} {{ value }};
 {% endfor -%}
