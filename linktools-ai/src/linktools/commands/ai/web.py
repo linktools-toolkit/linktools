@@ -32,6 +32,7 @@ class Command(BaseCommand):
         _add_local_runtime_arguments(parser)
         parser.add_argument("--port", type=int, default=8765, help="loopback HTTP port (default: 8765)")
         parser.add_argument("--read-only", action="store_true", help="browse persisted history without opening an execution Runtime")
+        parser.add_argument("--proxy", action="store_true", help="accept external Host/Origin headers from a loopback reverse proxy; the proxy must authenticate users")
         parser.add_argument("--open", action="store_true", help="open the console in your browser")
 
     def run(self, args: Namespace) -> int:
@@ -84,7 +85,7 @@ class Command(BaseCommand):
                     "api_key_configured": bool(args.api_key or os.getenv("OPENAI_API_KEY", "").strip()),
                 }
                 app = create_app(runtime=runtime, history=history, metrics=metrics, status=status,
-                                 capabilities=declarations, memory_scope=args.memory or "default", port=args.port)
+                                 capabilities=declarations, memory_scope=args.memory or "default", port=args.port, proxy=args.proxy)
                 url = f"http://127.0.0.1:{args.port}"
                 _logger.info("AI Web console: %s%s", url, " (read-only)" if read_only else "")
                 server = uvicorn.Server(uvicorn.Config(

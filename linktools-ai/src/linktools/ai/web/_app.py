@@ -124,8 +124,9 @@ async def _body(request: Request) -> dict[str, object]:
 
 
 class _LocalBoundary:
-    def __init__(self, app: "ASGIApp", *, port: int) -> None:
+    def __init__(self, app: "ASGIApp", *, port: int, proxy: bool) -> None:
         self.app = app
+        self.proxy = proxy
         self.hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
         if port == 80:
             self.hosts.update({"127.0.0.1", "localhost"})
@@ -141,7 +142,7 @@ class _LocalBoundary:
             return
         host = request.headers.get("host", "")
         origin = request.headers.get("origin")
-        if host not in self.hosts or (origin is not None and origin != f"http://{host.removesuffix(':80')}"):
+        if not self.proxy and (host not in self.hosts or (origin is not None and origin != f"http://{host.removesuffix(':80')}")):
             await _json({"error_code": "LOCAL_ORIGIN_REQUIRED"}, 403)(scope, receive, send)
             return
         if request.headers.get("sec-fetch-site") == "cross-site":
@@ -388,12 +389,14 @@ def create_app(
     *, runtime: Runtime | None = None, history: RuntimeHistory | None = None,
     metrics: Metrics | None = None, status: Mapping[str, object] | None = None,
     capabilities: Sequence[Mapping[str, object]] = (), memory_scope: str = "default", port: int = 8765,
+    proxy: bool = False,
 ) -> "ASGIApp":
     """Build a loopback-only console; the caller owns and closes injected resources.
 
     With no Runtime, mutations and live watches are disabled. Historical reads
-    remain available without model credentials. Never mount this local-trust app
-    as a remotely authenticated service.
+    remain available without model credentials. Proxy mode accepts external
+    Host/Origin headers from loopback; the proxy must enforce authentication
+    and access control. The console itself does not authenticate remote users.
     """
     if not 1 <= port <= 65535:
         raise ValueError("port must be between 1 and 65535")
@@ -411,4 +414,4 @@ def create_app(
         Route("/api/executions/{execution_id}/{action}", console.execution_action, methods=["POST"]),
         Route("/api/metrics", console.metric_query),
     ], exception_handlers={AIError: _error, ValueError: _error, TypeError: _error, KeyError: _error, Exception: _error})
-    return _LocalBoundary(app, port=port)
+    return _LocalBoundary(app, port=port, proxy=proxy)

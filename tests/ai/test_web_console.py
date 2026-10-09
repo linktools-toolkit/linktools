@@ -219,6 +219,25 @@ async def test_remote_peer_cannot_claim_a_local_host_header() -> None:
 
 
 @pytest.mark.asyncio
+async def test_proxy_mode_accepts_external_host_and_https_origin_without_relaxing_other_boundaries() -> None:
+    headers = {"Host": "console.example", "Origin": "https://console.example", "Sec-Fetch-Site": "same-origin"}
+    async with client(create_app()) as http:
+        assert (await http.get("/api/config", headers=headers)).status_code == 403
+    async with client(create_app(proxy=True)) as http:
+        response = await http.get("/api/config", headers=headers)
+        assert response.status_code == 200
+        assert "access-control-allow-origin" not in response.headers
+        assert (await http.post("/api/sessions", headers=headers, json={})).status_code == 403
+        assert (await http.post("/api/sessions", headers={**headers, **_HEADERS}, json={})).status_code == 503
+        assert (await http.get("/api/config", headers={**headers, "Sec-Fetch-Site": "cross-site"})).status_code == 403
+        assert (await http.options("/api/sessions", headers=headers)).status_code == 403
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(proxy=True), client=("203.0.113.9", 1000)), base_url="http://127.0.0.1:8765") as http:
+        response = await http.get("/api/config", headers={**headers, "X-Forwarded-For": "127.0.0.1"})
+        assert response.status_code == 403
+        assert response.json()["error_code"] == "LOOPBACK_REQUIRED"
+
+
+@pytest.mark.asyncio
 async def test_exception_diagnostics_never_serialize_provider_credentials() -> None:
     from dataclasses import dataclass
 

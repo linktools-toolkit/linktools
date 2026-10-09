@@ -14,6 +14,11 @@ ai-web --project /path/to/project --model your-model
 python -m linktools ai web --project /path/to/project --model your-model
 ```
 
+The execution stack requires `pydantic-ai-slim>=2.53.0,<3.0.0`. After updating
+the checkout, rerun the install command in the same virtual environment as
+`ai-web`; an existing editable install does not refresh dependency metadata
+until it is installed again. `--help` only exercises lightweight CLI discovery.
+
 Open `http://127.0.0.1:8765`. `--port` selects another local port, and `--open`
 opens the URL in your browser. The existing `--base-url`, `--api-key`, `--vision`
 and `--memory` arguments have the same meaning as `ai-run`; prefer environment
@@ -153,8 +158,8 @@ Runtime responsibilities.
 - The HTTP adapter checks the loopback peer, exact local Host/port, browser Origin
   and cross-site fetch metadata; mutation requests require JSON and a custom
   same-origin header, with no permissive CORS policy
-- Proxy headers are disabled; do not publish this local-trust application behind
-  a proxy or mount it as a remotely authenticated service
+- Forwarded proxy headers are disabled; the actual connection peer must be
+  loopback, including in proxy mode
 - No persistent access token, login system or new permission model is added
 - Credentials are represented only as configured/missing; exception messages
   are omitted from HTTP diagnostics because they can contain provider secrets;
@@ -165,6 +170,24 @@ Runtime responsibilities.
 An HTTP JSON request is bounded at 8 MiB, including envelope/escaping. Runtime
 prompt, file, tool-result and authorization validation still applies. No browser
 path bypasses Workspace policy.
+
+### Reverse proxy
+
+For a reverse proxy on the same machine, opt in explicitly:
+
+```bash
+ai-web --proxy --project /path/to/project --model your-model
+```
+
+`--proxy` accepts the proxy's external Host and browser Origin, including HTTPS
+origins. It does not change the loopback listener or trust forwarded peer
+headers. The proxy must connect to `127.0.0.1` and provide authentication, TLS,
+and access control. The console has no login: an unauthenticated public proxy
+exposes history and execution, cancellation, and recovery controls.
+
+Cross-site fetch rejection, the mutation request header, and the absence of
+permissive CORS remain in force. The default mode retains local Host/Origin
+validation. Serve the UI and API at the same external origin.
 
 ## Verification
 
