@@ -347,7 +347,8 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
             namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
             records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences,
         )
-        omitted = next(record for record in records if record.kind == "history_association")
+        omitted = next(record for record in records
+                       if record.kind == "history_association" and record.sort_key != "coverage:event")
         with pytest.raises(AIError) as missing:
             validate_snapshot_domain(
                 namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
@@ -356,7 +357,14 @@ async def test_snapshot_event_associations_remain_derived_from_canonical_facts(t
             )
         assert missing.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-        assert sum(record.kind == "history_association" for record in records) == 2
+        assert sum(record.kind == "history_association" and record.sort_key != "coverage:event"
+                   for record in records) == 2
+        validate_snapshot_domain(
+            namespace="request-lifecycle", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+            records=tuple(record for record in records
+                          if record.key_digest != omitted.key_digest and record.sort_key != "coverage:event"),
+            aliases=aliases, facts=facts, operations=operations, sequences=sequences,
+        )
         corrupted = tuple(
             replace(record, data={"sequence": 2}) if record.kind == "history_association" else record
             for record in records

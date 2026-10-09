@@ -658,12 +658,18 @@ class StoredAgentRunCheckpoint:
     timestamp: datetime
     state: str
     projection_digest: str
-    transcript_message_count: int
+    # Older checkpoints use the owner's authoritative transcript head rather
+    # than an explicit per-checkpoint boundary.
+    transcript_message_count: int | None = None
     has_context_projection: bool = False
     pending_request_index: int | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.transcript_message_count, bool) or not isinstance(self.transcript_message_count, int) or self.transcript_message_count < 0:
+        if self.transcript_message_count is not None and (
+            isinstance(self.transcript_message_count, bool)
+            or not isinstance(self.transcript_message_count, int)
+            or self.transcript_message_count < 0
+        ):
             raise ValueError("stored checkpoint transcript boundary is invalid")
         if self.pending_request_index is not None and (
             isinstance(self.pending_request_index, bool)
