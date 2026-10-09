@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import cast
+from uuid import uuid4
 
 from linktools.core import environ
 
@@ -140,6 +141,7 @@ class RuntimeStateCommands:
         execution_run_store: StateStepArchive | None = None,
         recovery_run_store: StateStepArchive | None = None,
         background_tasks: "set[asyncio.Task[object]]",
+        observe_cancellation: bool = True,
     ) -> None:
         self._execution = execution
         self._namespace = namespace
@@ -156,6 +158,7 @@ class RuntimeStateCommands:
         self._execution_run_store = execution_run_store
         self._recovery_run_store = recovery_run_store
         self._background_tasks = background_tasks
+        self._observe_cancellation = observe_cancellation
 
     def _require_approvals(self) -> ApprovalRepository:
         if self._approvals is None:
@@ -182,6 +185,7 @@ class RuntimeStateCommands:
         external_records: Sequence[ExternalCallRecord] = (),
         occurred_at: datetime,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
+        producer_generation: int | None = None,
     ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
         approvals = self._require_approvals()
         external_calls = self._require_external_calls()
@@ -271,6 +275,11 @@ class RuntimeStateCommands:
             ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
                 execution_tx = group.transaction(self._execution.state_store)
                 recovery_tx = group.transaction(self._recovery.state_store)
+                if producer_generation is not None:
+                    await self._execution.require_open_history_head_in_transaction(
+                        execution_tx, execution_id,
+                        expected_producer_generation=producer_generation, allow_cancelling=False,
+                    )
                 current_execution = await self._execution.get_in_transaction(
                     execution_tx,
                     execution_id,
@@ -337,6 +346,16 @@ class RuntimeStateCommands:
                     DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                     error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
                 )
+            if producer_generation is not None:
+                head = await self._execution.get_history_head(execution_id, tenant_id=tenant_id)
+                if head is not None and head.producer_generation > producer_generation:
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.STORAGE_CONFLICT),
+                    )
+                if execution.status is ExecutionStatus.CANCELLING:
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.EXECUTION_CANCELLED),
+                    )
             for expected in approval_values:
                 actual = await approvals.get(
                     expected.approval_id,
@@ -595,6 +614,8 @@ class RuntimeStateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         next_sequence = expected_agent_run_seq + 1
+        producer_claim_id = uuid4().hex
+        producer_generation = expected_execution_revision + 1
         next_agent_run_id = agent_run_id(
             namespace=self._namespace,
             tenant_id=tenant_id,
@@ -640,6 +661,10 @@ class RuntimeStateCommands:
                         expected_agent_run_seq=expected_agent_run_seq,
                     )
                 )
+                await self._execution.admit_history_producer_in_transaction(
+                    execution_tx, updated_execution,
+                    producer_claim_id=producer_claim_id,
+                )
                 updated_checkpoint = await self._recovery.compare_and_swap_in_transaction(
                     recovery_tx,
                     execution_id,
@@ -663,8 +688,15 @@ class RuntimeStateCommands:
             checkpoint = await self._recovery.get(execution_id, tenant_id=tenant_id)
             if execution is None or checkpoint is None:
                 return _partial_integrity()
+            head = await self._execution.get_history_head(execution_id, tenant_id=tenant_id)
+            own_claim = (
+                head is not None
+                and head.producer_generation == producer_generation
+                and head.producer_claim_id == producer_claim_id
+            )
             if (
-                execution.status is ExecutionStatus.STARTED
+                own_claim
+                and execution.status is ExecutionStatus.STARTED
                 and execution.agent_run_seq == next_sequence
                 and checkpoint.state is RecoveryCheckpointState.ACTIVE
                 and checkpoint.agent_run_id == next_agent_run_id
@@ -681,6 +713,11 @@ class RuntimeStateCommands:
                 and checkpoint.pending_tools == expected_pending_tools
             ):
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            if not own_claim:
+                return CommitObservation(
+                    DurableCommitState.NOT_COMMITTED,
+                    error=AIError(ErrorCode.STORAGE_CONFLICT, retryable=False),
+                )
             return _partial_integrity()
 
         owner_tasks = self._background_tasks if background_tasks is None else background_tasks
@@ -752,6 +789,7 @@ class RuntimeStateCommands:
         *,
         expected_status: ExecutionStatus,
         audit_events: Sequence[ExecutionEventAppend] = (),
+        producer_generation: int | None = None,
         background_tasks: "set[asyncio.Task[object]] | None" = None,
     ) -> ExecutionRecord:
         expected_events = tuple(audit_events) + (
@@ -764,7 +802,20 @@ class RuntimeStateCommands:
         target_sequence = commit.expected_event_seq + len(expected_events)
 
         async def operation() -> ExecutionRecord:
-            return await self._execution.request_cancel(commit, pending_events=audit_events)
+            if producer_generation is None:
+                return await self._execution.request_cancel(commit, pending_events=audit_events)
+
+            async def mutate(transaction: StateTransaction) -> ExecutionRecord:
+                await self._execution.require_open_history_head_in_transaction(
+                    transaction, commit.execution_id,
+                    expected_producer_generation=producer_generation,
+                )
+                return await self._execution.request_cancel_in_transaction(
+                    transaction, commit, expected_status=expected_status,
+                    pending_events=audit_events,
+                )
+
+            return await self._execution.state_store.mutate(mutate)
 
         async def readback() -> CommitObservation[ExecutionRecord]:
             try:
@@ -1024,6 +1075,8 @@ class RuntimeStateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         next_sequence = claim.expected_agent_run_seq + 1
+        producer_claim_id = uuid4().hex
+        producer_generation = claim.expected_execution_revision + 1
         next_agent_run_id = agent_run_id(
             namespace=self._namespace,
             tenant_id=self._tenant_id,
@@ -1067,6 +1120,10 @@ class RuntimeStateCommands:
                 expected_revision=claim.expected_execution_revision,
                 expected_agent_run_seq=claim.expected_agent_run_seq,
             )
+            await self._execution.admit_history_producer_in_transaction(
+                execution_transaction, updated_execution,
+                producer_claim_id=producer_claim_id,
+            )
             updated_recovery = replace(
                 current_recovery,
                 agent_run_id=next_agent_run_id,
@@ -1101,14 +1158,20 @@ class RuntimeStateCommands:
                 claim.execution_id,
                 tenant_id=self._tenant_id,
             )
+            head = await self._execution.get_history_head(claim.execution_id, tenant_id=self._tenant_id)
+            own_claim = (
+                head is not None
+                and head.producer_generation == producer_generation
+                and head.producer_claim_id == producer_claim_id
+            )
             execution_target = (
                 execution is not None
-                and execution.revision == claim.expected_execution_revision + 1
+                and execution.revision >= claim.expected_execution_revision + 1
                 and execution.agent_run_seq == next_sequence
             )
             recovery_target = (
                 recovery is not None
-                and recovery.revision == claim.expected_recovery_revision + 1
+                and recovery.revision >= claim.expected_recovery_revision + 1
                 and recovery.state is RecoveryCheckpointState.ACTIVE
                 and recovery.agent_run_id == next_agent_run_id
             )
@@ -1123,7 +1186,7 @@ class RuntimeStateCommands:
                 and recovery.state is claim.expected_recovery_state
                 and recovery.agent_run_id is None
             )
-            if execution_target and recovery_target:
+            if own_claim and execution_target and recovery_target:
                 _logger.warning(
                     "agent attempt commit outcome reconciled: execution=%s sequence=%s",
                     claim.execution_id,
@@ -1131,6 +1194,8 @@ class RuntimeStateCommands:
                 )
                 return execution, recovery
             if not (execution_predecessor and recovery_predecessor):
+                if not own_claim:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False) from error
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             return await stores[0].storage_group.mutate(stores, callback)
 
@@ -1160,7 +1225,7 @@ class RuntimeStateCommands:
         result_payload: StoredPayload | None = None,
         error_code: str | None = None,
         error_payload: StoredPayload | None = None,
-    ) -> ToolOperationRecord:
+    ) -> tuple[ToolOperationRecord, bool]:
         tools = self._tools
         if tools is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1182,12 +1247,18 @@ class RuntimeStateCommands:
             terminal_error_code = cast(str, error_code)
             terminal_error_payload = cast(StoredPayload, error_payload)
         stores = [tools.state_store]
+        if self._observe_cancellation:
+            stores.append(self._execution.state_store)
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         cancelled = False
+        cancellation_requested = False
 
         async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
+            nonlocal cancellation_requested
             transaction = group.transaction(tools.state_store)
             if result_payload is not None:
-                return await tools.complete_in_transaction(
+                record = await tools.complete_in_transaction(
                     transaction,
                     tool_operation_id,
                     tenant_id=tenant_id,
@@ -1195,17 +1266,29 @@ class RuntimeStateCommands:
                     fence=fence,
                     result_payload=result_payload,
                 )
-            return await tools.fail_in_transaction(
-                transaction,
-                tool_operation_id,
-                tenant_id=tenant_id,
-                owner=owner,
-                fence=fence,
-                error_code=terminal_error_code,
-                error_payload=terminal_error_payload,
-            )
+            else:
+                record = await tools.fail_in_transaction(
+                    transaction,
+                    tool_operation_id,
+                    tenant_id=tenant_id,
+                    owner=owner,
+                    fence=fence,
+                    error_code=terminal_error_code,
+                    error_payload=terminal_error_payload,
+                )
+            if self._observe_cancellation:
+                execution = await self._execution.get_in_transaction(
+                    group.transaction(self._execution.state_store), record.execution_id, tenant_id=tenant_id,
+                )
+                if execution is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                cancellation_requested = execution.status in {
+                    ExecutionStatus.CANCELLING, ExecutionStatus.CANCELLED,
+                }
+            return record
 
         async def readback() -> CommitObservation[ToolOperationRecord]:
+            nonlocal cancellation_requested
             observed = await tools.get_operation(
                 tool_operation_id,
                 tenant_id=tenant_id,
@@ -1232,6 +1315,16 @@ class RuntimeStateCommands:
                         DurableCommitState.NOT_COMMITTED,
                         error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
                     )
+                if self._observe_cancellation:
+                    execution = await self._execution.get(observed.execution_id, tenant_id=tenant_id)
+                    if execution is None:
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                        )
+                    cancellation_requested = execution.status in {
+                        ExecutionStatus.CANCELLING, ExecutionStatus.CANCELLED,
+                    }
                 return CommitObservation(
                     DurableCommitState.COMMITTED,
                     value=observed,
@@ -1264,7 +1357,7 @@ class RuntimeStateCommands:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if cancelled:
                     raise asyncio.CancelledError
-                return result.value
+                return result.value, cancellation_requested
             if result.state is DurableCommitState.NOT_COMMITTED:
                 if (
                     isinstance(result.error, AIError)
@@ -1360,8 +1453,20 @@ class RuntimeStateCommands:
                 request.tool_operation_id,
             )
             stores = [self._tools.state_store]
+            if request.producer_generation is not None:
+                stores.append(self._execution.state_store)
+                if not _same_group(stores):
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
             async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
+                if request.producer_generation is not None:
+                    execution_transaction = group.transaction(self._execution.state_store)
+                    await self._execution.require_open_history_head_in_transaction(
+                        execution_transaction,
+                        request.execution_id,
+                        expected_producer_generation=request.producer_generation,
+                        allow_cancelling=False,
+                    )
                 operation = await self._tools.admit_in_transaction(
                     group.transaction(self._tools.state_store),
                     request,
@@ -1402,6 +1507,23 @@ class RuntimeStateCommands:
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
+                if request.producer_generation is not None:
+                    head = await self._execution.get_history_head(
+                        request.execution_id, tenant_id=self._tenant_id,
+                    )
+                    execution = await self._execution.get(request.execution_id, tenant_id=self._tenant_id)
+                    if (
+                        head is None
+                        or head.state is not ExecutionHistoryState.OPEN
+                        or head.producer_generation != request.producer_generation
+                        or execution is None
+                        or execution.status not in {
+                            ExecutionStatus.STARTED,
+                            ExecutionStatus.CANCELLING,
+                            ExecutionStatus.FINALIZING,
+                        }
+                    ):
+                        raise AIError(ErrorCode.STORAGE_CONFLICT, retryable=False) from error
                 tools = self._tools
                 if tools is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
@@ -1427,6 +1549,51 @@ class RuntimeStateCommands:
                 # transaction so lease expiry and owner takeover semantics are
                 # never guessed from an out-of-transaction readback.
                 await asyncio.sleep(0)
+
+    async def commit_recovery_handoff(
+        self,
+        checkpoint: RecoveryCheckpoint,
+        *,
+        expected_revision: int,
+        producer_generation: int,
+    ) -> RecoveryCheckpoint:
+        """Publish a worker's terminal handoff while its producer fence is held."""
+        self._require_recovery()
+        if (
+            checkpoint.state is not RecoveryCheckpointState.HANDOFF
+            or checkpoint.handoff_phase is not RecoveryHandoffPhase.PREPARED
+            or checkpoint.terminal_handoff is None
+            or checkpoint.revision != expected_revision + 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        stores = _dedupe_stores((self._execution.state_store, self._recovery.state_store))
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+        async def operation() -> RecoveryCheckpoint:
+            async def mutate(group: StateGroupTransaction) -> RecoveryCheckpoint:
+                await self._execution.require_open_history_head_in_transaction(
+                    group.transaction(self._execution.state_store),
+                    checkpoint.execution_id,
+                    expected_producer_generation=producer_generation,
+                )
+                return await self._recovery.compare_and_swap_in_transaction(
+                    group.transaction(self._recovery.state_store),
+                    checkpoint.execution_id,
+                    tenant_id=self._tenant_id,
+                    expected_revision=expected_revision,
+                    next_record=checkpoint,
+                )
+            return await stores[0].storage_group.mutate(stores, mutate)
+
+        async def readback() -> CommitObservation[object]:
+            observed = await self._recovery.get(checkpoint.execution_id, tenant_id=self._tenant_id)
+            if observed == checkpoint:
+                return CommitObservation(DurableCommitState.COMMITTED)
+            return CommitObservation(DurableCommitState.NOT_COMMITTED)
+
+        await self._commit_or_raise(operation, readback)
+        return checkpoint
 
     async def commit_terminal_checkpoint(
         self,
@@ -1583,6 +1750,7 @@ class RuntimeStateCommands:
                 head, head_record = await self._execution.require_open_history_head_in_transaction(
                     execution_transaction,
                     commit.execution.execution_id,
+                    expected_producer_generation=commit.producer_generation,
                 )
                 effective_commit = await self._effective_terminal_commit(
                     execution_transaction,
@@ -1663,6 +1831,8 @@ class RuntimeStateCommands:
                                 events=projection.events,
                                 checkpoints=projection.checkpoints,
                                 interactions=projection.interactions,
+                                observation=projection.observation,
+                                producer_generation=projection.producer_generation,
                                 execution_id=commit.execution.execution_id,
                                 history_head_guard=(head, head_record),
                             )
@@ -1976,6 +2146,7 @@ class RuntimeStateCommands:
             head, head_record = await self._execution.require_open_history_head_in_transaction(
                 execution_transaction,
                 commit.execution.execution_id,
+                expected_producer_generation=commit.producer_generation,
             )
             effective_commit = await self._effective_terminal_commit(
                 execution_transaction, commit, expected_execution=expected_execution,
@@ -1992,6 +2163,8 @@ class RuntimeStateCommands:
                             events=projection.events,
                             checkpoints=projection.checkpoints,
                             interactions=projection.interactions,
+                            observation=projection.observation,
+                            producer_generation=projection.producer_generation,
                             execution_id=commit.execution.execution_id,
                             history_head_guard=(head, head_record),
                         )
@@ -2254,6 +2427,8 @@ class RuntimeStateCommands:
                 events=projection.events,
                 checkpoints=projection.checkpoints,
                 interactions=projection.interactions,
+                observation=projection.observation,
+                producer_generation=projection.producer_generation,
                 execution_id=execution_id,
             )
 

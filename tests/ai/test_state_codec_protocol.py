@@ -151,6 +151,7 @@ def test_checkpoint_frontier_always_writes_pending_request_index() -> None:
         datetime(2026, 9, 20, tzinfo=timezone.utc),
         "complete",
         "projection",
+        0,
         True,
     )
 
@@ -168,6 +169,7 @@ def test_checkpoint_frontier_preserves_pending_request_index() -> None:
         datetime(2026, 9, 20, tzinfo=timezone.utc),
         "complete",
         "projection",
+        0,
         True,
         3,
     )

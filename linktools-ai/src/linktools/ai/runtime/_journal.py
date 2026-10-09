@@ -16,6 +16,7 @@ from ._metric_id import _model_observation_id
 ModelRequestPurpose = Literal["agent", "compaction"]
 REQUEST_PURPOSE_METADATA_KEY = "linktools.ai.request_purpose"
 MESSAGE_SEQ_METADATA_KEY = "linktools.ai.message_seq"
+REPLAYED_TOOL_CALL_INDICES_METADATA_KEY = "linktools.ai.replayed_tool_call_indices"
 MODEL_REQUEST_SEQ_METADATA_KEY = "linktools.ai.model_request_seq"
 OUTPUT_RETRY_INDEX_METADATA_KEY = "linktools.ai.output_retry_index"
 OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"
@@ -192,4 +193,5 @@ __all__ = [
     "REQUEST_PURPOSE_METADATA_KEY",
     "MODEL_REQUEST_SEQ_METADATA_KEY",
     "MESSAGE_SEQ_METADATA_KEY",
+    "REPLAYED_TOOL_CALL_INDICES_METADATA_KEY",
 ]

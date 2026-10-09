@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from ...core import (
     ExecutionEventType,
@@ -68,6 +69,7 @@ class RuntimeRecoveryCommands:
         error_code: str,
         safe_error_details: Mapping[str, JsonValue],
         audit_events: Sequence[ExecutionEventAppend] = (),
+        producer_generation: int | None = None,
     ) -> ExecutionRecord:
         if execution.status not in {
             ExecutionStatus.STARTED,
@@ -85,16 +87,17 @@ class RuntimeRecoveryCommands:
             next_error_code=error_code,
             next_safe_error_details=safe_error_details,
             audit_events=audit_events,
+            producer_generation=producer_generation,
         )
 
     async def commit_resumed(self, execution: ExecutionRecord) -> ExecutionRecord:
-        if execution.status is not ExecutionStatus.RECOVERY_REQUIRED:
+        if execution.status not in {ExecutionStatus.RECOVERY_REQUIRED, ExecutionStatus.STARTED}:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return await self._commit_execution_transition(
             execution,
             next_status=ExecutionStatus.STARTED,
             event_type=ExecutionEventType.EXECUTION_RESUMED,
-            event_payload={},
+            event_payload={"producer_claim_id": uuid4().hex},
             next_error_code=None,
             next_safe_error_details={},
         )
@@ -310,6 +313,7 @@ class RuntimeRecoveryCommands:
         next_error_code: str | None,
         next_safe_error_details: Mapping[str, JsonValue],
         audit_events: Sequence[ExecutionEventAppend] = (),
+        producer_generation: int | None = None,
     ) -> ExecutionRecord:
         ordered_audit = tuple(audit_events)
         events = (*ordered_audit, ExecutionEventAppend(event_type, event_payload))
@@ -328,6 +332,11 @@ class RuntimeRecoveryCommands:
 
         async def operation() -> ExecutionRecord:
             async def mutate(transaction):
+                if producer_generation is not None:
+                    await self._execution.require_open_history_head_in_transaction(
+                        transaction, execution.execution_id,
+                        expected_producer_generation=producer_generation,
+                    )
                 stored = await transaction.get_record(key)
                 if stored is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -354,6 +363,11 @@ class RuntimeRecoveryCommands:
                     _projected_record(self._execution, stored, updated),
                     stored.storage_version,
                 )
+                if event_type is ExecutionEventType.EXECUTION_RESUMED:
+                    await self._execution.admit_history_producer_in_transaction(
+                        transaction, updated,
+                        producer_claim_id=event_payload["producer_claim_id"],
+                    )
                 await transaction.insert_facts(
                     tuple(
                         StoredFact(
@@ -409,6 +423,18 @@ class RuntimeRecoveryCommands:
                     and current.error_diagnostics is None
                     and prefix_matches
                 )
+                if target_matches and event_type is ExecutionEventType.EXECUTION_RESUMED:
+                    # Unrelated record updates preserve this admission, but a
+                    # later producer cannot be adopted by this caller.
+                    head = await self._execution.get_history_head(
+                        execution.execution_id, tenant_id=self._execution.tenant_id,
+                    )
+                    target_matches = head.producer_generation == target_revision
+                if target_matches and producer_generation is not None:
+                    head = await self._execution.get_history_head(
+                        execution.execution_id, tenant_id=self._execution.tenant_id,
+                    )
+                    target_matches = head is not None and head.producer_generation == producer_generation
                 if target_matches:
                     return CommitObservation(DurableCommitState.COMMITTED, value=current)
                 predecessor = current == execution and not page.items

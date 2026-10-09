@@ -42,7 +42,6 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import (
     AgentStreamEvent,
-    BaseToolCallPart,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
@@ -110,6 +109,7 @@ from ..workspace import (
 from ._budget import RunBudgetContext, RunBudgetCapability
 from ._capabilities import compose_platform_capabilities
 from ._agent_run_recorder import AgentRunRecorder
+from .state._steps import RuntimeAgentRunStore
 from ._compaction import CompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
@@ -141,7 +141,7 @@ from ._tool_return_codec import (
     tool_return_content_digest,
 )
 from .state._contracts import LoadedModelContext
-from .state._step_contracts import AgentRunStore
+from .state._step_contracts import AgentRunCheckpoint, AgentRunStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
@@ -193,6 +193,7 @@ class _AgentRunScope:
     run_store: AgentRunStore
     agent_run_id: str
     agent_run_seq: int
+    history_producer_generation: int | None = None
     initial_attachments: tuple[Mapping[str, JsonValue], ...] = ()
     history_id: str | None = None
     memory_store: MemoryStore | None = None
@@ -933,6 +934,27 @@ async def _materialize_agent(
             agent_id=compiled_agent.spec.id,
         )
     )
+    async def commit_history_boundary() -> None:
+        if isinstance(scope.run_store, RuntimeAgentRunStore):
+            await scope.run_store.flush_execution_projection(
+                scope.agent_run_id,
+                execution_id=scope.context.execution_id,
+                producer_generation=scope.history_producer_generation,
+                deferred=True,
+            )
+
+    async def save_checkpoint(checkpoint: AgentRunCheckpoint) -> None:
+        if isinstance(scope.run_store, RuntimeAgentRunStore):
+            await scope.run_store.save_checkpoint(
+                checkpoint,
+                execution_id=scope.context.execution_id,
+                producer_generation=scope.history_producer_generation,
+            )
+        else:
+            await scope.run_store.save_checkpoint(
+                checkpoint, execution_id=scope.context.execution_id,
+            )
+
     run_recorder = AgentRunRecorder(
         scope.run_store,
         execution_id=scope.context.execution_id,
@@ -940,6 +962,8 @@ async def _materialize_agent(
         initial_messages=scope.history,
         initial_context=scope.initial_context,
         initial_attachments=scope.initial_attachments,
+        history_boundary=commit_history_boundary,
+        checkpoint_sink=save_checkpoint,
     )
     if tool_metrics is not None:
         capabilities.append(ToolMetricsCapability(tool_metrics))
@@ -1069,7 +1093,7 @@ async def _materialize_agent(
     )
     capabilities.append(
         _event_stream_capability(
-            scope.event_sink, run_recorder, scope.agent_run_seq
+            scope.event_sink, run_recorder, scope.agent_run_seq, scope.tool_operations,
         )
     )
     return agent, tuple(capabilities)
@@ -1160,18 +1184,20 @@ def _event_stream_capability(
     sink: EventSink,
     recorder: AgentRunRecorder,
     agent_run_seq: int,
+    tool_operations: ToolOperationBridge | None = None,
 ) -> ProcessEventStream[AgentContext[object]]:
     async def forward(
         _ctx: PydanticRunContext[AgentContext[object]],
         events: AsyncIterable[AgentStreamEvent],
     ) -> None:
         async for event in events:
+            emission = _map_event(event)
             position: dict[str, JsonValue] = {"agent_run_seq": agent_run_seq}
-            if isinstance(event, PartStartEvent) and not isinstance(
-                event.part, (TextPart, ThinkingPart, BaseToolCallPart)
-            ):
-                recorder.stage_response_part(event.part, event.index)
-            if isinstance(event, PartEndEvent):
+            if isinstance(event, PartStartEvent):
+                recorder.stage_response_part(event.part, event.index, complete=False)
+            elif isinstance(event, PartDeltaEvent):
+                recorder.stage_response_delta(event.delta, event.index)
+            elif isinstance(event, PartEndEvent):
                 position["message_seq"] = recorder.stage_response_part(
                     event.part, event.index
                 )
@@ -1179,9 +1205,7 @@ def _event_stream_capability(
             elif isinstance(event, FunctionToolCallEvent):
                 await recorder.record_tool_start(event.part, _ctx.run_step)
             elif isinstance(event, FunctionToolResultEvent):
-                recorder.stage_tool_result(event.part)
                 await recorder.record_tool_result_boundary(event.part, _ctx.run_step)
-            emission = _map_event(event)
             if isinstance(emission, DurableBoundary):
                 emission = DurableBoundary(
                     emission.event_type, {**emission.payload, **position}
@@ -1195,6 +1219,9 @@ def _event_stream_capability(
                 )
                 continue
             await sink(emission)
+            if (isinstance(event, FunctionToolResultEvent) and tool_operations is not None
+                    and tool_operations.cancellation_requested):
+                _ctx.cancel()
 
     return ProcessEventStream(forward, id="linktools.ai.event-stream")
 
@@ -1292,12 +1319,16 @@ def _map_event(event: object) -> "AgentEmission | None":
         )
     if isinstance(event, FunctionToolCallEvent):
         part = event.part
+        try:
+            arguments = part.args_as_dict()
+        except (TypeError, ValueError):
+            arguments = part.args
         return DurableBoundary(
             ExecutionEventType.TOOL_CALL_STARTED,
             {
                 "call_id": part.tool_call_id,
                 "tool_name": part.tool_name,
-                "arguments_digest": canonical_sha256(part.args_as_dict()),
+                "arguments_digest": canonical_sha256(arguments),
             },
         )
     if isinstance(event, FunctionToolResultEvent):

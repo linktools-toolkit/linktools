@@ -983,7 +983,7 @@ class TaskGraphRun(Generic[AppT]):
             positions.setdefault(node_id, {})[execution_id] = cutoff
         unavailable_active = tuple(sorted(
             key for key, value in models.boundaries.items()
-            if not value.local_staging_available and captured[key][1].status not in {
+            if not (value.local_staging_available or value.durable_history_available) and captured[key][1].status not in {
                 ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
             }
         ))

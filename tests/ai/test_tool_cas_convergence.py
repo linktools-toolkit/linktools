@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from linktools.ai.core import ToolOperationStatus, canonical_sha256
+from linktools.ai.core import ExecutionStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
@@ -18,6 +18,17 @@ from linktools.ai.runtime.state._contracts import ToolOperationAdmission
 from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
 from linktools.ai.storage import FilesystemObjectStore, StoredPayload
 from sqlalchemy.ext.asyncio import create_async_engine
+
+
+class _CommandExecution:
+    def __init__(self, state_store):
+        self.state_store = state_store
+
+    async def get(self, execution_id, *, tenant_id):
+        return SimpleNamespace(status=ExecutionStatus.STARTED)
+
+    async def get_in_transaction(self, transaction, execution_id, *, tenant_id):
+        return await self.get(execution_id, tenant_id=tenant_id)
 
 
 def _record(
@@ -339,10 +350,12 @@ async def test_tool_terminal_command_retries_after_outer_transaction_exits() -> 
     tools = _CommandTools(_record())
     commands = object.__new__(RuntimeStateCommands)
     commands._tools = tools
+    commands._observe_cancellation = True
+    commands._execution = _CommandExecution(tools.state_store)
     commands._background_tasks = set()
     payload = StoredPayload.inline_bytes(b"result")
 
-    result = await commands.commit_tool_terminal(
+    result, cancellation_requested = await commands.commit_tool_terminal(
         "tool-operation",
         tenant_id="tenant",
         owner="tool-owner",
@@ -354,6 +367,7 @@ async def test_tool_terminal_command_retries_after_outer_transaction_exits() -> 
     assert tools.complete_calls == 1
     assert result.status is ToolOperationStatus.COMPLETED
     assert result.result_payload == payload
+    assert not cancellation_requested
 
 
 @pytest.mark.asyncio
@@ -361,6 +375,8 @@ async def test_tool_terminal_command_preserves_new_owner_after_conflict() -> Non
     tools = _CommandTools(_record(owner="new-owner", fence=2))
     commands = object.__new__(RuntimeStateCommands)
     commands._tools = tools
+    commands._observe_cancellation = True
+    commands._execution = _CommandExecution(tools.state_store)
     commands._background_tasks = set()
 
     with pytest.raises(AIError) as raised:

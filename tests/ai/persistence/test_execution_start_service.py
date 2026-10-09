@@ -141,6 +141,10 @@ class _Launcher:
         del execution_id
         return False
 
+    def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
+        del execution_id, tenant_id
+        return False
+
 
 def _request(
     prompt: str,
@@ -252,10 +256,11 @@ async def test_task_start_holds_immediate_terminal_execution_before_return() -> 
                 tenant_id=self._repository.tenant_id,
             )
 
-    async def release_terminal(execution_id: str, *, tenant_id: str) -> None:
+    async def release_terminal(execution_id: str, *, tenant_id: str) -> bool:
         del execution_id, tenant_id
         release_started.set()
         await release_finished.wait()
+        return True
 
     try:
         launcher = ImmediateTerminalLauncher(state.execution.executions)

@@ -591,10 +591,15 @@ async def test_session_start_cancel_before_worker_run_commits_cancelled_terminal
         request: Any,
         execution_record: Any,
         resume: Any,
+        *,
+        producer_generation: int | None = None,
     ) -> None:
         worker_entered.set()
         await release_worker.wait()
-        await original_run(backend, request, execution_record, resume)
+        await original_run(
+            backend, request, execution_record, resume,
+            producer_generation=producer_generation,
+        )
 
     monkeypatch.setattr(LocalExecutionBackend, "_run", pause_worker)
     try:
@@ -2538,27 +2543,32 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
 async def test_tool_effect_waits_for_durable_response_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original = StateStepArchive.materialize_checkpoint
+    from linktools.ai.runtime.state._step_archive import PreparedAgentRunCheckpoint
+    from linktools.ai.runtime.state._store import StateTransaction
+
+    original = StateStepArchive.materialize_checkpoint_in_transaction
     calls: list[str] = []
     rejected = False
 
     async def reject_response(
         self: StateStepArchive,
+        transaction: StateTransaction,
         run: AgentRunRecord,
-        checkpoint: AgentRunCheckpoint,
+        checkpoint: PreparedAgentRunCheckpoint,
         **kwargs: Any,
     ) -> None:
         nonlocal rejected
-        if self.runtime_domain is RuntimeDomain.RECOVERY and any(
-            isinstance(message, ModelResponse)
-            and any(isinstance(part, ToolCallPart) for part in message.parts)
-            for message in checkpoint.messages
-        ):
-            rejected = True
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-        return await original(self, run, checkpoint, **kwargs)
+        if self.runtime_domain is RuntimeDomain.RECOVERY:
+            messages = [message for chunk in checkpoint.chunks
+                        for message in await self.transcript_repository._decode_chunk_messages(chunk)]
+            if any(isinstance(message, ModelResponse)
+                   and any(isinstance(part, ToolCallPart) for part in message.parts)
+                   for message in messages):
+                rejected = True
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+        return await original(self, transaction, run, checkpoint, **kwargs)
 
-    monkeypatch.setattr(StateStepArchive, "materialize_checkpoint", reject_response)
+    monkeypatch.setattr(StateStepArchive, "materialize_checkpoint_in_transaction", reject_response)
     with pytest.raises(AIError) as raised:
         async with Runtime.open(
             "pre-effect-checkpoint",

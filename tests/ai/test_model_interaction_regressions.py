@@ -28,12 +28,8 @@ from linktools.ai.runtime._model_interaction import (
 )
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
 from linktools.ai.runtime.state._contracts import TranscriptSpanRef
-from linktools.ai.runtime.state._model_interaction_runtime import (
-    ModelInteractionRuntimeAgentRunStore,
-)
 from linktools.ai.runtime.state._model_interaction_store import (
     ModelInteractionInMemoryStepArchive,
-    ModelInteractionStagingAgentRunStore,
 )
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import (
@@ -101,7 +97,7 @@ def test_public_projection_summarizes_real_binary_without_mutation(
 async def test_base_run_store_applies_interaction_page_contract(
     enhanced: bool,
 ) -> None:
-    store = ModelInteractionStagingAgentRunStore() if enhanced else StagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     try:
         await store.register_agent_run(AgentRunRecord("run"))
@@ -124,8 +120,7 @@ async def test_base_run_store_applies_interaction_page_contract(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enhanced", (False, True))
 async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
-    store_type = ModelInteractionRuntimeAgentRunStore if enhanced else RuntimeAgentRunStore
-    store = store_type(
+    store = RuntimeAgentRunStore(
         StagingAgentRunStore(),
         conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
         execution_archive=None,
@@ -150,7 +145,7 @@ async def test_runtime_run_store_pages_plain_staging(enhanced: bool) -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_run_store_continues_recovery_interaction_high_water() -> None:
-    staging = ModelInteractionStagingAgentRunStore()
+    staging = StagingAgentRunStore()
     recovery = ModelInteractionInMemoryStepArchive(RuntimeDomain.RECOVERY)
     store = RuntimeAgentRunStore(
         staging,
@@ -317,7 +312,7 @@ def test_ambiguous_duplicate_projection_does_not_guess_occurrence() -> None:
 
 @pytest.mark.asyncio
 async def test_interaction_replay_preserves_nonzero_sequence_origin() -> None:
-    store = ModelInteractionStagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     try:
         values = tuple(_interaction(sequence) for sequence in (5, 6, 7))
@@ -338,8 +333,8 @@ async def test_interaction_replay_preserves_nonzero_sequence_origin() -> None:
 
 
 @pytest.mark.asyncio
-async def test_interaction_capture_respects_durable_high_water() -> None:
-    store = ModelInteractionStagingAgentRunStore()
+async def test_interaction_capture_excludes_acknowledged_identities() -> None:
+    store = StagingAgentRunStore()
     await store.initialize()
     try:
         await store.register_agent_run(AgentRunRecord("run"))
@@ -347,6 +342,7 @@ async def test_interaction_capture_respects_durable_high_water() -> None:
         for value in values:
             store.stage_model_interaction(value)
 
+        store.acknowledge_interactions_local("run", values[:1])
         captured = store.capture_projection_local(
             "run",
             _ProjectionOffset(interactions=5),

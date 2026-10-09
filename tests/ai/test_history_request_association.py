@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 
 import pytest
 from pydantic_ai import Agent, ModelRequestNode, RunContext
@@ -91,7 +92,7 @@ async def _history(run_count: int = 1) -> AsyncIterator[_History]:
             namespace="history",
             executions=state.execution.executions,
             store=state.run_store.read_store(RuntimeDomain.EXECUTION),
-            staging_store=state.run_store,
+            notifications=state.run_store,
             cursor_signer=HmacCursorSigner("history", b"history-key"),
         )
         recorders = []
@@ -103,7 +104,8 @@ async def _history(run_count: int = 1) -> AsyncIterator[_History]:
                 agent_run_seq=sequence,
             )
             recorder = AgentRunRecorder(
-                state.run_store, execution_id="execution", agent_run_id=run_id
+                state.run_store, execution_id="execution", agent_run_id=run_id,
+                history_boundary=partial(state.run_store.flush_execution_projection, run_id, execution_id="execution"),
             )
             record = AgentRunRecord(
                 run_id,
@@ -148,6 +150,7 @@ async def test_history_response_and_tool_result_keep_origin_after_archive() -> N
         recorder.append_transcript_message(ModelRequest(parts=[
             result, RetryPromptPart("validate the output"),
         ]))
+        await recorder.commit_history_boundary()
         live = await history.reader.history(
             "execution", tenant_id="tenant", cursor=None, limit=100
         )
@@ -228,16 +231,19 @@ async def test_history_same_step_requests_use_actual_response_slots(
 
 
 @pytest.mark.asyncio
-async def test_history_cursor_does_not_gain_later_response_association_after_archive() -> None:
+async def test_history_cursor_does_not_gain_unfinished_response_after_completion() -> None:
     async with _history() as history:
         recorder, = history.recorders
         journal, = history.journals
-        recorder.append_transcript_message(ModelRequest(parts=[UserPromptPart("question")]))
+        recorder.append_transcript_message(ModelRequest(parts=[
+            SystemPromptPart("instructions"), UserPromptPart("question"),
+        ]))
         fact = journal.begin(2)
         await recorder.record_model_event(fact, phase="started", include_observation=False)
         parts = [ThinkingPart("reason"), TextPart("answer")]
         for index, part in enumerate(parts):
             recorder.stage_response_part(part, index)
+        await recorder.commit_history_boundary()
         before = await history.reader.history(
             "execution", tenant_id="tenant", cursor=None, limit=1,
         )
@@ -245,7 +251,7 @@ async def test_history_cursor_does_not_gain_later_response_association_after_arc
         partial = await history.reader.history(
             "execution", tenant_id="tenant", cursor=before.next_cursor, limit=100,
         )
-        assert [item.content for item in partial.items] == ["reason", "answer"]
+        assert [item.content for item in partial.items] == ["question"]
         assert all(item.model_request_seq is None and item.step_index is None for item in partial.items)
         await recorder.record_model_event(
             journal.finish(fact.model_request_seq, status="SUCCEEDED"),
@@ -320,6 +326,8 @@ async def test_history_deferred_result_restores_same_run_request_after_recovery(
         )
         recovered = AgentRunRecorder(
             history.state.run_store, execution_id="execution", agent_run_id=recorder.agent_run_id,
+            history_boundary=partial(history.state.run_store.flush_execution_projection,
+                                     recorder.agent_run_id, execution_id="execution"),
         )
         await recovered.register_agent_run(history.records[0])
         result = ToolReturnPart("echo", "resumed result", tool_call_id="deferred-call")
@@ -418,9 +426,7 @@ async def test_sdk_after_node_boundary_retains_one_actual_raw_response(
 
 
 @pytest.mark.asyncio
-async def test_same_run_recovery_rejects_response_fact_ahead_of_raw_checkpoint() -> None:
-    from linktools.ai.errors import AIError, ErrorCode
-
+async def test_same_run_recovery_restores_committed_response_ahead_of_checkpoint() -> None:
     async with _history() as history:
         recorder, = history.recorders
         journal, = history.journals
@@ -443,6 +449,33 @@ async def test_same_run_recovery_rejects_response_fact_ahead_of_raw_checkpoint()
         )
         recovered = AgentRunRecorder(
             history.state.run_store, execution_id="execution", agent_run_id=recorder.agent_run_id,
+            history_boundary=partial(history.state.run_store.flush_execution_projection,
+                                     recorder.agent_run_id, execution_id="execution"),
+        )
+        await recovered.register_agent_run(history.records[0])
+        assert len(recovered.transcript_messages()) == 2
+        assert recovered.transcript_messages()[1].parts[0].content == "answer"
+
+
+@pytest.mark.asyncio
+async def test_same_run_recovery_rejects_response_fact_without_committed_body() -> None:
+    from linktools.ai.errors import AIError, ErrorCode
+
+    async with _history() as history:
+        recorder, = history.recorders
+        recorder.append_transcript_message(ModelRequest(parts=[UserPromptPart("question")]))
+        await recorder.commit_history_boundary()
+        await recorder.record_event("MODEL_REQUEST_SUCCEEDED", 1, metadata={
+            "linktools.ai.model_request_seq": "1", "linktools.ai.message_seq": "2",
+        })
+        await recorder.commit_history_boundary()
+        await history.state.run_store.release_staging_many(
+            candidate_agent_run_ids=(recorder.agent_run_id,), execution_id="execution",
+        )
+        recovered = AgentRunRecorder(
+            history.state.run_store, execution_id="execution", agent_run_id=recorder.agent_run_id,
+            history_boundary=partial(history.state.run_store.flush_execution_projection,
+                                     recorder.agent_run_id, execution_id="execution"),
         )
         with pytest.raises(AIError) as error:
             await recovered.register_agent_run(history.records[0])

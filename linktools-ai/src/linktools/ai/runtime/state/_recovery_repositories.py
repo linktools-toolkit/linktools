@@ -746,14 +746,20 @@ class ToolRepositoryImpl(_RepositoryBase):
         return bool(records)
 
     async def existing_call_ids(
+        self, agent_run_id: str, tool_call_ids: Sequence[str], *, tenant_id: str,
+    ) -> frozenset[str]:
+        values = await self.get_by_call_ids(agent_run_id, tool_call_ids, tenant_id=tenant_id)
+        return frozenset(value.tool_call_id for value in values)
+
+    async def get_by_call_ids(
         self,
         agent_run_id: str,
         tool_call_ids: Sequence[str],
         *,
         tenant_id: str,
-    ) -> frozenset[str]:
+    ) -> tuple[ToolOperationRecord, ...]:
         if tenant_id != self._tenant_id:
-            return frozenset()
+            return ()
         if not isinstance(agent_run_id, str) or not agent_run_id:
             raise ValueError("agent_run_id must be a non-empty string")
         if not isinstance(tool_call_ids, Sequence) or isinstance(
@@ -764,7 +770,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         if any(not isinstance(value, str) or not value for value in ordered):
             raise ValueError("tool_call_ids must contain non-empty strings")
         if not ordered:
-            return frozenset()
+            return ()
         aliases = tuple(
             alias_digest(
                 self._namespace,
@@ -776,14 +782,14 @@ class ToolRepositoryImpl(_RepositoryBase):
             for tool_call_id in ordered
         )
 
-        async def read(transaction: StateTransaction) -> frozenset[str]:
+        async def read(transaction: StateTransaction) -> tuple[ToolOperationRecord, ...]:
             resolved = await transaction.resolve_aliases(aliases)
             record_keys = tuple(
                 dict.fromkeys(key for key in resolved.values() if key is not None)
             )
             records = await transaction.get_records(record_keys) if record_keys else {}
             decoded: dict[bytes, ToolOperationRecord] = {}
-            present: set[str] = set()
+            present: list[ToolOperationRecord] = []
             for tool_call_id, alias in zip(ordered, aliases, strict=True):
                 key = resolved.get(alias)
                 if key is None:
@@ -795,10 +801,10 @@ class ToolRepositoryImpl(_RepositoryBase):
                 if value is None:
                     value = await self._decode(stored, ToolOperationRecord)
                     decoded[key] = value
-                if value.tool_call_id != tool_call_id:
+                if value.tool_call_id != tool_call_id or value.agent_run_id != agent_run_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                present.add(tool_call_id)
-            return frozenset(present)
+                present.append(value)
+            return tuple(present)
 
         return await self._store.read(read)
 

@@ -379,7 +379,7 @@ class ModelInteractionItem:
             or self.depth < 0
             or self.model_request_seq < 1
             or self.step_index < 0
-            or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}
+            or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}
             or self.duration_ns is not None and self.duration_ns < 0
         ):
             raise ValueError("model interaction item is invalid")
@@ -387,7 +387,7 @@ class ModelInteractionItem:
             raise TypeError("model interaction content flag must be bool")
         if not self.content_included and (self.request or self.response is not None):
             raise ValueError("omitted model interaction content must be empty")
-        if self.status == "RUNNING" and (
+        if self.status in {"RUNNING", "INTERRUPTED"} and (
             self.started_at is None
             or self.response is not None
             or self.finished_at is not None
@@ -395,7 +395,7 @@ class ModelInteractionItem:
             or self.usage is not None
             or self.error_code is not None
         ):
-            raise ValueError("running model interaction has terminal data")
+            raise ValueError("unfinished model interaction has terminal data")
         object.__setattr__(self, "model", deepcopy(dict(self.model)))
         object.__setattr__(self, "request", deepcopy(dict(self.request)))
         object.__setattr__(self, "response", deepcopy(self.response))
@@ -488,6 +488,8 @@ class UsageReadCutoff:
 
 @dataclass(frozen=True, slots=True)
 class ModelInteractionReadBoundary:
+    """Captured admitted identities; durable availability covers active runs too."""
+
     cutoffs: tuple[UsageReadCutoff, ...]
     durable_cutoffs: tuple[UsageReadCutoff, ...]
     local_staging_available: bool
@@ -520,6 +522,8 @@ class UsageSummary:
     unrecorded_executions: int = 0
     cutoffs: "tuple[UsageReadCutoff, ...]" = ()
     unknown_duration_requests: int = 0
+    running_requests: int = 0
+    interrupted_requests: int = 0
 
     def __post_init__(self) -> None:
         counts = (
@@ -527,6 +531,8 @@ class UsageSummary:
             self.succeeded_requests,
             self.failed_requests,
             self.cancelled_requests,
+            self.running_requests,
+            self.interrupted_requests,
             self.output_correction_retries,
             self.input_tokens,
             self.output_tokens,
@@ -548,6 +554,8 @@ class UsageSummary:
             self.succeeded_requests
             + self.failed_requests
             + self.cancelled_requests
+            + self.running_requests
+            + self.interrupted_requests
             != self.logical_requests
             or self.output_correction_retries > self.logical_requests
             or self.unknown_usage_requests > self.logical_requests

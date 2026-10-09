@@ -521,6 +521,7 @@ class StateTransaction(Protocol):
         lease_expires_at: datetime | None,
     ) -> bool: ...
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool: ...
+    async def delete_records(self, keys: Sequence[bytes]) -> None: ...
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]: ...
     async def scan_records(self) -> tuple[StoredRecord, ...]: ...
     async def scan_records_page(
@@ -724,6 +725,10 @@ class _ReadOnlyStateTransaction(StateTransaction):
         del key, expected_storage_version
         self._reject("delete_record")
         return False
+
+    async def delete_records(self, keys: Sequence[bytes]) -> None:
+        del keys
+        self._reject("delete_records")
 
     async def insert_alias(self, alias: StoredAlias) -> None:
         del alias

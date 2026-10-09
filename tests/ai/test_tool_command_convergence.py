@@ -5,14 +5,26 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
-from linktools.ai.core import ToolOperationStatus, canonical_sha256
+from linktools.ai.core import ExecutionStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
 from linktools.ai.runtime.state._contracts import ToolOperationAdmission
 from linktools.ai.storage import StoredPayload
+
+
+class _CommandExecution:
+    def __init__(self, state_store):
+        self.state_store = state_store
+
+    async def get(self, execution_id, *, tenant_id):
+        return SimpleNamespace(status=ExecutionStatus.STARTED)
+
+    async def get_in_transaction(self, transaction, execution_id, *, tenant_id):
+        return await self.get(execution_id, tenant_id=tenant_id)
 
 
 def _record(
@@ -116,6 +128,8 @@ async def test_tool_admission_conflict_reenters_fresh_repository_attempt() -> No
     tools = _AdmissionTools(current)
     commands = object.__new__(RuntimeStateCommands)
     commands._tools = tools
+    commands._observe_cancellation = True
+    commands._execution = _CommandExecution(tools.state_store)
 
     result = await commands.commit_tool_admission(_admission())
 
@@ -199,6 +213,8 @@ async def test_tool_terminal_cancellation_finishes_durable_retry_before_propagat
     tools = _TerminalTools()
     commands = object.__new__(RuntimeStateCommands)
     commands._tools = tools
+    commands._observe_cancellation = True
+    commands._execution = _CommandExecution(tools.state_store)
     commands._background_tasks = set()
     payload = StoredPayload.inline_bytes(b"result")
 
@@ -228,6 +244,8 @@ async def test_tool_terminal_command_rejects_mixed_success_and_failure() -> None
     tools = _TerminalTools()
     commands = object.__new__(RuntimeStateCommands)
     commands._tools = tools
+    commands._observe_cancellation = True
+    commands._execution = _CommandExecution(tools.state_store)
     commands._background_tasks = set()
     payload = StoredPayload.inline_bytes(b"result")
 
@@ -251,6 +269,8 @@ async def test_tool_terminal_command_rejects_malformed_failure_payload() -> None
     tools = _TerminalTools()
     commands = object.__new__(RuntimeStateCommands)
     commands._tools = tools
+    commands._observe_cancellation = True
+    commands._execution = _CommandExecution(tools.state_store)
     commands._background_tasks = set()
 
     with pytest.raises(AIError) as raised:
@@ -265,3 +285,47 @@ async def test_tool_terminal_command_rejects_malformed_failure_payload() -> None
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert tools.group.attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_superseded_history_producer_cannot_admit_a_tool_but_owned_effect_can_settle() -> None:
+    from linktools.ai.core import ExecutionStatus
+    from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+    from .test_execution_recovery_commands import _commands, _execution
+
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="tool-producer-fence", tenant_id="tenant")
+    try:
+        execution = replace(_execution(datetime.now(timezone.utc)), revision=1)
+        repository = state.execution.executions
+        await repository.create_with_history_head(execution)
+        await repository.state_store.mutate(
+            lambda transaction: repository.admit_history_producer_in_transaction(transaction, execution)
+        )
+        resumed = await _commands(state).commit_resumed(execution)
+        commands = RuntimeStateCommands(
+            repository, namespace="tool-producer-fence", events=state.execution.events,
+            tools=state.recovery.tools, background_tasks=set(),
+        )
+        stale = replace(_admission(), producer_generation=execution.revision)
+        assert decode_domain(encode_domain(stale), ToolOperationAdmission) == stale
+        with pytest.raises(AIError) as caught:
+            await asyncio.wait_for(commands.commit_tool_admission(stale), 2)
+        assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+        assert caught.value.retryable is False
+        assert await state.recovery.tools.get_operation(stale.tool_operation_id, tenant_id="tenant") is None
+        admitted = await commands.commit_tool_admission(
+            replace(stale, producer_generation=resumed.revision)
+        )
+        assert admitted.status is ToolOperationStatus.CLAIMED
+        successor = await _commands(state).commit_resumed(resumed)
+        assert successor.status is ExecutionStatus.STARTED
+        settled, cancellation_requested = await commands.commit_tool_terminal(
+            admitted.tool_operation_id, tenant_id="tenant", owner=admitted.owner,
+            fence=admitted.fence, result_payload=StoredPayload.inline_bytes(b"result"),
+        )
+        assert settled.status is ToolOperationStatus.COMPLETED
+        assert not cancellation_requested
+    finally:
+        await state.close()

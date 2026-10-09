@@ -162,7 +162,7 @@ async def _enter_waiting(
     execution = _execution(now)
     checkpoint = _checkpoint(now)
     continuation = _continuation()
-    await state.execution.executions.create(execution)
+    await state.execution.executions.create_with_history_head(execution)
     await state.recovery.checkpoints.create(checkpoint)
     commands = _commands(state, namespace)
     await commands.commit_deferred_checkpoint(
