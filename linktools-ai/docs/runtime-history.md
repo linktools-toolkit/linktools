@@ -284,3 +284,29 @@ Continuation reads current values, including newly added facts after its last
 identity; facts added before it require a fresh query. New requests above the
 captured high-water marks remain excluded. A cursor contains one identity and
 one cutoff per captured agent run, never attachment bodies or a fact snapshot.
+
+## Model context compaction
+
+Runtime derives a best-effort compaction target from the current SDK model's
+`context_window`, including its profile override and SDK registry lookup. It
+subtracts an explicitly configured `max_tokens`, merging request settings over
+model defaults. An explicit smaller context target still wins. Unknown windows
+remain unknown; without an explicit target, Runtime only deduplicates eligible
+file reads. It does not invent a model table or an output-token allowance when
+the provider's default is unknown.
+
+The trigger uses Harness's provider-usage anchor and text estimator. The current
+history, system/instruction text, visible function/output tool schemas and
+structured output schema provide an additional estimate floor, without charging
+those schemas again on top of a usage anchor that already covers them. Standard
+SDK dynamic instructions and tool preparation run before this projection. Raw
+history remains unchanged; model interactions record the prepared provider view.
+
+These are compaction estimates, not exact token limits or a guarantee that every
+request fits. Binary inputs retain their separate byte/count limits; their token
+cost, native-tool/provider serialization overhead and unknown output defaults
+remain provider-specific. Irreducible prompts and preserved recent messages may
+still exceed the target, and the summary request itself must fit the selected
+model. Custom capabilities that enlarge input after the compaction hook remain
+responsible for that late change. Runtime neither rejects a request solely from
+this heuristic nor adds a token-counting network request on every model call.
