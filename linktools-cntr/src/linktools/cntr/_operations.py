@@ -142,10 +142,12 @@ class ComposeOperations:
                     services.add(dependency)
             if before == (required, services, roots):
                 break
-        ordered = tuple(self.manager.resolver.resolve_dependencies(required))
+        ordered = tuple(container for container in selection.project_containers if container in required)
         selected_services = tuple(name for container in ordered for name in container.services if name in services)
         bootstrap = {name for container in ordered for name in container.bootstrap_services if name in services}
-        ordered_services = order_services(selection.project_containers, selected_services, model, bootstrap)
+        ordered_services = order_services(
+            selection.project_containers, selected_services, model, bootstrap,
+            dependency_roots={container.name for container in roots})
         if not ordered_services:
             names = ", ".join(c.name for c in selection.target_containers)
             raise ContainerError(f"No runnable service for {names}")
@@ -350,7 +352,10 @@ class ComposeOperations:
                         final_candidate.bootstrap_fallback = True
 
             owners = {service: container for container in sync for service in container.services}
-            services = order_services(sync, selection.services, context.compose_model, bootstrap_available)
+            native_scope = self.start_selection(explicit, context.compose_model)
+            services = order_services(
+                sync, selection.services, context.compose_model, bootstrap_available,
+                dependency_roots={container.name for container in native_scope.target_containers})
             for service in services:
                 container = owners[service]
                 candidate = candidates.get(container.name)
