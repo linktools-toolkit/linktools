@@ -217,11 +217,12 @@ location / {
 
 `proxy_headers` and `grpc_headers` share one default header definition and emit
 complete same-level sets. On shared hostnames with different authentication
-requirements, each native location must explicitly call
-`route_authorization()` (also from `nginx/headers.j2`) before its header
-macro. The authorization macro enables that route's declared authentication,
-or turns it off for an unauthenticated route. A missing declaration inherits
-the server's deny-by-default check, rather than exposing an unprotected proxy.
+requirements, use `route_authorization()` (also from `nginx/headers.j2`)
+inside each native location, or write equivalent native nginx directives.
+The authorization macro enables that route's declared authentication, or turns
+it off for an unauthenticated route. A location without an explicit override
+inherits the server's deny-by-default check. Native nginx validates directive
+syntax; generated text is not searched for a particular directive spelling.
 Explicit native `auth_request off` continues to override inherited protection
 for intentional login endpoints; do not call `route_authorization()` there.
 Override names are case-insensitive; values are native
