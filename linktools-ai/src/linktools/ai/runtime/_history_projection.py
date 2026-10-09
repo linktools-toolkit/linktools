@@ -11,6 +11,7 @@ from typing import Protocol, cast, runtime_checkable
 
 from linktools.core import environ
 from pydantic_ai.messages import (
+    SYNTHESIZED_TOOL_RETURN_METADATA_KEY,
     ModelRequest,
     ModelResponse,
     ToolReturnPart,
@@ -66,7 +67,13 @@ from .state._contracts import (
     SessionRepository,
     ToolOperationRecord,
 )
-from .state._step_contracts import AgentRunHistoryCapture, AgentRunRecord, StepEvent, AgentRunStore
+from .state._step_contracts import (
+    TOOL_ERROR_CODE_METADATA_KEY,
+    AgentRunHistoryCapture,
+    AgentRunRecord,
+    StepEvent,
+    AgentRunStore,
+)
 from .state._views import (
     SESSION_HISTORY_VIEW_V1,
     project_execution_transcript_message,
@@ -88,6 +95,7 @@ class _ProjectedHistoryItem:
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
     part_index: int | None = None
+    interrupted_tool_placeholder: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1063,6 +1071,7 @@ class StepExecutionHistoryReader:
         ],
     ]:
         values: dict[str, list[object | None]] = {}
+        requests: dict[str, int] = {}
         for event in events:
             if event.event_type not in {
                 "TOOL_CALL_STARTED",
@@ -1073,13 +1082,21 @@ class StepExecutionHistoryReader:
             call_id = event.tool_call_id
             if call_id is None or not call_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            value = values.setdefault(call_id, [None, None, None, "STARTED", None, None])
             model_request_seq = _event_model_request_seq(event)
             if model_request_seq is not None:
-                if value[4] is not None and value[4] != model_request_seq:
+                if call_id in requests and requests[call_id] != model_request_seq:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                value[4] = model_request_seq
+                requests[call_id] = model_request_seq
             timestamp = _event_timestamp(event)
+            raw_duration = event.metadata.get(DURATION_NS_METADATA_KEY)
+            if raw_duration is not None and not raw_duration.isdigit():
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (event.event_type == "TOOL_CALL_FAILED"
+                    and event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value):
+                continue
+            value = values.setdefault(call_id, [None, None, None, "STARTED", None, None])
+            if model_request_seq is not None:
+                value[4] = model_request_seq
             if event.event_type == "TOOL_CALL_STARTED":
                 if value[0] is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1088,10 +1105,7 @@ class StepExecutionHistoryReader:
             if value[1] is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             value[1] = timestamp
-            raw_duration = event.metadata.get(DURATION_NS_METADATA_KEY)
             if raw_duration is not None:
-                if not raw_duration.isdigit():
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 value[2] = int(raw_duration)
             value[3] = "SUCCEEDED" if event.event_type == "TOOL_CALL_SUCCEEDED" else "FAILED"
 
@@ -1345,6 +1359,8 @@ class StepExecutionHistoryReader:
                     ExecutionStatus.CANCELLED,
                 }:
                     status = source.record.status.value
+                if value.interrupted_tool_placeholder:
+                    status = "INTERRUPTED"
                 yield _HistoryOccurrence(
                     ExecutionHistoryItem(
                         execution_id=source.record.execution_id,
@@ -1845,6 +1861,9 @@ def _trace_item(
     if value is None:
         return None
     kind, status = value
+    tool_error_code = event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY)
+    if event.event_type == "TOOL_CALL_FAILED" and tool_error_code == ErrorCode.TOOL_EFFECT_UNKNOWN.value:
+        status = "EFFECT_UNKNOWN"
     payload = {
         "kind": kind,
         "status": status,
@@ -1854,6 +1873,8 @@ def _trace_item(
         "depth": depth,
         "occurred_at": _event_timestamp(event).isoformat(),
     }
+    if event.event_type == "TOOL_CALL_FAILED" and tool_error_code is not None:
+        payload["error_code"] = tool_error_code
     observation_id = event.metadata.get(OBSERVATION_ID_METADATA_KEY)
     if observation_id is not None:
         payload["observation_id"] = observation_id
@@ -2747,14 +2768,22 @@ def _history_parts(
 def _project_message(message: object) -> tuple[_ProjectedHistoryItem, ...]:
     if not isinstance(message, (ModelRequest, ModelResponse)):
         return ()
+    parts = tuple(message.parts)
+    if isinstance(message, ModelRequest) and message.instructions is not None:
+        parts = (None, *parts)
     return tuple(
         _ProjectedHistoryItem(
             item.item_kind,
             item.content,
             item.tool_name,
             item.tool_call_id,
+            interrupted_tool_placeholder=(
+                isinstance(part, ToolReturnPart) and part.outcome == "interrupted"
+                and isinstance(part.metadata, Mapping)
+                and part.metadata.get(SYNTHESIZED_TOOL_RETURN_METADATA_KEY) is True
+            ),
         )
-        for item in project_session_history_message(message)
+        for item, part in zip(project_session_history_message(message), parts, strict=True)
     )
 
 

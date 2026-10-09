@@ -56,7 +56,7 @@ from ._repository_common import (
     record_state,
     restore_lease_fields,
 )
-from ._step_contracts import AgentRunRecord, StepEvent
+from ._step_contracts import TOOL_ERROR_CODE_METADATA_KEY, AgentRunRecord, StepEvent
 from ._store import (
     StoredAlias,
     StoredFact,
@@ -437,7 +437,10 @@ def _history_association_records(
             locators.append((f"request:{event.event_type}", request))
         if event.event_type == "MODEL_REQUEST_SUCCEEDED" and message is not None:
             locators.append(("response", message))
-        if event.event_type in {"TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"} and event.tool_call_id is not None:
+        if (event.event_type in {"TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"}
+                and event.tool_call_id is not None
+                and not (event.event_type == "TOOL_CALL_FAILED"
+                         and event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value)):
             locators.append((event.event_type, event.tool_call_id))
         for family, identity in locators:
             key = record_key_digest(

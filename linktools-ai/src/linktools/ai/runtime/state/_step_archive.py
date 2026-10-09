@@ -58,6 +58,7 @@ from ._history import (
 )
 from ._plan import RuntimeDomain
 from ._step_contracts import (
+    TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunCheckpoint,
     AgentRunHistoryCapture,
     AgentRunRecord,
@@ -2886,7 +2887,9 @@ class StateStepArchive(AgentRunStore):
             if event.event_type == "MODEL_REQUEST_SUCCEEDED" and message is not None:
                 locators.append(("response", message))
             if (event.event_type in {"TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"}
-                    and event.tool_call_id is not None):
+                    and event.tool_call_id is not None
+                    and not (event.event_type == "TOOL_CALL_FAILED"
+                             and event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value)):
                 locators.append((event.event_type, event.tool_call_id))
             for family, identity in locators:
                 key = self._history_association_key(run.agent_run_id, family, identity)

@@ -53,6 +53,8 @@ from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateTable
 
+from .test_execution_recovery_commands import _execution
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -366,6 +368,9 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
     )
     await state.initialize(namespace="parallel-tools", tenant_id="tenant")
     try:
+        await state.execution.executions.create_with_history_head(
+            _execution(datetime.now(timezone.utc)),
+        )
         agent_run_id = "run"
         await state.run_store.register_agent_run(_tool_run(agent_run_id))
         background_tasks: set[asyncio.Task[object]] = set()

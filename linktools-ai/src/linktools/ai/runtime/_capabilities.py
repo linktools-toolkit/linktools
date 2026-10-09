@@ -45,6 +45,7 @@ from ._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY, 
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
+    TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunCheckpoint,
     AgentRunRecord,
     CheckpointState,
@@ -296,6 +297,8 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
+        if isinstance(error, AIError):
+            metadata[TOOL_ERROR_CODE_METADATA_KEY] = error.code.value
         async def record_failure() -> None:
             await self.recorder.record_event(
                 "TOOL_CALL_FAILED",

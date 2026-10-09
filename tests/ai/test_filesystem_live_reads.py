@@ -241,10 +241,10 @@ async def test_live_read_open_and_refresh_never_scan_all_business_records(
     reader = _store(root, grouped=True, read_only=True)
     original_glob = Path.glob
 
-    def bounded_glob(path: Path, pattern: str):
+    def bounded_glob(path: Path, pattern: str, **kwargs: object):
         if path == writer.root / "records":
             raise AssertionError("a live bounded read enumerated every stored record")
-        return original_glob(path, pattern)
+        return original_glob(path, pattern, **kwargs)
 
     monkeypatch.setattr(Path, "glob", bounded_glob)
     try:

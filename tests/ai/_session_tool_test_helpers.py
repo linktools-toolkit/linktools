@@ -244,6 +244,8 @@ def _crash_session_process(
                 .session("session")
                 .start("inspect", idempotency_key="turn-1")
             )
+            if phase == "recovered_before_terminal":
+                await execution.recover()
             await execution.wait(timeout_seconds=15)
         raise AssertionError("crash boundary was not reached")
 
@@ -297,7 +299,18 @@ async def _assert_tool_turn_recovers_without_replaying_effect(
             capabilities=(application,),
         ) as runtime:
             session = runtime.agents.get("default").session("session")
+            before_replay = await state.execution.executions.get(
+                execution_id, tenant_id=runtime.default_principal.tenant_id,
+            )
+            assert before_replay is not None
             same = await session.start("inspect", idempotency_key="turn-1")
+            assert same.execution_id == execution_id
+            if before_replay.status is ExecutionStatus.STARTED:
+                assert await state.execution.executions.get(
+                    execution_id, tenant_id=runtime.default_principal.tenant_id,
+                ) == before_replay
+                assert not runtime._execution_service.runtime_backend().worker_installed(execution_id)
+                await same.recover()
             result = (await same.wait(timeout_seconds=15)).result
             assert same.execution_id == execution_id
             assert result.status is ExecutionStatus.SUCCEEDED, result

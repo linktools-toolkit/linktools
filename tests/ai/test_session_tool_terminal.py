@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1502,6 +1503,9 @@ async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
                     execution_record: Any,
                     error: AIError,
                     effects: Any,
+                    *,
+                    expected_revision: int | None = None,
+                    producer_generation: int | None = None,
                 ) -> Any:
                     if error.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
                         boundary_started.set()
@@ -1511,6 +1515,8 @@ async def test_cancel_at_unknown_effect_boundaries_stays_nonterminal(
                         execution_record,
                         error,
                         effects,
+                        expected_revision=expected_revision,
+                        producer_generation=producer_generation,
                     )
 
                 monkeypatch.setattr(
@@ -1949,7 +1955,7 @@ async def test_completed_tool_operation_is_reused_after_reopen(
 
 
 @pytest.mark.asyncio
-async def test_active_tool_claim_reconciles_after_restart_without_external_nudge(
+async def test_expired_tool_claim_waits_for_explicit_recovery_after_restart(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "active-claim-restart.db"
@@ -1991,8 +1997,14 @@ async def test_active_tool_claim_reconciles_after_restart_without_external_nudge
             assert tools[0].status is ToolOperationStatus.CLAIMED
 
             execution = await runtime.executions.get(execution_id)
+            assert tools[0].lease_expires_at is not None
+            await asyncio.sleep(max(0.0, (tools[0].lease_expires_at - datetime.now(timezone.utc)).total_seconds()) + 0.01)
+            assert (await runtime.executions.inspect(
+                execution_id, principal=runtime.default_principal,
+            )).status is ExecutionStatus.STARTED
+            assert not runtime._execution_service.runtime_backend().worker_installed(execution_id)
             with pytest.raises(AIError) as raised:
-                await execution.wait(timeout_seconds=10)
+                await execution.recover()
 
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
             recovered = await state.execution.executions.get(
@@ -2008,7 +2020,7 @@ async def test_active_tool_claim_reconciles_after_restart_without_external_nudge
 
 
 @pytest.mark.asyncio
-async def test_idempotent_replay_during_active_tool_claim_converges_to_recovery(
+async def test_idempotent_replay_does_not_claim_active_tool_execution(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "active-claim-replay.db"
@@ -2042,6 +2054,12 @@ async def test_idempotent_replay_during_active_tool_claim_converges_to_recovery(
             )
             assert len(tools) == 1
             assert tools[0].status is ToolOperationStatus.CLAIMED
+            before_replay = await state.execution.executions.get(
+                execution_id, tenant_id=runtime.default_principal.tenant_id,
+            )
+            before_head = await state.execution.executions.get_history_head(
+                execution_id, tenant_id=runtime.default_principal.tenant_id,
+            )
 
             same = (
                 await runtime.agents.get("default")
@@ -2049,8 +2067,17 @@ async def test_idempotent_replay_during_active_tool_claim_converges_to_recovery(
                 .start("inspect", idempotency_key="turn-1")
             )
             assert same.execution_id == execution_id
+            assert await state.execution.executions.get(
+                execution_id, tenant_id=runtime.default_principal.tenant_id,
+            ) == before_replay
+            assert await state.execution.executions.get_history_head(
+                execution_id, tenant_id=runtime.default_principal.tenant_id,
+            ) == before_head
+            assert not runtime._execution_service.runtime_backend().worker_installed(execution_id)
+            assert tools[0].lease_expires_at is not None
+            await asyncio.sleep(max(0.0, (tools[0].lease_expires_at - datetime.now(timezone.utc)).total_seconds()) + 0.01)
             with pytest.raises(AIError) as raised:
-                await same.wait(timeout_seconds=10)
+                await same.recover()
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
 
             recovered = await state.execution.executions.get(
@@ -2276,32 +2303,22 @@ async def test_checkpoint_save_readback_ignores_transient_before_coordinate(
 ) -> None:
     state = RuntimeStorage.in_memory()
     await state.initialize(namespace="checkpoint-readback", tenant_id="tenant")
-    original = StateStepArchive.materialize_checkpoint
+    recovery = state.run_store.read_store(RuntimeDomain.RECOVERY)
+    assert isinstance(recovery, StateStepArchive)
+    original = recovery.state_store.mutate
     injected = False
 
-    async def commit_then_fail(
-        self: StateStepArchive,
-        run: AgentRunRecord,
-        checkpoint: AgentRunCheckpoint,
-        *,
-        execution_id: str | None = None,
-        **kwargs: Any,
-    ) -> None:
+    async def commit_then_fail(callback: Any) -> Any:
         nonlocal injected
-        await original(
-            self,
-            run,
-            checkpoint,
-            execution_id=execution_id,
-            **kwargs,
-        )
-        if self.runtime_domain is RuntimeDomain.RECOVERY and not injected:
+        result = await original(callback)
+        if not injected:
             injected = True
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+        return result
 
     monkeypatch.setattr(
-        StateStepArchive,
-        "materialize_checkpoint",
+        recovery.state_store,
+        "mutate",
         commit_then_fail,
     )
     try:
@@ -2521,11 +2538,12 @@ async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
         if phase == "effect_unconfirmed":
             with pytest.raises(AIError) as raised:
                 same = await session.start("inspect", idempotency_key="turn-1")
-                await same.wait(timeout_seconds=10)
+                await same.recover()
             assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
             assert calls == []
         else:
             same = await session.start("inspect", idempotency_key="turn-1")
+            await same.recover()
             result = (await same.wait(timeout_seconds=10)).result
             assert result.status is ExecutionStatus.SUCCEEDED, result
             assert calls == (["lookup"] if phase in {"activated", "request_checkpoint"} else [])

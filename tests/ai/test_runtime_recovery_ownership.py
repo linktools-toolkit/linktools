@@ -140,6 +140,24 @@ def _runtime_process(
                 command = await asyncio.to_thread(connection.recv)
                 if command == "snapshot":
                     connection.send(await snapshot())
+                elif command == "replay_start":
+                    agent = runtime.agents.get("default")
+                    handle = (
+                        await agent.session("session").start("Wait", idempotency_key="start")
+                        if mode == "session"
+                        else await agent.start("Wait", idempotency_key="start")
+                    )
+                    assert handle.execution_id == execution_id
+                    backend = runtime._execution_service.runtime_backend()
+                    failure = backend.worker_failure(
+                        execution_id, tenant_id=runtime.default_principal.tenant_id,
+                    )
+                    connection.send({
+                        **await snapshot(),
+                        "worker_installed": backend.worker_installed(execution_id),
+                        "local_producer": backend._live_broker.is_local_producer(execution_id),
+                        "worker_failure": None if failure is None else failure.code.value,
+                    })
                 elif command == "recover":
                     await runtime.executions.recover(
                         execution_id, principal=runtime.default_principal,
@@ -281,6 +299,14 @@ def test_sql_startup_does_not_take_over_live_process(
         assert remote.initial["model_calls"] == 0
         expected = ExecutionStatus.PENDING_START if phase == "pending" else ExecutionStatus.STARTED
         assert remote.initial["status"] == expected.value
+        if phase == "active":
+            replay = remote.request("replay_start")
+            for field in ("execution_id", "status", "revision", "generation", "claim_id"):
+                assert replay[field] == owner.initial[field]
+            assert replay["model_calls"] == 0
+            assert replay["worker_installed"] is False
+            assert replay["local_producer"] is False
+            assert replay["worker_failure"] is None
         assert owner.request("finish") == {
             "status": "SUCCEEDED", "output": {"text": "owner answer"}, "model_calls": 1,
         }

@@ -2581,6 +2581,10 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if launch_record.budget_scope_id is not None:
             await self._state.budgets.read(launch_record.budget_scope_id)
+        if launch_record.agent_run_seq > 0:
+            # A replay observes the admitted producer. Only explicit recovery
+            # may obtain a new generation for an already claimed attempt.
+            return
         prepared_local_stream = False
         try:
             if (

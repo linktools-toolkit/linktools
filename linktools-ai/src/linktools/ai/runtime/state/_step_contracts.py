@@ -27,6 +27,7 @@ StepEventType = Literal[
     "TOOL_CALL_FAILED",
 ]
 CheckpointState = Literal["complete", "interrupted"]
+TOOL_ERROR_CODE_METADATA_KEY = "linktools.ai.tool_error_code"
 
 
 @dataclass(slots=True)
@@ -182,6 +183,7 @@ __all__ = [
     "AgentRunCheckpoint",
     "AgentRunHistoryCapture",
     "StepEventType",
+    "TOOL_ERROR_CODE_METADATA_KEY",
     "AgentRunRecord",
     "CheckpointState",
     "StepEvent",

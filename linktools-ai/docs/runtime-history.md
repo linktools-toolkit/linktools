@@ -96,6 +96,14 @@ requested or because the response content budget was exhausted. Requesting
 and external-effect uncertainty remain separate from whether a result part
 exists; `EFFECT_UNKNOWN` is not success.
 
+An interrupted SDK tool-return placeholder remains in the raw transcript and
+has `INTERRUPTED` history status. It is not a confirmed result and does not
+prevent recovery from recording the eventual result under the same call ID.
+An attempt ending with typed `TOOL_EFFECT_UNKNOWN` retains its error event,
+shown in trace as `TOOL_ERROR` with `EFFECT_UNKNOWN` status. After effect
+resolution, the real success or failure supplies the call's terminal status;
+the earlier error and placeholder remain unchanged.
+
 ## Read one assistant part
 
 `ASSISTANT_PART_COMPLETED` includes the original response-part index and its
