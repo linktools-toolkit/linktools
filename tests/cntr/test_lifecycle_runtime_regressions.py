@@ -550,6 +550,22 @@ def test_plain_first_start_failure_stops_new_service(tmp_path, failure):
     assert not (tmp_path / "compose/applied/services" / "617070.yml").exists()
 
 
+def test_plain_first_start_cleanup_failure_reports_both_errors(tmp_path):
+    app = Container("app", {"app": {"image": "app:new"}}, tmp_path / "app")
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (app,))
+
+    def fail_readiness(context, service):
+        raise ContainerError("health check failed")
+
+    def fail_stop(context, services):
+        raise ContainerError("stop failed")
+
+    app.on_service_started = fail_readiness
+    runner.stop = fail_stop
+    with pytest.raises(ContainerError, match="health check failed.*Compose rollback failed: stop failed"):
+        operations.up(["app"])
+
+
 def test_plain_partial_start_failure_preserves_running_sibling(tmp_path):
     app = Container("app", {"existing": {"image": "app:old"},
                              "new": {"image": "app:new"}}, tmp_path / "app")
