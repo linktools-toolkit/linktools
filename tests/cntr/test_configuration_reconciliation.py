@@ -11,6 +11,7 @@ import yaml
 from linktools.cntr import BaseContainer
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
+from linktools.cntr.runtime.images import ImagePlan
 
 
 class Container(BaseContainer):
@@ -57,7 +58,8 @@ def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped")):
         generated_configs={}, compose_runner=runner,
         environ=SimpleNamespace(locks=SimpleNamespace(process_lock=lambda key: nullcontext())),
         lifecycle=SimpleNamespace(notify_start=lambda context: nullcontext(), notify_remove=lambda context: nullcontext()),
-        image_preparer=SimpleNamespace(plan=lambda *args, **kwargs: SimpleNamespace(pull=(), build=())),
+        image_preparer=SimpleNamespace(plan=lambda model, services, **kwargs:
+            ImagePlan(build=(), pull=(), targets=tuple(services))),
         artifact_index=SimpleNamespace(record=lambda entries: None),
         running_state=SimpleNamespace(mark_started=lambda context: None),
         resolver=SimpleNamespace(resolve_dependencies=lambda selected: [c for c in containers if c in selected]),
@@ -80,7 +82,7 @@ def test_partial_up_does_not_prepare_unrelated_images(tmp_path, monkeypatch):
     def image_plan(model, services, force_pull=False):
         planned.extend(services)
         assert "stopped" not in services
-        return SimpleNamespace(pull=(), build=())
+        return ImagePlan(build=(), pull=(), targets=tuple(services))
 
     manager.image_preparer.plan = image_plan
     operations.up(["target"])
@@ -103,11 +105,11 @@ def test_running_generated_owner_sync_does_not_build_stopped_sibling(tmp_path, m
 
     def image_plan(model, services, force_pull=False):
         planned.extend(services)
-        return SimpleNamespace(pull=(), build=())
+        return ImagePlan(build=(), pull=(), targets=tuple(services))
 
     manager.image_preparer.plan = image_plan
     operations.up(["target"])
-    assert planned == ["target", "running"]
+    assert planned == ["target"]
     assert validated == ["prepare", "validate"]
     assert ("apply", ("running",)) not in calls
     assert not any("stopped" in call[1] for call in calls)
