@@ -432,7 +432,21 @@ class ComposeOperations:
             previous = {path: content for path, content in context.saved_compose.items()
                         if context.compose_owners[path] == container.name}
             running = tuple(service for service in services if service in context.initial_running_services)
+            started = tuple(service for service in services if service not in context.initial_running_services)
             saved_models = context.service_models
+            if started:
+                try:
+                    runner.stop(context, started)
+                    saved_models.restore(started)
+                    self._restore_applied_compose(container, context, previous)
+                    if not any(name in context.initial_running_services for name in container.services):
+                        stopped_context = copy(context)
+                        stopped_context.target_containers = [container]
+                        stopped_context.is_full_containers = False
+                        self.manager.running_state.mark_stopped(stopped_context)
+                except Exception as rollback_error:
+                    raise ContainerError("{} apply failed: {}; Compose rollback failed: {}".format(
+                        container.name, error, rollback_error)) from error
             if running and (previous or any(name in saved_models.previous for name in running)):
                 try:
                     files = dict(context.compose_files)
