@@ -23,6 +23,7 @@ class _Generated(BaseContainer):
         self.manager = SimpleNamespace(data_path=path.parent,
                                        artifact_index=SimpleNamespace(record=lambda entries, remove=(): None),
                                        running_state=SimpleNamespace(mark_started=lambda context: None))
+        self.manager.compose_runner = ComposeRunner(self.manager)
         self.content = "first"
 
     def get_app_path(self, *parts):
@@ -84,7 +85,9 @@ def test_apply_failure_restores_and_confirms_old_generation(tmp_path):
             raise RuntimeError("new failed")
     owner.apply_config = apply
     owner.manager.generated_configs = {"test": owner}
+    AppliedServiceModels(owner.manager, {"services": owner.services}).record(("test",))
     context = SimpleNamespace(generated_candidates={}, initial_running_services={"test"},
+        native_running_images={"test": "sha256:test"}, containers=(owner,), initial_healthy_services=set(),
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
         service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
     with pytest.raises(RuntimeError, match="new failed"):
@@ -103,7 +106,9 @@ def test_rollback_failure_reports_both_failures(tmp_path):
         raise RuntimeError("new failed" if candidate.generation_id == second.generation_id else "old failed")
     owner.apply_config = apply
     owner.manager.generated_configs = {"test": owner}
+    AppliedServiceModels(owner.manager, {"services": owner.services}).record(("test",))
     context = SimpleNamespace(generated_candidates={}, initial_running_services={"test"},
+        native_running_images={"test": "sha256:test"}, containers=(owner,), initial_healthy_services=set(),
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={}, applied_generation_services={},
         service_models=AppliedServiceModels(owner.manager, {"services": owner.services}))
     with pytest.raises(ContainerError, match="new failed.*rollback failed: old failed"):
@@ -122,6 +127,8 @@ def test_first_upgrade_failure_restores_running_service_without_previous_generat
             ("restore", tuple(services), tuple(files.values()))),
         wait_service_running=lambda context, service: calls.append(("running", service)),
         wait_service_healthy=lambda context, service: calls.append(("healthy", service)),
+        saved_service_models=lambda context, services: {
+            service: old_compose.read_text() for service in services},
     )
     owner.manager.running_state = SimpleNamespace(
         mark_started=lambda context: calls.append(("state", context.target_containers[0].name)),
@@ -131,6 +138,7 @@ def test_first_upgrade_failure_restores_running_service_without_previous_generat
         RuntimeError("new failed"))
     context = SimpleNamespace(
         generated_candidates={}, initial_running_services={"test"}, initial_healthy_services={"test"},
+        native_running_images={"test": "sha256:test"}, containers=(owner,),
         saved_compose={str(old_compose): old_compose.read_text()},
         compose_files={str(old_compose): "services:\n  test:\n    image: new:test\n"},
         compose_owners={str(old_compose): "test"}, applied_compose={},
@@ -223,6 +231,7 @@ def test_first_upgrade_reports_unrecoverable_missing_compose_snapshot(tmp_path):
     owner.manager.compose_runner = SimpleNamespace()
     context = SimpleNamespace(
         generated_candidates={}, initial_running_services={"test"},
+        native_running_images={"test": "sha256:test"}, containers=(owner,),
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
         applied_generation_services={}, service_models=AppliedServiceModels(
             owner.manager, {"services": owner.services}),
@@ -348,7 +357,8 @@ def test_running_sync_nginx_expands_auth_provider_before_publish(fresh_manager, 
     declarations = dict(fresh_manager.integration_snapshot)
     declarations["portainer"] = ()
     monkeypatch.setattr(fresh_manager, "integration_snapshot", declarations)
-    state = ServiceRuntimeState(("nginx",), "nginx", "nginx", "running", "healthy", "nginx:test", None, {})
+    state = ServiceRuntimeState(("nginx",), "nginx", "nginx", "running", "healthy", "nginx:test", None, {},
+                                image_id="sha256:nginx")
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda containers:
                         ProjectRuntimeState(fresh_manager.project_name, (state,), "docker"))
     fresh_manager.compose_operations.up(["portainer"])
@@ -364,18 +374,23 @@ def test_compose_only_apply_failure_restores_previous_service_model(tmp_path):
     def fail(*args):
         raise RuntimeError("new process failed")
     runner = SimpleNamespace(apply_services=fail,
+                             saved_service_models=lambda context, services: {"app": "old"},
+                             wait_service_running=lambda context, service: None,
                              apply_saved_services=lambda context, services, files: applied.append(files))
     context = SimpleNamespace(saved_compose={str(config): "old"}, compose_files={str(config): "new"},
                               compose_owners={str(config): "app"}, initial_running_services={"app"}, applied_compose={},
-                              service_models=AppliedServiceModels(SimpleNamespace(data_path=tmp_path),
+                              initial_healthy_services=set(),
+                              service_models=AppliedServiceModels(SimpleNamespace(data_path=tmp_path,
+                                  artifact_index=SimpleNamespace(record=lambda entries, remove=(): None)),
                                                                  {"services": {"app": {}}}))
-    owner = SimpleNamespace(name="app", services={"app": {}})
+    owner = SimpleNamespace(name="app", services={"app": {}},
+                            on_service_started=lambda context, service: None)
     started = []
     manager = SimpleNamespace(compose_runner=runner, running_state=SimpleNamespace(mark_started=started.append))
     with pytest.raises(RuntimeError, match="new process failed"):
         ComposeOperations(manager)._apply_services_with_rollback(owner, context, ("app",))
     assert config.read_text() == "old"
-    assert applied == [{str(config): "old"}]
+    assert applied == [{"previous.yml": "old"}]
     assert len(started) == 1
     assert started[0].target_containers == [owner]
     assert started[0].is_full_containers is False
@@ -413,26 +428,30 @@ def test_native_diagnostic_keeps_site_source_but_omits_secret(tmp_path):
     assert "secret-token" not in message
 
 
-def test_saved_generated_model_retains_previous_generation_label():
+def test_saved_generated_model_retains_previous_generation_label(tmp_path):
     import yaml
     captured = []
 
-    def process(*args):
+    def process(*args, **kwargs):
         files = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--file"]
-        captured.extend(yaml.safe_load(open(path).read()) for path in files)
+        captured.extend(yaml.safe_load(Path(path).read_text()) for path in files)
         return SimpleNamespace(check_call=lambda: None)
 
     from _harness import builtin_container_type
     container = object.__new__(builtin_container_type("102-authelia"))
     container._name = "authelia"
+    container.__dict__["services"] = {"authelia": {}}
     manager = SimpleNamespace(project_name="test", runtime=SimpleNamespace(create_docker_process=process),
-                              containers={"authelia": container}, generated_configs={"authelia": container})
-    context = SimpleNamespace(generated_candidates={"authelia": SimpleNamespace(
-        container=container,
-        generation_id="previous")})
+        structured_runner=SimpleNamespace(execute_json=lambda process, **kwargs: {
+            "services": {"authelia": {"image": "sha256:old"}}}),
+        containers={"authelia": container}, generated_configs={"authelia": container})
+    context = SimpleNamespace(containers=(container,), compose_files={str(tmp_path / "old.yml"): ""},
+        native_running_images={"authelia": "sha256:old"},
+        generated_candidates={"authelia": SimpleNamespace(container=container, generation_id="previous")})
     ComposeRunner(manager).apply_saved_services(
         context, ("authelia",), {"old.yml": "services:\n  authelia:\n    image: authelia:old\n"})
     assert captured[-1]["services"]["authelia"]["labels"] == {"io.linktools.cntr.generation": "previous"}
+    assert captured[-1]["services"]["authelia"]["image"] == "sha256:old"
 
 
 def test_navigation_consumer_syncs_without_becoming_start_requirement(fresh_manager):
@@ -468,7 +487,7 @@ def test_partial_update_applies_navigation_only_if_flare_is_running(fresh_manage
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
     services = (ServiceRuntimeState(("flare",), "flare", "flare-runtime", "running",
-                                    None, "flare:test", None, {}),) if running else ()
+                                    None, "flare:test", None, {}, image_id="sha256:flare"),) if running else ()
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda containers:
                         ProjectRuntimeState(fresh_manager.project_name, services, "docker"))
     published = []
@@ -530,6 +549,7 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
     owner.manager.generated_configs = {"test": owner}
     path = str(tmp_path / "test.yml")
     context = SimpleNamespace(generated_candidates={}, initial_running_services=set(owner.services),
+        native_running_images={name: "sha256:" + name for name in owner.services}, containers=(owner,),
         applied_generation_services={}, applied_compose={},
         saved_compose={path: yaml.safe_dump(old_model)}, compose_files={path: yaml.safe_dump(new_model)},
         compose_owners={path: "test"}, service_models=AppliedServiceModels(owner.manager, new_model))
@@ -537,7 +557,7 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
     operations._publish_candidate(owner, candidate, context, ("test",))
     with pytest.raises(RuntimeError, match="sidecar failed"):
         operations._publish_candidate(owner, candidate, context, ("sidecar",))
-    assert calls[-1] == (full.generation_id, ("test", "sidecar"))
+    assert calls[-2:] == [(full.generation_id, ("test",)), (full.generation_id, ("sidecar",))]
     assert yaml.safe_load((tmp_path / "compose/applied/test.yml").read_text()) == old_model
     assert not AppliedServiceModels(owner.manager, old_model).changed_services
 

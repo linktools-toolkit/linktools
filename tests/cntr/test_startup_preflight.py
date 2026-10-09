@@ -57,7 +57,7 @@ def _case(root: Path, containers: "tuple[_Container, ...]", selected: "tuple[str
         docker_inspector=SimpleNamespace(get_project_state=lambda owners: SimpleNamespace(
             running_container_names=[owner.name for owner in containers
                                      if any(name in states for name in owner.services)],
-            services=tuple(SimpleNamespace(service=name, state=state, health=None, image_id=None)
+            services=tuple(SimpleNamespace(service=name, state=state, health=None, image_id="sha256:" + name)
                            for name, state in states.items()))),
         running_state=SimpleNamespace(
             mark_started=lambda context: events.append(("started", tuple(c.name for c in context.target_containers))),
@@ -86,6 +86,11 @@ def _case(root: Path, containers: "tuple[_Container, ...]", selected: "tuple[str
         stop=lambda context, services: events.append(("stop", tuple(services))),
         apply_saved_services=lambda context, services, files: events.append(
             ("restore", tuple(services), files)),
+        saved_service_models=lambda context, services: {
+            service: context.service_models.previous.get(service) or
+            next(iter(context.saved_compose.values())) for service in services},
+        wait_service_running=lambda context, service: None,
+        wait_service_healthy=lambda context, service: None,
     )
     operations = ComposeOperations(manager)
     targets = tuple(owner for owner in containers if owner.name in selected)

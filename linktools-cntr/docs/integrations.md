@@ -294,6 +294,21 @@ fails, both the original and cleanup errors are reported.
 When no resolved snapshot exists yet, a running service is reconciled once to
 establish it; rollback uses the previous saved Compose file where available.
 Historical external environment-file contents cannot be recovered retroactively.
+Rollback pins each restored service to the image ID observed before the operation;
+pulling or rebuilding a mutable tag must not change its restored image. A running
+instance without an identifiable original image or saved Compose model is rejected
+before replacement, including when a previous generated directory exists.
+Acknowledged cold-start bootstrap fallbacks do not require an earlier image.
+Saved Compose content executed from temporary files retains the original project
+base directory with `--project-directory`; multi-file order and old model
+dependencies remain authoritative. Only the affected services are restored.
+Normal Compose dependency readiness has no implicit 30-second total deadline;
+nginx config/TLS acknowledgement and explicit deadlines remain independently bounded.
+A `depends_on` entry with `required: false` does not force its unavailable
+provider into startup, image preparation, or rollback readiness.
+A running generated-config consumer such as nginx expands newly required native
+providers when its generated candidate changes; an independent Redis sidecar
+does not inherit its owner's unrelated provider dependencies.
 `restart app` stops only explicit targets, after all final and required bootstrap candidate validation passes.
 Preparation covers running services and their possible runtime dependencies:
 `CHECK`, `on_starting` and `BEFORE_START` may therefore run for other running

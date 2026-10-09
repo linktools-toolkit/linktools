@@ -3,6 +3,7 @@
 """Regression checks at mocked lifecycle and raw-Docker boundaries."""
 import copy
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -49,6 +50,7 @@ class Container(BaseContainer):
 
 def manager_at(root, containers, states=(), model=None):
     calls, restored = [], []
+    states = tuple(replace(state, image_id=state.image_id or "sha256:" + state.service) for state in states)
 
     def process(selected, *args, **kwargs):
         calls.append(tuple(args))
@@ -56,8 +58,21 @@ def manager_at(root, containers, states=(), model=None):
 
     def docker(*args, **kwargs):
         files = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--file"]
-        restored.extend(Path(path).read_text() for path in files)
-        return SimpleNamespace(check_call=lambda: 0)
+        contents = [Path(path).read_text() for path in files]
+        resolved = {}
+        for content in contents:
+            current = yaml.safe_load(content)
+            for key, value in current.items():
+                if key == "services":
+                    for service, spec in value.items():
+                        resolved.setdefault(key, {}).setdefault(service, {}).update(spec)
+                else:
+                    resolved[key] = value
+        if "up" in args:
+            restored.extend(contents[:-1])
+            original = next(state.image_id for state in states if state.service == args[-1])
+            assert resolved["services"][args[-1]]["image"] == original
+        return SimpleNamespace(check_call=lambda: 0, model=resolved)
 
     manager = SimpleNamespace(project_name="test", data_path=root, logger=None,
         containers={c.name: c for c in containers}, integration_snapshot={c.name: () for c in containers},
@@ -72,7 +87,8 @@ def manager_at(root, containers, states=(), model=None):
         resolver=SimpleNamespace(resolve_dependencies=lambda selected: [c for c in containers if c in selected]),
         docker_inspector=SimpleNamespace(get_project_state=lambda selected:
             ProjectRuntimeState("test", tuple(states), "docker")),
-        runtime=SimpleNamespace(create_docker_compose_process=process, create_docker_process=docker))
+        runtime=SimpleNamespace(create_docker_compose_process=process, create_docker_process=docker),
+        structured_runner=SimpleNamespace(execute_json=lambda process, **kwargs: process.model))
     stored = {"RUNNING_CONTAINERS": sorted({name for state in states for name in state.logical_containers
                                              if state.state in ("running", "restarting")})}
     manager.cache = SimpleNamespace(get=stored.get, set=stored.__setitem__)
@@ -106,10 +122,10 @@ def test_full_restart_bootstraps_nginx_after_stop(tmp_path, monkeypatch):
     nginx.render_bootstrap = lambda generation: {"nginx.conf": "bootstrap " + generation}
     old = GeneratedCandidate(nginx, nginx.render_config)
     old.publish()
+    AppliedServiceModels(manager, {"services": {"nginx": {"image": "nginx:old"}}}).record(("nginx",))
     nginx.on_prepare_config = lambda context: None
     nginx.validate_config = lambda *args: None
     nginx.confirm = lambda *args: None
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     runner.exec_service = lambda *args, **kwargs: SimpleNamespace(succeeded=True, stdout="")
     ready = []
     runner.wait_service_healthy = lambda ctx, service: ready.append((service, tuple(calls)))
@@ -136,7 +152,6 @@ def test_restart_bootstrap_failure_restores_generation_and_exact_runtime_snapsho
     prior.publish()
     owner.on_prepare_config = lambda context: None
     owner.validate_config = lambda context, candidate: None
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     runner.exec_service = lambda *args, **kwargs: SimpleNamespace(succeeded=True, stdout=prior.generation_id)
     confirmed = []
 
@@ -200,7 +215,6 @@ def test_restart_bootstrap_validation_failure_preserves_running_generation_and_m
 
     nginx.validate_config = validate
     nginx.apply_config = unexpected
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     with pytest.raises(ContainerError, match="bootstrap validation failed"):
         operations.restart(["nginx"])
     assert validated == ["full", "bootstrap"]
@@ -214,13 +228,13 @@ def test_restart_bootstrap_validation_failure_preserves_running_generation_and_m
 def test_restart_bootstrap_and_rollback_failures_are_both_reported(tmp_path, monkeypatch):
     nginx = NginxContainer("nginx", {"nginx": {}}, tmp_path / "nginx")
     operations, manager, runner, calls, restored = manager_at(tmp_path, (nginx,), (running_nginx(),))
+    AppliedServiceModels(manager, {"services": {"nginx": {"image": "nginx:old"}}}).record(("nginx",))
     owner = manager.generated_configs["nginx"] = nginx
     owner.render_config = lambda generation: {"nginx.conf": "serving " + generation}
     prior = GeneratedCandidate(nginx, owner.render_config)
     prior.publish()
     owner.on_prepare_config = lambda context: None
     owner.validate_config = lambda context, candidate: None
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
 
     def apply(context, candidate, services):
         if candidate.generation_id == prior.generation_id:
@@ -246,7 +260,6 @@ def test_first_upgrade_failure_restores_legacy_runtime_not_bootstrap(tmp_path, m
     nginx.render_bootstrap = lambda generation: {"nginx.conf": "bootstrap " + generation}
     nginx.on_prepare_config = lambda context: None
     nginx.validate_config = lambda context, candidate: None
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     applied = []
 
     def apply(context, candidate, services):
@@ -273,7 +286,6 @@ def test_first_upgrade_without_restore_model_fails_before_stopping(tmp_path, mon
     nginx.render_bootstrap = lambda generation: {"nginx.conf": "bootstrap " + generation}
     nginx.on_prepare_config = lambda context: None
     nginx.validate_config = lambda context, candidate: None
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     with pytest.raises(ContainerError, match="Cannot replace running service nginx"):
         operations.restart(["nginx"])
     assert calls == []
@@ -289,7 +301,6 @@ def test_cold_nginx_retains_acknowledged_bootstrap_on_final_failure(tmp_path, mo
     nginx.render_bootstrap = lambda generation: {"nginx.conf": "bootstrap " + generation}
     nginx.on_prepare_config = lambda context: None
     nginx.validate_config = lambda context, candidate: None
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     applied = []
 
     def apply(context, candidate, services):
@@ -335,9 +346,8 @@ def test_final_model_dependencies_start_before_consumer_without_stopped_siblings
     model = {"services": {"app": relation, "database": {}, "unrelated": {}}}
     operations, manager, runner, calls, restored = manager_at(tmp_path, (app, providers), model=model)
     operations.select = lambda *args, **kwargs: ComposeSelection((app, providers), (app,), ("app",), False)
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     healthy = []
-    runner.wait_service_healthy = lambda context, service: healthy.append(service)
+    runner.wait_service_healthy = lambda context, service, timeout=30: healthy.append(service)
     operations.up(["app"])
     assert [call[-1] for call in calls if call[0] == "up"] == ["database", "app"]
     assert all("--no-deps" in call for call in calls if call[0] == "up")
@@ -362,7 +372,6 @@ def test_container_policy_adds_only_its_required_provider_services(tmp_path, mon
     storage = Container("storage", {"database": {}, "idle": {}}, tmp_path / "storage")
     operations, manager, runner, calls, restored = manager_at(tmp_path, (storage, app))
     operations.select = lambda *args, **kwargs: ComposeSelection((storage, app), (app,), ("metrics",), False)
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     operations.up(["metrics"])
     assert [call[-1] for call in calls if call[0] == "up"] == ["database", "metrics"]
 
@@ -405,7 +414,7 @@ def test_container_policy_controls_bootstrap_order_and_changed_running_updates(
     state = ServiceRuntimeState(("indexer",), "indexer", "index-runtime", "running", None, "image", None, {})
     operations, manager, runner, calls, restored = manager_at(tmp_path, (indexer, app), (state,) if running else ())
     healthy = []
-    runner.wait_service_healthy = lambda context, service: healthy.append(service)
+    runner.wait_service_healthy = lambda context, service, timeout=30: healthy.append(service)
     owner = indexer
     owner.content = "old runtime input"
     manager.generated_configs["indexer"] = owner
@@ -417,7 +426,6 @@ def test_container_policy_controls_bootstrap_order_and_changed_running_updates(
     selected = (app,) if running else (app, indexer)
     selected_services = ("target",) if running else ("indexer", "target")
     operations.select = lambda *args, **kwargs: ComposeSelection((indexer, app), selected, selected_services, False)
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     operations.up([container.name for container in selected])
     expected_events = (["apply"] if changed else []) if running else ["bootstrap", "apply"]
     assert events == expected_events
@@ -457,14 +465,19 @@ def test_isolated_raw_arguments_decode_only_compose_serialization_and_leave_snap
     assert model == previous
     persisted = []
 
-    def process(*args):
+    def process(*args, **kwargs):
         paths = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--file"]
-        persisted.extend(Path(path).read_text() for path in paths)
+        if "up" in args:
+            persisted.extend(Path(path).read_text() for path in paths[:-1])
         return SimpleNamespace(check_call=lambda: 0)
 
     runner.manager.runtime = SimpleNamespace(create_docker_process=process)
+    runner.manager.structured_runner = SimpleNamespace(execute_json=lambda process, **kwargs: copy.deepcopy(model))
     serialized = yaml.safe_dump(model)
-    runner.apply_saved_services(SimpleNamespace(), ("app",), {"previous.yml": serialized})
+    owner = Container("app", model["services"], Path("/original"))
+    context = SimpleNamespace(containers=(owner,), compose_files={"/original/compose.yml": serialized},
+                              native_running_images={"app": "sha256:old"})
+    runner.apply_saved_services(context, ("app",), {"previous.yml": serialized})
     assert persisted == [serialized]
     assert yaml.safe_load(persisted[0]) == previous
 
@@ -502,7 +515,6 @@ def test_cold_bootstrap_uses_shared_validation_application_and_final_accounting(
     container = BootstrapContainer("example", {"example": {"image": "example:new"}}, tmp_path / "example")
     operations, manager, runner, calls, restored = manager_at(tmp_path, (container,))
     manager.generated_configs["example"] = container
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     if failure:
         with pytest.raises(ContainerError, match="application failed|validation failed"):
             operations.up(["example"])
@@ -598,7 +610,6 @@ def test_plain_restart_rollback_records_only_restored_owner(tmp_path, monkeypatc
     previous = dict(AppliedServiceModels(manager, runner.final_model(None)).previous)
     operations.select = lambda *args, **kwargs: ComposeSelection(
         (app, later, untouched), (app, later), ("app", "later"), False)
-    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
     applied = []
 
     def fail_apply(context, services):

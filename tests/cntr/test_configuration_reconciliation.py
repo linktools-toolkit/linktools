@@ -56,6 +56,10 @@ def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped"), sideca
             for name, spec in new_model["services"].items()}),
         apply_services=lambda context, services: calls.append(("apply", tuple(services))),
         apply_saved_services=lambda context, services, files: calls.append(("restore", tuple(services), files)),
+        saved_service_models=lambda context, services: {
+            service: context.service_models.previous[service] for service in services},
+        wait_service_running=lambda context, service: None,
+        wait_service_healthy=lambda context, service: None,
     )
     manager = SimpleNamespace(
         project_name="test", data_path=tmp_path, logger=None,
@@ -69,7 +73,8 @@ def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped"), sideca
         running_state=SimpleNamespace(mark_started=lambda context: None),
         resolver=SimpleNamespace(resolve_dependencies=lambda selected: [c for c in containers if c in selected]),
         docker_inspector=SimpleNamespace(get_project_state=lambda containers: ProjectRuntimeState("test", (
-            ServiceRuntimeState(("other",), "running", "other-runtime", "running", None, "image:one", None, {}),
+            ServiceRuntimeState(("other",), "running", "other-runtime", "running", None, "image:one", None, {},
+                                image_id="sha256:running"),
         ), "docker")),
     )
     from linktools.cntr.artifacts import AppliedServiceModels

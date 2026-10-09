@@ -86,7 +86,7 @@ def test_apply_service_always_waits_for_dependency_before_start(condition, metho
     runner = ComposeRunner(manager)
     context = SimpleNamespace(containers=(), is_full_containers=False, compose_model={"services": {
         "app": {"depends_on": {"provider": {"condition": condition}}}}})
-    monkeypatch.setattr(runner, method, lambda ctx, service: calls.append((condition, service)))
+    monkeypatch.setattr(runner, method, lambda ctx, service, timeout=None: calls.append((condition, service)))
     runner.apply_service(context, "app")
     assert calls == [(condition, "provider"), "apply"]
 
