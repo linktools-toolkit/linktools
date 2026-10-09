@@ -275,15 +275,31 @@ def test_shared_hostname_preserves_independent_auth_and_bypass(fresh_manager, tm
     assert "location /public {" in shared and "location /admin {" in shared
 
 
-def test_shared_hostname_fails_closed_when_custom_auth_is_unmarked(fresh_manager, tmp_path):
+def test_shared_hostname_inherits_deny_for_custom_auth_without_override(fresh_manager, tmp_path):
     nginx = fresh_manager.containers["nginx"]
     source = tmp_path / "custom.conf"
     source.write_text("location /admin { proxy_pass http://app; }")
     public = generation_site(nginx, "public", https=True, auth=False)
     protected = generation_site(nginx, "admin", https=True, auth=True, template=source)
     nginx.__dict__["sites"] = {site.identity: site for site in (public, protected)}
-    with pytest.raises(ContainerError, match="must configure location authentication"):
-        nginx.render_config("generation")
+    files = nginx.render_config("generation")
+    server = files["sites/" + public.file_id + ".conf"]
+    assert "auth_request /_internal/auth-deny;" in server
+    assert "location /admin { proxy_pass http://app; }" in server
+
+
+def test_shared_hostname_accepts_equivalent_quoted_native_auth(fresh_manager, tmp_path):
+    nginx = fresh_manager.containers["nginx"]
+    source = tmp_path / "quoted.conf"
+    public = generation_site(nginx, "public", https=True, auth=False)
+    protected = generation_site(nginx, "admin", https=True, auth=True, template=source)
+    path = "/_internal/auth/" + protected.var_name
+    source.write_text('location /admin { auth_request "' + path + '"; proxy_pass http://app; }')
+    nginx.__dict__["sites"] = {site.identity: site for site in (public, protected)}
+    files = nginx.render_config("generation")
+    server = files["sites/" + public.file_id + ".conf"]
+    assert 'auth_request "' + path + '";' in server
+    assert "location = " + path in server
 
 
 def test_shared_hostname_rejects_incompatible_waf_policies(fresh_manager):
