@@ -901,6 +901,7 @@ class _FilesystemTransaction:
                 query.stream_digest is None or item.stream_digest == query.stream_digest
             )
             and (query.states is None or item.state in query.states)
+            and (query.after_sequence is None or item.sequence > query.after_sequence)
             and (
                 query.through_sequence is None
                 or item.sequence <= query.through_sequence

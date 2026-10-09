@@ -1432,6 +1432,7 @@ class ExecutionService(Protocol):
         execution_id: str,
         *,
         principal: Principal,
+        idempotency_key: str | None = None,
     ) -> ExecutionHandle: ...
     async def trace(
         self,

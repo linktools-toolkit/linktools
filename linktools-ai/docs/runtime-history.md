@@ -368,11 +368,49 @@ After an executor crashes, confirm it has stopped, then call the existing
 `runtime.executions.recover(execution_id, principal=...)`. Recovery competes for
 the revision authorized by that invocation, preserves producer and tool-effect
 fences, and rejects a worker still running in the same Runtime. Unknown tool
-effects retain the existing `RECOVERY_REQUIRED` resolution flow. Each fresh
-call is a deliberate takeover, not a retry-idempotent request. If the response
-is uncertain, inspect canonical state before deciding whether another recovery
-is appropriate. A prepared start with no recovery checkpoint must use its
-original start/idempotency flow rather than inventing a checkpoint.
+effects retain the existing `RECOVERY_REQUIRED` resolution flow. A prepared
+start with no recovery checkpoint must use its original start/idempotency flow
+rather than inventing a checkpoint.
+
+Pass `idempotency_key=...` to retry one recovery control operation, including
+through `execution.recover(idempotency_key=...)`. Its receipt and new producer
+claim commit atomically. Reusing that key never admits another producer;
+changing the actor or execution under the key raises `IDEMPOTENCY_CONFLICT`.
+A `SUCCEEDED` recovery receipt confirms launch admission, not business success;
+a worker that later fails or is cancelled does not change that control result.
+A `CANCELLED` receipt means recovery completed cancellation before launch, which
+can happen without a new producer.
+The admitted execution keeps its original principal. If recovery instead
+establishes a failed terminal outcome (for example, a conflicting session), the
+keyed call and its retries raise the recorded error; no launch success is
+reported. This does not change the unkeyed recovery return behavior.
+
+If admission committed but launch or receipt settlement is uncertain, retrying
+the same key raises `STORAGE_RECOVERY_REQUIRED`; it does not relaunch. Inspect
+canonical state and confirm the previous executor has stopped before choosing
+a new key. Caller cancellation waits for the owned control operation to settle
+before propagating cancellation. Omitting the key preserves the existing
+non-idempotent takeover behavior.
+
+Recovery receipts are excluded from terminal-operation compaction so an old
+key cannot silently become a new takeover. They remain in durable storage; this
+API adds no receipt expiry or automatic retention policy.
+
+A fresh `TaskGraphRun.recover()` is an explicit takeover request for the graph's
+recoverable bound Agent executions, including running executions on handed-off
+`WAITING` nodes. Confirm that their previous executors have stopped before
+requesting recovery: this control does not detect remote liveness. The native
+backend rejects a worker still running in the same Runtime. Ordinary Runtime
+opening, graph start, and graph wait retain their existing behavior and do not
+implicitly invoke this graph-recovery control.
+
+The control actor needs `TASK_RUN` on the graph; standalone execution recovery
+still needs `EXECUTION_RECOVER`. Graph recovery preserves the admitted execution
+principal and verifies durable graph/node/execution bindings before takeover.
+Executions outside those bindings are not recovery targets. Child recovery keys
+derive from the graph recovery request, so retrying a partly recovered graph
+does not take over an already recovered child again. A later recovery boundary
+requires a new graph recovery key.
 
 Filesystem execution storage retains automatic crash recovery because its
 existing writer lock supplies exclusive ownership. SQL startup can still finish

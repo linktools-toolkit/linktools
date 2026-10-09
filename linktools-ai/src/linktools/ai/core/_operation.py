@@ -80,6 +80,14 @@ def operation_cas_immutable_matches(
         and current.compactable == candidate.compactable
         and current.sequence == candidate.sequence
         and current.created_at == candidate.created_at
+        and (
+            current.operation_kind is not OperationKind.EXECUTION_RECOVER
+            or (
+                current.result_ref == candidate.result_ref
+                and current.result_digest is None
+                and candidate.result_digest is None
+            )
+        )
     )
 
 
