@@ -11,9 +11,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 from linktools.core import environ
-from linktools.ai.capability import CapabilityGroup
 from linktools.ai.observe import Metrics
-from linktools.ai.runtime import Runtime, RuntimeHistory
 from linktools.ai.workspace import Workspace
 from ._common import (
     _add_local_runtime_arguments, _load_workspace, _local_metrics,
@@ -50,6 +48,8 @@ class Command(BaseCommand):
         read_only = args.read_only or not model
 
         async def serve() -> int:
+            from linktools.ai.runtime import RuntimeHistory
+
             async with AsyncExitStack() as stack:
                 runtime = None
                 history = None
@@ -59,6 +59,9 @@ class Command(BaseCommand):
                     if (root / "runtime.db").exists():
                         history = await stack.enter_async_context(RuntimeHistory.open("default", storage=_local_runtime_storage(workspace)))
                 else:
+                    from linktools.ai.capability import CapabilityGroup
+                    from linktools.ai.runtime import Runtime
+
                     assets = _local_runtime_assets(workspace)
                     await assets.initialize()
                     stack.push_async_callback(assets.close)

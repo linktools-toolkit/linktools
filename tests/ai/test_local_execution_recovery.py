@@ -167,6 +167,7 @@ def _backend() -> LocalExecutionBackend:
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
     backend._metric_recorder = None
+    backend._worker_completed = None
     backend._tool_operations = None
     backend._live_broker = SimpleNamespace(complete=lambda _execution_id: None)
     return backend
@@ -216,6 +217,12 @@ def test_local_infrastructure_failure_classification(
 @pytest.mark.asyncio
 async def test_local_worker_failure_is_consumed_and_observable() -> None:
     backend = _backend()
+    completed: list[str] = []
+
+    async def worker_completed(execution_id: str) -> None:
+        completed.append(execution_id)
+
+    backend._worker_completed = worker_completed
 
     async def fail() -> None:
         raise RuntimeError("worker failed")
@@ -235,6 +242,7 @@ async def test_local_worker_failure_is_consumed_and_observable() -> None:
         "phase": "local_execution_worker",
         "execution_id": "execution",
     }
+    assert completed == []
 
 
 @pytest.mark.asyncio
@@ -415,6 +423,8 @@ async def test_local_cancel_without_worker_requires_recovery_for_unknown_effect(
         execution: ExecutionRecord,
         error: AIError,
         effects: tuple[object, ...],
+        *,
+        producer_generation: int | None = None,
     ) -> ExecutionRecord:
         observed.append((execution, error, effects))
         return replace(execution, status=ExecutionStatus.RECOVERY_REQUIRED)
@@ -445,6 +455,8 @@ async def test_local_failure_uses_tool_ledger_even_for_an_unrelated_exception(
         execution: ExecutionRecord,
         error: AIError,
         effects: tuple[object, ...],
+        *,
+        producer_generation: int | None = None,
     ) -> ExecutionRecord:
         observed.append((execution, error, effects))
         return replace(
@@ -528,6 +540,8 @@ async def test_local_cancel_without_worker_reconciles_expired_claim_to_recovery(
         execution: ExecutionRecord,
         error: AIError,
         effects: tuple[object, ...],
+        *,
+        producer_generation: int | None = None,
     ) -> ExecutionRecord:
         assert error.code is ErrorCode.TOOL_EFFECT_UNKNOWN
         observed.append((execution, effects))
@@ -713,3 +727,56 @@ async def test_local_cancel_before_worker_coroutine_starts_confirms_cancelling_s
 
     assert outcome is CancelEffectOutcome.CONFIRMED
     assert backend._tasks == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_worker", (False, True))
+async def test_completion_cleanup_waits_for_control_and_preserves_new_worker(new_worker: bool) -> None:
+    backend = _backend()
+    release = asyncio.Event()
+    completed = []
+    backend._terminal_events["execution"] = asyncio.Event()
+    backend._terminal_events["execution"].set()
+    backend._pending_audit_locks["execution"] = asyncio.Lock()
+
+    async def worker_completed(execution_id: str) -> None:
+        completed.append(execution_id)
+
+    async def control() -> None:
+        await release.wait()
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    backend._worker_completed = worker_completed
+    control_task = asyncio.create_task(control())
+    backend._execution_durable_tasks["execution"] = {control_task}
+    cleanup = asyncio.create_task(backend._complete_worker_handoff("execution"))
+    installed = None
+    try:
+        await asyncio.sleep(0)
+        assert not cleanup.done()
+        if new_worker:
+            installed = asyncio.create_task(asyncio.Event().wait())
+            backend._tasks["execution"] = installed
+        release.set()
+        outcomes = await asyncio.gather(control_task, return_exceptions=True)
+        assert isinstance(outcomes[0], AIError)
+        await cleanup
+        assert backend._worker_failures == {}
+        if new_worker:
+            assert backend._tasks["execution"] is installed
+            assert "execution" in backend._terminal_events
+            assert "execution" in backend._pending_audit_locks
+            assert completed == []
+        else:
+            assert backend._terminal_events == {}
+            assert backend._pending_audit_locks == {}
+            assert backend._execution_durable_tasks == {}
+            assert completed == ["execution"]
+            await asyncio.wait_for(backend.wait_terminal("execution", tenant_id="tenant"), 1)
+            assert backend._terminal_events == {}
+    finally:
+        release.set()
+        if installed is not None:
+            installed.cancel()
+            await asyncio.gather(installed, return_exceptions=True)
+        await asyncio.gather(control_task, cleanup, return_exceptions=True)

@@ -845,9 +845,11 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
             *,
             expected_status: ExecutionStatus,
             audit_events: tuple[ExecutionEventAppend, ...],
+            producer_generation: int | None = None,
             background_tasks: set[asyncio.Task[object]] | None = None,
         ) -> ExecutionRecord:
             del commit, expected_status, background_tasks
+            assert producer_generation == 1
             assert audit_events == (pending,)
             self.started.set()
             await self.release.wait()
@@ -856,11 +858,19 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
     backend._tenant_id = "tenant"
+    backend._namespace = "stream-order"
+    backend._agent_run_lifecycle = SimpleNamespace(
+        execution_producer_generation=lambda agent_run_id, *, execution_id: 1,
+    )
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
-    backend._execution = SimpleNamespace(executions=_ExecutionReader(_execution()))
+    class Reader(_ExecutionReader):
+        async def get_history_head(self, execution_id: str, *, tenant_id: str) -> SimpleNamespace:
+            return SimpleNamespace(producer_generation=1)
+
+    backend._execution = SimpleNamespace(executions=Reader(replace(_execution(), agent_run_seq=1)))
     backend._live_broker = broker
     backend._runtime_commands = commands
     backend._metric_recorder = None
@@ -1523,3 +1533,79 @@ async def test_remote_durable_polling_does_not_retain_broker_activity(
     assert [item.durable_seq for item in streamed] == [1]
     assert delays == [1.0]
     assert broker._activity == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor,corruption", tuple(
+    (cursor, corruption)
+    for cursor in (0, 1)
+    for corruption in (None, "missing_confirmation", "different_confirmation", "missing_prefix")
+    if cursor == 0 or corruption != "missing_prefix"
+))
+async def test_live_forward_gap_requires_exact_canonical_evidence(cursor: int, corruption: str | None) -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    request = ExecutionEvent("execution", 1, ExecutionEventType.CANCEL_REQUESTED, {"operation_id": "cancel"})
+    tool = ExecutionEvent("execution", 2, ExecutionEventType.TOOL_CALL_STARTED, {"call_id": "tool"})
+    terminal = ExecutionEvent("execution", 3, ExecutionEventType.EXECUTION_CANCELLED, {})
+    values = (request, tool, terminal)
+    confirmation_sequence = 3 if cursor == 0 else 2
+
+    class Reader(_EventReader):
+        async def list(self, execution_id: str, *, tenant_id: str, after_event_seq: int, limit: int) -> Page[ExecutionEvent]:
+            selected = tuple(value for value in values if value.event_seq > after_event_seq)
+            if limit == 1 and after_event_seq == confirmation_sequence - 1:
+                if corruption == "missing_confirmation":
+                    return Page((), None)
+                if corruption == "different_confirmation":
+                    return Page((replace(selected[0], payload={"different": True}),), None)
+            if corruption == "missing_prefix" and limit != 1:
+                selected = selected[1:]
+            return Page(selected[:limit], None)
+
+    service = _service(_execution(status=ExecutionStatus.CANCELLED, revision=3, event_seq=3), Reader({}), broker)
+    broker.publish_event("execution", tool.event_type, tool.payload, durable_seq=None)
+    stream = service.stream("execution", principal=Principal("user", "tenant", "user"), after_event_seq=cursor)
+    try:
+        if cursor == 0:
+            provisional = await stream.__anext__()
+            assert provisional.durable_seq is None
+        broker.confirm_events("execution", first_event_seq=2, count=1)
+        broker.publish_event("execution", terminal.event_type, terminal.payload, durable_seq=3)
+        broker.complete("execution")
+        assert broker.is_local_producer("execution")
+        if corruption is not None:
+            with pytest.raises(AIError) as raised:
+                _ = [item async for item in stream]
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        else:
+            events = [item async for item in stream]
+            assert [item.durable_seq for item in events] == list(range(cursor + 1, 4))
+            assert events[-1].event_type == ExecutionEventType.EXECUTION_CANCELLED
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor", (0, 1))
+async def test_forward_control_gap_keeps_future_live_deltas(cursor: int) -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    control = ExecutionEvent("execution", 1, ExecutionEventType.CANCEL_REQUESTED, {"operation_id": "cancel"})
+    tool = ExecutionEvent("execution", 2, ExecutionEventType.TOOL_CALL_STARTED, {"call_id": "tool"})
+    broker.publish_event("execution", tool.event_type, tool.payload, durable_seq=2)
+    broker.publish(ExecutionDelta("execution", ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "after control"))
+    broker.publish_event("execution", ExecutionEventType.EXECUTION_CANCELLED, {}, durable_seq=3)
+    broker.complete("execution")
+    assert broker.is_local_producer("execution")
+    service = _service(
+        _execution(status=ExecutionStatus.CANCELLED, revision=3, event_seq=3),
+        _EventReader({0: (control, tool), 1: (tool,)}), broker,
+    )
+    events = [item async for item in service.stream(
+        "execution", principal=Principal("user", "tenant", "user"), after_event_seq=cursor,
+    )]
+    assert [item.durable_seq for item in events] == [*range(cursor + 1, 3), None, 3]
+    assert events[-2].payload["text"] == "after control"

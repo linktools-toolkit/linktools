@@ -1,6 +1,15 @@
 export const terminal = status => ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(status);
 export const modelKey = item => `${item.execution_id}:${item.agent_run_seq}:${item.model_request_seq}`;
 export const historyKey = item => `${item.execution_id}:${item.agent_run_seq}:${item.message_seq}:${item.part_index}:${item.item_kind}:${item.tool_call_id || ''}`;
+export function eventKey(item) {
+  const event=item.event, payload=event.payload || {};
+  const key=[item.execution_id,event.event_type];
+  if (['MODEL_REQUEST_STARTED','MODEL_REQUEST_FINISHED'].includes(event.event_type)) key.push(payload.agent_run_seq,payload.model_request_seq);
+  else if (['TOOL_CALL_STARTED','TOOL_CALL_FINISHED'].includes(event.event_type)) key.push(payload.agent_run_seq,payload.call_id);
+  else if (event.event_type==='ASSISTANT_PART_COMPLETED') key.push(payload.agent_run_seq,payload.message_seq,payload.part_index);
+  else key.push(event.durable_seq);
+  return JSON.stringify(key);
+}
 export function upsertModel(items, item) {
   const key = modelKey(item), previous = items.get(key);
   if (previous && previous.status !== 'RUNNING' && item.status === 'RUNNING') return;

@@ -95,9 +95,11 @@ class _RepositoryInstructionBoundary:
         execution: ExecutionRecord,
         initial: RepositoryInstructions | None,
         overlay: RepositoryInstructions | None,
+        producer_generation: int | None = None,
     ) -> None:
         self._runtime = runtime
         self._execution = execution
+        self._producer_generation = producer_generation
         self._initial = initial
         self._overlay = overlay
         self._has_initial = bool(initial is not None and initial.documents)
@@ -142,6 +144,7 @@ class _RepositoryInstructionBoundary:
                     tool_call_id=tool_call_id,
                     arguments=arguments,
                     path_fields=path_fields,
+                    producer_generation=self._producer_generation,
                 )
             )
             next_signature = _repository_instruction_signature(next_overlay)

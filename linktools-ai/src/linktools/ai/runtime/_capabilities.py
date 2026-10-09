@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -40,10 +41,11 @@ from ._harness_memory import (
 )
 from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
-from ._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY
+from ._journal import DURATION_NS_METADATA_KEY, MODEL_REQUEST_SEQ_METADATA_KEY, _await_request_handoff
 from ._metric_capability import ModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
+    TOOL_ERROR_CODE_METADATA_KEY,
     AgentRunCheckpoint,
     AgentRunRecord,
     CheckpointState,
@@ -144,7 +146,7 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
         )
         transcript = self.recorder.transcript_messages()
         self._last_checkpoint_transcript_count = len(transcript)
-        self._replay_request_captured = bool(transcript and isinstance(transcript[-1], ModelRequest))
+        self._replay_request_captured = self.recorder.request_already_captured(ctx.messages)
         await self.recorder.record_event("AGENT_RUN_STARTED", ctx.run_step)
 
     async def before_model_request(
@@ -274,11 +276,8 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
-        await self.recorder.record_event(
-            "TOOL_CALL_SUCCEEDED",
-            ctx.run_step,
-            tool_call_id=call.tool_call_id,
-            tool_name=tool_def.name,
+        self.recorder.remember_tool_execution(
+            call.tool_call_id,
             metadata=metadata,
         )
         return result
@@ -298,14 +297,22 @@ class _AgentRunPersistenceCapability(AbstractCapability[None]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
-        await self.recorder.record_event(
-            "TOOL_CALL_FAILED",
-            ctx.run_step,
-            tool_call_id=call.tool_call_id,
-            tool_name=tool_def.name,
-            error=repr(error),
-            metadata=metadata,
-        )
+        if isinstance(error, AIError):
+            metadata[TOOL_ERROR_CODE_METADATA_KEY] = error.code.value
+        async def record_failure() -> None:
+            await self.recorder.record_event(
+                "TOOL_CALL_FAILED",
+                ctx.run_step,
+                tool_call_id=call.tool_call_id,
+                tool_name=tool_def.name,
+                error=repr(error),
+                metadata=metadata,
+            )
+            await self.recorder.commit_history_boundary()
+
+        interrupted = await _await_request_handoff(record_failure())
+        if interrupted:
+            raise asyncio.CancelledError from error
         raise error
 
     def remember_context_projection(

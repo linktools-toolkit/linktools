@@ -71,7 +71,7 @@ model/tool details, metrics and Runtime status. The command surface is
 The former history, session, status, trace and metrics commands are consolidated
 into the Web console; their old entry points are removed without aliases.
 See the [Web console guide](docs/web-console.md) for command coverage, local
-security, read-only operation and the current upstream writable-startup caveat.
+security, read-only operation and explicit recovery of stopped executors.
 
 ### Python
 
@@ -98,6 +98,12 @@ async with Runtime.open(
 ```
 
 `Runtime.open()` is the public composition root. The Runtime composition is immutable for the lifetime of the context; registrations are completed before it opens.
+
+Cold `Runtime` and `RuntimeStorage` imports load the complete durable schema set.
+Include import and `Runtime.open()` initialization in the caller or deployment's
+startup budget, and report readiness only after the context opens successfully.
+`Runtime.open()` imposes no fixed startup deadline. Reuse the opened Runtime for
+its service lifetime; execution deadlines do not replace a startup budget.
 
 Connection settings can be resolved lazily for a route. The resolver runs only
 when that route is materialized, and each materialization resolves independently;
@@ -784,8 +790,9 @@ those high-water marks; it does not switch to a second query mode. `cutoffs=()`
 selects an empty snapshot. Cursors retain their captured high-water marks but
 do not freeze lifecycle state: a captured RUNNING request may be terminal when
 read later. Root queries include recursive descendants; selecting a SUBAGENT
-reads only that execution. Model interactions can read process-local staging,
-while aggregate `usage()` reads archived usage and may lag. See the
+reads only that execution. Retained model interactions and aggregate `usage()`
+read committed active identities; explicit TRANSIENT routes use process-local
+history. Running and interrupted requests retain unknown usage as unknown. See the
 [history guide](docs/runtime-history.md) for query scopes and content budgets.
 
 The live event buffer can fall back to durable replay before an uncommitted

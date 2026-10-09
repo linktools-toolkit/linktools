@@ -33,6 +33,7 @@ from .service_api import (
     ExternalSupplyResult,
 )
 from .state._contracts import (
+    deferred_resource_id,
     ExternalCallRecord,
     ExternalCallRepository,
     ExecutionRepository,
@@ -105,7 +106,8 @@ class DefaultExternalService:
             return ()
         views: list[ExternalCallView] = []
         for pending in checkpoint.pending_tools.calls:
-            call_id = external_call_id_for_call(
+            call_id = deferred_resource_id(
+                "external-call-v1",
                 principal.tenant_id,
                 execution_id,
                 checkpoint.pending_tools.source_agent_run_id,
@@ -242,24 +244,6 @@ class DefaultExternalService:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
-def external_call_id_for_call(
-    tenant_id: str,
-    execution_id: str,
-    source_agent_run_id: str,
-    tool_call_id: str,
-) -> str:
-    """Return the deterministic id for one external deferred call."""
-    return canonical_sha256(
-        {
-            "contract": "external-call-v1",
-            "tenant_id": tenant_id,
-            "execution_id": execution_id,
-            "source_agent_run_id": source_agent_run_id,
-            "tool_call_id": tool_call_id,
-        }
-    )
-
-
 def _pending_call(
     checkpoint: RecoveryCheckpoint | None,
     call_id: str,
@@ -269,7 +253,8 @@ def _pending_call(
     if checkpoint is None or checkpoint.pending_tools is None:
         return None
     for pending in checkpoint.pending_tools.calls:
-        candidate = external_call_id_for_call(
+        candidate = deferred_resource_id(
+            "external-call-v1",
             tenant_id,
             checkpoint.execution_id,
             checkpoint.pending_tools.source_agent_run_id,

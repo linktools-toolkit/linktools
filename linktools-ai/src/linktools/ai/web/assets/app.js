@@ -1,4 +1,4 @@
-import {terminal, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers} from './console.js';
+import {terminal, eventKey, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers} from './console.js';
 
 const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',
@@ -54,7 +54,7 @@ function setDisabled() {
   ['send','planning','thinking','memory','files','prompt'].forEach(id => $(id).disabled=readonly || state.session?.status === 'CLOSED' || !state.selectedSession);
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
   ['retry','fork-run','recover'].forEach(id => $(id).disabled=readonly || !state.execution);
-  $('recover').disabled=readonly || state.execution?.status!=='RECOVERY_REQUIRED' || state.recoveryReadbackId===state.selectedExecution || state.actionsPending.has(`${state.selectedExecution}:recover`);
+  $('recover').disabled=readonly || !['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status) || state.recoveryReadbackId===state.selectedExecution || state.actionsPending.has(`${state.selectedExecution}:recover`);
   $('export').disabled=!state.execution || !terminal(state.execution.status);
   const stoppable=!readonly && state.execution && !terminal(state.execution.status);
   $('stop-run').hidden=!stoppable;
@@ -292,7 +292,7 @@ function renderDetails() {
     if(state.tab==='models') {
       card.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`),element('p','',`Run ${item.agent_run_seq} · depth ${item.depth} · ${item.purpose}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`));
       if(item.usage)card.append(element('p','',usageLabel(item.usage)));
-      if(item.request && item.content_included!==false){const layers=element('details');layers.append(element('summary','','Prompt architecture'),properties(Object.fromEntries(promptLayers(item.request))));card.append(layers);}
+      if(item.request && Object.keys(item.request).length && item.content_included!==false){const layers=element('details');layers.append(element('summary','','Prompt architecture'),properties(Object.fromEntries(promptLayers(item.request))));card.append(layers);}
       else card.append(element('p','muted','Prompt content is not available yet.'));
       card.append(rawDetail(item,'Prompt, response & metadata'));
       if(item.execution_id!==state.selectedExecution)card.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
@@ -358,8 +358,7 @@ async function watchExecution(id,generation) {
           if(item.depth===0 && event.event_type==='ASSISTANT_TEXT_DELTA')state.liveText+=payload.text || '';
           else if(item.depth===0 && event.event_type==='ASSISTANT_THINKING_DELTA')state.liveThinking+=payload.text || '';
           else if(!event.event_type.endsWith('_DELTA')) {
-            const key=`${item.execution_id}:${event.durable_seq ?? event.event_type+':'+(payload.call_id || '')}`;
-            state.events.set(key,item);
+            state.events.set(eventKey(item),item);
             if(state.events.size>100)state.events.delete(state.events.keys().next().value);
           }
           renderLive();
@@ -446,6 +445,17 @@ async function executionAction(action) {
       if(generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution)navigate(info.session_id,result.execution_id);
     }
   } catch(error) {
+    if(action==='cancel' && error.code==='STORAGE_CONFLICT' && generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution){
+      try {
+        await refreshSelected();
+        if(generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution)return;
+        const status=state.execution?.status;
+        error.message+=`; Runtime status re-read: ${status || 'unknown'}. ${terminal(status)?'Execution is terminal; no cancellation retry is needed.':'Cancellation is not confirmed. If still needed, choose Stop execution again.'}`;
+      } catch(readbackError) {
+        if(generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution)return;
+        error.message+=`; cancellation outcome is unresolved (${readbackError.message}). Refresh to check the Runtime before another action.`;
+      }
+    }
     if(action==='recover' && generation===state.generation && id===state.selectedExecution){
       state.recoveryReadbackId=id;
       try {await refreshSelected();error.message+='; canonical state re-read. Recovery was not resent.';}

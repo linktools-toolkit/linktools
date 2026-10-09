@@ -18,7 +18,7 @@ def test_web_client_preserves_identity_and_reads_fragmented_streams() -> None:
 import {readFileSync} from 'node:fs';
 import assert from 'node:assert/strict';
 const source=readFileSync(process.argv[1], 'utf8');
-const {modelKey,historyKey,upsertModel,mergePage,parseSSE,readSSE,metricValue,duration,modelLabel,usageLabel,promptLayers}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {modelKey,historyKey,eventKey,upsertModel,mergePage,parseSSE,readSSE,metricValue,duration,modelLabel,usageLabel,promptLayers}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const items=new Map();
 const base={execution_id:'root',agent_run_seq:1,model_request_seq:1};
 upsertModel(items,{...base,status:'SUCCEEDED',usage:{input_tokens:2}});
@@ -30,6 +30,17 @@ assert.equal(items.get(modelKey(base)).usage.input_tokens,2);
 const original=[{id:'a',value:1},{id:'b',value:2}];
 assert.deepEqual(mergePage(original,[{id:'a',value:3},{id:'c',value:4}],x=>x.id),[{id:'a',value:3},{id:'b',value:2},{id:'c',value:4}]);
 assert.notEqual(historyKey({...base,message_seq:1,part_index:0,item_kind:'tool_call'}),historyKey({...base,execution_id:'child',message_seq:1,part_index:0,item_kind:'tool_call'}));
+for(const event_type of ['MODEL_REQUEST_STARTED','MODEL_REQUEST_FINISHED','TOOL_CALL_STARTED','TOOL_CALL_FINISHED','ASSISTANT_PART_COMPLETED']){
+  const payload={agent_run_seq:1,model_request_seq:2,call_id:'tool:1',message_seq:3,part_index:0};
+  const live={execution_id:'root',event:{event_type,durable_seq:null,payload}};
+  const replay={...live,event:{...live.event,durable_seq:9}};
+  assert.equal(eventKey(live),eventKey(replay));
+  assert.notEqual(eventKey(live),eventKey({...live,execution_id:'child'}));
+  assert.notEqual(eventKey(live),eventKey({...live,event:{...live.event,payload:{...payload,agent_run_seq:2}}}));
+  const distinct={...payload,model_request_seq:3,call_id:'tool:2',part_index:1};
+  assert.notEqual(eventKey(live),eventKey({...live,event:{...live.event,payload:distinct}}));
+}
+assert.notEqual(eventKey({execution_id:'root',event:{event_type:'EXECUTION_RESUMED',durable_seq:1}}),eventKey({execution_id:'root',event:{event_type:'EXECUTION_RESUMED',durable_seq:2}}));
 assert.equal(parseSSE(': heartbeat'),null);
 const input='id: cursor\r\ndata: {"text":"你好🌱"}\r\n\r\nevent: snapshot\r\ndata: {"status":"SUCCEEDED"}\r\n\r\n';
 const bytes=new TextEncoder().encode(input), observed=[];

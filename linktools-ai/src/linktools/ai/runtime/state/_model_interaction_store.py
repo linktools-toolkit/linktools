@@ -22,40 +22,25 @@ from ._contracts import (
     RuntimePayloadRef,
     TranscriptSpanRef,
 )
+from ._history import PreparedTranscriptObservation
+from ._plan import RuntimeDomain
 from ._step_contracts import AgentRunCheckpoint, AgentRunRecord, StepEvent
 from ._step_archive import (
-    ExecutionProjectionBatch,
     InMemoryStepArchive,
     PreparedAgentRunCheckpoint,
-    StagingAgentRunStore,
     StateStepArchive,
-    _ProjectionOffset,
     _decode_step,
     _encode_step,
-    _insert_facts,
-    _step_subject,
+    _validate_interaction_page,
 )
-from ._store import FactQuery, StateTransaction, StoredFact, StoredRecord
-
-
-class ModelInteractionStagingAgentRunStore(StagingAgentRunStore):
-    """Staging store with model-request-seq idempotency and durable high-water capture."""
-
-    def capture_projection_local(
-        self,
-        agent_run_id: str,
-        offset: _ProjectionOffset,
-    ) -> ExecutionProjectionBatch | None:
-        # Base staging owns runs/events/checkpoints/interactions. Ask it for a
-        # complete local interaction checkpoint, then translate the durable
-        # model-request-seq high-water without reaching into its other state.
-        base = super().capture_projection_local(
-            agent_run_id,
-            replace(offset, interactions=0),
-        )
-        if base is None:
-            return None
-        return _with_interaction_high_water(base, offset.interactions)
+from ._store import (
+    RecordQuery,
+    RecordReplacement,
+    StateTransaction,
+    StoredRecord,
+    record_key_digest,
+    require_no_run_history_lock,
+)
 
 
 class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
@@ -70,7 +55,12 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         local_message_base: int = 0,
         local_message_count: int = 0,
     ) -> tuple[ModelInteractionRecord, ...]:
-        values = _validate_interaction_batch(run, interactions)
+        values = tuple(
+            replace(value, request_context=None, request_envelope_digest=None)
+            if self.runtime_domain is RuntimeDomain.EXECUTION and value.status == "RUNNING"
+            else value
+            for value in _validate_interaction_batch(run, interactions)
+        )
         if local_message_base < 0 or local_message_count < 0:
             raise ValueError("local interaction transcript range is invalid")
 
@@ -99,8 +89,12 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
                 staged.purpose,
                 staged.output_retry_index,
                 staged.model,
-                prepare_context(staged.request_context),
-                RuntimePayloadRef(
+                None
+                if staged.request_context is None
+                else prepare_context(staged.request_context),
+                None
+                if staged.request_envelope_digest is None
+                else RuntimePayloadRef(
                     StoredPayload.inline_bytes(payload(staged.request_envelope_digest)),
                     self.runtime_domain,
                 ),
@@ -127,22 +121,28 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None:
-        current_values = await super().list_model_interactions(agent_run_id=run.agent_run_id)
-        current: dict[int, ModelInteractionRecord] = {}
-        for value in current_values:
-            if not isinstance(value, ModelInteractionRecord):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            current[value.model_request_seq] = value
         fresh: list[ModelInteractionRecord] = []
+        seen: set[int] = set()
         for interaction in interactions:
             if not isinstance(interaction, ModelInteractionRecord):
                 raise TypeError("model interaction is invalid")
-            previous = current.get(interaction.model_request_seq)
-            if previous is None:
-                fresh.append(interaction)
-                current[interaction.model_request_seq] = interaction
-            elif previous != interaction:
+            if interaction.agent_run_id != run.agent_run_id or interaction.model_request_seq in seen:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            seen.add(interaction.model_request_seq)
+            existing = await super().list_model_interactions(
+                agent_run_id=run.agent_run_id,
+                after_model_request_seq=interaction.model_request_seq - 1,
+                limit=1,
+            )
+            previous = existing[0] if existing else None
+            if previous is None or previous.model_request_seq != interaction.model_request_seq:
+                fresh.append(interaction)
+            else:
+                if not isinstance(previous, ModelInteractionRecord):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                previous.validate_successor(interaction)
+                if previous != interaction:
+                    fresh.append(interaction)
         await super().sync_projection(
             run,
             events=events,
@@ -169,7 +169,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
 
 
 class ModelInteractionStateStepArchive(StateStepArchive):
-    """Durable archive that keys one immutable fact per logical model request."""
+    """Durable archive with one CAS-protected record per admitted model request."""
 
     async def resolve_model_interactions(
         self,
@@ -204,6 +204,15 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             local_message_count=local_message_count,
         )
 
+    def _interaction_key(self, agent_run_id: str, model_request_seq: int) -> bytes:
+        return record_key_digest(
+            self._namespace,
+            self._tenant_id,
+            self.runtime_domain.value,
+            "model_interaction",
+            [agent_run_id, model_request_seq],
+        )
+
     async def list_model_interactions(
         self,
         *,
@@ -211,28 +220,105 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         after_model_request_seq: int | None = None,
         limit: int | None = None,
     ) -> list[object]:
-        # FactQuery is the physical pagination boundary and owns validation of
-        # after_sequence/limit. Do not duplicate that contract here.
-        values = await self._store.read(
-            lambda transaction: transaction.list_facts(
-                FactQuery(
-                    self._stream(agent_run_id, "interaction"),
-                    after_sequence=after_model_request_seq,
-                    limit=limit,
-                )
-            )
-        )
-        return [self._decode_interaction_fact(fact) for fact in values]
+        self._ensure_open()
+        require_no_run_history_lock("StateStepArchive.list_model_interactions")
+        _validate_interaction_page(after_model_request_seq, limit)
+        sequence_key = self._sequence(agent_run_id, "interaction")
+        start = 1 if after_model_request_seq is None else after_model_request_seq + 1
 
-    def _decode_interaction_fact(self, fact: StoredFact) -> ModelInteractionRecord:
-        value = _decode_step(fact.data)
+        async def read(transaction: StateTransaction) -> list[object]:
+            high_water = (await transaction.get_sequences((sequence_key,))).get(sequence_key, 0)
+            end = high_water + 1 if limit is None else min(high_water + 1, start + limit)
+            keys = tuple(self._interaction_key(agent_run_id, seq) for seq in range(start, end))
+            if not keys:
+                return []
+            records = await transaction.get_records(keys)
+            if len(records) != len(keys):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return [self._decode_interaction_record(records[key]) for key in keys]
+
+        return await self._store.read(read)
+
+    def _stored_interaction(self, value: ModelInteractionRecord) -> StoredRecord:
+        return StoredRecord(
+            self._interaction_key(value.agent_run_id, value.model_request_seq),
+            None,
+            self._agent_run_key(value.agent_run_id),
+            "model_interaction",
+            _interaction_sort_key(value.model_request_seq),
+            value.status,
+            0,
+            None,
+            0,
+            None,
+            _encode_step(value),
+        )
+
+    def _decode_interaction_record(self, record: StoredRecord) -> ModelInteractionRecord:
+        value = _decode_step(record.data)
+        if not isinstance(value, ModelInteractionRecord):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
-            not isinstance(value, ModelInteractionRecord)
-            or fact.sequence != value.model_request_seq
-            or fact.subject_digest != _step_subject(value)
+            record.key_digest != self._interaction_key(value.agent_run_id, value.model_request_seq)
+            or record.scope_digest is not None
+            or record.parent_digest != self._agent_run_key(value.agent_run_id)
+            or record.kind != "model_interaction"
+            or record.sort_key != _interaction_sort_key(value.model_request_seq)
+            or record.state != value.status
+            or record.lease_owner is not None
+            or record.lease_fence != 0
+            or record.lease_expires_at is not None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
+
+    async def interrupt_model_interactions(
+        self,
+        *,
+        agent_run_id: str,
+        execution_id: str,
+        producer_generation: int,
+    ) -> None:
+        """Close requests left in flight by a previous execution producer."""
+        self._ensure_open()
+        require_no_run_history_lock("StateStepArchive.interrupt_model_interactions")
+
+        async def mutate(transaction: StateTransaction) -> None:
+            guard = await self._execution_history_guard_in_transaction(
+                transaction,
+                execution_id,
+                None,
+                producer_generation=producer_generation,
+            )
+            if guard is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            owner = await transaction.get_record(self._agent_run_key(agent_run_id))
+            if owner is None:
+                return
+            run = _decode_step(owner.data)
+            if not isinstance(run, AgentRunRecord) or run.agent_run_id != agent_run_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            records = await transaction.list_records(
+                RecordQuery(
+                    parent_digest=owner.key_digest,
+                    kind="model_interaction",
+                    states=frozenset({"RUNNING"}),
+                )
+            )
+            interactions = tuple(
+                replace(self._decode_interaction_record(record), status="INTERRUPTED")
+                for record in records
+            )
+            changed = await self._sync_interactions_in_transaction(
+                transaction,
+                run,
+                interactions,
+                owner_already_guarded=False,
+            )
+            if changed:
+                await self._advance_execution_history_head_in_transaction(transaction, guard)
+
+        await self._store.mutate(mutate)
 
     async def _sync_projection_in_transaction(
         self,
@@ -242,6 +328,8 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         events: Sequence[StepEvent],
         checkpoints: Sequence[PreparedAgentRunCheckpoint],
         interactions: Sequence[ModelInteractionRecord] = (),
+        observation: PreparedTranscriptObservation | None = None,
+        producer_generation: int | None = None,
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
@@ -250,6 +338,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             transaction,
             execution_id,
             history_head_guard,
+            producer_generation=producer_generation,
         )
         owner = self._agent_run_key(run.agent_run_id)
         run_existed = await transaction.get_record(owner) is not None
@@ -259,6 +348,8 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             events=events,
             checkpoints=checkpoints,
             interactions=(),
+            observation=observation,
+            producer_generation=producer_generation,
             execution_id=execution_id,
             history_head_guard=guard,
         )
@@ -269,7 +360,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             owner_already_guarded=bool(events or checkpoints),
         )
         if guard is not None and not supplied_guard and (
-            not run_existed or events or checkpoints or inserted
+            not run_existed or events or checkpoints or inserted or observation is not None
         ):
             await self._advance_execution_history_head_in_transaction(
                 transaction,
@@ -287,6 +378,8 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         values = tuple(interactions)
         if not values:
             return 0
+        if any(not isinstance(value, ModelInteractionRecord) for value in values):
+            raise TypeError("model interaction is invalid")
         sequences = tuple(value.model_request_seq for value in values)
         if (
             any(value.agent_run_id != run.agent_run_id for value in values)
@@ -300,46 +393,46 @@ class ModelInteractionStateStepArchive(StateStepArchive):
             sequence_key,
             0,
         )
-        replay = tuple(
-            value for value in values if value.model_request_seq <= durable_count
+        keys = tuple(
+            self._interaction_key(value.agent_run_id, value.model_request_seq)
+            for value in values
         )
-        fresh = tuple(
-            value for value in values if value.model_request_seq > durable_count
-        )
-        if replay:
-            replay_sequences = tuple(value.model_request_seq for value in replay)
-            if replay_sequences != tuple(
-                range(
-                    replay_sequences[0],
-                    replay_sequences[0] + len(replay_sequences),
-                )
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stored = await transaction.list_facts(
-                FactQuery(
-                    self._stream(run.agent_run_id, "interaction"),
-                    after_sequence=replay_sequences[0] - 1,
-                    limit=len(replay),
-                )
-            )
-            if len(stored) != len(replay):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for fact, value in zip(stored, replay, strict=True):
-                if (
-                    fact.sequence != value.model_request_seq
-                    or fact.subject_digest != _step_subject(value)
-                    or fact.state != value.status
-                    or fact.data != _encode_step(value)
-                ):
+        stored = await transaction.get_records(keys)
+        fresh: list[StoredRecord] = []
+        replacements: list[RecordReplacement] = []
+        for key, value in zip(keys, values, strict=True):
+            previous = stored.get(key)
+            if value.model_request_seq > durable_count:
+                if previous is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not fresh:
-            return 0
-        fresh_sequences = tuple(value.model_request_seq for value in fresh)
+                fresh.append(self._stored_interaction(value))
+                continue
+            if previous is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            previous_value = self._decode_interaction_record(previous)
+            previous_value.validate_successor(value)
+            if previous_value != value:
+                replacements.append(
+                    RecordReplacement(
+                        replace(
+                            previous,
+                            state=value.status,
+                            data=_encode_step(value),
+                            storage_version=previous.storage_version + 1,
+                        ),
+                        previous.storage_version,
+                    )
+                )
+        fresh_sequences = tuple(
+            value.model_request_seq for value in values
+            if value.model_request_seq > durable_count
+        )
         if fresh_sequences != tuple(
             range(durable_count + 1, durable_count + len(fresh) + 1)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
+        if not fresh and not replacements:
+            return 0
         if not owner_already_guarded:
             owner_record = await transaction.get_record(self._agent_run_key(run.agent_run_id))
             if owner_record is None or await transaction.guard_record(
@@ -347,27 +440,14 @@ class ModelInteractionStateStepArchive(StateStepArchive):
                 expected_storage_version=owner_record.storage_version,
             ) is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-        final = await transaction.reserve_sequence(sequence_key, len(fresh))
-        if final != fresh_sequences[-1]:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        stream = self._stream(run.agent_run_id, "interaction")
-        owner = self._agent_run_key(run.agent_run_id)
-        await _insert_facts(
-            transaction,
-            tuple(
-                StoredFact(
-                    stream,
-                    value.model_request_seq,
-                    owner,
-                    "model_interaction",
-                    _step_subject(value),
-                    value.status,
-                    _encode_step(value),
-                )
-                for value in fresh
-            ),
-        )
-        return len(fresh)
+        if fresh:
+            final = await transaction.reserve_sequence(sequence_key, len(fresh))
+            if final != fresh_sequences[-1]:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await transaction.insert_records(tuple(fresh))
+        if replacements:
+            await transaction.replace_records(tuple(replacements))
+        return len(fresh) + len(replacements)
 
 
 def _validate_interaction_batch(
@@ -381,7 +461,6 @@ def _validate_interaction_batch(
             not isinstance(interaction, StagedModelInteraction)
             or interaction.agent_run_id != run.agent_run_id
             or interaction.model_request_seq in sequences
-            or interaction.status == "RUNNING"
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sequences.add(interaction.model_request_seq)
@@ -389,36 +468,11 @@ def _validate_interaction_batch(
 
 
 
-def _with_interaction_high_water(
-    batch: ExecutionProjectionBatch,
-    durable_high_water: int,
-) -> ExecutionProjectionBatch:
-    interactions: list[StagedModelInteraction] = []
-    expected = durable_high_water + 1
-    running_seen = False
-    for value in batch.interactions:
-        if value.model_request_seq <= durable_high_water:
-            continue
-        if value.model_request_seq != expected:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if value.status == "RUNNING":
-            running_seen = True
-            continue
-        if running_seen:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        interactions.append(value)
-        expected += 1
-    target = durable_high_water + len(interactions)
-    return replace(
-        batch,
-        interactions=tuple(interactions),
-        base_interaction_offset=durable_high_water,
-        target_interaction_offset=target,
-    )
+def _interaction_sort_key(model_request_seq: int) -> str:
+    return f"m:{model_request_seq:020d}"
 
 
 __all__ = [
     "ModelInteractionInMemoryStepArchive",
-    "ModelInteractionStagingAgentRunStore",
     "ModelInteractionStateStepArchive",
 ]

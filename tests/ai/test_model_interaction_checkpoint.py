@@ -53,6 +53,9 @@ async def test_checkpoint_preserves_live_request_until_terminal(
             capture.begin_model_interaction(
                 fact, TestModel(), messages, None, ModelRequestParameters(), False,
             )
+            capture.prepare_model_interaction(
+                fact, TestModel(), messages, None, ModelRequestParameters(), False,
+            )
             capture.append_transcript_message(request)
             checkpoint = AgentRunCheckpoint(
                 agent_run_id="run",

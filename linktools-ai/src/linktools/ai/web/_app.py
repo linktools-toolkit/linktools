@@ -20,7 +20,7 @@ from ..core import Principal, PrincipalKind
 from ..errors import AIError, ErrorCode, ErrorDiagnostics, ObservationError
 from ..observe import MetricAggregation, MetricQuery, Metrics, MetricWindow
 from ..runtime import (
-    CreateSessionRequest,
+    CreateSessionRequest, ExecutionStreamEvent,
     ListExecutionRequest, ListSessionRequest, Runtime, RuntimeHistory,
     TaskModelProjection, ToolEffectApplied, ToolEffectFailed, ToolEffectNotApplied,
 )
@@ -51,7 +51,15 @@ def _wire(value: object) -> object:
         return {"exception_type": value.exception_type, "cause_digest": value.cause_digest}
     if is_dataclass(value) and not isinstance(value, type):
         # Recurse before asdict so diagnostic messages never enter an HTTP response.
-        return {field.name: _wire(getattr(value, field.name)) for field in fields(value)}
+        result = {field.name: _wire(getattr(value, field.name)) for field in fields(value)}
+        if isinstance(value, ExecutionStreamEvent):
+            payload = result["payload"]
+            if isinstance(payload, dict) and isinstance(payload.get("error_diagnostics"), dict):
+                diagnostics = payload["error_diagnostics"]
+                payload["error_diagnostics"] = {
+                    key: diagnostics[key] for key in ("exception_type", "cause_digest") if key in diagnostics
+                }
+        return result
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, datetime):

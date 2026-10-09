@@ -14,7 +14,10 @@ from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionStatus,
+    IdempotencyStatus,
     JsonValue,
+    ResourceKind,
+    RunBudget,
     StopReason,
     UsageMetrics,
 )
@@ -25,11 +28,15 @@ from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
+    decode_domain,
+    encode_domain,
     encode_envelope,
 )
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
+    ExecutionStartReservation,
     ExecutionTerminalCommit,
+    IdempotencyRecord,
     ResultRecord,
 )
 from linktools.ai.spec import AgentSpec
@@ -96,6 +103,47 @@ def _result(execution_id: str, payload_kind: str, now: datetime) -> ResultRecord
         usage=UsageMetrics(),
         created_at=now,
     )
+
+
+@pytest.mark.parametrize("persisted", (False, True))
+def test_execution_reservation_wire_keeps_budget_admission_separate(
+    persisted: bool,
+) -> None:
+    execution = _execution()
+    reservation = ExecutionStartReservation(
+        execution,
+        IdempotencyRecord(
+            "scope", "a" * 64, "b" * 64, ResourceKind.EXECUTION,
+            execution.execution_id, IdempotencyStatus.RESERVED, None, None,
+            execution.created_at, execution.updated_at,
+        ),
+        RunBudget(model_requests=2),
+    )
+    encode = _encode_persisted_domain if persisted else encode_domain
+    payload = encode(reservation)
+
+    def decode(value: JsonValue) -> ExecutionStartReservation:
+        if persisted:
+            return _decode_enveloped_domain(
+                encode_envelope({"type": "execution_start_reservation", "payload": value}),
+                ExecutionStartReservation,
+            )
+        return decode_domain(value, ExecutionStartReservation)
+
+    assert set(payload["fields"]) == {"execution", "idempotency"}
+    assert decode(payload) == replace(reservation, budget=None)
+    additive = {
+        **payload,
+        "fields": {**payload["fields"], "budget": encode(reservation.budget), "future_note": True},
+    }
+    assert decode(additive) == replace(reservation, budget=None)
+    for value in (
+        {**payload, "fields": {"execution": payload["fields"]["execution"]}},
+        {**payload, "fields": {**payload["fields"], "idempotency": False}},
+    ):
+        with pytest.raises(AIError) as raised:
+            decode(value)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_execution_record_writer_accepts_nested_json_result() -> None:

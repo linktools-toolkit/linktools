@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 from dataclasses import replace
+from datetime import timezone
 from typing import cast
 
 from ...core import BudgetUsage, OperationLedgerInput
@@ -21,7 +22,7 @@ from ...task import (
     TaskNodeView,
     TaskResultRecord,
 )
-from ._codec import _decode_enveloped_domain
+from ._codec import _decode_enveloped_domain, decode_envelope
 from ._contracts import (
     ApprovalRecord,
     ArtifactRecord,
@@ -35,14 +36,18 @@ from ._contracts import (
     ExternalCallRecord,
     IdempotencyRecord,
     MemoryRecord,
+    ModelInteractionRecord,
     RecoveryCheckpoint,
     SessionRecord,
+    StoredAgentRunCheckpoint,
     TaskPreparedInputRecord,
     ToolOperationRecord,
     TranscriptChunk,
     TranscriptHeadRecord,
+    TranscriptOrigin,
     TranscriptSeekDimension,
     TranscriptSeekRecord,
+    TranscriptSpanRef,
 )
 from ._plan import RuntimeDomain
 from ._repository_common import (
@@ -51,7 +56,7 @@ from ._repository_common import (
     record_state,
     restore_lease_fields,
 )
-from ._step_contracts import AgentRunRecord
+from ._step_contracts import TOOL_ERROR_CODE_METADATA_KEY, AgentRunRecord, StepEvent
 from ._store import (
     StoredAlias,
     StoredFact,
@@ -81,6 +86,7 @@ _ALLOWED_RECORD_KINDS = {
             "transcript_seek",
             "context_projection",
             "agent_run",
+            "model_interaction",
         }
     ),
     RuntimeDomain.EXECUTION: frozenset(
@@ -96,6 +102,8 @@ _ALLOWED_RECORD_KINDS = {
             "transcript_seek",
             "context_projection",
             "agent_run",
+            "model_interaction",
+            "history_association",
         }
     ),
     RuntimeDomain.MEMORY: frozenset({"memory"}),
@@ -123,6 +131,7 @@ _ALLOWED_RECORD_KINDS = {
             "transcript_seek",
             "context_projection",
             "agent_run",
+            "model_interaction",
         }
     ),
 }
@@ -165,6 +174,7 @@ _RECORD_TYPES = {
     "task_result": TaskResultRecord,
     "task_prepared_input": TaskPreparedInputRecord,
     "agent_run": AgentRunRecord,
+    "model_interaction": ModelInteractionRecord,
 }
 
 
@@ -219,7 +229,15 @@ def validate_snapshot_domain(
         domain,
         values,
     )
+    associations = _history_association_records(namespace, tenant_id, domain, facts, values)
+    if {record.key_digest for record in records if record.kind == "history_association"} != set(associations):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for record in records:
+        if record.kind == "history_association":
+            expected = associations.get(record.key_digest)
+            if expected is None or not _same_physical_identity(record, expected) or record.data != expected.data:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            continue
         expected = _expected_record(
             namespace,
             tenant_id,
@@ -266,6 +284,26 @@ def validate_snapshot_references(
     records: Mapping[RuntimeDomain, tuple[StoredRecord, ...]],
 ) -> None:
     """Validate cross-domain references against the snapshot's durable owners."""
+    transcript_heads: dict[tuple[RuntimeDomain, str], TranscriptHeadRecord] = {}
+    interactions: list[ModelInteractionRecord] = []
+    for domain, domain_records in records.items():
+        for record in domain_records:
+            if record.kind == "transcript_head":
+                head = _decode_enveloped_domain(record.data, TranscriptHeadRecord)
+                transcript_heads[domain, head.owner_id] = head
+            elif record.kind == "model_interaction":
+                interactions.append(_decode_enveloped_domain(record.data, ModelInteractionRecord))
+    for interaction in interactions:
+        for context in (interaction.request_context, interaction.response_context):
+            if context is None:
+                continue
+            for item in context.items:
+                if not isinstance(item, TranscriptSpanRef):
+                    continue
+                head = transcript_heads.get((item.source_domain, item.owner_id))
+                if head is None or item.end > head.message_count:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     budgets: dict[str, BudgetUsage] = {}
     for record in records.get(RuntimeDomain.EXECUTION, ()):
         if record.kind != "budget_scope":
@@ -339,6 +377,11 @@ def _canonical_aliases(
 def _decode_record(record: StoredRecord) -> object:
     if record.kind == "session_turn_commit":
         return _decode_session_turn_commit(record.data)
+    if record.kind == "history_association":
+        sequence = record.data.get("sequence")
+        if set(record.data) != {"sequence"} or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return dict(record.data)
     target = _RECORD_TYPES.get(record.kind)
     if target is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -363,6 +406,60 @@ def _decode_record(record: StoredRecord) -> object:
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     return value
+
+
+def _history_association_records(
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    facts: tuple[StoredFact, ...],
+    values: Mapping[bytes, object],
+) -> Mapping[bytes, StoredRecord]:
+    if domain is not RuntimeDomain.EXECUTION:
+        return {}
+    result: dict[bytes, StoredRecord] = {}
+    for fact in facts:
+        if fact.kind != "step_event":
+            continue
+        run = values.get(fact.owner_key_digest)
+        if not isinstance(run, AgentRunRecord):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        event = _decode_enveloped_domain(fact.data, StepEvent)
+        if event.agent_run_id != run.agent_run_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        locators = (
+            [("trace", str(fact.sequence))]
+            if event.event_type.startswith(("MODEL_REQUEST_", "TOOL_CALL_")) else []
+        )
+        request = event.metadata.get("linktools.ai.model_request_seq")
+        message = event.metadata.get("linktools.ai.message_seq")
+        if event.event_type.startswith("MODEL_REQUEST_") and request is not None:
+            locators.append((f"request:{event.event_type}", request))
+        if event.event_type == "MODEL_REQUEST_SUCCEEDED" and message is not None:
+            locators.append(("response", message))
+        if (event.event_type in {"TOOL_CALL_STARTED", "TOOL_CALL_SUCCEEDED", "TOOL_CALL_FAILED"}
+                and event.tool_call_id is not None
+                and not (event.event_type == "TOOL_CALL_FAILED"
+                         and event.metadata.get(TOOL_ERROR_CODE_METADATA_KEY) == ErrorCode.TOOL_EFFECT_UNKNOWN.value)):
+            locators.append((event.event_type, event.tool_call_id))
+        for family, identity in locators:
+            key = record_key_digest(
+                namespace, tenant_id, domain.value, "history_association",
+                [run.agent_run_id, family, identity],
+            )
+            sort_key = (
+                f"trace:{event.timestamp.astimezone(timezone.utc).isoformat(timespec='microseconds')}:{fact.sequence:020d}"
+                if family == "trace" else f"{fact.sequence:020d}"
+            )
+            candidate = StoredRecord(
+                key, None, fact.owner_key_digest, "history_association", sort_key,
+                None, 1, None, 0, None, {"sequence": fact.sequence},
+            )
+            previous = result.get(key)
+            if previous is not None and previous != candidate:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result[key] = candidate
+    return result
 
 
 def _decode_session_turn_commit(value: object) -> Mapping[str, object]:
@@ -586,7 +683,10 @@ def _expected_record(
             value.graph_id,
         )
     elif isinstance(value, TranscriptHeadRecord):
-        if value.owner_domain.value != domain.value:
+        if (
+            value.owner_domain.value != domain.value
+            or value.pending is not None and value.pending.source_domain is not domain
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         anchor_kind = (
             "conversation_history"
@@ -625,6 +725,15 @@ def _expected_record(
         if parent not in records:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sort_key = agent_run_id
+    elif isinstance(value, ModelInteractionRecord):
+        _require_anchor(
+            namespace, tenant_id, domain, records, "agent_run", value.agent_run_id
+        )
+        parent = record_key_digest(
+            namespace, tenant_id, domain.value, "agent_run", value.agent_run_id
+        )
+        sort_key = f"m:{value.model_request_seq:020d}"
+        state = value.status
     elif isinstance(value, AgentRunRecord):
         if value.agent_conversation_id is not None:
             scope = scope_digest(
@@ -704,6 +813,8 @@ def _record_identity(
         return value.owner_id
     if isinstance(value, TranscriptSeekRecord):
         return [value.owner_id, value.dimension.value, value.block_start]
+    if isinstance(value, ModelInteractionRecord):
+        return [value.agent_run_id, value.model_request_seq]
     if isinstance(value, AgentRunRecord):
         return value.agent_run_id
     if isinstance(value, ContextProjection):
@@ -818,15 +929,20 @@ def _validate_facts(
     previous_stream: bytes | None = None
     previous_sequence = 0
     previous_owner: object | None = None
+    previous_fact: StoredFact | None = None
     fact_owners: set[bytes] = set()
+    transcript_owners: set[bytes] = set()
+    current_pending_owners: set[bytes] = set()
+    pending_keys: set[str] = set()
     for fact in facts:
         if previous_stream is None or fact.stream_digest > previous_stream:
-            if previous_owner is not None:
-                _validate_fact_high_water(previous_owner, previous_sequence)
+            if previous_owner is not None and previous_fact is not None:
+                _validate_fact_high_water(previous_owner, previous_sequence, previous_fact)
             if fact.sequence != 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             previous_stream = fact.stream_digest
             previous_sequence = 1
+            pending_keys.clear()
         elif fact.stream_digest == previous_stream:
             if fact.sequence != previous_sequence + 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -836,30 +952,59 @@ def _validate_facts(
         owner = values.get(fact.owner_key_digest)
         if fact.owner_key_digest not in records or owner is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if fact.stream_digest != _fact_stream(
-            namespace, tenant_id, domain, fact, owner
-        ):
+        if fact.stream_digest != _fact_stream(namespace, tenant_id, domain, fact, owner):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if isinstance(owner, AgentRunRecord) and fact.kind == "step_checkpoint":
+            checkpoint = _decode_enveloped_domain(fact.data, StoredAgentRunCheckpoint)
+            head_key = record_key_digest(
+                namespace, tenant_id, domain.value, "transcript_head", owner.agent_run_id,
+            )
+            head = values.get(head_key)
+            if (
+                checkpoint.agent_run_id != owner.agent_run_id
+                or checkpoint.state != fact.state
+                or not isinstance(head, TranscriptHeadRecord)
+                or checkpoint.transcript_message_count > head.message_count
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if isinstance(owner, TranscriptHeadRecord):
+            if fact.kind == "transcript_chunk":
+                transcript_owners.add(fact.owner_key_digest)
+            elif fact.kind == "transcript_pending_part":
+                key = cast(str, decode_envelope(fact.data).value["pending_key"])
+                if key in pending_keys:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                pending_keys.add(key)
+                chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
+                if chunk.first_message_index == owner.message_count:
+                    current_pending_owners.add(fact.owner_key_digest)
         previous_owner = owner
+        previous_fact = fact
         fact_owners.add(fact.owner_key_digest)
 
-    if previous_owner is not None:
-        _validate_fact_high_water(previous_owner, previous_sequence)
+    if previous_owner is not None and previous_fact is not None:
+        _validate_fact_high_water(previous_owner, previous_sequence, previous_fact)
 
     for owner_key, owner in values.items():
-        if owner_key in fact_owners:
-            continue
-        if isinstance(owner, ExecutionRecord) and owner.event_seq != 0:
+        if isinstance(owner, ExecutionRecord) and owner_key not in fact_owners and owner.event_seq != 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if isinstance(owner, TranscriptHeadRecord) and owner.chunk_count != 0:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if isinstance(owner, TranscriptHeadRecord):
+            if owner.chunk_count != 0 and owner_key not in transcript_owners:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if owner.pending_part_count != 0 and owner_key not in current_pending_owners:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _validate_fact_high_water(owner: object, sequence: int) -> None:
+def _validate_fact_high_water(owner: object, sequence: int, fact: StoredFact) -> None:
     if isinstance(owner, ExecutionRecord) and owner.event_seq != sequence:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if isinstance(owner, TranscriptHeadRecord) and owner.chunk_count != sequence:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if isinstance(owner, TranscriptHeadRecord):
+        if fact.kind == "transcript_chunk" and owner.chunk_count != sequence:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if fact.kind == "transcript_pending_part":
+            chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
+            if chunk.first_message_index == owner.message_count and owner.pending_part_count != sequence:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _fact_stream(
@@ -902,6 +1047,21 @@ def _fact_storage_identity(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return "session_turn", [owner.session_id]
     if isinstance(owner, TranscriptHeadRecord):
+        if fact.kind == "transcript_pending_part":
+            chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
+            key = decode_envelope(fact.data).value.get("pending_key")
+            if (
+                not isinstance(key, str) or not key
+                or chunk.owner_id != owner.owner_id
+                or chunk.first_message_index > owner.message_count
+                or chunk.message_count != 1
+                or chunk.content.source_domain is not domain
+                or chunk.origin is not TranscriptOrigin.RAW
+                or fact.subject_digest is not None
+                or fact.state is not None
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return "transcript_pending_parts", [owner.owner_id, chunk.first_message_index]
         if fact.kind != "transcript_chunk":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         chunk = _decode_enveloped_domain(fact.data, TranscriptChunk)
@@ -917,7 +1077,6 @@ def _fact_storage_identity(
         relation = {
             "step_event": "event",
             "step_checkpoint": "checkpoint",
-            "model_interaction": "interaction",
         }.get(fact.kind)
         if relation is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -937,11 +1096,25 @@ def _canonical_sequences(
     values: Mapping[bytes, object],
 ) -> Mapping[bytes, int]:
     sequences: dict[bytes, int] = {}
+    interactions: dict[str, set[int]] = {}
+    for value in values.values():
+        if isinstance(value, ModelInteractionRecord):
+            admitted = interactions.setdefault(value.agent_run_id, set())
+            if value.model_request_seq in admitted:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            admitted.add(value.model_request_seq)
+    for agent_run_id, admitted in interactions.items():
+        if admitted != set(range(1, len(admitted) + 1)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = sequence_key(
+            namespace, tenant_id, domain.value, "interaction", agent_run_id
+        )
+        sequences[key] = len(admitted)
     for fact in facts:
         owner = values.get(fact.owner_key_digest)
         if owner is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if isinstance(owner, ExecutionRecord):
+        if isinstance(owner, ExecutionRecord) or fact.kind == "transcript_pending_part":
             continue
         relation, value = _fact_storage_identity(domain, fact, owner)
         key = sequence_key(

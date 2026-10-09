@@ -19,13 +19,10 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_metrics_sqlite, validate_metrics_sqlite
-from linktools.ai.model import ModelRegistry
 from linktools.ai.observe import Metrics
-from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.storage import FilesystemMutationLock, StorageOverlay
 from linktools.ai.workspace import Workspace
 
@@ -33,6 +30,8 @@ ResultT = TypeVar("ResultT")
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
+    from linktools.ai.model import ModelRegistry
+    from linktools.ai.runtime import Runtime, RuntimeStorage
 
 OPENAI_BASE_URL = ConfigField(name="OPENAI_BASE_URL", cast=str, default=None)
 OPENAI_MODEL = ConfigField(name="OPENAI_MODEL", cast=str, default=None)
@@ -83,7 +82,9 @@ def _local_runtime_assets(workspace: Workspace) -> AssetStore:
     )
 
 
-def _local_runtime_storage(workspace: Workspace) -> RuntimeStorage:
+def _local_runtime_storage(workspace: Workspace) -> "RuntimeStorage":
+    from linktools.ai.runtime import RuntimeStorage
+
     return RuntimeStorage.from_root(_local_runtime_root(workspace))
 
 
@@ -106,7 +107,9 @@ def _local_models(
     vision: "bool | None" = None,
     base_url: "str | None" = None,
     api_key: "str | None" = None,
-) -> ModelRegistry:
+) -> "ModelRegistry":
+    from linktools.ai.model import ModelRegistry
+
     configured = workspace.config.get("model")
     selected_model = (
         model.strip()
@@ -151,7 +154,7 @@ def _local_models(
     )
 
 
-def _local_runtime_models(workspace: Workspace, args: Namespace) -> ModelRegistry:
+def _local_runtime_models(workspace: Workspace, args: Namespace) -> "ModelRegistry":
     return _local_models(
         workspace,
         model=args.model,
@@ -166,7 +169,10 @@ async def _open_local_runtime(
     workspace: Workspace,
     *,
     models: "ModelRegistry | None" = None,
-) -> AsyncIterator[Runtime]:
+) -> "AsyncIterator[Runtime]":
+    from linktools.ai.capability import CapabilityGroup
+    from linktools.ai.runtime import Runtime
+
     assets = _local_runtime_assets(workspace)
     await assets.initialize()
     try:

@@ -241,6 +241,33 @@ async def test_exception_diagnostics_never_serialize_provider_credentials() -> N
         assert response.json()["error_diagnostics"]["cause_digest"]
 
 
+@pytest.mark.asyncio
+async def test_failed_execution_stream_redacts_diagnostics_without_rewriting_user_content() -> None:
+    from ._runtime_test_helpers import _UsageFunctionModel
+    from .test_live_history_readback_integration import _Models
+
+    async def fail(messages, info):
+        raise ValueError("api_key=provider-secret")
+
+    prompt = '{"error_diagnostics":{"exception_message":"user content"}}'
+    async with Runtime.open(
+        "web-failed-stream", models=_Models(_UsageFunctionModel(fail)), storage=RuntimeStorage.in_memory(),
+    ) as runtime:
+        execution = await runtime.agents.get().start(prompt)
+        await execution.wait()
+        async with client(create_app(runtime=runtime)) as http:
+            response = await http.get(f"/api/executions/{execution.execution_id}/events")
+            assert response.status_code == 200
+            assert "provider-secret" not in response.text
+            events = [json.loads(frame.split("data: ", 1)[1]) for frame in response.text.split("\n\n") if "data: " in frame]
+            failed = next(item["item"]["event"] for item in events if item.get("type") == "event" and item["item"]["event"]["event_type"] == "EXECUTION_FAILED")
+            assert failed["payload"]["error_diagnostics"]["exception_type"] == "ValueError"
+            assert failed["payload"]["error_diagnostics"]["cause_digest"]
+            assert "exception_message" not in failed["payload"]["error_diagnostics"]
+            history = await http.get(f"/api/executions/{execution.execution_id}/history?include_content=true")
+            assert any(item["content"] == prompt for item in history.json()["items"])
+
+
 def test_web_cli_owns_one_runtime_and_closes_it_after_server_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from contextlib import asynccontextmanager
     from linktools.ai.errors import AIError, ErrorCode

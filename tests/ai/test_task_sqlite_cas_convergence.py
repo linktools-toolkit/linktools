@@ -1003,6 +1003,47 @@ async def _admitted_state(
 
 
 @pytest.mark.asyncio
+async def test_graph_state_decodes_each_definition_once_per_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    graph = TaskGraph(
+        "definition-read",
+        (TaskNode("a", input={"body": ["input"] * 100}), TaskNode("b", ("a",))),
+    )
+    state, request = await _admitted_state(graph)
+    repository = state.task.tasks
+    original_decode = TaskRepositoryImpl._decode
+    definitions: list[str] = []
+
+    async def decode(self, record, target):
+        value = await original_decode(self, record, target)
+        if target is TaskNode:
+            definitions.append(value.node_id)
+        return value
+
+    monkeypatch.setattr(TaskRepositoryImpl, "_decode", decode)
+    try:
+        for _ in range(2):
+            definitions.clear()
+            snapshot = await repository.graph_state(
+                request.graph.graph_id, tenant_id="tenant"
+            )
+            assert snapshot is not None
+            assert snapshot.nodes == graph.nodes
+            assert {node.node_id: node.dependencies for node in snapshot.node_states} == {
+                "a": (), "b": ("a",),
+            }
+            assert sorted(definitions) == ["a", "b"]
+
+        definitions.clear()
+        nodes = await repository.list_nodes(request.graph.graph_id, tenant_id="tenant")
+        assert tuple(node.node_id for node in nodes) == ("a", "b")
+        assert sorted(definitions) == ["a", "b"]
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_task_node_dependency_projection_fails_closed() -> None:
     state, request = await _admitted_state(
         TaskGraph(

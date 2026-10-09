@@ -152,6 +152,37 @@ class _Store:
             parts=[TextPart(content=f"response:{record.execution_id}")]
         )
 
+    async def capture_history(self, agent_run_ids, *, include_pending=False):
+        from linktools.ai.runtime.state._step_contracts import AgentRunHistoryCapture
+
+        del include_pending
+        result = {}
+        for run_id in agent_run_ids:
+            value = self._runs.get(run_id)
+            result[run_id] = AgentRunHistoryCapture(None if value is None else value[1], 1 if value else 0, 2 if value else 0, 0)
+        return result
+
+    async def iter_message_range(self, *, agent_run_id, start, end):
+        messages = [message async for message in self.iter_messages(agent_run_id=agent_run_id)]
+        for message in messages[start:end]:
+            yield message
+
+    async def read_history_associations(self, *, agent_run_id, message_seqs, tool_call_ids, event_high_water):
+        del message_seqs, tool_call_ids
+        return (await self.list_events(agent_run_id=agent_run_id))[:event_high_water]
+
+    async def list_event_range(self, *, agent_run_id, start, end):
+        return (await self.list_events(agent_run_id=agent_run_id))[start:end]
+
+    async def list_trace_events(self, *, agent_run_id, event_high_water, after_timestamp, after_sequence, limit,
+                                model_request_seq=None, step_index=None, tool_call_id=None):
+        values = [(sequence, event) for sequence, event in enumerate(await self.list_events(agent_run_id=agent_run_id), 1)
+                  if sequence <= event_high_water and (after_timestamp is None or (event.timestamp, sequence) > (after_timestamp, after_sequence))]
+        return [pair for pair in sorted(values, key=lambda pair: (pair[1].timestamp, pair[0]))
+                if (model_request_seq is None or pair[1].metadata.get("linktools.ai.model_request_seq") == str(model_request_seq))
+                and (step_index is None or pair[1].step_index == step_index)
+                and (tool_call_id is None or pair[1].tool_call_id == tool_call_id)][:limit]
+
 
 def _reader(
     records: tuple[ExecutionRecord, ...],

@@ -47,8 +47,8 @@ const sessions=new Map(['a','b'].map(id=>[id,{session_id:id,agent_id:'default',s
 const executions=new Map([['a-run',info('a-run')],['b-run',info('b-run')]]);
 const timeline=id=>timelineOverrides.get(id) || ({items:[{execution_id:`${id}-run`,status:'SUCCEEDED',created_at:'2026-01-01T00:00:00Z',user_input:`${id} question`,conversation_committed:true,items:[{item_kind:'assistant',content:`${id} answer`}]}],next_cursor:null});
 function response(value,status=200){return new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});}
-function deferred(path){let release;const promise=new Promise(resolve=>{release=resolve;});delays.set(path,promise);return value=>{delays.delete(path);release(response(value));};}
-let forkAttempts=0;
+function deferred(path){let release,reject;const promise=new Promise((resolve,fail)=>{release=resolve;reject=fail;});delays.set(path,promise);const resolve=value=>{delays.delete(path);release(response(value));};resolve.reject=error=>{delays.delete(path);reject(error);};return resolve;}
+let forkAttempts=0,cancelAttempts=0;
 globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
   calls.push({key,method,body,query:Object.fromEntries(url.searchParams)});
@@ -65,6 +65,12 @@ globalThis.fetch=async(path,options={})=>{
   if(key.endsWith('/events'))return new Response('event: snapshot\ndata: '+JSON.stringify(executions.get(key.split('/')[3]))+'\n\n');
   if(key.endsWith('/history'))return response({items:[{execution_id:key.split('/')[3],message_seq:1,item_kind:'assistant',content:'History marker'}],next_cursor:null});
   if(key.endsWith('/models')||key.endsWith('/trace')||key.endsWith('/transcript'))return response({items:[],next_cursor:null});
+  if(key==='/api/executions/orphan/cancel'){
+    cancelAttempts++;
+    if(cancelAttempts===1)return response({code:'STORAGE_CONFLICT'},409);
+    executions.set('orphan',{...executions.get('orphan'),status:'CANCELLING'});
+    return response({execution_id:'orphan',cancelled:false});
+  }
   if(key.endsWith('/fork')&&key.startsWith('/api/sessions/')){
     forkAttempts++;
     if(forkAttempts===1)return response({code:'STORAGE_COMMIT_UNKNOWN'},503);
@@ -164,6 +170,47 @@ assert.equal(node('metric-name').tagName,'INPUT');
 executions.set('orphan',{...info('orphan',null),status:'RECOVERY_REQUIRED'});location.hash='#execution=orphan';await settle();
 assert.equal(node('composer').hidden,true);assert.equal(node('stop-run').hidden,false);assert.ok(node('live'));
 
+// Orphan status alone never initiates recovery; a stopped executor must be confirmed.
+const recoveries=()=>calls.filter(call=>call.key==='/api/executions/orphan/recover');
+for(const status of ['PENDING_START','STARTED','CANCELLING','RECOVERY_REQUIRED']){
+  executions.set('orphan',{...info('orphan',null),status});node('refresh').click();await settle();
+  assert.equal(node('recover').disabled,false);
+  assert.equal(recoveries().length,0);
+}
+let recoveryConfirmation='';
+globalThis.confirm=message=>{recoveryConfirmation=message;return false;};
+node('recover').click();await settle();
+assert.match(recoveryConfirmation,/previous executor has stopped/);assert.equal(recoveries().length,0);
+globalThis.confirm=()=>true;
+const releaseRecovery=deferred('POST /api/executions/orphan/recover');
+node('recover').click();node('recover').click();await tick();
+assert.equal(recoveries().length,1);assert.equal(node('recover').disabled,true);
+executions.set('orphan',{...info('orphan',null),status:'SUCCEEDED'});
+releaseRecovery({execution_id:'orphan'});await settle();
+assert.equal(node('recover').disabled,true);assert.equal(recoveries().length,1);
+
+// A cancellation conflict reads state without resending; a new click reuses its key.
+executions.set('orphan',{...info('orphan',null),status:'STARTED'});node('refresh').click();await settle();
+await node('stop-run').click();await settle();
+assert.equal(cancelAttempts,1);assert.match(node('notice').textContent,/Runtime status re-read: STARTED/);
+assert.match(node('notice').textContent,/If still needed, choose Stop execution again/);
+await node('stop-run').click();await settle();
+assert.equal(cancelAttempts,2);
+const cancels=calls.filter(call=>call.key==='/api/executions/orphan/cancel');
+assert.equal(cancels[0].body.request_id,cancels[1].body.request_id);
+assert.match(node('notice').textContent,/terminal outcome is not yet confirmed/);
+
+// A failed cancellation readback must not post its error into a newer selection.
+executions.set('orphan',{...info('orphan',null),status:'STARTED'});node('refresh').click();await settle();
+cancelAttempts=0;
+const failedCancelRead=deferred('GET /api/executions/orphan');
+node('stop-run').click();await tick();
+location.hash='#session=b';await settle();
+const newerNotice=node('notice').textContent;
+failedCancelRead.reject(new Error('old readback unavailable'));await settle();
+assert.equal(node('conversation-title').textContent,'Beta');
+assert.equal(node('notice').textContent,newerNotice);
+
 // Exact-ID lookup preserves opaque sessions and distinguishes standalone executions.
 const opaque=' ../team/conversation?notes#你好 ';
 sessions.set(opaque,{...sessions.get('a'),session_id:opaque,metadata:{title:'Opaque conversation'}});
@@ -173,6 +220,12 @@ assert.equal(new URLSearchParams(location.hash.slice(1)).get('session'),opaque);
 assert.equal(node('conversation-title').textContent,'Opaque conversation');
 node('open-kind').value='execution';node('open-id').value='b-run';node('open-form').requestSubmit();await settle();
 assert.equal(location.hash,'#execution=b-run');assert.equal(node('composer').hidden,true);
+
+// A committed RUNNING identity can have an intentionally empty prompt envelope.
+detailResponses.set('/api/executions/b-run/models',{items:[{execution_id:'b-run',agent_run_seq:1,depth:0,model_request_seq:1,purpose:'agent',status:'RUNNING',model:{},request:{},response:null,content_included:true}],next_cursor:null});
+tab('models').click();await settle();
+assert.match(node('inspector-content').textContent,/Prompt content is not available yet/);
+assert.doesNotMatch(node('inspector-content').textContent,/Prompt architecture/);
 
 // Former history/trace summaries remain human-readable without an eager trace fetch.
 const beforeTrace=calls.filter(call=>call.key.endsWith('/trace')).length;

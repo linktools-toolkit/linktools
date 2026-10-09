@@ -42,8 +42,9 @@ class _RefreshCoordinator:
         tool_call_id: str,
         arguments: dict[str, object],
         path_fields: tuple[str, ...],
+        producer_generation: int | None = None,
     ) -> tuple[RepositoryInstructions | None, bool]:
-        del execution, initial, tool_name, tool_call_id, path_fields
+        del execution, initial, tool_name, tool_call_id, path_fields, producer_generation
         self.active_checks += 1
         self.max_active_checks = max(self.max_active_checks, self.active_checks)
         try:

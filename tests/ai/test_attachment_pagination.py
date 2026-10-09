@@ -32,7 +32,7 @@ from linktools.ai.runtime._attachment import bind_tool_return_attachments
 from linktools.ai.runtime._history_projection import _attachment_fact_cursor
 from linktools.ai.runtime._metric_capability import ModelObservationCapability
 
-from ._runtime_test_helpers import _UsageFunctionModel
+from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
 from .test_history_request_association import _history
 from .test_live_history_readback_integration import _Models
 
@@ -68,6 +68,7 @@ async def test_request_preparation_keeps_acceptance_and_recalculates_inclusion(
         parameters = ModelRequestParameters()
         fact = journal.begin(1)
         recorder.begin_model_interaction(fact, model, messages, None, parameters, False)
+        await recorder.commit_history_boundary()
         before = await history.reader.attachment_facts(
             "execution", tenant_id="tenant", cursor=None, limit=100,
         )
@@ -81,6 +82,7 @@ async def test_request_preparation_keeps_acceptance_and_recalculates_inclusion(
         recorder.prepare_model_interaction(
             fact, model, prepared_messages, None, parameters, False,
         )
+        await recorder.commit_history_boundary()
         prepared = await history.reader.attachment_facts(
             "execution", tenant_id="tenant", cursor=None, limit=100,
         )
@@ -89,8 +91,7 @@ async def test_request_preparation_keeps_acceptance_and_recalculates_inclusion(
             ("included_in_request", "first"),
             *([] if remove_inclusion else [("included_in_request", "second")]),
         ]
-        if not remove_inclusion:
-            assert prepared.items == before.items
+        assert prepared.items[:2] == before.items
         continuation = await history.reader.attachment_facts(
             "execution", tenant_id="tenant", cursor=first.next_cursor, limit=100,
         )
@@ -126,7 +127,7 @@ async def test_request_preparation_keeps_acceptance_and_recalculates_inclusion(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["delete_earlier", "delete_last_read", "reorder"])
-async def test_attachment_cursor_keeps_unread_occurrences_when_preparation_changes_positions(
+async def test_attachment_cursor_preserves_admission_through_prepared_positions(
     change: str,
 ) -> None:
     async with _history() as history:
@@ -140,25 +141,24 @@ async def test_attachment_cursor_keeps_unread_occurrences_when_preparation_chang
         parameters = ModelRequestParameters()
         fact = journal.begin(1)
         recorder.begin_model_interaction(fact, model, messages, None, parameters, False)
+        await recorder.commit_history_boundary()
         before = await history.reader.attachment_facts(
             "execution", tenant_id="tenant", cursor=None, limit=100,
         )
         first = await history.reader.attachment_facts(
-            "execution", tenant_id="tenant", cursor=None, limit=5,
+            "execution", tenant_id="tenant", cursor=None, limit=2,
         )
-        assert [item.fact for item in first.items] == [
-            "accepted", "accepted", "accepted", "included_in_request", "included_in_request",
-        ]
+        assert [item.fact for item in first.items] == ["accepted", "accepted"]
         assert first.next_cursor is not None
-        unread = before.items[5:]
-        assert len(unread) == 2 and unread[0].attachment_id == unread[1].attachment_id
-        assert [item.position for item in unread] == [2, 3]
+        assert len(before.items) == 3
+        repeated_attachment = before.items[-1].attachment_id
         prepared_messages = (
             messages[1:] if change == "delete_earlier"
             else [messages[0], messages[2]] if change == "delete_last_read"
             else list(reversed(messages))
         )
         recorder.prepare_model_interaction(fact, model, prepared_messages, None, parameters, False)
+        await recorder.commit_history_boundary()
         expected = [1, 2] if change != "reorder" else [0, 1]
         for archived in (False, True):
             if archived:
@@ -175,14 +175,15 @@ async def test_attachment_cursor_keeps_unread_occurrences_when_preparation_chang
                     "execution", tenant_id="tenant", cursor=cursor, limit=1,
                 )
                 items.extend(page.items)
-                assert len(items) <= len(unread)
+                assert len(items) <= 5
                 cursor = page.next_cursor
-            assert [item.attachment_id for item in items] == [item.attachment_id for item in unread]
-            assert [item.position for item in items] == expected
+            included = [item for item in items if item.fact == "included_in_request"
+                        and item.attachment_id == repeated_attachment]
+            assert [item.position for item in included] == expected
             fresh = await history.reader.attachment_facts(
                 "execution", tenant_id="tenant", cursor=None, limit=100,
             )
-            assert tuple(items) == fresh.items[-2:]
+            assert first.items + tuple(items) == fresh.items
 
 
 @pytest.mark.asyncio
@@ -230,8 +231,12 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
 
     imported = ExecutionInputContext.from_messages([
         ModelRequest(parts=[UserPromptPart("attach")]),
-        ModelResponse(parts=[ToolCallPart("attach_files", {}, tool_call_id="call")]),
+        ModelResponse(parts=[
+            ToolCallPart("attach_files", {}, tool_call_id="call"),
+            ToolCallPart("attach_files", {}, tool_call_id="second-call"),
+        ]),
         _attachment_request("call"),
+        _attachment_request("second-call"),
     ])
     group = CapabilityGroup("attachment-pagination")
     group.capability(PausePreparation(), id="pause-preparation")
@@ -252,10 +257,13 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
             nonlocal first, started_items
             if tree.event.event_type != ExecutionEventType.MODEL_REQUEST_STARTED:
                 return
-            started = await runtime.history.attachment_facts(execution.execution_id, principal=principal)
+            count = 3 if initial_attachment else 2
+            started = await _wait_for_committed(
+                lambda: runtime.history.attachment_facts(execution.execution_id, principal=principal),
+                lambda page: len(page.items) == count,
+            )
             started_items = started.items
-            count = 2 if initial_attachment else 1
-            assert [item.fact for item in started_items] == ["accepted"] * count + ["included_in_request"] * count
+            assert [item.fact for item in started_items] == ["accepted"] * count
             first = await runtime.history.attachment_facts(execution.execution_id, principal=principal, limit=1)
             assert first.items == started_items[:1]
             assert first.next_cursor is not None
@@ -267,6 +275,9 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
             release.set()
         assert result.result.status is ExecutionStatus.SUCCEEDED
         assert first is not None
+        prepared = await runtime.history.attachment_facts(execution.execution_id, principal=principal)
+        assert prepared.items[:len(started_items)] == started_items
+        assert len(prepared.items) == 2 * len(started_items)
         items = list(first.items)
         cursor = first.next_cursor
         while cursor is not None:
@@ -274,9 +285,9 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
                 execution.execution_id, principal=principal, cursor=cursor, limit=1,
             )
             items.extend(tail.items)
-            assert len(items) <= len(started_items)
+            assert len(items) <= len(prepared.items)
             cursor = tail.next_cursor
-        assert tuple(items) == started_items
+        assert tuple(items) == prepared.items
 
     async with RuntimeHistory.open(
         "attachment-pagination", storage=RuntimeStorage.filesystem(tmp_path),
@@ -288,7 +299,7 @@ async def test_attachment_cursor_from_request_started_survives_archive_reopen(
                 execution.execution_id, principal=principal, cursor=cursor, limit=1,
             )
             items.extend(tail.items)
-            assert len(items) <= len(started_items)
+            assert len(items) <= len(prepared.items)
             cursor = tail.next_cursor
         fresh = await archived.attachment_facts(execution.execution_id, principal=principal)
-        assert tuple(items) == fresh.items == started_items
+        assert tuple(items) == fresh.items == prepared.items

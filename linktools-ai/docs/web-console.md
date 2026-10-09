@@ -33,31 +33,27 @@ invoke recovery. It also works without a model configuration. An unconfigured
 model automatically selects this mode. Missing history and metrics stores are
 shown as empty/unavailable, without provisioning them through a history read.
 
-### Runtime prerequisites for long-lived execution
+### Shared storage and explicit recovery
 
-The Runtime version on which this console is based has a verified startup
-recovery limitation: opening another writable Runtime with the same
-namespace/tenant/storage and compatible bindings while a different process is
-still executing can resume that live execution a second time. This is an
-upstream startup-recovery issue, not a restriction on independent work in
-already-open Runtime instances: distinct sessions can run concurrently, and a
-second execution in the same session is rejected with `SESSION_BUSY`.
+The default local SQL Runtime can open alongside another process using the same
+namespace, tenant, and storage without resuming its live execution. Writable
+and read-only consoles read the same committed history. Independent sessions
+can run concurrently; a second execution in the same session is rejected with
+`SESSION_BUSY`.
 
-Use `--read-only` to inspect an already-running CLI process until the upstream
-startup ownership fix is available. The console does not introduce a private
-lock, owner lease, heartbeat, or alternative recovery implementation.
+SQL startup does not infer that an unfinished execution is abandoned. A stopped
+process can leave `PENDING_START`, `STARTED`, or `CANCELLING` visible. Refresh and
+observation never take ownership. Use **Recover stopped executor** only after
+confirming the previous executor has stopped; the confirmation applies equally
+to these statuses and `RECOVERY_REQUIRED`. Resolve unknown external effects
+explicitly before recovery. A cancellation request may remain `CANCELLING` until
+the owner finishes or explicit recovery completes an orphaned cancellation.
 
-The same baseline also retains completed execution staging when no owner-side
-`Execution.wait`/result consumer performs its terminal handoff. Browser watches
-and `RuntimeHistory` queries do not consume that handoff, so a long-lived
-writable console can accumulate retained local staging even after durable
-completion. This is another upstream Runtime lifetime issue. The console does
-not add a background result consumer solely to compensate for it.
-
-Integrate the published Runtime fixes for both startup ownership and terminal
-staging release before treating long-lived writable operation as validated.
-This console branch uses the published master APIs and does not incorporate
-unpublished persistence or lifecycle changes.
+Runtime owns producer fencing, terminal handoff, and local staging release.
+The console does not introduce a private lock, heartbeat, background result
+consumer, or alternative recovery implementation. See the
+[Runtime history guide](runtime-history.md) for storage-specific recovery and
+publication guarantees.
 
 ## Command consolidation and coverage
 
@@ -124,7 +120,11 @@ Metrics objects for embedding and testing; the caller owns their lifespan.
 Sending a message returns its execution ID independently of the SSE connection.
 A browser disconnect closes its observer, not the execution. Stop requests
 cancellation and reads the actual Runtime outcome; acceptance does not imply
-that external effects or resource cleanup have finished. Server shutdown uses
+that external effects or resource cleanup have finished. A concurrent Runtime
+update can return a cancellation conflict. The console rereads the authoritative
+status and lets you explicitly choose Stop again with the same request identity;
+it never treats a conflict as success or retries cancellation automatically.
+Server shutdown uses
 Runtime's normal close behavior rather than creating browser-owned executions.
 
 SSE passes through Runtime watch cursors and metadata-only model projections.
@@ -138,10 +138,14 @@ success or restart an execution.
 
 History, trace and model requests load only for the selected execution/tab.
 Tool arguments/results and model prompt/response bodies are not stored in a
-second Web cache or sent through Redis. Live progress can precede durable
-history on the current Runtime; the UI explicitly shows incomplete or pending
-content. Incremental persistence, stronger cross-process visibility and exact
-recovery behavior remain Runtime responsibilities.
+second Web cache or sent through Redis. Retained live progress can precede
+committed history; the UI explicitly shows incomplete or pending content. Independently opened readers see the committed
+prefix after Runtime publishes its observation batch, including RUNNING model
+identities without request/response bodies. Completed requests and controlled
+abnormal ends publish their available content. Refresh the same exact identity
+to see newer facts. A live notification or empty page is not evidence of a
+provider outcome. Publication, cross-process visibility, and recovery remain
+Runtime responsibilities.
 
 ## Local trust boundary
 
@@ -180,11 +184,17 @@ The Web regression tests cover the local-origin boundary, remote-peer rejection,
 secret-safe diagnostics, real session/execution idempotency, history cursor
 paging and content opt-in, trace/model/result/metric parity, session revision
 conflicts, fork/close, read-only reopen without models, SSE cursor replay and
-observer disconnect without cancellation. A Node-backed client test checks
-Unicode/chunked SSE parsing, root/child/request identity, terminal metadata
+observer disconnect without cancellation. Cross-process HTTP tests also cover
+live reads without startup takeover, explicit recovery after process exit, and
+orphaned cancellation without restarting the provider. A controlled SQL revision
+conflict verifies canonical readback and explicit same-identity retry without
+duplicate cancellation events. A Node-backed client test checks Unicode/chunked
+SSE parsing, root/child/request identity, terminal metadata
 ordering and duplicate page replacement. A lightweight DOM contract harness
 also exercises stale navigation/details/actions, an interrupted creation dialog,
-uncertain fork identity, repeated sends and edits to the next draft. These are
+uncertain fork identity, repeated sends and edits to the next draft. Recovery
+checks cover all recoverable statuses, refresh without takeover, confirmation
+rejection, repeated clicks, and terminal control reconciliation. These are
 interaction-logic tests, not browser rendering tests; they skip explicitly if
 Node is absent.
 

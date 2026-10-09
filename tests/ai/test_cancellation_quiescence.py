@@ -62,6 +62,7 @@ def _local_backend(current: object) -> LocalExecutionBackend:
     backend._executor = _Executor()
     backend._subagent_dispatcher = None
     backend._accepting = True
+    backend._worker_completed = None
     return backend
 
 
@@ -71,6 +72,59 @@ def _execution_service() -> DefaultExecutionService:
     service._detached_cancel_finalizers = set()
     service._detached_cancel_failure = None
     return service
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", (False, True))
+async def test_worker_completion_cleanup_is_owned_until_close(fail: bool) -> None:
+    backend = _local_backend(SimpleNamespace(status=ExecutionStatus.CANCELLED))
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    failure = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+    async def completed(execution_id: str) -> None:
+        assert execution_id == "execution"
+        assert not backend.owns_execution(execution_id, tenant_id="tenant")
+        cleanup_started.set()
+        await release_cleanup.wait()
+        if fail:
+            raise failure
+
+    async def worker() -> None:
+        pass
+
+    backend._worker_completed = completed
+    task = asyncio.create_task(worker())
+    backend._tasks["execution"] = task
+    task.add_done_callback(lambda done: backend._task_done("execution", done))
+    await cleanup_started.wait()
+    close = asyncio.create_task(backend.close())
+    await asyncio.sleep(0)
+    assert not close.done()
+    release_cleanup.set()
+    if fail:
+        with pytest.raises(AIError) as caught:
+            await close
+        assert caught.value.code is failure.code
+        assert backend._worker_failures
+    else:
+        await close
+        assert backend._checkpoint_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_worker_completion_does_not_claim_unrequested_or_held_handoff() -> None:
+    gate = HandoffGate[str, None]()
+    assert await gate.claim_requested_release("execution") is None
+    assert gate._states == {}
+    await gate.acquire_hold("execution", "dependency")
+    state, owner = await gate.request_release("execution")
+    assert owner is False
+    assert await gate.claim_requested_release("execution") is None
+    released, owner = await gate.release_hold("execution", "dependency")
+    assert released is state and owner is True
+    await gate.finish_release("execution", state, succeeded=True)
+    assert gate._states == {}
 
 
 @pytest.mark.asyncio
