@@ -239,10 +239,12 @@ class ComposeOperations:
                 if container.name in generations and
                 any(name in context.initial_running_services for name in container.services))
             context.changed_image_services = set()
+            context.image_preparation_targets = set()
             prepared_pulls, prepared_builds = set(), set()
 
             def prepare_images(services):
                 image_plan = manager.image_preparer.plan(model, tuple(services), force_pull=pull)
+                context.image_preparation_targets.update(image_plan.targets)
                 pull_services = tuple(service for service in image_plan.pull if service not in prepared_pulls)
                 build_services = tuple(service for service in image_plan.build if service not in prepared_builds)
                 if pull_services:
