@@ -550,13 +550,23 @@ class _FilesystemTransaction:
         await self.delete_sequences((key,))
 
     async def delete_sequences(self, keys: Sequence[bytes]) -> None:
-        for key in sorted(set(keys)):
+        paths = {key: _sequence_path(self._root, key) for key in keys}
+        existing = await asyncio.to_thread(
+            lambda: {key for key, relative in paths.items() if (self._root / relative).exists()}
+        )
+        for key in sorted(paths):
+            relative = paths[key]
+            if key not in existing and relative not in self.writes:
+                continue
             if key in self.sequences:
                 del self.sequences[key]
             else:
                 self.sequences[key] = 0
                 del self.sequences[key]
-            self._delete(_sequence_path(self._root, key))
+            if key in existing:
+                self._delete(relative)
+            else:
+                self.writes.pop(relative, None)
 
     async def insert_fact(self, fact: StoredFact) -> None:
         await self.insert_facts((fact,))
