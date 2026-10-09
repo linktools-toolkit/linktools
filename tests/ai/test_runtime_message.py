@@ -186,3 +186,21 @@ def test_model_message_reader_rejects_invalid_persistence(raw: bytes) -> None:
         decode_model_messages(raw)
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize(
+    ("version", "error_code"),
+    (
+        (True, ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1.0, ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (2, ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+    ),
+)
+def test_model_message_version_requires_supported_integer(
+    version: object, error_code: ErrorCode,
+) -> None:
+    value = json.loads(encode_model_messages((ModelRequest(parts=[]),)))
+    value[0]["version"] = version
+    with pytest.raises(AIError) as raised:
+        decode_model_messages(canonical_json_bytes(value))
+    assert raised.value.code is error_code
