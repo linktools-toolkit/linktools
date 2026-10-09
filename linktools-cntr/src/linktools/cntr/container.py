@@ -228,6 +228,11 @@ class BaseContainer(metaclass=AbstractMetaClass):
     application_priority: int = 0
     bootstrap_services: "tuple[str, ...]" = ()
 
+    @property
+    def generation_services(self) -> "tuple[str, ...]":
+        """Services that actually consume this owner's generated configuration."""
+        return tuple(self.services)
+
     def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
         """Declare native providers needed by the selected project services."""
         return {}
