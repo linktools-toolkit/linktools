@@ -556,6 +556,7 @@ def test_plain_partial_start_failure_preserves_running_sibling(tmp_path):
     current = ServiceRuntimeState(("app",), "existing", "existing-runtime",
                                   "running", "healthy", "app:old", None, {})
     operations, manager, runner, calls, restored = manager_at(tmp_path, (app,), (current,))
+    AppliedServiceModels(manager, runner.final_model(None)).record(("existing",))
     operations.select = lambda *args, **kwargs: ComposeSelection(
         (app,), (app,), ("new",), False)
     app.on_service_started = lambda context, service: (_ for _ in ()).throw(
