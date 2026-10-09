@@ -325,6 +325,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
                 return
             payload = json.dumps({
                 "path": self.path, "user": self.headers.get("X-Auth-User"),
+                "authorization": self.headers.get("Authorization"),
             }).encode()
             self.send_response(200)
             self.end_headers()
@@ -354,7 +355,8 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
                 producer=producer, local_id=name, file_id=name, var_name=name,
                 server_name="app.test", default=False, https=True, waf=False,
                 auth=auth_enabled, auth_bypass=(r"^/admin/free",) if auth_enabled else (),
-                waf_bypass=(), auth_headers={}, vars={},
+                waf_bypass=(), auth_headers={"Authorization": "Bearer trusted"} if auth_enabled else {},
+                vars={},
             )
 
         public = site("public", False)
@@ -413,15 +415,19 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
             connection = http.client.HTTPSConnection(
                 "127.0.0.1", https_port, timeout=3,
                 context=ssl._create_unverified_context())
-            connection.request("GET", path, headers={"Host": "app.test"})
+            connection.request("GET", path, headers={
+                "Host": "app.test", "Authorization": "Bearer client"})
             response = connection.getresponse()
             result = response.status, json.loads(response.read())
             connection.close()
             return result
 
-        assert request("/public") == (200, {"path": "/public", "user": None})
-        assert request("/admin") == (200, {"path": "/admin", "user": "verified"})
-        assert request("/admin/free") == (200, {"path": "/admin/free", "user": None})
+        assert request("/public") == (200, {
+            "path": "/public", "user": None, "authorization": "Bearer client"})
+        assert request("/admin") == (200, {
+            "path": "/admin", "user": "verified", "authorization": "Bearer trusted"})
+        assert request("/admin/free") == (200, {
+            "path": "/admin/free", "user": None, "authorization": "Bearer client"})
         assert auth.paths == ["/api/authz/auth-request"]
         app_paths = list(app.paths)
         auth.auth_status = 401
