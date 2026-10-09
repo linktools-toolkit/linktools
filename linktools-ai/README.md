@@ -84,6 +84,12 @@ async with Runtime.open(
 
 `Runtime.open()` is the public composition root. The Runtime composition is immutable for the lifetime of the context; registrations are completed before it opens.
 
+Cold `Runtime` and `RuntimeStorage` imports load the complete durable schema set.
+Include import and `Runtime.open()` initialization in the caller or deployment's
+startup budget, and report readiness only after the context opens successfully.
+`Runtime.open()` imposes no fixed startup deadline. Reuse the opened Runtime for
+its service lifetime; execution deadlines do not replace a startup budget.
+
 Connection settings can be resolved lazily for a route. The resolver runs only
 when that route is materialized, and each materialization resolves independently;
 there is no process-global first-use client cache or initialization lock. Concurrent
