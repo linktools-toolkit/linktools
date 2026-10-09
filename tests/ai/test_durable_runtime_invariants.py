@@ -238,6 +238,11 @@ async def test_durable_commit_cancellation_accepts_committed_readback() -> None:
 
 def _run_store_for_preflight() -> RuntimeAgentRunStore:
     store = object.__new__(RuntimeAgentRunStore)
+    store._projection_offsets = {}
+    store._projection_dirty = set()
+    store._observation_task = None
+    store._observation_wake = asyncio.Event()
+    store._observation_started_at = None
     store._background_tasks = set()
     store._durability_flights = {}
     store._terminal_seals = {}

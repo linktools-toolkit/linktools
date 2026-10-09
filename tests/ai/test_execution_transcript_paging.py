@@ -139,6 +139,16 @@ class _RangedStore:
 
         return iterate()
 
+    async def capture_history(self, agent_run_ids, *, include_pending=False):
+        from linktools.ai.runtime.state._step_contracts import AgentRunHistoryCapture
+
+        del include_pending
+        result = {}
+        for run_id in agent_run_ids:
+            run = await self.get_agent_run(agent_run_id=run_id)
+            result[run_id] = AgentRunHistoryCapture(run, 0, await self.transcript_message_count(run_id), 0)
+        return result
+
 
 @pytest.mark.asyncio
 async def test_execution_transcript_cursor_keeps_first_page_high_water() -> None:

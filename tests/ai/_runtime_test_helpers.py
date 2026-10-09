@@ -2,9 +2,10 @@
 # -*- coding: utf-8 -*-
 """Shared helpers for Runtime tests and persistence fixtures."""
 
-from collections.abc import AsyncIterator, Callable, Mapping
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic_ai import Tool
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
@@ -25,6 +26,26 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
 from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
+
+
+_ReadT = TypeVar("_ReadT")
+
+
+async def _wait_for_committed(
+    read: Callable[[], Awaitable[_ReadT]],
+    ready: Callable[[_ReadT], bool],
+    *,
+    timeout: float = 5.0,
+) -> _ReadT:
+    """Wait for a canonical read condition without advancing the producer."""
+    async def wait() -> _ReadT:
+        while True:
+            value = await read()
+            if ready(value):
+                return value
+            await asyncio.sleep(0.05)
+
+    return await asyncio.wait_for(wait(), timeout=timeout)
 
 
 def tool_run_context() -> RunContext[None]:

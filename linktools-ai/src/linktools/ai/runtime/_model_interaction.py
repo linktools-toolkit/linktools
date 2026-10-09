@@ -86,8 +86,8 @@ class StagedModelInteraction:
     purpose: str
     output_retry_index: int | None
     model: Mapping[str, str]
-    request_context: StagedContextProjection
-    request_envelope_digest: str
+    request_context: StagedContextProjection | None
+    request_envelope_digest: str | None
     response_context: StagedContextProjection | None
     status: str
     error_code: str | None
@@ -103,7 +103,7 @@ class StagedModelInteraction:
             or self.step_index < 0
             or self.model_request_seq < 1
             or self.purpose not in {"agent", "compaction"}
-            or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}
+            or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}
             or self.duration_ns is not None
             and self.duration_ns < 0
             or not isinstance(self.started_at, datetime)
@@ -113,12 +113,16 @@ class StagedModelInteraction:
                 not isinstance(self.finished_at, datetime)
                 or self.finished_at.tzinfo is None
             )
-            or len(self.request_envelope_digest) != 64
-            or any(
-                value not in "0123456789abcdef"
-                for value in self.request_envelope_digest
+            or (self.request_context is None) != (self.request_envelope_digest is None)
+            or self.request_envelope_digest is not None
+            and (
+                len(self.request_envelope_digest) != 64
+                or any(
+                    value not in "0123456789abcdef"
+                    for value in self.request_envelope_digest
+                )
             )
-            or self.status == "RUNNING"
+            or self.status in {"RUNNING", "INTERRUPTED"}
             and (
                 self.started_at is None
                 or self.response_context is not None
@@ -127,19 +131,20 @@ class StagedModelInteraction:
                 or self.usage is not None
                 or self.finished_at is not None
             )
-            or self.status != "RUNNING"
+            or self.status not in {"RUNNING", "INTERRUPTED"}
             and self.duration_ns is None
             or self.status == "SUCCEEDED"
-            and self.response_context is None
-            or self.status not in {"RUNNING", "SUCCEEDED"}
-            and self.response_context is not None
+            and (self.response_context is None or self.request_context is None)
+            or self.response_context is not None and self.request_context is None
             or self.status == "FAILED"
             and not self.error_code
-            or self.status != "RUNNING"
+            or self.status not in {"RUNNING", "INTERRUPTED"}
             and self.finished_at is None
         ):
             raise ValueError("staged model interaction is invalid")
-        if not isinstance(self.request_context, StagedContextProjection):
+        if self.request_context is not None and not isinstance(
+            self.request_context, StagedContextProjection
+        ):
             raise TypeError("staged request context is invalid")
         if self.response_context is not None and not isinstance(
             self.response_context,

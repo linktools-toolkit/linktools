@@ -122,6 +122,16 @@ class _Store:
         ]
         return values if limit is None else values[:limit]
 
+    async def capture_history(self, agent_run_ids, *, include_pending=False):
+        from linktools.ai.runtime.state._step_contracts import AgentRunHistoryCapture
+
+        del include_pending
+        result = {}
+        for run_id in agent_run_ids:
+            run = await self.get_agent_run(agent_run_id=run_id)
+            result[run_id] = AgentRunHistoryCapture(run, 0, 0, await self.model_interaction_count(agent_run_id=run_id))
+        return result
+
 
 @pytest.mark.asyncio
 async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:

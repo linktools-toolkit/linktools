@@ -11,12 +11,12 @@ from rich.table import Table
 from rich.text import Text
 
 from linktools.ai.core import Principal, service_principal
-from linktools.ai.runtime import RuntimeHistory
 from linktools.cli import BaseCommand
 
 from ._common import _load_workspace, _local_runtime_storage, _run_async
 
 if TYPE_CHECKING:
+    from linktools.ai.runtime import RuntimeHistory
     from linktools.cli import CommandParser
 
 _PAGE_LIMIT = 200
@@ -32,6 +32,8 @@ class Command(BaseCommand):
         workspace = _load_workspace()
 
         async def execute() -> int:
+            from linktools.ai.runtime import RuntimeHistory
+
             async with RuntimeHistory.open(
                 "default",
                 storage=_local_runtime_storage(workspace),
@@ -44,7 +46,7 @@ class Command(BaseCommand):
 
 
 async def _emit_trace(
-    history: RuntimeHistory,
+    history: "RuntimeHistory",
     principal: Principal,
     execution_id: str,
 ) -> None:

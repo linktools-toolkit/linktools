@@ -6,9 +6,10 @@ import hashlib
 import zlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StoredPayload, read_object
@@ -17,6 +18,7 @@ from .._message import decode_model_messages, encode_model_messages
 from ._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
+    decode_envelope,
     encode_envelope,
 )
 from ._contracts import (
@@ -47,6 +49,7 @@ from ._store import (
     StateTransaction,
     StoredFact,
     StoredRecord,
+    active_state_scope,
     record_key_digest,
     require_no_run_history_lock,
     sequence_key,
@@ -74,6 +77,33 @@ class TranscriptCapture:
     messages: tuple[ModelMessage, ...]
     origins: tuple[TranscriptOrigin, ...]
     quality: HistoryQuality
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingPart:
+    key: str
+    source_part: object
+    chunk: TranscriptChunk
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTranscriptObservation:
+    owner_id: str
+    base_message_count: int
+    target_message_count: int
+    chunks: tuple[TranscriptChunk, ...]
+    base_storage_version: int
+    pending: RuntimePayloadRef | None
+    pending_parts: tuple[_PendingPart, ...]
+    new_pending_parts: tuple[StoredFact, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingCache:
+    message_index: int
+    storage_version: int
+    pending: RuntimePayloadRef | None
+    parts: tuple[_PendingPart, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +207,7 @@ class TranscriptRepository:
         self._context_sources = dict(context_sources or {})
         self._history_repository = history_repository
         self._projector = _ContextProjector(runtime_domain)
+        self._pending_cache: dict[str, _PendingCache] = {}
 
     @property
     def runtime_domain(self) -> RuntimeDomain:
@@ -273,6 +304,316 @@ class TranscriptRepository:
                 {"type": "transcript_head", "payload": _encode_persisted_domain(head)}
             ),
         )
+
+    async def capture_pending_in_transaction(
+        self,
+        transaction: StateTransaction,
+        head: TranscriptHeadRecord,
+    ) -> tuple[tuple[TranscriptChunk, ...], tuple[str, ...]]:
+        return await self._capture_pending_suffix(transaction, head, ())
+
+    async def _capture_pending_suffix(
+        self,
+        transaction: StateTransaction,
+        head: TranscriptHeadRecord,
+        known_keys: tuple[str, ...],
+    ) -> tuple[tuple[TranscriptChunk, ...], tuple[str, ...]]:
+        chunks: list[TranscriptChunk] = []
+        keys: list[str] = []
+        seen_keys = set(known_keys)
+        start = len(known_keys)
+        while start + len(chunks) < head.pending_part_count:
+            facts = await transaction.list_facts(FactQuery(
+                self._pending_stream(head.owner_id, head.message_count),
+                after_sequence=start + len(chunks),
+                limit=min(_TRANSCRIPT_PAGE_SIZE, head.pending_part_count - start - len(chunks)),
+            ))
+            if not facts:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for fact in facts:
+                if (
+                    fact.kind != "transcript_pending_part"
+                    or fact.owner_key_digest != self._head_key(head.owner_id)
+                    or fact.sequence != start + len(chunks) + 1
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                key = decode_envelope(fact.data).value.get("pending_key")
+                self._require_pending_key(key)
+                chunk = self.decode_chunk(fact)
+                if (
+                    not isinstance(key, str) or not key or key in seen_keys
+                    or chunk.owner_id != head.owner_id
+                    or chunk.first_message_index != head.message_count
+                    or chunk.message_count != 1
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                chunks.append(chunk)
+                keys.append(key)
+                seen_keys.add(key)
+        return tuple(chunks), tuple(keys)
+
+    async def read_pending_message(
+        self,
+        pending: RuntimePayloadRef,
+        parts: Sequence[TranscriptChunk],
+    ) -> ModelMessage:
+        if pending.source_domain is not self._runtime_domain:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        shells = decode_model_messages(await self._read_payload(pending.payload))
+        if len(shells) != 1 or shells[0].parts:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        shell = shells[0]
+        values = []
+        for chunk in parts:
+            messages = await self._decode_chunk_messages(chunk)
+            if len(messages) != 1 or type(messages[0]) is not type(shell) or len(messages[0].parts) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values.extend(messages[0].parts)
+        return replace(shell, parts=values)
+
+    async def load_pending(
+        self,
+        head: TranscriptHeadRecord,
+    ) -> tuple[ModelMessage | None, tuple[str, ...]]:
+        if head.pending is None:
+            return None, ()
+        parts, keys = await self._store.read(
+            lambda transaction: self.capture_pending_in_transaction(transaction, head)
+        )
+        return await self.read_pending_message(head.pending, parts), keys
+
+    @classmethod
+    def _part_message(cls, message: ModelMessage, part: object) -> ModelMessage:
+        timestamp = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        if isinstance(message, ModelRequest):
+            return ModelRequest(parts=[part], timestamp=timestamp)
+        return ModelResponse(parts=[part], timestamp=timestamp)
+
+    @classmethod
+    def _require_pending_key(cls, key: object) -> str:
+        if isinstance(key, str):
+            kind, separator, suffix = key.partition(":")
+            if separator and suffix and (
+                kind in {"tool_result", "retry"}
+                or kind == "part" and suffix.isascii() and suffix.isdigit()
+                and (suffix == "0" or not suffix.startswith("0"))
+            ):
+                return key
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    @classmethod
+    def _completed_parts(cls, message: ModelMessage) -> dict[str, object]:
+        if isinstance(message, ModelResponse):
+            return {f"part:{index}": part for index, part in enumerate(message.parts)}
+        result: dict[str, object] = {}
+        for part in message.parts:
+            kind = "tool_result" if part.part_kind == "tool-return" else "retry" if part.part_kind == "retry-prompt" else None
+            if kind is not None and part.tool_call_id is not None:
+                key = f"{kind}:{part.tool_call_id}"
+                if key in result:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                result[key] = part
+        return result
+
+    async def prepare_observation(
+        self,
+        owner_id: str,
+        messages: Sequence[ModelMessage],
+        *,
+        first_message_index: int,
+        pending: ModelMessage | None,
+        pending_keys: tuple[str, ...],
+    ) -> PreparedTranscriptObservation:
+        require_no_run_history_lock("TranscriptRepository.prepare_observation")
+        scope = active_state_scope()
+        committed_read = scope is None or not scope.writable
+
+        async def capture(transaction: StateTransaction):
+            entry = await self.get_head_in_transaction(transaction, owner_id)
+            head = self.empty_head(owner_id) if entry is None else entry[0]
+            version = -1 if entry is None else entry[1].storage_version
+            cache = self._pending_cache.get(owner_id)
+            previous = ()
+            if (cache is not None and cache.message_index == head.message_count
+                    and cache.storage_version <= version and cache.pending == head.pending
+                    and len(cache.parts) <= head.pending_part_count):
+                previous = cache.parts
+            chunks, keys = await self._capture_pending_suffix(
+                transaction, head, tuple(part.key for part in previous),
+            )
+            return head, version, previous, chunks, keys
+
+        head, base_version, cached, previous_chunks, previous_keys = await self._store.read(capture)
+        if head.message_count != first_message_index:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        loaded = list(cached)
+        for key, chunk in zip(previous_keys, previous_chunks, strict=True):
+            values = await self._decode_chunk_messages(chunk)
+            if len(values) != 1 or len(values[0].parts) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            loaded.append(_PendingPart(key, values[0].parts[0], chunk))
+        previous = tuple(loaded)
+        values = tuple(messages)
+        if values and previous:
+            completed_parts = self._completed_parts(values[0])
+            for part in previous:
+                if part.key not in completed_parts:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                final = self._part_message(values[0], completed_parts[part.key])
+                encoded = _exact_message_signature(final)
+                if len(encoded) != part.chunk.raw_size or hashlib.sha256(encoded).hexdigest() != part.chunk.raw_digest:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            previous = ()
+        if pending is None:
+            if pending_keys or previous:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        else:
+            for key in pending_keys:
+                self._require_pending_key(key)
+            if len(pending.parts) != len(pending_keys) or len(set(pending_keys)) != len(pending_keys) or not pending_keys:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        chunks = await self.prepare_chunks(owner_id, values, first_message_index=first_message_index)
+        target = first_message_index + len(values)
+        shell = None
+        next_parts: list[_PendingPart] = []
+        additions: list[StoredFact] = []
+        if pending is not None:
+            if len(pending_keys) < len(previous):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            shell = head.pending if previous else RuntimePayloadRef(
+                StoredPayload.inline_bytes(encode_model_messages((replace(pending, parts=[]),))),
+                self._runtime_domain,
+            )
+            for index, (key, part) in enumerate(zip(pending_keys, pending.parts, strict=True)):
+                if key.startswith("part:"):
+                    if not isinstance(pending, ModelResponse):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                else:
+                    kind, _, call_id = key.partition(":")
+                    expected = "tool-return" if kind == "tool_result" else "retry-prompt"
+                    if not isinstance(pending, ModelRequest) or part.part_kind != expected or part.tool_call_id != call_id:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if index < len(previous):
+                    existing = previous[index]
+                    if existing.key != key:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if existing.source_part is not part:
+                        candidate = self._part_message(pending, part)
+                        encoded = _exact_message_signature(candidate)
+                        if len(encoded) != existing.chunk.raw_size or hashlib.sha256(encoded).hexdigest() != existing.chunk.raw_digest:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    next_parts.append(_PendingPart(key, part, existing.chunk))
+                    continue
+                message = self._part_message(pending, part)
+                chunk = await self._make_chunk(owner_id, target, (message,), TranscriptOrigin.RAW)
+                next_parts.append(_PendingPart(key, part, chunk))
+                additions.append(StoredFact(
+                    self._pending_stream(owner_id, target), index + 1,
+                    self._head_key(owner_id), "transcript_pending_part", None, None,
+                    encode_envelope({
+                        "type": "transcript_chunk", "payload": _encode_persisted_domain(chunk),
+                        "pending_key": key,
+                    }),
+                ))
+        if committed_read:
+            # Only the prefix read from durable facts is safe to reuse after rollback.
+            if previous:
+                self._pending_cache[owner_id] = _PendingCache(
+                    head.message_count, base_version, head.pending,
+                    tuple(next_parts[:len(previous)]),
+                )
+            else:
+                self._pending_cache.pop(owner_id, None)
+        return PreparedTranscriptObservation(
+            owner_id, first_message_index, target, chunks, base_version,
+            shell, tuple(next_parts), tuple(additions),
+        )
+
+    async def commit_observation(
+        self,
+        transaction: StateTransaction,
+        prepared: PreparedTranscriptObservation,
+    ) -> None:
+        entry = await self.get_head_in_transaction(transaction, prepared.owner_id)
+        if entry is None:
+            if prepared.base_storage_version != -1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await self.create_head_in_transaction(transaction, prepared.owner_id)
+            entry = await self.get_head_in_transaction(transaction, prepared.owner_id)
+        if entry is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        head, record = entry
+        if (
+            record.storage_version != max(0, prepared.base_storage_version)
+            or head.message_count != prepared.base_message_count
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if (
+            not prepared.chunks and not prepared.new_pending_parts
+            and head.pending == prepared.pending
+            and head.pending_part_count == len(prepared.pending_parts)
+        ):
+            guarded = await transaction.guard_record(
+                record.key_digest, expected_storage_version=record.storage_version,
+            )
+            if guarded is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return
+        await self.append_chunks(transaction, prepared.owner_id, prepared.chunks)
+        entry = await self.get_head_in_transaction(transaction, prepared.owner_id)
+        if entry is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        head, record = entry
+        next_head = replace(head, pending=prepared.pending, pending_part_count=len(prepared.pending_parts))
+        upgraded = replace(
+            record,
+            data=encode_envelope({"type": "transcript_head", "payload": _encode_persisted_domain(next_head)}),
+            storage_version=record.storage_version + 1,
+        )
+        if not await transaction.replace_record(upgraded, expected_storage_version=record.storage_version):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if prepared.new_pending_parts:
+            await transaction.insert_facts(prepared.new_pending_parts)
+
+    async def verify_observation(self, prepared: PreparedTranscriptObservation) -> bool:
+        head = await self.get_head(prepared.owner_id)
+        if head is None or head.message_count < prepared.target_message_count:
+            return False
+        if head.message_count == prepared.target_message_count and prepared.pending_parts:
+            if head.pending is None or head.pending_part_count < len(prepared.pending_parts):
+                return False
+            if head.pending != prepared.pending:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for chunk in prepared.chunks:
+            expected = await self._decode_chunk_messages(chunk)
+            actual = tuple([value async for value in self.iter_message_range(
+                prepared.owner_id, start=chunk.first_message_index,
+                end=chunk.first_message_index + chunk.message_count,
+            )])
+            if encode_model_messages(actual) != encode_model_messages(expected):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if prepared.pending_parts and head.message_count > prepared.target_message_count:
+            messages = tuple([value async for value in self.iter_message_range(
+                prepared.owner_id, start=prepared.target_message_count,
+                end=prepared.target_message_count + 1,
+            )])
+            if len(messages) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            completed = self._completed_parts(messages[0])
+            for part in prepared.pending_parts:
+                if part.key not in completed:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raw = _exact_message_signature(self._part_message(messages[0], completed[part.key]))
+                if len(raw) != part.chunk.raw_size or hashlib.sha256(raw).hexdigest() != part.chunk.raw_digest:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        elif prepared.pending_parts:
+            cut = replace(head, pending_part_count=len(prepared.pending_parts))
+            chunks, keys = await self._store.read(
+                lambda transaction: self.capture_pending_in_transaction(transaction, cut)
+            )
+            if keys != tuple(part.key for part in prepared.pending_parts) or chunks != tuple(part.chunk for part in prepared.pending_parts):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return True
 
     async def prepare_chunks(
         self,
@@ -701,12 +1042,25 @@ class TranscriptRepository:
                 )
             )
             if not page:
-                return
+                break
             for record in page:
                 await self._validate_head_record(record)
             last = page[-1]
             after_sort = last.sort_key
             after_key = last.key_digest
+        facts = await self._store.read(lambda transaction: transaction.scan_facts())
+        for fact in facts:
+            if fact.kind != "transcript_pending_part":
+                continue
+            chunk = self.decode_chunk(fact)
+            messages = await self._decode_chunk_messages(chunk)
+            if (
+                len(messages) != 1 or len(messages[0].parts) != 1
+                or _exact_message_signature(messages[0]) != _exact_message_signature(
+                    self._part_message(messages[0], messages[0].parts[0])
+                )
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _validate_head_record(self, record: StoredRecord) -> None:
         head = self._decode_head(record)
@@ -749,6 +1103,8 @@ class TranscriptRepository:
             or expected_chunks != head.chunk_count
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if head.pending is not None:
+            await self.load_pending(head)
         current = await self._store.read(
             lambda transaction: transaction.get_record(record.key_digest)
         )
@@ -1456,6 +1812,12 @@ class TranscriptRepository:
             if self._runtime_domain is RuntimeDomain.CONVERSATION
             else "run_transcript",
             owner_id,
+        )
+
+    def _pending_stream(self, owner_id: str, message_index: int) -> bytes:
+        return stream_digest(
+            self._namespace, self._tenant_id, self._runtime_domain.value,
+            "transcript_pending_parts", [owner_id, message_index],
         )
 
     def _projection_key(self, agent_run_id: str) -> bytes:

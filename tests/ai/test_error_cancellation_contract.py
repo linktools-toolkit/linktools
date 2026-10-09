@@ -270,7 +270,10 @@ async def test_handoff_gate_recovers_after_cancelled_cleanup() -> None:
 
 @pytest.mark.asyncio
 async def test_immediate_terminal_execution_waits_for_task_dependency_hold() -> None:
+    from linktools.ai.runtime._execution import _ExecutionRuntimeBridge
+
     service = object.__new__(DefaultExecutionService)
+    service._runtime_bridge = _ExecutionRuntimeBridge()
     service._handoff = HandoffGate()
 
     class Executions:

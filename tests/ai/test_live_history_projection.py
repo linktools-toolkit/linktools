@@ -3,6 +3,7 @@
 """Run-local transcript identities and terminal boundary facts."""
 
 from datetime import datetime, timezone
+from functools import partial
 
 import pytest
 from pydantic_ai.messages import (
@@ -47,7 +48,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
             namespace="history",
             executions=state.execution.executions,
             store=state.run_store.read_store(RuntimeDomain.EXECUTION),
-            staging_store=state.run_store,
+            notifications=state.run_store,
             cursor_signer=HmacCursorSigner("history", b"history-key"),
         )
         conversation = agent_conversation_id(
@@ -62,7 +63,8 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
                 agent_run_seq=sequence,
             )
             recorder = AgentRunRecorder(
-                state.run_store, execution_id="execution", agent_run_id=run_id
+                state.run_store, execution_id="execution", agent_run_id=run_id,
+                history_boundary=partial(state.run_store.flush_execution_projection, run_id, execution_id="execution"),
             )
             await recorder.register_agent_run(
                 AgentRunRecord(
@@ -99,6 +101,7 @@ async def test_same_call_id_is_scoped_to_run_and_has_no_invented_result(
                 )
                 recorder.stage_tool_result(result)
                 await recorder.record_tool_result_boundary(result, 1)
+            await recorder.commit_history_boundary()
             recorders.append(recorder)
 
         for sequence in (1, 2):
@@ -209,7 +212,7 @@ def test_default_boundary_metadata_keeps_locators_but_omits_unrequested_body(
 @pytest.mark.parametrize(
     "method, count", [("history", 2), ("transcript", 2), ("trace", 1)]
 )
-async def test_read_keeps_run_visible_across_staging_archive_handoff(
+async def test_read_uses_one_run_capture_without_independent_run_lookup(
     method: str, count: int
 ) -> None:
     import asyncio
@@ -226,24 +229,15 @@ async def test_read_keeps_run_visible_across_staging_archive_handoff(
         published = False
 
         async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
+            raise AssertionError("projection must use the captured run identity")
+
+        async def capture_history(self, agent_run_ids, *, include_pending=False):
+            captured = await super().capture_history(agent_run_ids, include_pending=include_pending)
             if not self.published:
                 entered.set()
                 await release.wait()
                 self.published = True
-                return None
-            return await super().get_agent_run(agent_run_id=agent_run_id)
-
-    class Staging:
-        async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
-            if archive.published:
-                return None
-            return await _Store.get_agent_run(archive, agent_run_id=agent_run_id)
-
-        def staged_transcript(self, agent_run_id: str) -> None:
-            return None
-
-        async def list_events(self, *, agent_run_id: str) -> list:
-            return []
+            return captured
 
     record = make_record("root", created_at=datetime.now(timezone.utc))
     archive = Archive((record,))
@@ -252,7 +246,6 @@ async def test_read_keeps_run_visible_across_staging_archive_handoff(
         executions=_Executions((record,)),
         store=archive,
         cursor_signer=HmacCursorSigner("history", b"key"),
-        staging_store=Staging(),
     )
     read = asyncio.create_task(
         getattr(reader, method)("root", tenant_id="tenant", cursor=None, limit=100)
@@ -276,7 +269,7 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     from pydantic_ai.models import CompletedStreamedResponse
     from pydantic_ai.models.function import FunctionModel
     from linktools.ai.capability import CapabilityGroup
-    from linktools.ai.core import ExecutionEventType
+    from linktools.ai.core import ExecutionDeltaType, ExecutionEventType
     from linktools.ai.runtime import Runtime
     from .test_live_history_readback_integration import _Models
 
@@ -319,11 +312,15 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
     ) as runtime:
         execution = await runtime.agents.get("default").start("prompt")
         selector = None
-        first = None
-        expected = None
+        received_tail = False
 
         async def observe(tree):
-            nonlocal selector, first, expected
+            nonlocal selector, received_tail
+            if tree.event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
+                if tree.event.payload.get("text") == "incomplete":
+                    received_tail = True
+                    release.set()
+                return
             if tree.event.event_type != ExecutionEventType.ASSISTANT_PART_COMPLETED:
                 return
             payload = tree.event.payload
@@ -333,16 +330,20 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
             }
             assert selector["part_index"] == 1
             exact = await execution.history(include_content=True, **selector)
-            assert [item.content for item in exact.items] == ["confirmed"]
-            expected = (await execution.history(include_content=True)).items
-            first = await execution.history(include_content=True, limit=1)
-            release.set()
+            assert exact.items == ()
 
-        result = await execution.wait(on_event=observe, timeout_seconds=5)
+        try:
+            result = await execution.wait(
+                on_event=observe, include_event_content=True, timeout_seconds=5,
+            )
+        finally:
+            release.set()
         assert result.result.status is ExecutionStatus.FAILED
-        assert selector is not None and first is not None and expected is not None
+        assert selector is not None and received_tail
         exact = await execution.history(include_content=True, **selector)
         assert [item.content for item in exact.items] == ["confirmed"]
+        expected = (await execution.history(include_content=True)).items
+        first = await execution.history(include_content=True, limit=1)
         seen = list(first.items)
         cursor = first.next_cursor
         while cursor is not None:
@@ -352,7 +353,9 @@ async def test_interrupted_response_preserves_confirmed_native_and_text_part_pos
         assert [(item.item_kind, item.part_index, item.content) for item in seen] == [
             (item.item_kind, item.part_index, item.content) for item in expected
         ]
-        assert not any(item.content == "incomplete" for item in seen)
+        response = [item for item in seen if item.message_seq == selector["message_seq"]]
+        assert [item.part_index for item in response] == [0, 1, 2]
+        assert [item.content for item in response[1:]] == ["confirmed", "incomplete"]
 
 
 @pytest.mark.asyncio
@@ -366,11 +369,10 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
     from .test_attachment_facts import _Executions, _fact
     from .test_model_interaction_lifecycle_paging import (
         _HistoryStore,
-        _StagingStore,
-        _running_interaction,
+        _running_record,
     )
 
-    interaction = _running_interaction("execution", 1, 1, datetime.now(timezone.utc))
+    interaction = _running_record("execution", 1, 1, datetime.now(timezone.utc))
     interaction = replace(
         interaction,
         attachments=(
@@ -389,9 +391,9 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
         ),
         metadata={"agent_run_seq": "1", "agent_id": "default"},
     )
-    staging = _StagingStore()
-    staging.runs[run.agent_run_id] = run
-    staging.staged[run.agent_run_id] = {1: interaction}
+    archive = _HistoryStore()
+    archive.runs[run.agent_run_id] = run
+    archive.interactions[run.agent_run_id] = [interaction]
     record = SimpleNamespace(
         execution_id="execution",
         status=ExecutionStatus.STARTED,
@@ -406,8 +408,7 @@ async def test_attachment_inclusion_is_readable_from_running_interaction_without
     reader = StepExecutionHistoryReader(
         namespace="history",
         executions=_Executions(record),
-        store=_HistoryStore(),
-        staging_store=staging,
+        store=archive,
         cursor_signer=HmacCursorSigner("history", b"key"),
     )
     page = await reader.attachment_facts(

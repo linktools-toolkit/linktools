@@ -14,18 +14,18 @@ from rich.text import Text
 from rich.tree import Tree
 
 from linktools.ai.core import Principal, UsageMetrics, service_principal
-from linktools.ai.runtime import (
-    ExecutionInfo,
-    ModelInteractionItem,
-    Page,
-    RuntimeHistory,
-    UsageSummary,
-)
 from linktools.cli import BaseCommand
 
 from ._common import _load_workspace, _local_runtime_storage, _run_async
 
 if TYPE_CHECKING:
+    from linktools.ai.runtime import (
+        ExecutionInfo,
+        ModelInteractionItem,
+        Page,
+        RuntimeHistory,
+        UsageSummary,
+    )
     from linktools.cli import CommandParser
 
 _PAGE_LIMIT = 200
@@ -43,6 +43,8 @@ class Command(BaseCommand):
         workspace = _load_workspace()
 
         async def execute() -> int:
+            from linktools.ai.runtime import RuntimeHistory
+
             async with RuntimeHistory.open(
                 "default",
                 storage=_local_runtime_storage(workspace),
@@ -62,7 +64,7 @@ class Command(BaseCommand):
         return _run_async(execute())
 
 
-def _emit_execution_list(executions: tuple[ExecutionInfo, ...]) -> None:
+def _emit_execution_list(executions: "tuple[ExecutionInfo, ...]") -> None:
     console = get_console()
     if not executions:
         console.print("[dim]No executions.[/dim]")
@@ -90,7 +92,7 @@ def _emit_execution_list(executions: tuple[ExecutionInfo, ...]) -> None:
 
 
 async def _emit_execution_detail(
-    history: RuntimeHistory,
+    history: "RuntimeHistory",
     principal: Principal,
     execution_id: str,
 ) -> None:
@@ -128,7 +130,7 @@ async def _emit_execution_detail(
     )
 
 
-def _execution_panel(execution: ExecutionInfo) -> Panel:
+def _execution_panel(execution: "ExecutionInfo") -> Panel:
     table = Table.grid(padding=(0, 2))
     table.add_column(style="bold")
     table.add_column()
@@ -164,7 +166,7 @@ def _execution_panel(execution: ExecutionInfo) -> Panel:
 
 
 async def _emit_history_rows(
-    history: RuntimeHistory,
+    history: "RuntimeHistory",
     principal: Principal,
     execution_id: str,
 ) -> None:
@@ -208,7 +210,7 @@ async def _emit_history_rows(
 
 
 async def _emit_transcript_rows(
-    history: RuntimeHistory,
+    history: "RuntimeHistory",
     principal: Principal,
     execution_id: str,
 ) -> None:
@@ -245,10 +247,10 @@ async def _emit_transcript_rows(
 
 
 async def _emit_model_interactions(
-    history: RuntimeHistory,
+    history: "RuntimeHistory",
     principal: Principal,
     execution_id: str,
-    first_page: Page[ModelInteractionItem],
+    first_page: "Page[ModelInteractionItem]",
 ) -> None:
     console = get_console()
     page = first_page
@@ -296,7 +298,7 @@ async def _emit_model_interactions(
         console.print(Panel("[dim]No model requests.[/dim]", title="Model Requests"))
 
 
-def _prompt_architecture_tree(interaction: ModelInteractionItem) -> Tree:
+def _prompt_architecture_tree(interaction: "ModelInteractionItem") -> Tree:
     request = interaction.request
     parameters = request.get("parameters")
     parameter_map = parameters if isinstance(parameters, Mapping) else {}
@@ -544,7 +546,7 @@ def _model_label(model: Mapping[str, object]) -> str:
     return "-"
 
 
-def _usage_label(usage: UsageMetrics | UsageSummary | None) -> str:
+def _usage_label(usage: "UsageMetrics | UsageSummary | None") -> str:
     if usage is None:
         return "-"
     return (

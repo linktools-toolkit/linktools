@@ -123,6 +123,7 @@ class _LiveEvent:
 @dataclass(frozen=True, slots=True)
 class _LiveReplayRequired:
     execution_id: str
+    discard_uncommitted: bool = False
 
 
 @dataclass(slots=True)
@@ -211,13 +212,13 @@ class _LiveSubscription:
         self._wakeup.set()
         return True
 
-    def require_replay(self) -> None:
-        if self._closed or self._replay_required:
+    def require_replay(self, *, discard_uncommitted: bool = False) -> None:
+        if self._closed or (self._replay_required and not discard_uncommitted):
             return
         self._queue.clear()
         self._queue_bytes = 0
         self._replay_required = True
-        self._queue.append(_LiveReplayRequired(self._execution_id))
+        self._queue.append(_LiveReplayRequired(self._execution_id, discard_uncommitted))
         self._wakeup.set()
 
     def finish(self) -> None:
@@ -507,6 +508,14 @@ class LiveExecutionEventBroker:
         if not subscriptions and execution_id not in self._prepared:
             self._release_execution(execution_id)
 
+    def handoff(self, execution_id: str) -> None:
+        """Continue observers from durable truth after this producer loses its claim."""
+        for subscription in tuple(self._subscriptions.pop(execution_id, ())):
+            subscription.require_replay(discard_uncommitted=True)
+            subscription.finish()
+        self._signal(execution_id)
+        self._release_execution(execution_id)
+
     def _signal(self, execution_id: str) -> None:
         self._activity.setdefault(execution_id, asyncio.Event()).set()
 
@@ -779,6 +788,8 @@ class DefaultEventService:
             async for item in _iterate_live(live):
                 if isinstance(item, _LiveReplayRequired):
                     await _close_live(live)
+                    if item.discard_uncommitted:
+                        ephemeral_semantic_count = 0
                     skipped = 0
                     async for event in self._stream_durable(
                         execution_id,
@@ -832,7 +843,16 @@ class DefaultEventService:
                         if item.durable_seq == replay_cursor:
                             replay_cursor = None
                         continue
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    async for event in self._catch_up_live_gap(
+                        execution_id, principal.tenant_id, item, after_event_seq=cursor,
+                    ):
+                        yield event
+                        if event.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
+                            return
+                    cursor = item.durable_seq
+                    ephemeral_semantic_count = 0
+                    replay_cursor = None
+                    continue
                 if isinstance(item, ExecutionDelta):
                     poll_backoff = 1.0
                     yield ExecutionStreamEvent(
@@ -858,7 +878,17 @@ class DefaultEventService:
                     continue
                 expected_event_seq = cursor + ephemeral_semantic_count + 1
                 if item.durable_seq != expected_event_seq:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if item.durable_seq < expected_event_seq:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    async for event in self._catch_up_live_gap(
+                        execution_id, principal.tenant_id, item, after_event_seq=cursor,
+                    ):
+                        yield event
+                        if event.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
+                            return
+                    cursor = item.durable_seq
+                    ephemeral_semantic_count = 0
+                    continue
                 cursor = item.durable_seq
                 ephemeral_semantic_count = 0
                 yield ExecutionStreamEvent(
@@ -914,6 +944,40 @@ class DefaultEventService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def _catch_up_live_gap(
+        self, execution_id: str, tenant_id: str,
+        item: _LiveEvent, *, after_event_seq: int,
+    ) -> AsyncIterator[ExecutionStreamEvent]:
+        if item.durable_seq is None or item.durable_seq <= after_event_seq:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        confirmed = await self._read_durable(
+            execution_id, tenant_id=tenant_id, after_event_seq=item.durable_seq - 1, limit=1,
+        )
+        if confirmed.items != (ExecutionEvent(
+            execution_id, item.durable_seq, item.event_type, item.payload,
+        ),):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        # Catch up through this confirmed event without dropping future live deltas.
+        # Previously delivered provisional events may be delivered again.
+        cursor = after_event_seq
+        while cursor < item.durable_seq:
+            page = await self._read_durable(
+                execution_id, tenant_id=tenant_id, after_event_seq=cursor,
+                limit=min(200, item.durable_seq - cursor),
+            )
+            if not page.items:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for event in page.items:
+                if (event.execution_id != execution_id or event.event_seq != cursor + 1
+                        or event.event_seq > item.durable_seq):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                cursor = event.event_seq
+                yield ExecutionStreamEvent(
+                    event.execution_id, event.event_seq, event.event_type, event.payload,
+                )
+                if event.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
+                    return
 
     async def _stream_durable(
         self,

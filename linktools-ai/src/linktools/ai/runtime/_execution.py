@@ -275,7 +275,7 @@ class ExecutionBackend(Protocol):
         request: "ResolveToolEffectRequest",
     ) -> "ToolEffectResolutionResult": ...
     async def recover_execution(
-        self, execution_id: str, *, tenant_id: str
+        self, execution_id: str, *, tenant_id: str, expected_revision: int,
     ) -> ExecutionRecord: ...
     async def persist_cancel_intent(
         self,
@@ -632,6 +632,13 @@ class DefaultExecutionService:
         if owner:
             await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
+    async def resume_terminal_handoff(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> None:
+        state = await self._handoff.claim_requested_release((tenant_id, execution_id))
+        if state is not None:
+            await self._run_handoff_cleanup(execution_id, tenant_id, state)
+
     async def _request_handoff_if_terminal(
         self, execution_id: str, tenant_id: str
     ) -> None:
@@ -650,6 +657,12 @@ class DefaultExecutionService:
         state: HandoffState[None],
     ) -> None:
         key = tenant_id, execution_id
+        waiter = self._local_waiter
+        if waiter is not None and waiter.owns_execution(execution_id, tenant_id=tenant_id):
+            await self._handoff.finish_release(key, state, succeeded=False)
+            if not waiter.owns_execution(execution_id, tenant_id=tenant_id):
+                await self.resume_terminal_handoff(execution_id, tenant_id=tenant_id)
+            return
         try:
             released = await self._release_terminal(
                 execution_id,
@@ -2568,6 +2581,10 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if launch_record.budget_scope_id is not None:
             await self._state.budgets.read(launch_record.budget_scope_id)
+        if launch_record.agent_run_seq > 0:
+            # A replay observes the admitted producer. Only explicit recovery
+            # may obtain a new generation for an already claimed attempt.
+            return
         prepared_local_stream = False
         try:
             if (
@@ -3507,11 +3524,17 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RECOVER,
         )
-        if execution.status is not ExecutionStatus.RECOVERY_REQUIRED:
+        if execution.status not in {
+            ExecutionStatus.RECOVERY_REQUIRED,
+            ExecutionStatus.PENDING_START,
+            ExecutionStatus.STARTED,
+            ExecutionStatus.CANCELLING,
+        }:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         await self.runtime_backend().recover_execution(
             execution_id,
             tenant_id=principal.tenant_id,
+            expected_revision=execution.revision,
         )
         return ExecutionHandle(execution_id)
 

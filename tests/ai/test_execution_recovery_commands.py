@@ -129,7 +129,7 @@ async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> No
     now = datetime.now(timezone.utc)
     execution = _execution(now)
     try:
-        await state.execution.executions.create(execution)
+        await state.execution.executions.create_with_history_head(execution)
         commands = _commands(state)
         recovery = await commands.commit_recovery_required(
             execution,
@@ -168,7 +168,7 @@ async def test_recovery_cancel_intent_fences_stale_resume() -> None:
     now = datetime.now(timezone.utc)
     execution = _execution(now)
     try:
-        await state.execution.executions.create(execution)
+        await state.execution.executions.create_with_history_head(execution)
         commands = _commands(state)
         recovery = await commands.commit_recovery_required(
             execution,
@@ -232,7 +232,7 @@ async def test_recovery_cancel_claim_reports_concurrent_intent_as_conflict(
     now = datetime.now(timezone.utc)
     execution = _execution(now)
     try:
-        await state.execution.executions.create(execution)
+        await state.execution.executions.create_with_history_head(execution)
         commands = _commands(state)
         recovery = await commands.commit_recovery_required(
             execution,
@@ -424,5 +424,81 @@ async def test_tool_effect_resolution_rejects_stale_fence_and_key_reuse(
                 target_status=ToolOperationStatus.PENDING,
             )
         assert raised.value.code is expected_error
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_active_restart_admits_a_new_history_producer_and_fences_predecessor() -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="restart-producer", tenant_id="tenant")
+    execution = _execution(datetime.now(timezone.utc))
+    try:
+        repository = state.execution.executions
+        await repository.create_with_history_head(execution)
+        resumed = await _commands(state).commit_resumed(execution)
+        assert resumed.status is ExecutionStatus.STARTED
+        assert resumed.revision == execution.revision + 1
+        head = await repository.get_history_head(execution.execution_id, tenant_id="tenant")
+        assert head.producer_generation == resumed.revision
+
+        async def guard(transaction, generation):
+            return await repository.require_open_history_head_in_transaction(
+                transaction, execution.execution_id, expected_producer_generation=generation,
+            )
+
+        with pytest.raises(AIError) as stale:
+            await repository.state_store.mutate(lambda transaction: guard(transaction, execution.revision))
+        assert stale.value.code is ErrorCode.STORAGE_CONFLICT
+        await repository.state_store.mutate(lambda transaction: guard(transaction, resumed.revision))
+        with pytest.raises(AIError) as duplicate:
+            await _commands(state).commit_resumed(execution)
+        assert duplicate.value.code is ErrorCode.STORAGE_CONFLICT
+        successor = await _commands(state).commit_resumed(resumed)
+        assert successor.revision == resumed.revision + 1
+        with pytest.raises(AIError) as superseded:
+            await _commands(state).commit_resumed(execution)
+        assert superseded.value.code is ErrorCode.STORAGE_CONFLICT
+        with pytest.raises(AIError) as stale:
+            await repository.state_store.mutate(lambda transaction: guard(transaction, resumed.revision))
+        assert stale.value.code is ErrorCode.STORAGE_CONFLICT
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unrelated_update", (False, True))
+async def test_resume_recovers_its_own_lost_commit_acknowledgement(monkeypatch, unrelated_update) -> None:
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="resume-ack", tenant_id="tenant")
+    execution = _execution(datetime.now(timezone.utc))
+    try:
+        repository = state.execution.executions
+        await repository.create_with_history_head(execution)
+        store_type = type(repository.state_store)
+        original = store_type.mutate
+        interrupted = False
+
+        async def lose_ack(store, operation):
+            nonlocal interrupted
+            result = await original(store, operation)
+            if store is repository.state_store and not interrupted:
+                interrupted = True
+                if unrelated_update:
+                    await repository.compare_and_swap(
+                        execution.execution_id,
+                        tenant_id="tenant",
+                        expected_revision=result.revision,
+                        next_record=replace(result, revision=result.revision + 1),
+                    )
+                raise RuntimeError("commit acknowledgement lost")
+            return result
+
+        monkeypatch.setattr(store_type, "mutate", lose_ack)
+        resumed = await _commands(state).commit_resumed(execution)
+        assert interrupted
+        assert resumed.revision == execution.revision + 1 + int(unrelated_update)
+        head = await repository.get_history_head(execution.execution_id, tenant_id="tenant")
+        assert head.producer_generation == execution.revision + 1
     finally:
         await state.close()

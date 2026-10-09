@@ -13,16 +13,25 @@ from typing import Any, Protocol
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
 from pydantic_ai.exceptions import RunCancelled
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.messages import (
+    InstructionPart,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.wrapper import WrapperModel
-from pydantic_ai.settings import ModelSettings
+from pydantic_ai.settings import ModelSettings, merge_model_settings
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
     SummarizingCompaction,
     TieredCompaction,
+    estimate_context_tokens,
+    estimate_token_count,
 )
 
 from ..core import PromptLimits
@@ -307,7 +316,8 @@ class CompactionCapability(AbstractCapability[None]):
         )
         # Harness may rewrite its context history; only the provider view is mutable.
         projected_run_context = replace(ctx, messages=projected_context.messages)
-        if self._target_tokens is None:
+        target_tokens = self._request_target(projected_context)
+        if target_tokens is None:
             projected_context = await self._deduplicate.before_model_request(
                 projected_run_context,
                 projected_context,
@@ -340,7 +350,7 @@ class CompactionCapability(AbstractCapability[None]):
                         keep_messages=_SUMMARY_TAIL_MESSAGES,
                     ),
                 ),
-                target_tokens=self._target_tokens,
+                target_tokens=target_tokens,
             )
             projected_context = await tiered.before_model_request(
                 projected_run_context,
@@ -353,6 +363,65 @@ class CompactionCapability(AbstractCapability[None]):
                 None if projected == source else projected,
             )
         return await handler(projected_context)
+
+    def _request_target(self, request: ModelRequestContext) -> int | None:
+        target = self._target_tokens
+        window = request.model.context_window
+        if window is not None and window > 0:
+            settings = merge_model_settings(request.model.settings, request.model_settings)
+            output_tokens = (settings or {}).get("max_tokens") or 0
+            available = max(1, window - output_tokens)
+            target = available if target is None else min(target, available)
+        if target is None:
+            return None
+
+        parameters = request.model_request_parameters
+        messages = list(request.messages)
+        if parameters.instruction_parts is not None:
+            for index in range(len(messages) - 1, -1, -1):
+                if isinstance(message := messages[index], ModelRequest):
+                    messages[index] = replace(
+                        message,
+                        instructions=InstructionPart.join(parameters.instruction_parts),
+                    )
+                    break
+        schema_text: list[str] = []
+        for tool in parameters.function_tools:
+            if (
+                parameters.visibility_of(tool.name) == "withheld"
+                and tool.name not in parameters.revealed_tool_names
+            ):
+                continue
+            schema_text.extend((
+                tool.name,
+                tool.description or "",
+                json.dumps(tool.parameters_json_schema, sort_keys=True),
+            ))
+        output_text = "".join(
+            tool.name + (tool.description or "")
+            + json.dumps(tool.parameters_json_schema, sort_keys=True)
+            for tool in parameters.output_tools
+        )
+        if output := parameters.output_object:
+            object_text = parameters.prompted_output_instructions or "".join((
+                output.name or "",
+                output.description or "",
+                json.dumps(output.json_schema, sort_keys=True),
+            ))
+            # Auto output carries both alternatives until the provider selects a mode.
+            output_text = max(output_text, object_text, key=len)
+        schema_text.append(output_text)
+        # Provider usage already includes schemas and instructions. Use the current
+        # request's text/schema estimate as a floor, not an extra charge on that anchor.
+        current_estimate = estimate_token_count([
+            *messages,
+            ModelRequest(parts=[UserPromptPart("".join(schema_text))]),
+        ])
+        anchored_estimate = estimate_context_tokens(
+            request.messages,
+            model_request_parameters=parameters,
+        )
+        return max(1, target - max(0, current_estimate - anchored_estimate))
 
     def _refresh_policy(self) -> None:
         if self._policy is None:

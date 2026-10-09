@@ -266,6 +266,7 @@ class _LaunchExecutions:
             execution_id=execution_id,
             tenant_id=tenant_id,
             status=ExecutionStatus.STARTED,
+            agent_run_seq=0,
             budget_scope_id=None,
         )
 

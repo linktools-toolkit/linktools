@@ -6,8 +6,8 @@ import asyncio
 import json
 import os
 import shutil
-from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -16,7 +16,9 @@ from typing import Literal, TypeVar
 from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
-from ...storage import FilesystemJournal, FilesystemWriterLock, sync_directory
+from ...storage import (
+    FilesystemJournal, FilesystemMutationLock, FilesystemWriterLock, sync_directory,
+)
 from ._codec import decode_alias, decode_fact, decode_operation, decode_record
 from ._filesystem_layout import (
     _FactStreamInfo, _FilesystemCache, _FilesystemIndex, _RECORD_INDEX_MARKER,
@@ -148,7 +150,7 @@ class FilesystemStateStorageGroup:
 
     async def _initialize_owned(self) -> None:
         if self._read_only:
-            await asyncio.to_thread(self._initialize_read_only_sync)
+            await self._publication_call(self._initialize_read_only_sync)
             return
         async with self._mutation_lock:
             if self._closed:
@@ -189,7 +191,7 @@ class FilesystemStateStorageGroup:
                     await member._writer_lock.acquire()
                     acquired.append(member._writer_lock)
                 await asyncio.to_thread(self._validate_roots_sync)
-            await asyncio.to_thread(self._initialize_sync)
+            await self._publication_call(self._initialize_sync)
             self._initialized = True
             _logger.info(
                 "filesystem StateStorageGroup initialized: scope=%s domains=%s",
@@ -283,20 +285,66 @@ class FilesystemStateStorageGroup:
             store._runtime_domain,
             (monotonic() - started) * 1000,
         )
-        transaction = _FilesystemTransaction(store.root, store._require_index())
-        token = bind_state_scope(
-            self,
-            {store: transaction},
-            writable=False,
-        )
         try:
-            readonly = active_state_transaction(store)
-            if readonly is None:
-                raise RuntimeError("read-only StateTransaction scope was not bound")
-            return await fn(readonly)
+            async with self._read_fence(store):
+                transaction = _FilesystemTransaction(store.root, store._require_index())
+                token = bind_state_scope(self, {store: transaction}, writable=False)
+                try:
+                    readonly = active_state_transaction(store)
+                    if readonly is None:
+                        raise RuntimeError("read-only StateTransaction scope was not bound")
+                    return await fn(readonly)
+                finally:
+                    reset_state_transaction(token)
         finally:
-            reset_state_transaction(token)
             store._consistency_lock.release()
+
+    @asynccontextmanager
+    async def _read_fence(self, store: "FilesystemStateStore") -> AsyncIterator[None]:
+        if not self._read_only:
+            yield
+            return
+        # Keep lazy file reads and their generation check within one publication.
+        async with FilesystemMutationLock(store._publication_lock_path):
+            await asyncio.to_thread(self._refresh_read_only_sync, store)
+            yield
+
+    @asynccontextmanager
+    async def _publication_fence(self) -> AsyncIterator[None]:
+        if self._read_only and any(not member.root.is_dir() for member in self._members):
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        async with AsyncExitStack() as stack:
+            for member in sorted(self._members, key=lambda value: value.root.as_posix()):
+                await stack.enter_async_context(
+                    FilesystemMutationLock(member._publication_lock_path)
+                )
+            yield
+
+    async def _publication_call(self, fn: Callable[[], ValueT]) -> ValueT:
+        async with self._publication_fence():
+            return await asyncio.to_thread(fn)
+
+    def _check_readable_sync(self) -> None:
+        if not self._standalone:
+            if (self._transaction_root / f".txn-{self._scope_digest}" / "commit").exists():
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            self._check_foreign_group_journals_sync()
+        for member in self._members:
+            if (member.root / ".txn" / "commit").exists():
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+
+    def _refresh_read_only_sync(self, store: "FilesystemStateStore") -> None:
+        self._check_readable_sync()
+        generation = _read_generation_value(store.root / "generation")
+        indexed = _record_index_marker_valid(store.root)
+        if (
+            generation != store._index_generation
+            or indexed != store._require_index().cache.record_index_complete
+        ):
+            # Dropping all mutable and negative entries keeps refresh independent
+            # of store size; requested records are loaded lazily by the new cache.
+            store._index = store._new_index()
+            store._index_generation = generation
 
     async def mutate(
         self,
@@ -391,7 +439,8 @@ class FilesystemStateStorageGroup:
             try:
                 for member in ordered:
                     member._ensure_ready()
-                    await asyncio.to_thread(member._validate_integrity_sync)
+                    async with self._read_fence(member):
+                        await asyncio.to_thread(member._validate_integrity_sync)
             finally:
                 for member in reversed(ordered):
                     member._consistency_lock.release()
@@ -418,20 +467,17 @@ class FilesystemStateStorageGroup:
         self._generation = self._read_generation()
 
     def _initialize_read_only_sync(self) -> None:
-        if self._standalone:
-            member = self._members[0]
-            member._validate_existing_root()
-            member._index = member._load_index()
-            member._index_generation = member._generation()
-            self._generation = member._index_generation
-            self._initialized = True
-            return
-        self._validate_group_read_only_sync()
+        self._check_readable_sync()
+        if not self._standalone:
+            self._validate_group_read_only_sync()
         for member in self._members:
             member._validate_existing_root()
-            member._index = member._load_index()
+            member._index = member._new_index()
             member._index_generation = member._generation()
-        self._generation = self._read_generation()
+        self._generation = (
+            self._members[0]._index_generation
+            if self._standalone else self._read_generation()
+        )
         self._initialized = True
 
     def _validate_group_read_only_sync(self) -> None:
@@ -633,7 +679,9 @@ class FilesystemStateStorageGroup:
                 deletes.add(f"{prefix}/{relative}" if prefix else relative)
         started = monotonic()
         physical = asyncio.create_task(
-            asyncio.to_thread(self._commit_sync, writes, deletes, base, target),
+            self._publication_call(
+                lambda: self._commit_sync(writes, deletes, base, target)
+            ),
             name=f"filesystem-group-commit-{self._scope_digest}",
         )
         _track_physical_task(
@@ -702,7 +750,7 @@ class FilesystemStateStorageGroup:
 
     async def _reconcile_commit(self, base: int, target: int) -> _ReconcileResult:
         task = asyncio.create_task(
-            asyncio.to_thread(self._reconcile_sync, base, target),
+            self._publication_call(lambda: self._reconcile_sync(base, target)),
             name=f"filesystem-group-reconcile-{self._scope_digest}",
         )
         _track_physical_task(
@@ -717,6 +765,8 @@ class FilesystemStateStorageGroup:
                 return await _finish_owned_task(task), error
             except BaseException:  # noqa: BLE001
                 return "unknown", error
+        except Exception:  # noqa: BLE001
+            return "unknown", None
 
     def _reconcile_sync(self, base: int, target: int) -> _CommitOutcome:
         try:
@@ -752,6 +802,7 @@ class FilesystemStateStore:
         self._runtime_domain = runtime_domain
         self._range_index_enabled = _range_index
         self._writer_lock = FilesystemWriterLock(self._root / "state.lock")
+        self._publication_lock_path = self._root / "publication.lock"
         self._consistency_lock = asyncio.Lock()
         self._journal = FilesystemJournal(
             self._root,
@@ -870,7 +921,7 @@ class FilesystemStateStore:
         if self._root.is_dir() and not any(self._root.iterdir()):
             return 0
         if self._root.is_dir() and all(
-            path.name == "state.lock" for path in self._root.iterdir()
+            path.name in {"state.lock", "publication.lock"} for path in self._root.iterdir()
         ):
             return 0
         return _read_generation_value(self._root / "generation")
@@ -910,7 +961,8 @@ class FilesystemStateStore:
             self._validate_existing_root()
             return
         unexpected = [
-            path for path in self._root.iterdir() if path.name != "state.lock"
+            path for path in self._root.iterdir()
+            if path.name not in {"state.lock", "publication.lock"}
         ]
         if unexpected:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1129,7 +1181,9 @@ class FilesystemStateStore:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         target = base + 1
         physical = asyncio.create_task(
-            asyncio.to_thread(self._commit_sync, transaction, base, target),
+            self._storage_group._publication_call(
+                lambda: self._commit_sync(transaction, base, target)
+            ),
             name=f"filesystem-commit-{self._runtime_domain}",
         )
         _track_physical_task(
@@ -1206,7 +1260,9 @@ class FilesystemStateStore:
 
     async def _reconcile_commit(self, base: int, target: int) -> _ReconcileResult:
         task = asyncio.create_task(
-            asyncio.to_thread(self._reconcile_commit_sync, base, target),
+            self._storage_group._publication_call(
+                lambda: self._reconcile_commit_sync(base, target)
+            ),
             name=f"filesystem-reconcile-{self._runtime_domain}",
         )
         _track_physical_task(
@@ -1221,6 +1277,8 @@ class FilesystemStateStore:
                 return await _finish_owned_task(task), error
             except BaseException:  # noqa: BLE001
                 return "unknown", error
+        except Exception:  # noqa: BLE001
+            return "unknown", None
 
     def _reconcile_commit_sync(self, base: int, target: int) -> _CommitOutcome:
         try:

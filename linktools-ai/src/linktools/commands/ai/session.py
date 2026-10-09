@@ -11,16 +11,12 @@ from rich.table import Table
 from rich.text import Text
 
 from linktools.ai.core import Principal, PrincipalKind
-from linktools.ai.runtime import (
-    ListExecutionRequest,
-    RuntimeHistory,
-    SessionView,
-)
 from linktools.cli import BaseCommand
 
 from ._common import _load_workspace, _local_runtime_storage, _run_async
 
 if TYPE_CHECKING:
+    from linktools.ai.runtime import RuntimeHistory, SessionView
     from linktools.cli import CommandParser
 
 _DEFAULT_LIMIT = 20
@@ -36,6 +32,8 @@ class Command(BaseCommand):
         workspace = _load_workspace()
 
         async def execute() -> int:
+            from linktools.ai.runtime import RuntimeHistory
+
             async with RuntimeHistory.open(
                 "default",
                 storage=_local_runtime_storage(workspace),
@@ -68,7 +66,7 @@ class Command(BaseCommand):
         return _run_async(execute())
 
 
-def _emit_sessions(sessions: tuple[SessionView, ...]) -> None:
+def _emit_sessions(sessions: "tuple[SessionView, ...]") -> None:
     console = get_console()
     if not sessions:
         console.print("[dim]No sessions.[/dim]")
@@ -94,7 +92,7 @@ def _emit_sessions(sessions: tuple[SessionView, ...]) -> None:
     console.print(table)
 
 
-def _emit_session(session: SessionView) -> None:
+def _emit_session(session: "SessionView") -> None:
     table = Table.grid(padding=(0, 2))
     table.add_column(style="bold")
     table.add_column()
@@ -109,10 +107,12 @@ def _emit_session(session: SessionView) -> None:
 
 
 async def _emit_session_executions(
-    history: RuntimeHistory,
+    history: "RuntimeHistory",
     principal: Principal,
     session_id: str,
 ) -> None:
+    from linktools.ai.runtime import ListExecutionRequest
+
     page = await history.list_executions(
         ListExecutionRequest(
             principal,

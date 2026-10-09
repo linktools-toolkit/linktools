@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 
-from linktools.ai.acp import ACPAgent, serve_stdio
-
 from ._common import (
     _add_local_runtime_arguments,
     _load_workspace,
@@ -33,6 +31,8 @@ class Command(BaseCommand):
         memory_scope = args.memory if args.memory is not None else "default"
 
         async def execute() -> int:
+            from linktools.ai.acp import ACPAgent, serve_stdio
+
             async with _open_local_runtime(
                 workspace,
                 models=_local_runtime_models(workspace, args),

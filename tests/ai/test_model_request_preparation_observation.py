@@ -31,7 +31,7 @@ from linktools.ai.runtime._model_interaction import StagedContextInline, model_i
 from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
 
-from ._runtime_test_helpers import _UsageFunctionModel
+from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
 from .test_model_interaction_regressions import _interaction
 from .test_task_mixed_node_reliability import _TaskTestModels
 
@@ -51,7 +51,7 @@ class _ChangeRequestAfterResponse(AbstractCapability[AgentContext[object]]):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ("success", "failure", "cancel"))
-async def test_imported_request_records_prepared_provider_input_while_running(
+async def test_imported_request_publishes_prepared_provider_input_at_completion(
     tmp_path: Path,
     outcome: str,
 ) -> None:
@@ -131,13 +131,14 @@ async def test_imported_request_records_prepared_provider_input_while_running(
             assert "candidate-only behavior" in str(provider_requests[0])
             assert "original-only behavior" not in str(provider_requests[0])
             assert "prepared-only input" in str(provider_requests[0])
-            running = (await execution.model_interactions(include_content=True)).items[0]
+            committed = await _wait_for_committed(
+                lambda: execution.model_interactions(include_content=True),
+                lambda page: bool(page.items),
+            )
+            running = committed.items[0]
             assert running.status == "RUNNING"
-            assert "candidate-only behavior" in str(running.request)
-            assert "original-only behavior" not in str(running.request)
-            assert running.request["messages"] == provider_requests[0]
-            assert {key: running.request[key] for key in provider_envelopes[0]} == provider_envelopes[0]
-            assert running.model == model_identity(selected_model, route_id="prepared-route")
+            assert running.request == {}
+            assert running.response is None
             if outcome == "cancel":
                 await execution.cancel()
         finally:
@@ -149,7 +150,11 @@ async def test_imported_request_records_prepared_provider_input_while_running(
             "cancel": ExecutionStatus.CANCELLED,
         }[outcome]
         terminal = (await execution.model_interactions(include_content=True)).items[0]
-        assert terminal.request == running.request
+        assert terminal.model == model_identity(selected_model, route_id="prepared-route")
+        assert terminal.request["messages"] == provider_requests[0]
+        assert {key: terminal.request[key] for key in provider_envelopes[0]} == provider_envelopes[0]
+        assert "candidate-only behavior" in str(terminal.request)
+        assert "original-only behavior" not in str(terminal.request)
         assert "after-only diagnostic" not in str(terminal.request)
     observations = await metric_store.scan_observations(
         "prepared-input", kind="linktools.model.request", start=start,

@@ -87,7 +87,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
     changed = []
     terminal_results = []
 
-    async def prepare_hold(self, execution, binding, output, usage, agent_run_id):
+    async def prepare_hold(self, execution, binding, output, usage, agent_run_id, **kwargs):
         if hold_change == "release":
             await self._execution.executions.acquire_dependency_hold(
                 execution.execution_id,
@@ -95,7 +95,7 @@ async def test_terminal_preserves_concurrent_hold_metadata(
                 hold_id="dependent",
             )
         return await original_success(
-            self, execution, binding, output, usage, agent_run_id
+            self, execution, binding, output, usage, agent_run_id, **kwargs
         )
 
     async def interleave(self, current, commit, **kwargs):
@@ -467,3 +467,75 @@ async def test_terminal_rebase_rejects_semantic_changes_without_writes(
     finally:
         await state.close()
 
+
+
+@pytest.mark.asyncio
+async def test_stale_cancelled_worker_cannot_seal_resumed_attempt_before_run_registration() -> None:
+    from .test_execution_recovery_commands import _commands
+    from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+
+    state = RuntimeStorage.in_memory()
+    await state.initialize(namespace="unregistered-terminal-fence", tenant_id="tenant")
+    try:
+        repository = state.execution.executions
+        original = replace(_record(ExecutionStatus.STARTED, 1), revision=1)
+        await repository.create_with_history_head(original)
+        await repository.state_store.mutate(
+            lambda transaction: repository.admit_history_producer_in_transaction(transaction, original)
+        )
+        resumed = await _commands(state).commit_resumed(original)
+        commands = RuntimeStateCommands(
+            repository, namespace="unregistered-terminal-fence",
+            events=state.execution.events, recovery=state.recovery.checkpoints,
+            background_tasks=set(),
+        )
+        terminal = replace(
+            resumed, status=ExecutionStatus.CANCELLED,
+            error_code=ErrorCode.EXECUTION_CANCELLED.value,
+        )
+        commit = ExecutionTerminalCommit(
+            resumed.revision, resumed.event_seq, terminal,
+            ResultRecord(None, StopReason.CANCELLED, UsageMetrics(), resumed.updated_at),
+            ExecutionEventType.EXECUTION_CANCELLED,
+            {"error_code": ErrorCode.EXECUTION_CANCELLED.value, "safe_error_details": {}},
+            producer_generation=original.revision,
+        )
+        assert decode_domain(encode_domain(commit), ExecutionTerminalCommit) == commit
+        checkpoint = RecoveryCheckpoint(
+            original.execution_id, "run", RecoveryCheckpointState.ACTIVE, 0,
+            resumed.created_at, resumed.updated_at,
+        )
+        await state.recovery.checkpoints.create(checkpoint)
+        handoff = replace(
+            checkpoint, state=RecoveryCheckpointState.HANDOFF, revision=1,
+            handoff_phase=RecoveryHandoffPhase.PREPARED,
+            terminal_handoff=RecoveryTerminalHandoff(
+                RecoveryTerminalOutcome(
+                    terminal.status, terminal.error_code, {}, StopReason.CANCELLED,
+                    None, None, UsageMetrics(), commit.terminal_event_type,
+                    commit.terminal_event_payload, resumed.updated_at,
+                ),
+                "run", None,
+            ),
+        )
+        with pytest.raises(AIError) as stale_handoff:
+            await commands.commit_recovery_handoff(
+                handoff, expected_revision=checkpoint.revision,
+                producer_generation=original.revision,
+            )
+        assert stale_handoff.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await state.recovery.checkpoints.get(original.execution_id, tenant_id="tenant") == checkpoint
+        # Rereading the latest execution revision does not grant the old worker
+        # authority over the replacement attempt, even before any run exists.
+        with pytest.raises(AIError) as caught:
+            await commands.commit_terminal_checkpoint(commit, expected_execution=resumed)
+        assert caught.value.code is ErrorCode.STORAGE_CONFLICT
+        assert await repository.get(original.execution_id, tenant_id="tenant") == resumed
+        assert await repository.get_history_seal(original.execution_id, tenant_id="tenant") is None
+        committed = await commands.commit_terminal_checkpoint(
+            replace(commit, producer_generation=resumed.revision),
+            expected_execution=resumed,
+        )
+        assert committed.execution.status is ExecutionStatus.CANCELLED
+    finally:
+        await state.close()

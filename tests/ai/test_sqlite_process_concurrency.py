@@ -5,15 +5,13 @@
 import asyncio
 import hashlib
 import multiprocessing
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime.state._contracts import ArtifactRecord
-from linktools.ai.storage import ObjectRef
 from linktools.ai.workspace import Workspace
 from linktools.commands.ai._common import _local_metrics
 
@@ -58,9 +56,16 @@ def _local_metrics_worker(root: str, barrier) -> None:
         await _local_metrics(Workspace.load(Path(root)))
 
     asyncio.run(run())
+    for name in (
+        "linktools.ai.runtime", "linktools.ai.capability", "linktools.ai.model",
+        "pydantic_ai", "fastmcp", "openai",
+    ):
+        assert name not in sys.modules, name
 
 
 def _runtime_bootstrap_worker(database: str, barrier) -> None:
+    from linktools.ai.runtime import RuntimeStorage
+
     barrier.wait()
 
     async def run() -> None:
@@ -72,6 +77,10 @@ def _runtime_bootstrap_worker(database: str, barrier) -> None:
 
 
 def _artifact_write_worker(database: str, barrier) -> None:
+    from linktools.ai.runtime import RuntimeStorage
+    from linktools.ai.runtime.state._contracts import ArtifactRecord
+    from linktools.ai.storage import ObjectRef
+
     barrier.wait()
 
     async def run() -> None:
@@ -137,6 +146,8 @@ def test_local_metrics_initialize_once_across_processes(tmp_path: Path) -> None:
 async def test_runtime_sqlite_bootstrap_converges_across_processes(
     tmp_path: Path,
 ) -> None:
+    from linktools.ai.runtime import RuntimeStorage
+
     database = tmp_path / "runtime.db"
     context = multiprocessing.get_context("spawn")
     barrier = context.Barrier(2)
@@ -163,6 +174,8 @@ async def test_runtime_sqlite_bootstrap_converges_across_processes(
 async def test_runtime_sqlite_concurrent_idempotent_writes_converge(
     tmp_path: Path,
 ) -> None:
+    from linktools.ai.runtime import RuntimeStorage
+
     database = tmp_path / "runtime.db"
     initial = RuntimeStorage.sqlite(database)
     await initial.initialize(namespace=_NAMESPACE, tenant_id=_TENANT_ID)
