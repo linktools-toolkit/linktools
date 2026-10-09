@@ -191,14 +191,19 @@ def test_partial_cold_generated_start_failure_stops_all_new_siblings(tmp_path):
     owner.manager.running_state = SimpleNamespace(
         mark_stopped=lambda context: events.append(("stopped",)),
         mark_started=lambda context: pytest.fail("unexpected restarted old service"))
+    compose_path = tmp_path / "test.yml"
+    compose_path.write_text(
+        "services:\n  test:\n    image: new\n  sidecar:\n    image: new\n")
     context = SimpleNamespace(
         generated_candidates={}, initial_running_services=set(),
-        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
+        saved_compose={}, compose_files={str(compose_path): compose_path.read_text()},
+        compose_owners={str(compose_path): "test"}, applied_compose={},
         applied_generation_services={}, service_models=AppliedServiceModels(
             owner.manager, {"services": owner.services}),
     )
     operations = ComposeOperations(owner.manager)
     operations._publish_candidate(owner, candidate, context, ("test",))
+    assert (tmp_path / "compose/applied/test.yml").exists()
     with pytest.raises(RuntimeError, match="sidecar failed"):
         operations._publish_candidate(owner, candidate, context, ("sidecar",))
     assert events == [
@@ -206,6 +211,7 @@ def test_partial_cold_generated_start_failure_stops_all_new_siblings(tmp_path):
         ("stop", ("test", "sidecar")), ("stopped",),
     ]
     assert GeneratedCandidate.current_id(str(owner.path)) is None
+    assert not (tmp_path / "compose/applied/test.yml").exists()
     assert not (tmp_path / "compose/applied/services" / "74657374.yml").exists()
 
 
