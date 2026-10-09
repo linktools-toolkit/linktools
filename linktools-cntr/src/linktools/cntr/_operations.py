@@ -100,30 +100,35 @@ class ComposeOperations:
         )
 
     def start_selection(self, selection: ComposeSelection,
-                        model: "dict | None" = None) -> ComposeSelection:
-        """Resolve runtime providers without starting unrelated sibling services."""
+                        model: "dict | None" = None,
+                        dependency_roots: "Sequence[BaseContainer] | None" = None) -> ComposeSelection:
+        """Resolve requested container dependencies and all selected service dependencies."""
         installed = {container.name: container for container in selection.project_containers}
         owners = {service: container for container in selection.project_containers for service in container.services}
         definitions = model["services"] if model is not None else {
             name: container.services[name] for name, container in owners.items()}
         required = set(selection.target_containers)
+        roots = set(selection.target_containers if dependency_roots is None else dependency_roots)
         services = set(selection.services) if selection.services else {
             service for container in required for service in container.services}
 
         while True:
-            before = (set(required), set(services))
-            for container in tuple(required):
+            before = (set(required), set(services), set(roots))
+            for container in tuple(roots):
                 for dependency in container.dependencies:
                     if dependency not in installed:
                         raise ContainerError(
                             f"Required dependency {dependency!r} for {container.name} is not installed")
                     owner = installed[dependency]
                     required.add(owner)
+                    roots.add(owner)
                     services.update(owner.services)
-            required_names = {container.name for container in required}
+            required_names = {container.name for container in roots}
             for container in selection.project_containers:
                 for provider, provider_services in container.get_runtime_requirements(required_names).items():
-                    required.add(installed[provider])
+                    owner = installed[provider]
+                    required.add(owner)
+                    roots.add(owner)
                     services.update(provider_services)
             for name in tuple(services):
                 owner = owners[name]
@@ -132,8 +137,10 @@ class ComposeOperations:
                     if provider is None:
                         raise ContainerError(f"Compose dependency {dependency!r} for {owner.name} is not installed")
                     required.add(provider)
+                    if owner in roots:
+                        roots.add(provider)
                     services.add(dependency)
-            if before == (required, services):
+            if before == (required, services, roots):
                 break
         ordered = tuple(self.manager.resolver.resolve_dependencies(required))
         selected_services = tuple(name for container in ordered for name in container.services if name in services)
@@ -158,7 +165,8 @@ class ComposeOperations:
                 targets.add(container)
         return self.start_selection(ComposeSelection(explicit.project_containers, tuple(targets),
                                                      tuple(services), explicit.full),
-                                    getattr(context, "compose_model", None))
+                                    getattr(context, "compose_model", None),
+                                    dependency_roots=explicit.target_containers)
 
     def _make_context(self, commands, selection: ComposeSelection) -> "EventContext":
         context = EventContext()
