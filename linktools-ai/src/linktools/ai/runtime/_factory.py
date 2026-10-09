@@ -21,6 +21,7 @@ from ..capability import (
     SkillSourceRegistry,
 )
 from ..core import (
+    AuthorizationPolicy,
     HmacCursorSigner,
     PromptLimits,
     TenantAuthorizationPolicy,
@@ -112,6 +113,7 @@ async def compose_runtime_components(
     capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
     metrics: "Metrics | None" = None,
     limits: "PromptLimits | None" = None,
+    authorization: "AuthorizationPolicy | None" = None,
 ) -> _RuntimeComponents:
     """Capture declarations and build Runtime-private services."""
     resolved_namespace = validate_persistence_namespace(namespace)
@@ -263,13 +265,16 @@ async def compose_runtime_components(
             resolved_namespace,
             selected_storage,
         )
-        authorization = TenantAuthorizationPolicy(effective_tenant_id)
+        selected_authorization = (
+            TenantAuthorizationPolicy(effective_tenant_id)
+            if authorization is None else authorization
+        )
         ownership_transferred = True
         components = await _build_local_components(
             storage=selected_storage,
             catalog=catalog,
             compiler=compiler,
-            authorization=authorization,
+            authorization=selected_authorization,
             tenant_id=effective_tenant_id,
             namespace=resolved_namespace,
             workspace=workspace,
@@ -456,7 +461,7 @@ async def _build_local_components(
     storage: RuntimeStorage,
     catalog: AgentCatalog,
     compiler: AgentCompiler,
-    authorization: TenantAuthorizationPolicy,
+    authorization: AuthorizationPolicy,
     tenant_id: str,
     namespace: str,
     workspace: "Workspace | None",
