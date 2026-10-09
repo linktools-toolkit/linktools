@@ -13,6 +13,7 @@ from linktools.ai.core import (
     Principal,
     ResourceRef,
     TaskStatus,
+    TenantAuthorizationPolicy,
     canonical_json_bytes,
     canonical_sha256,
 )
@@ -35,12 +36,8 @@ from linktools.ai.storage import FilesystemObjectStore
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
-async def _recover_node(context: TaskNodeContext[None]) -> JsonValue:
-    return {"graph_id": context.graph_id, "node_id": context.node_id}
-
-
 @pytest.mark.asyncio
-async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
+async def test_sqlite_runtime_recovery_preserves_execution_principal_after_expired_lease(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "state.sqlite"
@@ -50,12 +47,20 @@ async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
     finally:
         await engine.dispose()
 
-    handler = Task("test.recovery", _recover_node, effect_policy="none")
+    execution_principal = Principal("tester", "default")
+    actor = Principal("operator", "default")
+    executed_principals: list[Principal] = []
+
+    async def recover_node(context: TaskNodeContext[None]) -> JsonValue:
+        executed_principals.append(context.principal)
+        return {"graph_id": context.graph_id, "node_id": context.node_id}
+
+    handler = Task("test.recovery", recover_node, effect_policy="none")
     graph = TaskGraph("reopen-expired", (TaskNode("root", task=handler),))
     admission = TaskGraphAdmission.from_request(
         TaskGraphRequest(
             graph,
-            Principal("tester", "default"),
+            execution_principal,
             "submit:reopen-expired",
             TaskGraphLimits(max_concurrency=1),
         )
@@ -130,6 +135,22 @@ async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
 
     await asyncio.sleep(1.05)
 
+    class RecoveryAuthorization:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Principal, AuthorizationAction]] = []
+            self.default = TenantAuthorizationPolicy("default")
+
+        async def authorize(
+            self, principal: Principal, action: AuthorizationAction, resource: ResourceRef,
+        ) -> None:
+            self.calls.append((principal, action))
+            if principal == actor:
+                if action in {AuthorizationAction.TASK_READ, AuthorizationAction.TASK_RUN} and resource.id == graph.graph_id:
+                    return
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self.default.authorize(principal, action, resource)
+
+    authorization = RecoveryAuthorization()
     reopened = RuntimeStorage.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
@@ -138,9 +159,12 @@ async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
         "default",
         models=ModelRegistry.openai(model="gpt-test"),
         storage=reopened,
+        authorization=authorization,
     ) as runtime:
-        run = await runtime.tasks.bind(handler).get(graph.graph_id)
-        await run.recover(idempotency_key="recover-expired-lease")
+        engine = runtime.tasks.bind(handler)
+        recovery = await engine.get(graph.graph_id, principal=actor)
+        await recovery.recover(idempotency_key="recover-expired-lease")
+        run = await engine.get(graph.graph_id, principal=execution_principal)
         result = (await run.wait(timeout_seconds=10)).result
         page = await reopened.task.admissions.list_recoverable_page(
             cursor=None,
@@ -152,6 +176,10 @@ async def test_sqlite_runtime_explicit_recovery_recovers_expired_task_lease(
         TaskStatus.SUCCEEDED,
     )
     assert page.items == ()
+    assert executed_principals == [execution_principal]
+    actor_actions = [action for principal, action in authorization.calls if principal == actor]
+    assert set(actor_actions) == {AuthorizationAction.TASK_READ, AuthorizationAction.TASK_RUN}
+    assert (execution_principal, AuthorizationAction.EXECUTION_RUN) in authorization.calls
 
 
 @pytest.mark.asyncio
@@ -214,8 +242,8 @@ async def test_runtime_batch_recovery_keeps_run_only_actor_at_safe_service_bound
         "recovery-actor",
         models=ModelRegistry.openai(model="gpt-test"),
         storage=RuntimeStorage.filesystem(storage_root),
+        authorization=authorization,
     ) as runtime:
-        runtime._graph_service._authorization = authorization
         with pytest.raises(AIError) as read_denied:
             await runtime._graph_service.state(graph.graph_id, principal=actor)
         assert read_denied.value.code is ErrorCode.AUTHORIZATION_DENIED

@@ -24,6 +24,7 @@ from ..agent import (
 )
 from ..capability import CapabilityGroup, CapabilityGroupCapture
 from ..core import (
+    AuthorizationPolicy,
     RunBudget,
     CorrelationData,
     ExecutionMode,
@@ -391,6 +392,7 @@ class Runtime(Generic[AppT]):
         capabilities: "Sequence[CapabilityGroup[None] | CapabilityGroupCapture[None]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
+        authorization: "AuthorizationPolicy | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -405,6 +407,7 @@ class Runtime(Generic[AppT]):
         capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
+        authorization: "AuthorizationPolicy | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -418,6 +421,7 @@ class Runtime(Generic[AppT]):
         capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
+        authorization: "AuthorizationPolicy | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         resolved_namespace = validate_persistence_namespace(namespace)
         root_context = RuntimeContext(None) if context is None else context
@@ -432,6 +436,7 @@ class Runtime(Generic[AppT]):
             capabilities=capabilities,
             metrics=metrics,
             limits=selected_limits,
+            authorization=authorization,
         )
 
     @property
@@ -1440,6 +1445,7 @@ async def _open_runtime(
     capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]",
     metrics: "Metrics | None",
     limits: PromptLimits,
+    authorization: "AuthorizationPolicy | None",
 ):
     from ._factory import compose_runtime_components
 
@@ -1452,6 +1458,7 @@ async def _open_runtime(
         capabilities=capabilities,
         metrics=metrics,
         limits=limits,
+        authorization=authorization,
     )
     try:
         if components.metric_control is not None:
