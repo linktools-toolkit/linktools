@@ -196,3 +196,40 @@ def test_context_exposes_exact_service_selection(full: bool) -> None:
     selection = ComposeSelection((owner,), (owner,), () if full else ("sidecar",), full)
     context = ComposeOperations(SimpleNamespace())._make_context("up", selection)
     assert context.target_services == (("app", "sidecar") if full else ("sidecar",))
+
+
+def test_implicit_native_provider_is_prepared_before_its_first_application(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lldap = _Container("lldap", ("lldap",))
+    nginx = _Container("nginx", ("nginx",))
+    authelia = _Container("authelia", ("authelia", "authelia-redis"))
+    nginx.generation_services = ("nginx",)
+    authelia.generation_services = ("authelia",)
+    nginx.get_runtime_requirements = lambda roots: (
+        {"authelia": ("authelia",)} if "nginx" in roots else {})
+    authelia.dependencies = ("lldap",)
+    case = _case(tmp_path, (nginx, lldap, authelia), ("lldap",), {"nginx": "running"})
+    case.generated_configs = {"nginx": nginx, "authelia": authelia}
+    AppliedServiceModels(case, case.model).record(("nginx",))
+    events = case.events
+
+    for owner in (nginx, authelia):
+        owner.on_prepare_config = lambda ctx, name=owner.name: events.append(("prepared", name))
+        owner.render_config = lambda generation_id: {"config": generation_id}
+        owner.validate_config = lambda ctx, candidate: None
+        owner.apply_config = lambda ctx, candidate, services, name=owner.name: events.append(
+            ("native-applied", name, tuple(services)))
+
+    def candidate(owner, render):
+        return SimpleNamespace(container=owner, changed=True, previous_id=None,
+                               generation_id="next-" + owner.name, changed_files=(),
+                               publish=lambda: None, restore=lambda: None)
+
+    monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate", candidate)
+    case.operations.up(["lldap"])
+    assert ("prepared", "authelia") in events
+    assert ("native-applied", "authelia", ("authelia",)) in events
+    assert events.index(("prepared", "authelia")) < events.index(
+        ("native-applied", "authelia", ("authelia",)))
+    assert not any(event == ("native-applied", "authelia", ("authelia-redis",))
+                   for event in events)
