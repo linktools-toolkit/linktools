@@ -4,6 +4,7 @@
 
 import json
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,24 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     assert decode_alias(primitives["alias"]).record_key_digest == bytes.fromhex(
         "77" * 32
     )
+
+
+@pytest.mark.parametrize("wire_id,target", _V1_ENUM_WIRE_TYPES)
+def test_registered_enum_wire_values_round_trip(
+    wire_id: str, target: type[Enum],
+) -> None:
+    for member in target:
+        payload = {"$enum": wire_id, "value": member.value}
+        assert encode_domain(member) == payload
+        assert decode_domain(payload, target) is member
+
+    for raw, expected in (
+        ("future-enum-value", ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        ([], ErrorCode.STORAGE_INTEGRITY_ERROR),
+    ):
+        with pytest.raises(AIError) as raised:
+            decode_domain({"$enum": wire_id, "value": raw}, target)
+        assert raised.value.code is expected
 
 
 def test_task_binding_contract_uses_wire_version_and_behavior_reference() -> None:
