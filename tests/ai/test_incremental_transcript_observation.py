@@ -15,6 +15,7 @@ from linktools.ai.runtime.state import _history
 from linktools.ai.runtime.state._filesystem import FilesystemStateStore
 from linktools.ai.runtime.state._history import TranscriptRepository
 from linktools.ai.runtime.state._memory import InMemoryStateStore
+from linktools.ai.runtime.state._memory_transaction import _MemoryTransaction
 from linktools.ai.runtime.state._store import StateStore
 from linktools.ai.storage import InMemoryObjectStore
 
@@ -248,3 +249,120 @@ async def test_rolled_back_pending_observation_can_be_retried(observation_store)
     assert head is not None and head.pending_part_count == 1
     await repository.validate_integrity()
     await store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("nested", (False, True))
+@pytest.mark.parametrize("complete", (False, True))
+async def test_rolled_back_pending_cache_uses_other_writers_committed_parts(
+    observation_store, nested: bool, complete: bool,
+) -> None:
+    store = observation_store
+    await store.initialize()
+    first, second = _repository(store), _repository(store)
+    await first.create_head("run")
+    base = TextPart("confirmed prefix")
+    shared = TextPart("same tail after a different middle part")
+    shell = ModelResponse(parts=[])
+
+    async def prepare(repository, parts):
+        return await repository.prepare_observation(
+            "run", (), first_message_index=0, pending=replace(shell, parts=parts),
+            pending_keys=tuple(f"part:{index}" for index in range(len(parts))),
+        )
+
+    initial = await prepare(first, [base])
+    await store.mutate(lambda tx: first.commit_observation(tx, initial))
+    await prepare(first, [base])
+    abandoned = await prepare(first, [base, TextPart("abandoned middle"), shared])
+
+    async def rollback(transaction) -> None:
+        await first.commit_observation(transaction, abandoned)
+        if nested:
+            extra = await prepare(first, [base, TextPart("abandoned middle"), shared, TextPart("abandoned extra")])
+            await first.commit_observation(transaction, extra)
+        raise RuntimeError("abort outer transaction")
+
+    with pytest.raises(RuntimeError, match="abort outer transaction"):
+        await store.mutate(rollback)
+    winning = [base, TextPart("committed middle"), shared]
+    committed = await prepare(second, winning)
+    await store.mutate(lambda tx: second.commit_observation(tx, committed))
+    if nested:
+        winning.append(TextPart("committed extra"))
+        committed = await prepare(second, winning)
+        await store.mutate(lambda tx: second.commit_observation(tx, committed))
+
+    if complete:
+        message = replace(shell, parts=winning)
+        resumed = await first.prepare_observation(
+            "run", (message,), first_message_index=0, pending=None, pending_keys=(),
+        )
+        await store.mutate(lambda tx: first.commit_observation(tx, resumed))
+        assert await first.load_messages("run") == (message,)
+        later = replace(shell, parts=[TextPart("new pending message")])
+        for pending in (later, replace(later, parts=[*later.parts, TextPart("later suffix")])):
+            prepared = await first.prepare_observation(
+                "run", (), first_message_index=1, pending=pending,
+                pending_keys=tuple(f"part:{index}" for index in range(len(pending.parts))),
+            )
+            await store.mutate(lambda tx: first.commit_observation(tx, prepared))
+        expected = pending.parts
+    else:
+        winning.append(TextPart("next part"))
+        resumed = await prepare(first, winning)
+        await store.mutate(lambda tx: first.commit_observation(tx, resumed))
+        expected = winning
+    head = await first.get_head("run")
+    pending, _keys = await first.load_pending(head)
+    assert pending is not None and pending.parts == expected
+    await first.validate_integrity()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_pending_prefix_reads_only_added_parts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = 0
+    decoded = 0
+    original_read = _MemoryTransaction.list_facts
+    original_decode = TranscriptRepository._decode_chunk_messages
+
+    async def read(self, query):
+        nonlocal rows
+        values = await original_read(self, query)
+        rows += sum(value.kind == "transcript_pending_part" for value in values)
+        return values
+
+    async def decode(self, chunk):
+        nonlocal decoded
+        decoded += 1
+        return await original_decode(self, chunk)
+
+    monkeypatch.setattr(_MemoryTransaction, "list_facts", read)
+    monkeypatch.setattr(TranscriptRepository, "_decode_chunk_messages", decode)
+    for count in (16, 32, 64):
+        store = InMemoryStateStore()
+        await store.initialize()
+        repository = _repository(store)
+        await repository.create_head("run")
+        before = rows, decoded
+        parts = []
+        for index in range(count):
+            parts.append(ToolReturnPart("tool", "body" * 128, tool_call_id=str(index)))
+            pending = ModelRequest(parts=list(parts))
+            keys = tuple(f"tool_result:{position}" for position in range(len(parts)))
+            for _ in range(2):
+                prepared = await repository.prepare_observation(
+                    "run", (), first_message_index=0, pending=pending, pending_keys=keys,
+                )
+                await store.mutate(lambda tx: repository.commit_observation(tx, prepared))
+            warmed = rows, decoded
+            await repository.prepare_observation(
+                "run", (), first_message_index=0, pending=pending, pending_keys=keys,
+            )
+            assert (rows, decoded) == warmed, "unchanged confirmed parts must not be read again"
+        assert rows - before[0] <= count
+        assert decoded - before[1] <= count
+        await store.close()

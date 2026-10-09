@@ -49,6 +49,7 @@ from ._store import (
     StateTransaction,
     StoredFact,
     StoredRecord,
+    active_state_scope,
     record_key_digest,
     require_no_run_history_lock,
     sequence_key,
@@ -101,6 +102,7 @@ class PreparedTranscriptObservation:
 class _PendingCache:
     message_index: int
     storage_version: int
+    pending: RuntimePayloadRef | None
     parts: tuple[_PendingPart, ...]
 
 
@@ -308,14 +310,23 @@ class TranscriptRepository:
         transaction: StateTransaction,
         head: TranscriptHeadRecord,
     ) -> tuple[tuple[TranscriptChunk, ...], tuple[str, ...]]:
+        return await self._capture_pending_suffix(transaction, head, ())
+
+    async def _capture_pending_suffix(
+        self,
+        transaction: StateTransaction,
+        head: TranscriptHeadRecord,
+        known_keys: tuple[str, ...],
+    ) -> tuple[tuple[TranscriptChunk, ...], tuple[str, ...]]:
         chunks: list[TranscriptChunk] = []
         keys: list[str] = []
-        seen_keys: set[str] = set()
-        while len(chunks) < head.pending_part_count:
+        seen_keys = set(known_keys)
+        start = len(known_keys)
+        while start + len(chunks) < head.pending_part_count:
             facts = await transaction.list_facts(FactQuery(
                 self._pending_stream(head.owner_id, head.message_count),
-                after_sequence=len(chunks),
-                limit=min(_TRANSCRIPT_PAGE_SIZE, head.pending_part_count - len(chunks)),
+                after_sequence=start + len(chunks),
+                limit=min(_TRANSCRIPT_PAGE_SIZE, head.pending_part_count - start - len(chunks)),
             ))
             if not facts:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -323,7 +334,7 @@ class TranscriptRepository:
                 if (
                     fact.kind != "transcript_pending_part"
                     or fact.owner_key_digest != self._head_key(head.owner_id)
-                    or fact.sequence != len(chunks) + 1
+                    or fact.sequence != start + len(chunks) + 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 key = decode_envelope(fact.data).value.get("pending_key")
@@ -414,31 +425,34 @@ class TranscriptRepository:
         pending_keys: tuple[str, ...],
     ) -> PreparedTranscriptObservation:
         require_no_run_history_lock("TranscriptRepository.prepare_observation")
+        scope = active_state_scope()
+        committed_read = scope is None or not scope.writable
 
         async def capture(transaction: StateTransaction):
             entry = await self.get_head_in_transaction(transaction, owner_id)
             head = self.empty_head(owner_id) if entry is None else entry[0]
             version = -1 if entry is None else entry[1].storage_version
             cache = self._pending_cache.get(owner_id)
-            if cache is not None and cache.message_index == head.message_count and cache.storage_version == version:
-                return head, version, cache.parts, (), ()
-            chunks, keys = await self.capture_pending_in_transaction(transaction, head)
-            return head, version, None, chunks, keys
+            previous = ()
+            if (cache is not None and cache.message_index == head.message_count
+                    and cache.storage_version <= version and cache.pending == head.pending
+                    and len(cache.parts) <= head.pending_part_count):
+                previous = cache.parts
+            chunks, keys = await self._capture_pending_suffix(
+                transaction, head, tuple(part.key for part in previous),
+            )
+            return head, version, previous, chunks, keys
 
         head, base_version, cached, previous_chunks, previous_keys = await self._store.read(capture)
         if head.message_count != first_message_index:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        previous: tuple[_PendingPart, ...]
-        if cached is not None:
-            previous = cached
-        else:
-            loaded = []
-            for key, chunk in zip(previous_keys, previous_chunks, strict=True):
-                values = await self._decode_chunk_messages(chunk)
-                if len(values) != 1 or len(values[0].parts) != 1:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                loaded.append(_PendingPart(key, values[0].parts[0], chunk))
-            previous = tuple(loaded)
+        loaded = list(cached)
+        for key, chunk in zip(previous_keys, previous_chunks, strict=True):
+            values = await self._decode_chunk_messages(chunk)
+            if len(values) != 1 or len(values[0].parts) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            loaded.append(_PendingPart(key, values[0].parts[0], chunk))
+        previous = tuple(loaded)
         values = tuple(messages)
         if values and previous:
             completed_parts = self._completed_parts(values[0])
@@ -501,6 +515,15 @@ class TranscriptRepository:
                         "pending_key": key,
                     }),
                 ))
+        if committed_read:
+            # Only the prefix read from durable facts is safe to reuse after rollback.
+            if previous:
+                self._pending_cache[owner_id] = _PendingCache(
+                    head.message_count, base_version, head.pending,
+                    tuple(next_parts[:len(previous)]),
+                )
+            else:
+                self._pending_cache.pop(owner_id, None)
         return PreparedTranscriptObservation(
             owner_id, first_message_index, target, chunks, base_version,
             shell, tuple(next_parts), tuple(additions),
@@ -535,13 +558,6 @@ class TranscriptRepository:
             )
             if guarded is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if prepared.pending_parts:
-                self._pending_cache[prepared.owner_id] = _PendingCache(
-                    prepared.target_message_count, guarded.storage_version,
-                    prepared.pending_parts,
-                )
-            else:
-                self._pending_cache.pop(prepared.owner_id, None)
             return
         await self.append_chunks(transaction, prepared.owner_id, prepared.chunks)
         entry = await self.get_head_in_transaction(transaction, prepared.owner_id)
@@ -558,12 +574,6 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if prepared.new_pending_parts:
             await transaction.insert_facts(prepared.new_pending_parts)
-        if prepared.pending_parts:
-            self._pending_cache[prepared.owner_id] = _PendingCache(
-                prepared.target_message_count, upgraded.storage_version, prepared.pending_parts,
-            )
-        else:
-            self._pending_cache.pop(prepared.owner_id, None)
 
     async def verify_observation(self, prepared: PreparedTranscriptObservation) -> bool:
         head = await self.get_head(prepared.owner_id)
