@@ -8,13 +8,17 @@ from enum import Enum
 from pathlib import Path
 
 import pytest
+from linktools.ai.core import IdempotencyStatus, OperationStatus
 from linktools.ai.evaluation import CaseRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state._codec import (
     _V1_ENUM_WIRE_TYPES,
     _V1_WIRE_TYPES,
+    _CURRENT_CODEC,
+    _decode_domain,
     _decode_step_envelope,
     _encode_step_envelope,
+    _encode_persisted_domain,
     CURRENT_DATA_VERSION,
     decode_alias,
     decode_domain,
@@ -30,6 +34,8 @@ from linktools.ai.runtime.state._codec import (
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
     ExecutionHistoryState,
+    IdempotencyTerminalUpdate,
+    OperationTerminalUpdate,
     StoredAgentRunCheckpoint,
     TranscriptMessageRef,
 )
@@ -105,6 +111,54 @@ def test_registered_enum_wire_values_round_trip(
         with pytest.raises(AIError) as raised:
             decode_domain({"$enum": wire_id, "value": raw}, target)
         assert raised.value.code is expected
+
+
+@pytest.mark.parametrize("persisted", (False, True))
+@pytest.mark.parametrize("update,expected", (
+    (
+        IdempotencyTerminalUpdate(
+            "scope", "a" * 64, IdempotencyStatus.STARTED,
+            IdempotencyStatus.COMPLETED, "b" * 64, None, None,
+        ),
+        {
+            "scope": "scope", "idempotency_key_digest": "a" * 64,
+            "expected_status": {"$enum": "idempotency_status", "value": "STARTED"},
+            "next_status": {"$enum": "idempotency_status", "value": "COMPLETED"},
+            "request_digest": "b" * 64, "result_digest": None, "error_code": None,
+        },
+    ),
+    (
+        OperationTerminalUpdate(
+            "operation", OperationStatus.RUNNING, OperationStatus.SUCCEEDED,
+            "result", "c" * 64, None,
+        ),
+        {
+            "operation_id": "operation",
+            "expected_status": {"$enum": "operation_status", "value": "RUNNING"},
+            "next_status": {"$enum": "operation_status", "value": "SUCCEEDED"},
+            "result_ref": "result", "result_digest": "c" * 64, "error_code": None,
+        },
+    ),
+))
+def test_terminal_updates_preserve_plain_mapping_wire(
+    update: IdempotencyTerminalUpdate | OperationTerminalUpdate,
+    expected: dict[str, object],
+    persisted: bool,
+) -> None:
+    encode = _encode_persisted_domain if persisted else encode_domain
+    payload = encode(update)
+    assert payload == expected
+    assert _decode_domain(payload, type(update), _CURRENT_CODEC, persisted=persisted) == update
+    assert _decode_domain(
+        {**payload, "future_note": True}, type(update), _CURRENT_CODEC, persisted=persisted,
+    ) == update
+    for name in payload:
+        with pytest.raises(AIError) as raised:
+            _decode_domain(
+                {key: value for key, value in payload.items() if key != name},
+                type(update), _CURRENT_CODEC, persisted=persisted,
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_task_binding_contract_uses_wire_version_and_behavior_reference() -> None:

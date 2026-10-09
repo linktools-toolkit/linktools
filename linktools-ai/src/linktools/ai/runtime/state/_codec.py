@@ -429,7 +429,7 @@ class _VersionCodec:
     enum_types: Mapping[str, type[Enum]]
     dataclass_encoders: Mapping[str, DataclassEncoder]
     dataclass_decoders: Mapping[str, DataclassDecoder]
-    external_schema_types: Mapping[type[object], JsonValue]
+    external_schema_types: frozenset[type[object]]
 
 
 def _encode_v1_task_node_fields(
@@ -1085,19 +1085,15 @@ _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     }
 )
 
-_V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
+_V1_EXTERNAL_SCHEMA_TYPES: frozenset[type[object]] = frozenset(
     {
-        IdempotencyTerminalUpdate: (
-            "linktools.ai.runtime.state.IdempotencyTerminalUpdate"
-        ),
-        OperationTerminalUpdate: (
-            "linktools.ai.runtime.state.OperationTerminalUpdate"
-        ),
-        AgentBindingContract: "linktools.ai.agent.AgentBindingContract@1",
-        AssetVersionRef: "linktools.ai.asset.asset_version_ref@1",
-        ScoreBundle: "linktools.ai.evaluation.score_bundle@1",
-        ModelRequest: "pydantic_ai.messages.ModelRequest",
-        ModelResponse: "pydantic_ai.messages.ModelResponse",
+        IdempotencyTerminalUpdate,
+        OperationTerminalUpdate,
+        AgentBindingContract,
+        AssetVersionRef,
+        ScoreBundle,
+        ModelRequest,
+        ModelResponse,
     }
 )
 
@@ -1349,16 +1345,7 @@ def canonical_digest(value: Mapping[str, JsonValue]) -> str:
 
 def wire_type_id(value: DomainT | type[DomainT]) -> str:
     """Return the explicit stable protocol id for one persisted type."""
-    target = value if isinstance(value, type) else type(value)
-    if isinstance(target, type) and issubclass(target, Enum):
-        try:
-            return _CURRENT_CODEC.enum_wire_ids[target]
-        except KeyError as error:
-            raise TypeError(f"unsupported enum type: {target.__name__}") from error
-    try:
-        return _CURRENT_CODEC.wire_ids[target]
-    except KeyError as error:
-        raise TypeError(f"unsupported domain type: {target.__name__}") from error
+    return _codec_wire_type_id(value, _CURRENT_CODEC)
 
 
 def _codec_wire_type_id(
@@ -1384,26 +1371,10 @@ def _encode_external(value: object, codec: _VersionCodec) -> JsonValue:
         return value.to_payload()
     if isinstance(value, ScoreBundle):
         return _encode_domain(value.to_mapping(), codec)
-    if isinstance(value, IdempotencyTerminalUpdate):
+    if isinstance(value, (IdempotencyTerminalUpdate, OperationTerminalUpdate)):
         return {
-            "scope": _encode_domain(value.scope, codec),
-            "idempotency_key_digest": _encode_domain(
-                value.idempotency_key_digest, codec
-            ),
-            "expected_status": _encode_domain(value.expected_status, codec),
-            "next_status": _encode_domain(value.next_status, codec),
-            "request_digest": _encode_domain(value.request_digest, codec),
-            "result_digest": _encode_domain(value.result_digest, codec),
-            "error_code": _encode_domain(value.error_code, codec),
-        }
-    if isinstance(value, OperationTerminalUpdate):
-        return {
-            "operation_id": _encode_domain(value.operation_id, codec),
-            "expected_status": _encode_domain(value.expected_status, codec),
-            "next_status": _encode_domain(value.next_status, codec),
-            "result_ref": _encode_domain(value.result_ref, codec),
-            "result_digest": _encode_domain(value.result_digest, codec),
-            "error_code": _encode_domain(value.error_code, codec),
+            name: _encode_domain(attrgetter(name)(value), codec)
+            for name in _dataclass_fields(type(value))
         }
     if isinstance(value, (ModelRequest, ModelResponse)):
         raw = encode_model_messages((value,))
@@ -1451,90 +1422,13 @@ def _decode_external(
         return messages[0]
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if target is IdempotencyTerminalUpdate:
-        _require_required_keys(
-            value,
-            frozenset(
-                {
-                    "scope",
-                    "idempotency_key_digest",
-                    "expected_status",
-                    "next_status",
-                    "request_digest",
-                    "result_digest",
-                    "error_code",
-                }
-            ),
-        )
-        return IdempotencyTerminalUpdate(
-            scope=cast(str, _decode_domain(value["scope"], str, codec)),
-            idempotency_key_digest=cast(
-                str,
-                _decode_domain(value["idempotency_key_digest"], str, codec),
-            ),
-            expected_status=cast(
-                IdempotencyStatus,
-                _decode_domain(
-                    value["expected_status"], IdempotencyStatus, codec
-                ),
-            ),
-            next_status=cast(
-                IdempotencyStatus,
-                _decode_domain(value["next_status"], IdempotencyStatus, codec),
-            ),
-            request_digest=cast(
-                str,
-                _decode_domain(value["request_digest"], str, codec),
-            ),
-            result_digest=cast(
-                str | None,
-                _decode_domain(value["result_digest"], str | None, codec),
-            ),
-            error_code=cast(
-                str | None,
-                _decode_domain(value["error_code"], str | None, codec),
-            ),
-        )
-    if target is OperationTerminalUpdate:
-        _require_required_keys(
-            value,
-            frozenset(
-                {
-                    "operation_id",
-                    "expected_status",
-                    "next_status",
-                    "result_ref",
-                    "result_digest",
-                    "error_code",
-                }
-            ),
-        )
-        return OperationTerminalUpdate(
-            operation_id=cast(
-                str,
-                _decode_domain(value["operation_id"], str, codec),
-            ),
-            expected_status=cast(
-                OperationStatus,
-                _decode_domain(value["expected_status"], OperationStatus, codec),
-            ),
-            next_status=cast(
-                OperationStatus,
-                _decode_domain(value["next_status"], OperationStatus, codec),
-            ),
-            result_ref=cast(
-                str | None,
-                _decode_domain(value["result_ref"], str | None, codec),
-            ),
-            result_digest=cast(
-                str | None,
-                _decode_domain(value["result_digest"], str | None, codec),
-            ),
-            error_code=cast(
-                str | None,
-                _decode_domain(value["error_code"], str | None, codec),
-            ),
-        )
+    if target in (IdempotencyTerminalUpdate, OperationTerminalUpdate):
+        declared = _dataclass_fields(target)
+        _require_required_keys(value, frozenset(declared))
+        return target(**{
+            name: _decode_domain(value[name], field_type, codec)
+            for name, (field_type, _init) in declared.items()
+        })
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
