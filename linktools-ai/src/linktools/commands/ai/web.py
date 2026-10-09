@@ -76,8 +76,7 @@ class Command(BaseCommand):
                     "runtime_db": {"path": str(root / "runtime.db"), "exists": (root / "runtime.db").exists()},
                     "object_store": {"path": str(root / "objects"), "exists": (root / "objects").exists()},
                     "metrics_db": {"path": str(root / "metrics.db"), "exists": (root / "metrics.db").exists()},
-                    "model": model or None,
-                    "vision": args.vision if args.vision is not None else os.getenv("OPENAI_VISION", "").strip() or "default",
+                    "model": model or None, "vision": args.vision,
                     "base_url_configured": bool(args.base_url or os.getenv("OPENAI_BASE_URL", "").strip()),
                     "api_key_configured": bool(args.api_key or os.getenv("OPENAI_API_KEY", "").strip()),
                 }

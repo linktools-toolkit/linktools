@@ -19,6 +19,10 @@ and `--memory` arguments have the same meaning as `ai-run`; prefer environment
 configuration for credentials rather than shell history. The console does not
 persist or edit model credentials.
 
+Shared CLI configuration uses the `LINKTOOLS_` environment prefix. For example,
+`LINKTOOLS_OPENAI_VISION=true` supplies the typed vision setting used by both
+`ai-run` and `ai-web`; the console displays that resolved setting.
+
 ```bash
 ai-web --project /path/to/project --read-only
 ```

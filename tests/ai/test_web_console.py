@@ -298,7 +298,7 @@ def test_web_cli_read_only_does_not_provision_workspace_or_open_runtime(monkeypa
             async with client(self.config.app) as http:
                 response = await http.get("/api/config")
                 assert response.json()["read_only"]
-                assert response.json()["vision"] == "true"
+                assert response.json()["vision"] is True
                 assert response.json()["api_key_configured"]
                 assert "secret-key-value" not in response.text
                 assert (await http.get("/api/sessions")).json()["items"] == []
@@ -306,11 +306,31 @@ def test_web_cli_read_only_does_not_provision_workspace_or_open_runtime(monkeypa
     monkeypatch.setattr(Runtime, "open", forbidden)
     monkeypatch.setattr(uvicorn, "Server", Server)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.setenv("OPENAI_VISION", "true")
+    monkeypatch.setenv("LINKTOOLS_OPENAI_VISION", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "secret-key-value")
+    env = web_command.command.environ
+    monkeypatch.setattr(env, "config", env.build_config("web-test", "LINKTOOLS_"))
     args = web_command.command.create_parser().parse_args(["--project", str(tmp_path)] + (["--read-only"] if explicit else []))
     assert web_command.command.run(args) == 0
     assert not (tmp_path / ".linktools").exists()
+
+
+@pytest.mark.parametrize("vision", [False, True])
+def test_web_vision_uses_the_shared_typed_cli_configuration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, vision: bool) -> None:
+    from linktools.ai.workspace import Workspace
+    from linktools.commands.ai._common import _local_runtime_models
+    from linktools.commands.ai.run import command as run_command
+    from linktools.commands.ai.web import command as web_command
+
+    monkeypatch.setenv("LINKTOOLS_OPENAI_VISION", str(vision).lower())
+    env = web_command.environ
+    monkeypatch.setattr(env, "config", env.build_config("web-test", "LINKTOOLS_"))
+    workspace = Workspace.discover(tmp_path)
+    for command, positional in ((run_command, ["prompt"]), (web_command, [])):
+        args = command.create_parser().parse_args(positional + ["--model", "fake-model"])
+        binding = _local_runtime_models(workspace, args).capture().resolve("default")
+        assert args.vision is vision
+        assert binding.vision is vision
 
 
 @pytest.mark.asyncio
