@@ -335,14 +335,15 @@ class ComposeRunner:
         return args
 
     def apply_service(self, context: "EventContext", service: str, recreate: bool = False) -> int:
-        previous = getattr(context, "rollback_service_models", {}).get(service)
-        if previous is not None:
-            self.apply_saved_services(context, (service,), {"previous.yml": previous})
-            return 0
-        saved = getattr(context, "rollback_compose_files", None)
-        if saved is not None:
-            self.apply_saved_services(context, (service,), saved)
-            return 0
+        if service not in getattr(context, "bootstrap_fallback_services", ()):
+            previous = getattr(context, "rollback_service_models", {}).get(service)
+            if previous is not None:
+                self.apply_saved_services(context, (service,), {"previous.yml": previous})
+                return 0
+            saved = getattr(context, "rollback_compose_files", None)
+            if saved is not None:
+                self.apply_saved_services(context, (service,), saved)
+                return 0
         self.wait_service_dependencies(context, service)
         args = self.apply_service_args(service, recreate, context.is_full_containers)
         import tempfile
