@@ -397,7 +397,8 @@ class Container(BaseContainer):
         groups = OrderedDict()
         for site in active:
             domain = site.server_name
-            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]", domain):
+            host_pattern = r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
+            if re.fullmatch(host_pattern, domain) or re.fullmatch(r"\*\." + host_pattern, domain):
                 domain = domain.lower()
             key = (site.producer.get_config("NGINX_HTTP_PORT"), domain)
             groups.setdefault(key, []).append(site)
