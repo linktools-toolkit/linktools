@@ -264,6 +264,50 @@ def test_first_upgrade_failure_restores_legacy_runtime_not_bootstrap(tmp_path, m
     assert manager.running_state.get_persisted() == ["nginx"]
 
 
+def test_first_upgrade_without_restore_model_fails_before_stopping(tmp_path, monkeypatch):
+    nginx = NginxContainer("nginx", {"nginx": {"image": "nginx:new"}}, tmp_path / "nginx")
+    operations, manager, runner, calls, restored = manager_at(
+        tmp_path, (nginx,), (running_nginx(),))
+    manager.generated_configs["nginx"] = nginx
+    nginx.render_config = lambda generation: {"nginx.conf": "final " + generation}
+    nginx.render_bootstrap = lambda generation: {"nginx.conf": "bootstrap " + generation}
+    nginx.on_prepare_config = lambda context: None
+    nginx.validate_config = lambda context, candidate: None
+    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
+    with pytest.raises(ContainerError, match="Cannot replace running service nginx"):
+        operations.restart(["nginx"])
+    assert calls == []
+    assert restored == []
+    assert GeneratedCandidate.current_id(str(nginx.get_app_path("generated"))) is None
+
+
+def test_cold_nginx_retains_acknowledged_bootstrap_on_final_failure(tmp_path, monkeypatch):
+    nginx = NginxContainer("nginx", {"nginx": {"image": "nginx:new"}}, tmp_path / "nginx")
+    operations, manager, runner, calls, _ = manager_at(tmp_path, (nginx,))
+    manager.generated_configs["nginx"] = nginx
+    nginx.render_config = lambda generation: {"nginx.conf": "final " + generation}
+    nginx.render_bootstrap = lambda generation: {"nginx.conf": "bootstrap " + generation}
+    nginx.on_prepare_config = lambda context: None
+    nginx.validate_config = lambda context, candidate: None
+    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
+    applied = []
+
+    def apply(context, candidate, services):
+        content = Path(candidate.path, "nginx.conf").read_text()
+        applied.append(content.split()[0])
+        if content.startswith("final "):
+            raise ContainerError("final rejected")
+
+    nginx.apply_config = apply
+    with pytest.raises(ContainerError, match="final rejected"):
+        operations.up(["nginx"])
+    current = GeneratedCandidate.current_id(str(nginx.get_app_path("generated")))
+    assert current is not None
+    assert (nginx.get_app_path("generated") / "current/nginx.conf").read_text().startswith("bootstrap ")
+    assert applied == ["bootstrap", "final", "bootstrap"]
+    assert manager.running_state.get_persisted() == ["nginx"]
+
+
 def test_acme_install_and_runtime_share_config_home():
     path = Path(__file__).parents[2] / "linktools-cntr/src/linktools/assets/containers/100-nginx/Dockerfile"
     text = path.read_text()
