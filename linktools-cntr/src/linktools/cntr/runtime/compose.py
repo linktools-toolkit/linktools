@@ -48,7 +48,8 @@ def service_dependencies(spec: "dict[str, Any]") -> "dict[str, dict[str, Any]]":
 
 def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[str]",
                    model: "dict[str, Any] | None" = None,
-                   available_services: "Iterable[str]" = ()) -> "tuple[str, ...]":
+                   available_services: "Iterable[str]" = (),
+                   dependency_roots: "Iterable[str] | None" = None) -> "tuple[str, ...]":
     """Topologically order applications; priority only breaks ready-node ties.
 
     Availability is reserved for acknowledged bootstrap services, never the
@@ -64,13 +65,15 @@ def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[st
     definitions = model["services"] if model is not None else {
         name: owner.services[name] for name, owner in owners.items()}
     required = {owners[name].name for name in selected}
+    roots = required if dependency_roots is None else set(dependency_roots)
     dependencies = {}
     for name in selected:
         owner = owners[name]
         edges = set()
-        for dependency in owner.dependencies:
-            edges.update(service for service in installed[dependency].services
-                         if service in pending and service not in available)
+        if owner.name in roots:
+            for dependency in owner.dependencies:
+                edges.update(service for service in installed[dependency].services
+                             if service in pending and service not in available)
         for dependency, options in service_dependencies(definitions[name]).items():
             condition = options.get("condition", "service_started")
             if dependency in available and condition in ("service_started", "service_healthy"):
@@ -78,9 +81,10 @@ def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[st
             if dependency not in pending:
                 raise ContainerError("Unselected Compose dependency {} for {}".format(dependency, name))
             edges.add(dependency)
-        for provider, provider_services in owner.get_runtime_requirements(required).items():
-            if provider != owner.name:
-                edges.update(service for service in provider_services if service in pending)
+        if owner.name in roots:
+            for provider, provider_services in owner.get_runtime_requirements(roots).items():
+                if provider != owner.name:
+                    edges.update(service for service in provider_services if service in pending)
         dependencies[name] = edges
     result = []
     positions = {name: index for index, name in enumerate(selected)}
