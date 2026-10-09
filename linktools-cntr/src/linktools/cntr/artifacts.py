@@ -8,7 +8,8 @@ shares.
 
 The index never records config values, secrets, or full template context --
 only a relative path, kind, owning container, sha256 and (best-effort)
-source path. It never deletes stale entries/files itself; it only records.
+source path. It never scans or deletes stale files; explicit rollback may
+remove entries for applied snapshots that were undone.
 """
 import hashlib
 import json
@@ -185,9 +186,10 @@ class ArtifactIndex:
             return []
         return sorted(rel_path for rel_path, meta in artifacts.items() if "repository_url" in meta)
 
-    def record(self, entries: "dict[str, dict[str, Any]]") -> bool:
-        """Merge ``entries`` (artifact relative path -> metadata) into the
-        index and write it atomically (canonical JSON, sorted, trailing
+    def record(self, entries: "dict[str, dict[str, Any]]", *,
+               remove: "Iterable[str]" = ()) -> bool:
+        """Merge ``entries`` and explicitly remove paths undone by rollback.
+        The index is written atomically (canonical JSON, sorted, trailing
         newline). Unrelated existing entries are preserved. Returns True iff
         the on-disk index content changed.
 
@@ -202,6 +204,8 @@ class ArtifactIndex:
         with self.manager.environ.locks.process_lock("cntr:artifact-index"):
             artifacts = self.load()
             artifacts.update(entries)
+            for rel_path in remove:
+                artifacts.pop(rel_path, None)
             payload = dict(
                 schema_version=INDEX_SCHEMA_VERSION,
                 project=self.manager.project_name,
@@ -378,15 +382,17 @@ class AppliedServiceModels:
     def restore(self, services: "Iterable[str]") -> None:
         """Restore snapshot identities after their runtime rollback succeeds."""
         entries = {}
+        removed = []
         for service in dict.fromkeys(services):
             path = self._path(service)
             previous = self.previous.get(service)
             if previous is None:
                 if os.path.exists(path):
                     os.unlink(path)
+                removed.append(os.path.relpath(path, str(self.manager.data_path)))
                 continue
             utils.atomic_write(path, previous, encoding="utf-8")
             entries[os.path.relpath(path, str(self.manager.data_path))] = dict(
                 kind="compose-applied-service", container=service, sha256=sha256_of(previous))
-        if entries:
-            self.manager.artifact_index.record(entries)
+        if entries or removed:
+            self.manager.artifact_index.record(entries, remove=removed)
