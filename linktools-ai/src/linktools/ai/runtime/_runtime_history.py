@@ -48,6 +48,7 @@ from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history_projection import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._runtime_identity import token_seed
+from ._transient_history import TransientExecutionHistoryStore
 from ._session_timeline import (
     SessionTimelineTranscriptStore,
     project_session_timeline,
@@ -72,7 +73,8 @@ from .service_api import (
     UsageReadCutoff,
     UsageSummary,
 )
-from .state import RuntimeDomain, RuntimeStorage
+from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
+from .state._step_archive import StagingAgentRunStore
 from .state._contracts import (
     ConversationRepositories,
     EventRepository,
@@ -126,6 +128,8 @@ def _merge_usage_summaries(
         "succeeded_requests": 0,
         "failed_requests": 0,
         "cancelled_requests": 0,
+        "running_requests": 0,
+        "interrupted_requests": 0,
         "output_correction_retries": 0,
         "input_tokens": 0,
         "output_tokens": 0,
@@ -140,6 +144,8 @@ def _merge_usage_summaries(
         totals["succeeded_requests"] += value.succeeded_requests
         totals["failed_requests"] += value.failed_requests
         totals["cancelled_requests"] += value.cancelled_requests
+        totals["running_requests"] += value.running_requests
+        totals["interrupted_requests"] += value.interrupted_requests
         totals["output_correction_retries"] += value.output_correction_retries
         totals["input_tokens"] += value.input_tokens
         totals["output_tokens"] += value.output_tokens
@@ -1124,10 +1130,15 @@ async def _open_runtime_history(
             or selected_storage.tenant_id != effective_tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        history_store = selected_storage.run_store.read_store(RuntimeDomain.EXECUTION)
+        if selected_storage.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.TRANSIENT:
+            if not isinstance(history_store, StagingAgentRunStore):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            history_store = TransientExecutionHistoryStore(history_store, selected_storage.run_store)
         reader = StepExecutionHistoryReader(
             namespace=resolved_namespace,
             executions=selected_storage.execution.executions,
-            store=selected_storage.run_store.read_store(RuntimeDomain.EXECUTION),
+            store=history_store,
             cursor_signer=HmacCursorSigner(
                 "execution-history",
                 token_seed(resolved_namespace),

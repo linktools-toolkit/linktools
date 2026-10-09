@@ -10,12 +10,12 @@ from typing import Any, Literal, cast
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from pydantic_ai import StructuredDict
-from pydantic_core import core_schema
+from pydantic_core import PydanticCustomError, core_schema
 
-from ..core import JsonValue, canonical_json_bytes, canonical_sha256
-from ..errors import AIError, ErrorCode
+from ..core import JsonValue, canonical_json_bytes
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..spec import canonicalize_json_schema, canonicalize_pydantic_model_schema
 
 
@@ -70,9 +70,10 @@ class OutputBinding:
         try:
             _schema_validator(self.schema_definition).validate(value)
         except JsonSchemaValidationError as error:
-            raise AIError(
-                ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False
-            ) from error
+            diagnostic = _OutputSchemaDiagnostic.from_schema_error(
+                error, _declared_property_names(self.schema_definition)
+            )
+            raise diagnostic.to_error(ErrorCode.OUTPUT_VALIDATION_FAILED) from None
 
     @property
     def runtime_output_type(self) -> "type[object]":
@@ -128,11 +129,21 @@ def _durable_runtime_type(
             safe_details={"reason": "output_schema_not_durable"},
         ) from error
 
-    def validate(value: object) -> object:
+    declared_names = _declared_property_names(normalized)
+
+    def validate(value: object, handler: core_schema.ValidatorFunctionWrapHandler) -> object:
+        try:
+            value = handler(value)
+        except ValidationError:
+            diagnostic = _OutputSchemaDiagnostic(
+                "$", "type", "object with string property names", _json_type(value)
+            )
+            raise diagnostic.to_validation_error() from None
         try:
             validator.validate(value)
         except JsonSchemaValidationError as error:
-            raise ValueError("output does not match durable JSON schema") from error
+            diagnostic = _OutputSchemaDiagnostic.from_schema_error(error, declared_names)
+            raise diagnostic.to_validation_error() from None
         return value
 
     class DurableStructuredOutput(structured_type):  # type: ignore[misc, valid-type]
@@ -143,7 +154,7 @@ def _durable_runtime_type(
             handler: Any,
         ) -> core_schema.CoreSchema:
             del cls, source_type, handler
-            return core_schema.no_info_after_validator_function(
+            return core_schema.no_info_wrap_validator_function(
                 validate,
                 core_schema.dict_schema(
                     keys_schema=core_schema.str_schema(),
@@ -152,6 +163,140 @@ def _durable_runtime_type(
             )
 
     return cast("type[object]", DurableStructuredOutput)
+
+
+@dataclass(frozen=True, slots=True)
+class _OutputSchemaDiagnostic:
+    path: str
+    rule: str
+    expected_type: str | None = None
+    actual_type: str | None = None
+
+    @classmethod
+    def from_schema_error(
+        cls, error: JsonSchemaValidationError, declared_names: frozenset[str]
+    ) -> "_OutputSchemaDiagnostic":
+        path = list(error.absolute_path)
+        if error.validator == "required" and isinstance(error.instance, Mapping):
+            missing = next(
+                (name for name in error.validator_value if name not in error.instance), None
+            )
+            if missing is not None:
+                path.append(missing)
+        segments = ["$"]
+        for segment in path[:8]:
+            if isinstance(segment, int):
+                segments.append(f"[{segment}]")
+            elif isinstance(segment, str) and segment in declared_names:
+                segments.append(f"[{json.dumps(segment[:64], ensure_ascii=True)}]")
+            else:
+                segments.append('["<key>"]')
+        if len(path) > 8:
+            segments.append("[...]")
+        rule = error.validator if error.validator in Draft202012Validator.VALIDATORS else "falseSchema"
+        expected_type = None
+        actual_type = None
+        if rule == "type":
+            types = error.validator_value
+            expected_type = ", ".join(types) if isinstance(types, list) else types
+            actual_type = _json_type(error.instance)
+        location = "".join(segments)
+        if len(location) > 512:
+            location = location[:507] + "[...]"
+        return cls(location, rule, expected_type, actual_type)
+
+    def __str__(self) -> str:
+        message = f"output does not match durable JSON schema at {self.path}: {self.rule}"
+        if self.expected_type is not None:
+            message += f" (expected {self.expected_type}, got {self.actual_type})"
+        return message
+
+    def to_validation_error(self) -> ValidationError:
+        # hide_input alone is lost when an enclosing Pydantic validator rewraps
+        # the failure. Omit the input itself so SDK retry payloads stay safe too.
+        return ValidationError.from_exception_data(
+            "DurableStructuredOutput",
+            [{
+                "type": PydanticCustomError(
+                    "durable_output_schema", "{diagnostic}", {"diagnostic": self}
+                ),
+                "loc": (),
+            }],
+            hide_input=True,
+        )
+
+    def to_error(self, code: ErrorCode) -> AIError:
+        details: dict[str, JsonValue] = {"path": self.path, "rule": self.rule}
+        if self.expected_type is not None:
+            details["expected_type"] = self.expected_type
+            details["actual_type"] = self.actual_type
+        return AIError(
+            code,
+            str(self),
+            retryable=False,
+            safe_details={"output_validation": details},
+            diagnostics=ErrorDiagnostics.from_exception(self.to_validation_error()),
+        )
+
+
+def output_validation_error(error: BaseException, *, code: ErrorCode) -> "AIError | None":
+    """Project durable schema failures without SDK input values or exception text."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ValidationError):
+            for detail in current.errors(include_input=False, include_url=False):
+                diagnostic = detail.get("ctx", {}).get("diagnostic")
+                if isinstance(diagnostic, _OutputSchemaDiagnostic):
+                    return diagnostic.to_error(code)
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+    return None
+
+
+def _json_type(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, Mapping):
+        return "object"
+    return "non-JSON value"
+
+
+def _declared_property_names(schema: Mapping[str, JsonValue]) -> frozenset[str]:
+    # Only schema-declared field names may appear in a diagnostic path; arbitrary
+    # object keys (including pattern/additional properties) can contain secrets.
+    names: set[str] = set()
+    pending: list[object] = [schema]
+    while pending:
+        node = pending.pop()
+        if not isinstance(node, Mapping):
+            continue
+        required = node.get("required")
+        if isinstance(required, list):
+            names.update(name for name in required if isinstance(name, str))
+        for keyword in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas"):
+            children = node.get(keyword)
+            if isinstance(children, Mapping):
+                if keyword == "properties":
+                    names.update(children)
+                pending.extend(children.values())
+        for keyword in (
+            "items", "prefixItems", "allOf", "anyOf", "oneOf", "not", "if", "then", "else",
+            "contains", "additionalProperties", "unevaluatedProperties", "unevaluatedItems", "propertyNames",
+        ):
+            child = node.get(keyword)
+            pending.extend(child if isinstance(child, list) else [child])
+    return frozenset(names)
 
 
 def _schema_validator(
@@ -189,5 +334,6 @@ __all__ = [
     "OutputBinding",
     "OutputMode",
     "bind_output",
+    "output_validation_error",
     "restore_output",
 ]

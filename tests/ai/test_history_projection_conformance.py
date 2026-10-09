@@ -43,6 +43,7 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptMessageRef,
 )
 from linktools.ai.runtime.state._steps import ExecutionTerminalSealPlan, StateStepArchive
+from linktools.ai.runtime.state._model_interaction_store import ModelInteractionStateStepArchive
 from linktools.ai.runtime.state._store import (
     StateLockOrderError,
     StoredFact,
@@ -406,7 +407,7 @@ async def test_terminal_commit_cancellation_still_finalizes_after_durable_commit
     lifecycle = Lifecycle()
     backend = object.__new__(LocalExecutionBackend)
     backend._run_stores = {
-        RuntimeDomain.EXECUTION: object.__new__(StateStepArchive),
+        RuntimeDomain.EXECUTION: object.__new__(ModelInteractionStateStepArchive),
         RuntimeDomain.CONVERSATION: object(),
         RuntimeDomain.RECOVERY: object(),
     }

@@ -6,9 +6,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import TypeVar
+from typing import TypeVar, cast
 
-from ...core import IdempotencyStatus, ResourceKind
+from ...core import IdempotencyStatus, ImmutableJsonMapping, ResourceKind, canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...evaluation import (
     CaseContract, CaseRef, ComparisonReport, DatasetContract, DatasetRef,
@@ -26,9 +26,15 @@ from ._plan import RuntimeDomain
 from ._repository_common import RepositoryBase, projected_record, replace_checked, record_cursor, record_state
 from ...storage import ObjectRef
 from ._codec import encode_domain, iter_runtime_object_refs
-from ._store import StateStore, StateTransaction, RecordQuery
+from ._store import StateStore, StateTransaction, StoredRecord, RecordQuery
 
 ValueT = TypeVar("ValueT")
+
+
+def _read_header(record: StoredRecord) -> tuple[object, ...]:
+    return (record.key_digest, record.scope_digest, record.parent_digest,
+            record.kind, record.sort_key, record.state, record.storage_version,
+            record.lease_owner, record.lease_fence, record.lease_expires_at)
 
 
 class EvaluationRepositoryImpl(RepositoryBase):
@@ -36,6 +42,11 @@ class EvaluationRepositoryImpl(RepositoryBase):
         super().__init__(store, namespace=namespace, tenant_id=tenant_id,
                          domain=RuntimeDomain.EVALUATION)
         self._background_tasks: set[asyncio.Task[object]] = set()
+        self._last_evaluation_read: tuple[StoredRecord, bytes, EvaluationRecord] | None = None
+
+    async def close(self) -> None:
+        self._last_evaluation_read = None
+        await super().close()
 
     async def _commit(
         self, operation: Callable[[], Awaitable[ValueT]],
@@ -196,8 +207,32 @@ class EvaluationRepositoryImpl(RepositoryBase):
 
     async def get(self, experiment_id: str, *, tenant_id: str) -> EvaluationRecord | None:
         if tenant_id != self.tenant_id:
+            self._last_evaluation_read = None
             return None
-        return await self._get("evaluation", experiment_id, EvaluationRecord)
+        try:
+            stored = await self._record(self._key("evaluation", experiment_id))
+            if stored is None:
+                self._last_evaluation_read = None
+                if await self._record(self._key("evaluation_tombstone", experiment_id)) is not None:
+                    raise AIError(ErrorCode.EVALUATION_EVIDENCE_UNAVAILABLE)
+                return None
+            if type(stored.data) is not ImmutableJsonMapping:
+                self._last_evaluation_read = None
+                return await self._decode(stored, EvaluationRecord)
+            previous = self._last_evaluation_read
+            if previous is not None and stored is previous[0]:
+                return previous[2]
+            payload = canonical_json_bytes(cast(ImmutableJsonMapping, stored.data))
+            if (previous is not None and _read_header(stored) == _read_header(previous[0])
+                    and payload == previous[1]):
+                value = previous[2]
+            else:
+                value = await self._decode(stored, EvaluationRecord)
+            self._last_evaluation_read = (stored, payload, value)
+            return value
+        except BaseException:
+            self._last_evaluation_read = None
+            raise
 
     async def update(
         self, experiment_id: str,
@@ -464,7 +499,10 @@ class EvaluationRepositoryImpl(RepositoryBase):
             else:
                 await replace_checked(transaction, projected_record(self, cleanup_stored, updated), cleanup_stored.storage_version)
             return candidates
-        return await self._store.mutate(write)
+        try:
+            return await self._store.mutate(write)
+        finally:
+            self._last_evaluation_read = None
 
     async def pending_cleanup(self, *, owner_principal_id: str, limit: int | None) -> tuple[EvaluationCleanupRecord, ...]:
         found = []

@@ -1136,11 +1136,11 @@ class RuntimeEvaluations:
     async def _collect_score(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
     ) -> None:
-        record = await self._record(record.experiment_id, record.manifest.principal, allow_expired=True)
-        if any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in record.scores):
-            return
         node = next(item for item in state.node_states if item.node_id == "score")
         if node.status not in _TERMINAL:
+            return
+        record = await self._record(record.experiment_id, record.manifest.principal, allow_expired=True)
+        if any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in record.scores):
             return
         try:
             await self._require_content(record, record.manifest.principal)

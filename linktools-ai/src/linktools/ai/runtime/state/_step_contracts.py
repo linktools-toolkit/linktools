@@ -5,9 +5,13 @@
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic_ai.messages import ModelMessage, ModelRequest
+
+if TYPE_CHECKING:
+    from ._contracts import RuntimePayloadRef, TranscriptChunk
+
 
 StepEventType = Literal[
     "AGENT_RUN_STARTED",
@@ -23,6 +27,7 @@ StepEventType = Literal[
     "TOOL_CALL_FAILED",
 ]
 CheckpointState = Literal["complete", "interrupted"]
+TOOL_ERROR_CODE_METADATA_KEY = "linktools.ai.tool_error_code"
 
 
 @dataclass(slots=True)
@@ -94,6 +99,25 @@ class AgentRunCheckpoint:
             raise ValueError("checkpoint pending request must identify a model request")
 
 
+@dataclass(frozen=True, slots=True)
+class AgentRunHistoryCapture:
+    """Committed read boundary shared by all public run history projections."""
+
+    run: AgentRunRecord | None
+    event_count: int
+    transcript_message_count: int
+    model_interaction_count: int
+    pending: "RuntimePayloadRef | None" = None
+    pending_keys: tuple[str, ...] = ()
+    pending_parts: "tuple[TranscriptChunk, ...]" = ()
+    pending_message: ModelMessage | None = None
+    inline_events: tuple[StepEvent, ...] | None = None
+
+    @property
+    def message_count(self) -> int:
+        return self.transcript_message_count + (self.pending is not None or self.pending_message is not None)
+
+
 class AgentRunStore(Protocol):
     async def initialize(self) -> None: ...
 
@@ -157,7 +181,9 @@ class AgentRunStore(Protocol):
 
 __all__ = [
     "AgentRunCheckpoint",
+    "AgentRunHistoryCapture",
     "StepEventType",
+    "TOOL_ERROR_CODE_METADATA_KEY",
     "AgentRunRecord",
     "CheckpointState",
     "StepEvent",

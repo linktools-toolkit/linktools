@@ -45,9 +45,7 @@ from linktools.ai.runtime._model_interaction import (
     project_public_messages,
     request_envelope,
 )
-from linktools.ai.runtime.state._model_interaction_store import (
-    ModelInteractionStagingAgentRunStore,
-)
+from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
 from linktools.ai.runtime.state._step_contracts import AgentRunCheckpoint, AgentRunRecord
 
 
@@ -193,7 +191,7 @@ def test_cancelled_model_interaction_has_no_synthetic_error() -> None:
 
 @pytest.mark.asyncio
 async def test_staging_interaction_identity_is_idempotent() -> None:
-    store = ModelInteractionStagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
     interaction = _cancelled_interaction()
@@ -217,7 +215,7 @@ async def test_model_request_records_attach_files_call_identity() -> None:
 
     body = b"image"
     digest = hashlib.sha256(body).hexdigest()
-    store = ModelInteractionStagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
     capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
@@ -261,6 +259,14 @@ async def test_model_request_records_attach_files_call_identity() -> None:
         ModelRequestParameters(),
         False,
     )
+    capture.prepare_model_interaction(
+        fact,
+        TestModel(),
+        (message,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
     finished = journal.finish(fact.model_request_seq, status="SUCCEEDED")
     capture.finish_model_interaction(
         finished,
@@ -291,7 +297,7 @@ async def test_model_request_records_attach_files_call_identity() -> None:
 async def test_model_request_preserves_duplicate_initial_attachment_identity() -> None:
     body = BinaryContent(b"same", media_type="image/png")
     accepted = input_attachment_views((body, body))
-    store = ModelInteractionStagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
     capture = AgentRunRecorder(
@@ -304,6 +310,14 @@ async def test_model_request_preserves_duplicate_initial_attachment_identity() -
     journal = _journal()
     fact = journal.begin(1)
     capture.begin_model_interaction(
+        fact,
+        TestModel(),
+        (message,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
+    capture.prepare_model_interaction(
         fact,
         TestModel(),
         (message,),
@@ -346,7 +360,7 @@ async def test_model_request_preserves_input_attachment_identifiers() -> None:
         identifier="input-b",
     )
     accepted = input_attachment_views((first, second))
-    store = ModelInteractionStagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
     capture = AgentRunRecorder(
@@ -359,6 +373,14 @@ async def test_model_request_preserves_input_attachment_identifiers() -> None:
     journal = _journal()
     fact = journal.begin(1)
     capture.begin_model_interaction(
+        fact,
+        TestModel(),
+        (message,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
+    capture.prepare_model_interaction(
         fact,
         TestModel(),
         (message,),
@@ -391,7 +413,7 @@ async def test_model_request_preserves_input_attachment_identifiers() -> None:
 
 @pytest.mark.asyncio
 async def test_success_request_does_not_stage_full_message_payloads() -> None:
-    store = ModelInteractionStagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
     capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
@@ -400,6 +422,9 @@ async def test_success_request_does_not_stage_full_message_payloads() -> None:
     fact = journal.begin(1)
     capture.append_transcript_message(message)
     capture.begin_model_interaction(
+        fact, TestModel(), (message,), None, ModelRequestParameters(), False, "alias"
+    )
+    capture.prepare_model_interaction(
         fact, TestModel(), (message,), None, ModelRequestParameters(), False, "alias"
     )
     assert len(store._payloads["run"]) == 1
@@ -429,7 +454,7 @@ async def test_success_request_does_not_stage_full_message_payloads() -> None:
 
 @pytest.mark.asyncio
 async def test_failed_request_inlines_context_only_after_failure() -> None:
-    store = ModelInteractionStagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
     capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
@@ -438,6 +463,9 @@ async def test_failed_request_inlines_context_only_after_failure() -> None:
     fact = journal.begin(1)
     capture.append_transcript_message(message)
     capture.begin_model_interaction(
+        fact, TestModel(), (message,), None, ModelRequestParameters(), False
+    )
+    capture.prepare_model_interaction(
         fact, TestModel(), (message,), None, ModelRequestParameters(), False
     )
     assert len(store._payloads["run"]) == 1
@@ -459,7 +487,7 @@ async def test_failed_request_inlines_context_only_after_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> None:
-    store = ModelInteractionStagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
     capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
@@ -475,6 +503,14 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
     journal = _journal()
     fact = journal.begin(1)
     capture.begin_model_interaction(
+        fact,
+        TestModel(),
+        (request,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
+    capture.prepare_model_interaction(
         fact,
         TestModel(),
         (request,),
@@ -559,6 +595,14 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
             ModelRequestParameters(),
             False,
         )
+        capture.prepare_model_interaction(
+            first_fact,
+            TestModel(),
+            (first_request,),
+            None,
+            ModelRequestParameters(),
+            False,
+        )
         first_response = ModelResponse(
             parts=[
                 ToolCallPart(
@@ -597,6 +641,14 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
         capture.append_transcript_message(tool_result)
         second_fact = journal.begin(2)
         capture.begin_model_interaction(
+            second_fact,
+            TestModel(),
+            capture.transcript_messages(),
+            None,
+            ModelRequestParameters(),
+            False,
+        )
+        capture.prepare_model_interaction(
             second_fact,
             TestModel(),
             capture.transcript_messages(),
@@ -658,7 +710,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
 
 @pytest.mark.asyncio
 async def test_compaction_request_uses_explicit_source_not_stale_projection() -> None:
-    store = ModelInteractionStagingAgentRunStore()
+    store = StagingAgentRunStore()
     await store.initialize()
     await store.register_agent_run(AgentRunRecord("run"))
     capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
@@ -676,6 +728,15 @@ async def test_compaction_request_uses_explicit_source_not_stale_projection() ->
     journal = _journal()
     fact = journal.begin(2, purpose="compaction")
     capture.begin_model_interaction(
+        fact,
+        TestModel(),
+        (source[0], synthetic),
+        None,
+        ModelRequestParameters(),
+        False,
+        source_messages=source,
+    )
+    capture.prepare_model_interaction(
         fact,
         TestModel(),
         (source[0], synthetic),
@@ -735,3 +796,32 @@ async def test_execution_model_interactions_support_volatile_memory_state() -> N
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
+
+
+@pytest.mark.asyncio
+async def test_preparation_failure_retains_admission_without_provider_input() -> None:
+    store = StagingAgentRunStore()
+    await store.initialize()
+    capture = AgentRunRecorder(store, execution_id="execution", agent_run_id="run")
+    await capture.register_agent_run(AgentRunRecord("run"))
+    journal = _journal()
+    fact = journal.begin(1)
+    capture.begin_model_interaction(
+        fact, TestModel(), (ModelRequest(parts=[UserPromptPart("hello")]),),
+        None, ModelRequestParameters(), False,
+    )
+    admitted = (await store.list_model_interactions(agent_run_id="run"))[0]
+    assert admitted.status == "RUNNING"
+    assert admitted.request_context is None
+    assert admitted.request_envelope_digest is None
+    finished = journal.finish(fact.model_request_seq, status="FAILED")
+    capture.finish_model_interaction(
+        finished, model=TestModel(), response=None, status="FAILED",
+        error_code=ErrorCode.REQUEST_FIELD_INVALID.value, duration_ns=1, usage=None,
+    )
+    failed = (await store.list_model_interactions(agent_run_id="run"))[0]
+    assert failed.status == "FAILED"
+    assert failed.request_context is None
+    assert failed.request_envelope_digest is None
+    assert failed.response_context is None
+    await store.close()

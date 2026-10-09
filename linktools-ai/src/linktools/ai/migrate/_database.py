@@ -3,17 +3,15 @@
 """Explicit Runtime, Asset, and Metrics schema provisioning."""
 
 from collections.abc import Iterable
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
 from ..asset import build_asset_sql_metadata
-from ..errors import AIError, ErrorCode
 from ..observe import build_metrics_sql_metadata
 from ..runtime.state import RuntimeDomain, runtime_domain_uses_object_store
 from ..runtime.state.schema import build_runtime_sql_metadata
-from ..storage import build_object_sql_metadata, provision_sql, validate_sql
+from ..storage import build_object_sql_metadata, provision_sql
 
 _logger = environ.get_logger("ai.migrate.database")
 
@@ -74,59 +72,9 @@ async def provision_asset_database(engine: "AsyncEngine") -> None:
     await provision_sql(engine, metadata)
 
 
-async def provision_metrics_database(engine: "AsyncEngine") -> None:
-    await provision_sql(engine, build_metrics_sql_metadata())
-
-
-async def validate_metrics_database(engine: "AsyncEngine") -> None:
-    await validate_sql(engine, build_metrics_sql_metadata())
-
-
-def _metrics_sqlite_engine(path: str | Path) -> "AsyncEngine":
-    if (
-        not isinstance(path, (str, Path))
-        or not str(path).strip()
-        or str(path) == ":memory:"
-    ):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    database = str(Path(path).expanduser().resolve(strict=False))
-    try:
-        from sqlalchemy.engine import URL
-        from sqlalchemy.ext.asyncio import create_async_engine
-        from sqlalchemy.pool import NullPool
-    except (ImportError, ModuleNotFoundError) as error:
-        raise AIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING) from error
-    return create_async_engine(
-        URL.create("sqlite+aiosqlite", database=database),
-        poolclass=NullPool,
-    )
-
-
-async def provision_metrics_sqlite(path: str | Path) -> None:
-    """Provision a path-backed SQLite Metrics database without exposing an engine."""
-    engine = _metrics_sqlite_engine(path)
-    try:
-        await provision_metrics_database(engine)
-    finally:
-        await engine.dispose()
-
-
-async def validate_metrics_sqlite(path: str | Path) -> None:
-    """Validate a path-backed SQLite Metrics database without mutating its schema."""
-    engine = _metrics_sqlite_engine(path)
-    try:
-        await validate_metrics_database(engine)
-    finally:
-        await engine.dispose()
-
-
 __all__ = [
     "build_sql_schema_metadata",
     "provision_asset_database",
     "provision_database",
-    "provision_metrics_database",
-    "provision_metrics_sqlite",
     "provision_runtime_database",
-    "validate_metrics_database",
-    "validate_metrics_sqlite",
 ]

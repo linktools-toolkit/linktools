@@ -81,6 +81,7 @@ class ExecutionStateCommands:
                 await self._executions.require_open_history_head_in_transaction(
                     transaction,
                     commit.execution.execution_id,
+                    expected_producer_generation=commit.producer_generation,
                 )
             )
             effective_commit = commit

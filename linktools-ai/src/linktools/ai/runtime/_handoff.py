@@ -116,6 +116,15 @@ class HandoffGate(Generic[KeyT, ValueT]):
                 state.release_requested = True
             self._condition.notify_all()
 
+    async def claim_requested_release(
+        self, key: KeyT,
+    ) -> "HandoffState[ValueT] | None":
+        async with self._condition:
+            state = self._states.get(key)
+            if state is None or not self._claim_cleanup(state):
+                return None
+            return state
+
     @staticmethod
     def _claim_cleanup(state: HandoffState[ValueT]) -> bool:
         if (

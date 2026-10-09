@@ -52,6 +52,8 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    import linktools.ai.acp as acp_adapter
+
     workspace = Workspace.initialize(tmp_path)
     models = object()
     opened: list[tuple[Workspace, object]] = []
@@ -73,12 +75,12 @@ def test_ai_acp_uses_shared_local_runtime_composition(
         yield SimpleNamespace(default_principal=object())
 
     monkeypatch.setattr(acp_module, "_open_local_runtime", open_local_runtime)
-    monkeypatch.setattr(acp_module, "ACPAgent", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(acp_adapter, "ACPAgent", lambda *_args, **_kwargs: object())
 
     async def serve_stdio(_agent: object) -> None:
         return None
 
-    monkeypatch.setattr(acp_module, "serve_stdio", serve_stdio)
+    monkeypatch.setattr(acp_adapter, "serve_stdio", serve_stdio)
 
     assert acp_command.run(acp_command.create_parser().parse_args([])) == 0
     assert opened == [(workspace, models)]
@@ -126,3 +128,64 @@ def test_ai_cli_rejects_unknown_commands() -> None:
     )
     assert result.returncode != 0
     assert "invalid choice: 'unknown-command'" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_output"),
+    (
+        (("--help",), "ai"),
+        (("ai", "status"), "AI Runtime Status"),
+        (("ai", "metrics"), "Executions"),
+    ),
+)
+def test_lightweight_cli_commands_do_not_load_execution_dependencies(
+    arguments: tuple[str, ...],
+    expected_output: str,
+    tmp_path: Path,
+) -> None:
+    environment = dict(os.environ)
+    source_root = Path(__file__).parents[2]
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(source_root / "linktools-ai/src"), str(source_root / "linktools/src"))
+    )
+    environment["LINKTOOLS_PATH"] = str(tmp_path / "home")
+    environment["DEBUG"] = "false"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import runpy
+import sys
+
+sys.argv[0] = "lt"
+try:
+    runpy.run_module("linktools", run_name="__main__")
+except SystemExit as error:
+    assert error.code == 0, error.code
+
+heavy_dependencies = (
+    "linktools.ai.runtime",
+    "linktools.ai.capability",
+    "linktools.ai.model",
+    "linktools.ai.acp",
+    "pydantic_ai",
+    "fastmcp",
+    "openai",
+)
+loaded = tuple(
+    name for name in sys.modules
+    if any(name == prefix or name.startswith(prefix + ".") for prefix in heavy_dependencies)
+)
+assert not loaded, loaded
+""",
+            *arguments,
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert expected_output in result.stdout

@@ -175,6 +175,12 @@ class RuntimeExecutions(Generic[AppT]):
         return await self._service.resolve_tool_effect(execution_id, request)
 
     async def recover(self, execution_id: str, *, principal: Principal) -> ExecutionHandle:
+        """Explicitly take over recoverable work after its previous executor stopped.
+
+        Each invocation competes for the authorized revision. Inspect canonical
+        state after an uncertain response; a fresh invocation is not an
+        idempotent retry and can supersede a previous recovery attempt.
+        """
         self._ensure_open()
         return await self._service.recover(execution_id, principal=principal)
 

@@ -44,6 +44,8 @@ from linktools.ai.runtime.state._step_contracts import AgentRunRecord
 from linktools.ai.runtime.state._steps import StagingAgentRunStore
 from linktools.ai.observe._memory import InMemoryMetricStore
 
+from ._runtime_test_helpers import _wait_for_committed
+
 
 class _LifecycleRecorder:
     def __init__(self) -> None:
@@ -70,6 +72,12 @@ class _LifecycleRecorder:
             "error_code": None,
             "usage": None,
         }
+
+    def prepare_model_interaction(self, *args: object, **kwargs: object) -> None:
+        pass
+
+    async def commit_history_boundary(self) -> None:
+        pass
 
     def finish_model_interaction(
         self,
@@ -676,7 +684,7 @@ def test_compaction_started_publish_run_cancelled_closes_external_request() -> N
     "failure_kind",
     ("preparation", "storage", "async_cancel", "run_cancel"),
 )
-def test_compaction_preaccept_failures_propagate_without_terminal_record(
+def test_compaction_preparation_failures_preserve_admitted_outcome_without_input(
     failure_kind: str,
 ) -> None:
     async def scenario() -> None:
@@ -750,11 +758,21 @@ def test_compaction_preaccept_failures_propagate_without_terminal_record(
             await wrapped.request([], None, ModelRequestParameters())
 
         assert raised.value is failure
-        assert await store.list_model_interactions(
-            agent_run_id=agent_run_id
-        ) == []
-        assert await store.list_events(agent_run_id=agent_run_id) == []
-        assert published == []
+        interactions = await store.list_model_interactions(agent_run_id=agent_run_id)
+        assert len(interactions) == 1
+        interaction = interactions[0]
+        expected_status = "CANCELLED" if failure_kind in {"async_cancel", "run_cancel"} else "FAILED"
+        assert interaction.status == expected_status
+        assert interaction.request_context is None
+        assert interaction.request_envelope_digest is None
+        assert interaction.response_context is None
+        assert [event.event_type for event in await store.list_events(agent_run_id=agent_run_id)] == [
+            "MODEL_REQUEST_STARTED", f"MODEL_REQUEST_{expected_status}",
+        ]
+        assert [event_type for event_type, _payload in published] == [
+            ExecutionEventType.MODEL_REQUEST_STARTED,
+            ExecutionEventType.MODEL_REQUEST_FINISHED,
+        ]
         with pytest.raises(RuntimeError, match="missing"):
             capability._journal.current(1)
 
@@ -1193,7 +1211,9 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
             assert event.payload["status"] == "RUNNING"
             assert event.payload["model_request_seq"] == 1
             assert "TOP_SECRET_PROMPT" not in repr(event.payload)
-            page = await execution.model_interactions(include_content=False)
+            page = await _wait_for_committed(
+                lambda: execution.model_interactions(include_content=False), lambda page: bool(page.items),
+            )
             assert len(page.items) == 1
             running = page.items[0]
             assert running.status == "RUNNING"
@@ -1242,7 +1262,7 @@ def test_execution_stream_and_history_expose_blocked_request_before_response(
     asyncio.run(scenario())
 
 
-def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
+def test_history_cursor_keeps_captured_identity_during_durable_completion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1268,10 +1288,11 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
             wait_task = asyncio.create_task(execution.wait())
             try:
                 await asyncio.wait_for(models.entered.wait(), timeout=5)
-                first = await execution.model_interactions(
-                    limit=1,
-                    include_content=True,
+                await _wait_for_committed(
+                    lambda: execution.model_interactions(include_content=True),
+                    lambda page: any(item.model_request_seq == 2 for item in page.items),
                 )
+                first = await execution.model_interactions(limit=1, include_content=True)
                 assert [(item.model_request_seq, item.status) for item in first.items] == [
                     (1, "SUCCEEDED")
                 ]
@@ -1309,7 +1330,7 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                     )
                 )
                 await asyncio.wait_for(archive_read_started.wait(), timeout=3)
-                assert archive_snapshot == []
+                assert [(item.model_request_seq, item.status) for item in archive_snapshot] == [(2, "RUNNING")]
 
                 models.release.set()
                 result = (await wait_task).result
@@ -1325,7 +1346,7 @@ def test_history_cursor_keeps_lifecycle_identity_during_archive_handoff(
                     (item.model_request_seq, item.status)
                     for item in captured_page.items
                 ] == [(2, "RUNNING")]
-                assert captured_page.items[0].request["messages"]
+                assert captured_page.items[0].request == {}
                 assert captured_page.items[0].response is None
 
                 durable_page = await execution.model_interactions(
@@ -1365,11 +1386,13 @@ def test_public_content_mutation_does_not_change_live_or_archived_history(
             wait_task = asyncio.create_task(execution.wait())
             try:
                 await asyncio.wait_for(models.entered.wait(), timeout=5)
-                live = await execution.model_interactions(include_content=True)
+                live = await _wait_for_committed(
+                    lambda: execution.model_interactions(include_content=True),
+                    lambda page: bool(page.items),
+                )
                 expected_request = deepcopy(dict(live.items[0].request))
-                messages = live.items[0].request["messages"]
-                assert isinstance(messages, list) and messages
-                messages.clear()
+                assert expected_request == {}
+                live.items[0].request["messages"] = ["caller-only mutation"]
 
                 reread_live = await execution.model_interactions(include_content=True)
                 assert dict(reread_live.items[0].request) == expected_request
@@ -1467,8 +1490,8 @@ def test_history_refresh_survives_event_buffer_fallback_for_blocked_request(
             try:
                 await asyncio.wait_for(models.entered.wait(), timeout=5)
                 assert execution.execution_id in replays
-                running_page = await execution.model_interactions(
-                    include_content=False
+                running_page = await _wait_for_committed(
+                    lambda: execution.model_interactions(include_content=False), lambda page: len(page.items) >= 2,
                 )
                 assert [
                     (item.model_request_seq, item.status)
@@ -1538,3 +1561,43 @@ def test_active_and_reconnected_streams_follow_broker_replay_fallback(
         await reconnected.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_provider_dispatch_waits_for_prepared_input_commit(streaming: bool) -> None:
+    from linktools.ai.runtime._metric_capability import _PreparedRequestModel
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    provider_calls: list[bool] = []
+    committed = False
+
+    async def prepare(messages, settings, parameters, request_streaming) -> None:
+        nonlocal committed
+        assert request_streaming is streaming
+        entered.set()
+        await release.wait()
+        committed = True
+
+    async def respond(messages, info) -> ModelResponse:
+        assert committed
+        provider_calls.append(True)
+        return ModelResponse(parts=[TextPart("answer")])
+
+    model = _PreparedRequestModel(_BlockingFunctionModel(respond), prepare, lambda error: None)
+
+    async def run() -> None:
+        if streaming:
+            async with model.request_stream([], None, ModelRequestParameters()):
+                pass
+        else:
+            await model.request([], None, ModelRequestParameters())
+
+    task = asyncio.create_task(run())
+    await asyncio.wait_for(entered.wait(), 2)
+    assert provider_calls == []
+    assert not task.done()
+    release.set()
+    await asyncio.wait_for(task, 2)
+    assert provider_calls == [True]

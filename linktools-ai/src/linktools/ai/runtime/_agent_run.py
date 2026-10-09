@@ -46,6 +46,9 @@ class _WorkerFailure:
 
 
 class _AgentRunLifecycle(Protocol):
+    def execution_producer_generation(
+        self, agent_run_id: str, *, execution_id: str,
+    ) -> int | None: ...
     async def materialize_conversation(self, *, agent_run_id: str) -> None: ...
     async def materialize_from_recovery(
         self,
@@ -70,7 +73,10 @@ class _AgentRunLifecycle(Protocol):
         execution_id: "str | None" = None,
     ) -> None: ...
     async def flush_execution_projection(
-        self, agent_run_id: str, *, execution_id: str
+        self, agent_run_id: str, *, execution_id: str, producer_generation: int | None = None,
+    ) -> None: ...
+    async def discard_revoked_producer_staging(
+        self, agent_run_id: str, *, execution_id: str, producer_generation: int,
     ) -> None: ...
     async def wait_projection_flight(self, agent_run_id: str) -> None: ...
     async def prepare_execution_terminal_seal(
@@ -129,6 +135,7 @@ class _AgentRunInput:
     repository_instruction_boundary: RepositoryInstructionBoundary | None
     deferred_tool_results: DeferredToolResults | None
     budget: RunBudgetContext | None = None
+    history_producer_generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +183,7 @@ class _AgentRunRunner:
             run_store=agent_run_input.run_store,
             agent_run_id=agent_run_input.agent_run_id,
             agent_run_seq=agent_run_input.agent_run_seq,
+            history_producer_generation=agent_run_input.history_producer_generation,
             history_id=agent_run_input.history_id,
             memory_store=agent_run_input.memory_store,
             plan_store_resolver=agent_run_input.plan_store_resolver,

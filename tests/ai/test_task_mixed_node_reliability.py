@@ -41,6 +41,7 @@ from linktools.ai.errors import AIError, ErrorCode, ObservationError
 from linktools.ai.runtime import (
     AgentTaskInput,
     AgentTaskInputContext,
+    ExecutionInputContext,
     ExecutionService,
     Runtime,
     RuntimeStorage,
@@ -1616,7 +1617,8 @@ async def test_runtime_runner_cannot_commit_unreadable_success() -> None:
     assert runner.calls == 1
 
 
-def test_agent_task_input_keeps_but_excludes_unknown_additive_fields() -> None:
+@pytest.mark.parametrize("authoring", (False, True))
+def test_agent_task_input_keeps_but_excludes_unknown_additive_fields(authoring: bool) -> None:
     value = dict(
         AgentTaskInput(
             "prompt",
@@ -1627,12 +1629,20 @@ def test_agent_task_input_keeps_but_excludes_unknown_additive_fields() -> None:
     )
     value["metadata"] = {"source": "host"}
 
-    restored = AgentTaskInput.from_mapping(value)
+    value["capture_context"] = ExecutionInputContext.from_messages(()).to_payload()
+    value["capture_files"] = [{"path": "input.txt"}]
+    restored = (
+        AgentTaskInput.from_authoring(value) if authoring
+        else AgentTaskInput.from_mapping(value)
+    )
 
     assert restored.prompt == "prompt"
     assert restored.parameters == {"task_id": "business"}
     assert restored["metadata"] == {"source": "host"}
     assert "metadata" not in restored.execution_payload()
+    assert dict(restored.execution_payload()) == {
+        key: item for key, item in value.items() if key != "metadata"
+    }
 
 
 def test_agent_task_input_authoring_defaults_and_durable_required_fields() -> None:

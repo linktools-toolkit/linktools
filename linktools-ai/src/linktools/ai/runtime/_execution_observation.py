@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Iterable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from ..core import ExecutionStatus, Principal
+from ..core import Principal
 from ..errors import AIError, ErrorCode, ObservationError
 from ._graph_projection import _GraphModelProjection
 from ._observation import (
@@ -189,11 +189,8 @@ class _ExecutionModelObservation:
                     yield self.tree_event(event)
                 async for event in self.refresh(self.models.views, finite=True):
                     yield event
-                terminal = {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
                 if any(
                     not self.models.boundaries[view.execution_id].durable_history_available
-                    or (view.status not in terminal
-                        and not self.models.boundaries[view.execution_id].local_staging_available)
                     for view, _, _ in captured
                 ):
                     raise ObservationError(

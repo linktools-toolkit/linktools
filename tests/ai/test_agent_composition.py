@@ -4,6 +4,7 @@
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +34,24 @@ def test_top_level_public_surface_is_exact() -> None:
         "Session",
         "Workspace",
     ]
+    from linktools.ai import capability, runtime, workspace
+
+    expected = {
+        "Agent": runtime.Agent,
+        "CapabilityGroup": capability.CapabilityGroup,
+        "Execution": runtime.Execution,
+        "AgentContext": capability.AgentContext,
+        "Runtime": runtime.Runtime,
+        "Session": runtime.Session,
+        "Workspace": workspace.Workspace,
+    }
+    assert set(expected) <= set(dir(ai))
+    for name, value in expected.items():
+        assert getattr(ai, name) is value
+        assert pickle.loads(pickle.dumps(getattr(ai, name))) is value
+    imported: dict[str, object] = {}
+    exec("from linktools.ai import *", imported)
+    assert {name: imported[name] for name in ai.__all__} == expected
 
 
 def test_agent_binding_contract_persists_binding_inputs() -> None:

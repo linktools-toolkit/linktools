@@ -20,11 +20,9 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._approval import (
     DefaultApprovalService,
-    approval_id_for_call,
 )
 from linktools.ai.runtime._external import (
     DefaultExternalService,
-    external_call_id_for_call,
 )
 from linktools.ai.runtime.service_api import (
     ApprovalDecisionRequest,
@@ -32,6 +30,7 @@ from linktools.ai.runtime.service_api import (
     ExternalSupplyRequest,
 )
 from linktools.ai.runtime.state._contracts import (
+    deferred_resource_id,
     ApprovalRecord,
     ExternalCallRecord,
     PendingDeferredCall,
@@ -245,7 +244,7 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
         "external_tool",
         StoredPayload.inline_json({"value": 1}),
     )
-    call_id = external_call_id_for_call("tenant", "execution", "step", pending.tool_call_id)
+    call_id = deferred_resource_id("external-call-v1", "tenant", "execution", "step", pending.tool_call_id)
     calls = _ExternalCalls(
         ExternalCallRecord(
             call_id=call_id,
@@ -304,7 +303,8 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
         "approval_tool",
         StoredPayload.inline_json({"value": 1}),
     )
-    approval_id = approval_id_for_call(
+    approval_id = deferred_resource_id(
+        "approval-v1",
         "tenant", "execution", "step", pending.tool_call_id
     )
     approvals = _Approvals(

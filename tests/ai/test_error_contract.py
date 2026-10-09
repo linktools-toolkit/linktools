@@ -16,7 +16,7 @@ from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._execution import _terminal_error
 from linktools.ai.runtime._local import _secondary_execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.storage import InMemoryObjectStore, ObjectRef, PayloadPolicy, StoredPayload
 from openai import APIError as OpenAIAPIError
 from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -361,3 +361,26 @@ def test_failed_tool_record_requires_the_linktools_failure_contract() -> None:
             error_code=ErrorCode.MODEL_RATE_LIMITED.value,
             error_payload=StoredPayload.inline_bytes(b"{}"),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    (
+        StoredPayload.inline_json({"version": 1, "kind": "tool_call_rejected", "message": "retry"}),
+        StoredPayload.inline_text('{"version":1,"kind":"tool_call_rejected","message":"retry"}'),
+        StoredPayload.object(ObjectRef("runtime", "failure", "a" * 64, 1)),
+    ),
+)
+async def test_tool_failure_requires_inline_byte_payload(payload: StoredPayload) -> None:
+    with pytest.raises(ValueError):
+        _failed_tool_record(
+            error_code=ErrorCode.TOOL_RETRY_REQUIRED.value, error_payload=payload,
+        )
+    with pytest.raises(AIError) as captured:
+        await _tool_bridge()._decode_error(
+            _unchecked_failed_tool_record(
+                error_code=ErrorCode.TOOL_RETRY_REQUIRED.value, error_payload=payload,
+            )
+        )
+    assert captured.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

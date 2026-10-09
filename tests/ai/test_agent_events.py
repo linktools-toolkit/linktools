@@ -7,6 +7,7 @@ from pydantic_ai.capabilities import ProcessEventStream, Thinking
 from pydantic_ai.messages import (
     FunctionToolResultEvent,
     PartDeltaEvent,
+    PartEndEvent,
     PartStartEvent,
     RetryPromptPart,
     TextPart,
@@ -14,6 +15,7 @@ from pydantic_ai.messages import (
     ThinkingPart,
     ThinkingPartDelta,
     ToolReturnPart,
+    ToolCallPart,
 )
 from pydantic_ai.models.test import TestModel
 
@@ -102,12 +104,12 @@ async def test_event_stream_forwarding_uses_native_capability() -> None:
 
     async def events():  # type: ignore[no-untyped-def]
         yield PartStartEvent(index=0, part=TextPart(content="hello"))
-        yield PartDeltaEvent(index=0, delta=ThinkingPartDelta(content_delta="thinking"))
+        yield PartDeltaEvent(index=0, delta=TextPartDelta(content_delta=" world"))
 
     await capability.handler(None, events())  # type: ignore[arg-type]
     assert emissions == [
         LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "hello"),
-        LiveDelta(ExecutionDeltaType.ASSISTANT_THINKING_DELTA, "thinking"),
+        LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, " world"),
     ]
 
 
@@ -168,3 +170,50 @@ def test_event_emissions_expose_owner_specific_event_type(
     event_type: ExecutionDeltaType | ExecutionEventType,
 ) -> None:
     assert event.event_type is event_type
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("visible_part", (TextPart("answer"), ThinkingPart("thought")))
+async def test_stream_parts_stay_local_until_the_request_or_run_finishes(
+    visible_part: TextPart | ThinkingPart,
+) -> None:
+    from linktools.ai.runtime._agent_run_recorder import AgentRunRecorder
+    from linktools.ai.runtime.state._step_archive import StagingAgentRunStore
+
+    staged = StagingAgentRunStore()
+    published: list[tuple[object, ...]] = []
+    first_call = ToolCallPart("work", {}, tool_call_id="first")
+    second_call = ToolCallPart("work", {}, tool_call_id="second")
+
+    async def commit() -> None:
+        transcript = staged.staged_transcript("run")
+        if transcript is not None:
+            assert transcript.pending is None
+            published.append(tuple(transcript.messages[-1].parts))
+
+    async def sink(emission: object) -> None:
+        assert isinstance(emission, DurableBoundary)
+        assert emission.event_type is ExecutionEventType.ASSISTANT_PART_COMPLETED
+        assert emission.payload["part_index"] == 1
+        assert not published
+        assert staged.staged_transcript("run") is None
+
+    recorder = AgentRunRecorder(
+        staged, execution_id="execution", agent_run_id="run", history_boundary=commit,
+    )
+    capability = _event_stream_capability(sink, recorder, 1)
+
+    async def events():  # type: ignore[no-untyped-def]
+        yield PartEndEvent(index=0, part=first_call)
+        assert not published
+        yield PartEndEvent(index=1, part=visible_part)
+        yield PartEndEvent(index=2, part=second_call)
+
+    await capability.handler(None, events())  # type: ignore[arg-type]
+    assert not published
+    await recorder.commit_history_boundary()
+    assert not published
+    recorder.finish_transcript(interrupted=True)
+    await recorder.commit_history_boundary()
+    assert published == [(first_call, visible_part, second_call)]
+    assert recorder.transcript_messages()[-1].state == "interrupted"

@@ -30,7 +30,7 @@ from linktools.ai.runtime.state._contracts import (
     RuntimePayloadRef,
 )
 from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.runtime.state._step_contracts import AgentRunRecord, StepEvent
+from linktools.ai.runtime.state._step_contracts import AgentRunHistoryCapture, AgentRunRecord, StepEvent
 from linktools.ai.storage import StoredPayload
 
 
@@ -70,6 +70,7 @@ class _HistoryStore:
     def __init__(self) -> None:
         self.runs: dict[str, AgentRunRecord] = {}
         self.interactions: dict[str, list[ModelInteractionRecord]] = {}
+        self.before_reads: dict[str, list[ModelInteractionRecord]] = {}
 
     async def get_agent_run(self, *, agent_run_id: str) -> AgentRunRecord | None:
         return self.runs.get(agent_run_id)
@@ -79,7 +80,18 @@ class _HistoryStore:
         return []
 
     async def model_interaction_count(self, *, agent_run_id: str) -> int:
-        return len(self.interactions.get(agent_run_id, ()))
+        return max((value.model_request_seq for value in self.interactions.get(agent_run_id, ())), default=0)
+
+    async def capture_history(self, agent_run_ids, *, include_pending=False):
+        del include_pending
+        result = {}
+        for run_id in agent_run_ids:
+            run = await self.get_agent_run(agent_run_id=run_id)
+            count = await self.model_interaction_count(agent_run_id=run_id)
+            if run is None and count:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result[run_id] = AgentRunHistoryCapture(run, 0, 0, count)
+        return result
 
     async def list_model_interactions(
         self,
@@ -88,6 +100,11 @@ class _HistoryStore:
         after_model_request_seq: int | None = None,
         limit: int | None = None,
     ) -> list[ModelInteractionRecord]:
+        for updated in self.before_reads.pop(agent_run_id, ()):
+            self.interactions[agent_run_id] = [
+                updated if value.model_request_seq == updated.model_request_seq else value
+                for value in self.interactions[agent_run_id]
+            ]
         values = [
             item
             for item in self.interactions.get(agent_run_id, ())
@@ -102,46 +119,6 @@ class _HistoryStore:
     ) -> list[object]:
         del interactions
         raise AssertionError("lightweight queries do not resolve request content")
-
-
-class _StagingStore(_HistoryStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.staged: dict[str, dict[int, StagedModelInteraction]] = {}
-        self.handoff_during_snapshot: dict[str, list[ModelInteractionRecord]] = {}
-
-    async def model_interaction_history_high_water(
-        self,
-        *,
-        agent_run_id: str,
-    ) -> int:
-        archived = await self.list_model_interactions(agent_run_id=agent_run_id)
-        return max(
-            max((item.model_request_seq for item in archived), default=0),
-            max(self.staged.get(agent_run_id, {}), default=0),
-        )
-
-    async def list_model_interaction_history_snapshot(
-        self,
-        *,
-        agent_run_id: str,
-        after_model_request_seq: int,
-        limit: int,
-    ) -> tuple[list[object], list[StagedModelInteraction]]:
-        staged = [
-            item
-            for sequence, item in sorted(self.staged.get(agent_run_id, {}).items())
-            if sequence > after_model_request_seq
-        ][:limit]
-        for interaction in self.handoff_during_snapshot.pop(agent_run_id, ()):
-            self.interactions.setdefault(agent_run_id, []).append(interaction)
-            self.staged.get(agent_run_id, {}).pop(interaction.model_request_seq, None)
-        archived = await self.list_model_interactions(
-            agent_run_id=agent_run_id,
-            after_model_request_seq=after_model_request_seq,
-            limit=limit,
-        )
-        return archived, staged
 
 
 def _record(execution_id: str, *, child: bool = False) -> object:
@@ -223,7 +200,13 @@ def _running_interaction(
     )
 
 
-def _terminal(value: StagedModelInteraction) -> StagedModelInteraction:
+def _running_record(execution_id: str, run_sequence: int, sequence: int, started_at: datetime) -> ModelInteractionRecord:
+    run_id = agent_run_id(namespace="history", tenant_id="tenant", execution_id=execution_id, agent_run_seq=run_sequence)
+    return replace(_interaction(run_id, sequence), status="RUNNING", started_at=started_at,
+                   duration_ns=None, finished_at=None, request_context=None, request_envelope=None)
+
+
+def _terminal(value: ModelInteractionRecord | StagedModelInteraction) -> ModelInteractionRecord | StagedModelInteraction:
     return replace(
         value,
         status="CANCELLED",
@@ -234,10 +217,10 @@ def _terminal(value: StagedModelInteraction) -> StagedModelInteraction:
     )
 
 
-def _reader() -> tuple[StepExecutionHistoryReader, _Executions, _StagingStore]:
+def _reader() -> tuple[StepExecutionHistoryReader, _Executions, _HistoryStore]:
     root = _record("root")
     executions = _Executions(root)
-    store = _StagingStore()
+    store = _HistoryStore()
     conv_id = agent_conversation_id(
         namespace="history",
         tenant_id="tenant",
@@ -255,23 +238,21 @@ def _reader() -> tuple[StepExecutionHistoryReader, _Executions, _StagingStore]:
         agent_id="agent",
         metadata={"agent_run_seq": "1"},
     )
-    store.interactions[run_id] = []
-    store.staged[run_id] = {
-        sequence: _running_interaction(
+    store.interactions[run_id] = [
+        _running_record(
             "root",
             1,
             sequence,
             datetime.now(timezone.utc) + timedelta(milliseconds=sequence),
         )
         for sequence in (1, 2)
-    }
+    ]
     return (
         StepExecutionHistoryReader(
             namespace="history",
             executions=executions,  # type: ignore[arg-type]
             store=store,  # type: ignore[arg-type]
             cursor_signer=HmacCursorSigner("lifecycle", b"lifecycle-key"),
-            staging_store=store,
         ),
         executions,
         store,
@@ -279,10 +260,10 @@ def _reader() -> tuple[StepExecutionHistoryReader, _Executions, _StagingStore]:
 
 
 @pytest.mark.asyncio
-async def test_archive_terminal_wins_when_handoff_follows_staging_snapshot() -> None:
+async def test_terminal_update_after_capture_preserves_request_identity() -> None:
     reader, _executions, store = _reader()
-    run_id = next(iter(store.staged))
-    store.handoff_during_snapshot[run_id] = [_interaction(run_id, 1)]
+    run_id = next(iter(store.interactions))
+    store.before_reads[run_id] = [_interaction(run_id, 1)]
 
     page = await reader.model_interactions(
         "root",
@@ -312,12 +293,11 @@ async def test_pages_refresh_states_without_expanding_captured_identity_set() ->
     ]
     assert first.next_cursor is not None
 
-    root_run_id = next(iter(store.staged))
-    store.staged[root_run_id][1] = _terminal(store.staged[root_run_id][1])
-    store.staged[root_run_id][2] = _terminal(store.staged[root_run_id][2])
-    store.staged[root_run_id][3] = _running_interaction(
-        "root", 1, 3, datetime.now(timezone.utc)
-    )
+    root_run_id = next(iter(store.interactions))
+    store.interactions[root_run_id] = [
+        *(_terminal(value) for value in store.interactions[root_run_id]),
+        _running_record("root", 1, 3, datetime.now(timezone.utc)),
+    ]
     child = _record("child", child=True)
     executions.children.append(child)
     child_conv_id = agent_conversation_id(
@@ -337,10 +317,9 @@ async def test_pages_refresh_states_without_expanding_captured_identity_set() ->
         agent_id="child-agent",
         metadata={"agent_run_seq": "1"},
     )
-    store.interactions[child_run_id] = []
-    store.staged[child_run_id] = {
-        1: _running_interaction("child", 1, 1, datetime.now(timezone.utc))
-    }
+    store.interactions[child_run_id] = [
+        _running_record("child", 1, 1, datetime.now(timezone.utc)),
+    ]
 
     second = await reader.model_interactions(
         "root",
@@ -374,12 +353,11 @@ async def test_pages_refresh_states_without_expanding_captured_identity_set() ->
 @pytest.mark.asyncio
 async def test_explicit_cutoffs_use_the_same_lifecycle_paging_contract() -> None:
     reader, _executions, store = _reader()
-    run_id = next(iter(store.staged))
+    run_id = next(iter(store.interactions))
     store.interactions[run_id] = [
         _interaction(run_id, 1),
         _interaction(run_id, 2),
     ]
-    store.staged[run_id].clear()
 
     assert (
         await reader.model_interactions(

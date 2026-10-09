@@ -3,7 +3,6 @@
 """Runtime-owned tool authorization and durable operation contracts."""
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -45,6 +44,7 @@ from .state._durability import (
 )
 from .state._contracts import (
     ToolOperationRecord,
+    decode_tool_operation_failure,
 )
 
 _logger = environ.get_logger("ai.runtime.tool")
@@ -65,6 +65,9 @@ class ToolOperationDecision:
 
 
 class ToolOperationBridge(Protocol):
+    @property
+    def cancellation_requested(self) -> bool: ...
+
     async def begin(
         self,
         ctx: PydanticRunContext[None],
@@ -106,6 +109,9 @@ class ToolStateRepository(Protocol):
     ) -> "ToolOperationRecord | None": ...
     async def list_by_execution(
         self, execution_id: str, *, tenant_id: str
+    ) -> tuple[ToolOperationRecord, ...]: ...
+    async def get_by_call_ids(
+        self, agent_run_id: str, tool_call_ids: Sequence[str], *, tenant_id: str,
     ) -> tuple[ToolOperationRecord, ...]: ...
     async def reconcile_expired_claim(
         self,
@@ -252,7 +258,7 @@ class _ToolTerminalCommands(Protocol):
         result_payload: "StoredPayload | None" = None,
         error_code: "str | None" = None,
         error_payload: "StoredPayload | None" = None,
-    ) -> ToolOperationRecord: ...
+    ) -> tuple[ToolOperationRecord, bool]: ...
 
     async def commit_tool_deferred(
         self,
@@ -282,6 +288,7 @@ class RuntimeToolOperationBridge:
         payload_policy: PayloadPolicy,
         recovery_agent_run_id: "str | None" = None,
         terminal_commands: "_ToolTerminalCommands | None" = None,
+        producer_generation: int | None = None,
     ) -> None:
         self._repository = repository
         self._recovery_objects = recovery_objects
@@ -295,8 +302,16 @@ class RuntimeToolOperationBridge:
         self._payload_policy = payload_policy
         self._recovery_agent_run_id = recovery_agent_run_id
         self._terminal_commands = terminal_commands
+        self._producer_generation = producer_generation
+        self._cancellation_requested = False
+        if producer_generation is not None and terminal_commands is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
         self._decision_fingerprints: dict[tuple[str, str], tuple[str, str]] = {}
+
+    @property
+    def cancellation_requested(self) -> bool:
+        return self._cancellation_requested
 
     async def begin(
         self,
@@ -355,6 +370,7 @@ class RuntimeToolOperationBridge:
             owner=self._owner,
             lease_seconds=TOOL_OPERATION_LEASE_SECONDS,
             arguments_payload=arguments_payload,
+            producer_generation=self._producer_generation,
         )
         if self._terminal_commands is not None:
             existing = await self._terminal_commands.commit_tool_admission(admission)
@@ -419,7 +435,7 @@ class RuntimeToolOperationBridge:
             )
         if existing.status is ToolOperationStatus.EFFECT_UNKNOWN:
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
-        if existing.status is not ToolOperationStatus.CLAIMED:
+        if existing.status is not ToolOperationStatus.CLAIMED or existing.owner != self._owner:
             raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
         return ToolOperationDecision(
             existing.tool_operation_id, self._owner, existing.fence, replay_safe
@@ -465,13 +481,15 @@ class RuntimeToolOperationBridge:
 
         async def finish() -> ToolOperationRecord:
             if self._terminal_commands is not None:
-                return await self._terminal_commands.commit_tool_terminal(
+                record, cancellation_requested = await self._terminal_commands.commit_tool_terminal(
                     decision.operation_id,
                     tenant_id=self._tenant_id,
                     owner=self._owner,
                     fence=decision.fence,
                     result_payload=payload,
                 )
+                self._cancellation_requested |= cancellation_requested
+                return record
             return await self._repository.complete_payload(
                 decision.operation_id,
                 tenant_id=self._tenant_id,
@@ -496,7 +514,7 @@ class RuntimeToolOperationBridge:
 
         async def finish() -> ToolOperationRecord:
             if self._terminal_commands is not None:
-                return await self._terminal_commands.commit_tool_terminal(
+                record, cancellation_requested = await self._terminal_commands.commit_tool_terminal(
                     decision.operation_id,
                     tenant_id=self._tenant_id,
                     owner=self._owner,
@@ -504,6 +522,8 @@ class RuntimeToolOperationBridge:
                     error_code=code,
                     error_payload=payload,
                 )
+                self._cancellation_requested |= cancellation_requested
+                return record
             return await self._repository.fail_payload(
                 decision.operation_id,
                 tenant_id=self._tenant_id,
@@ -744,39 +764,10 @@ class RuntimeToolOperationBridge:
         self,
         record: ToolOperationRecord,
     ) -> ToolCallRetry | ToolCallFailed:
-        if record.error_payload is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value = await self._payload_json(record.error_payload)
-        if not isinstance(value, dict):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        version = value.get("version")
-        if (
-            not isinstance(version, int)
-            or isinstance(version, bool)
-            or version != 1
-        ):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if set(value) != {"version", "kind", "message"}:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        kind = value.get("kind")
-        message = value.get("message")
-        if not isinstance(kind, str) or not isinstance(message, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if kind == "tool_call_rejected":
-            if record.error_code != ErrorCode.TOOL_RETRY_REQUIRED.value:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                return ToolCallRetry(message)
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if kind == "tool_call_failed":
-            if record.error_code != ErrorCode.TOOL_EXECUTION_FAILED.value:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                return ToolCallFailed(message)
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        message = decode_tool_operation_failure(record.error_code, record.error_payload)
+        if record.error_code == ErrorCode.TOOL_RETRY_REQUIRED.value:
+            return ToolCallRetry(message)
+        return ToolCallFailed(message)
 
     async def _error_payload(
         self,
@@ -927,12 +918,6 @@ class RuntimeToolOperationBridge:
         if payload.ref is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await read_runtime_object(self._recovery_objects, payload.ref)
-
-    async def _payload_json(self, payload: StoredPayload) -> object:
-        try:
-            return json.loads((await self._payload_bytes(payload)).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _run_id(self, ctx: PydanticRunContext[None]) -> str:
         del ctx
