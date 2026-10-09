@@ -434,6 +434,22 @@ def test_initial_migration_without_certificate_switch_keeps_existing_link(certif
     assert os.readlink(str(root / "certs/live")) == "versions/legacy"
 
 
+def test_initial_migration_restores_certificate_state_before_symlink_creation(
+        certificate_case, monkeypatch):
+    container, root, _, _ = certificate_case
+    monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
+    (root / "generated").mkdir()
+    (root / "generated/current").symlink_to("prior")
+    live = root / "certs/live"
+    live.unlink()
+    context = SimpleNamespace(initial_services=("nginx",))
+    container.on_starting(context)
+    assert context.nginx_certificate_previous is None
+    live.symlink_to("versions/pending")
+    container.rollback_config(context)
+    assert not live.is_symlink()
+
+
 def test_preparation_reuses_matching_certificate_without_issuance(certificate_case, monkeypatch):
     container, root, _, _ = certificate_case
     monkeypatch.setattr(container, "get_app_path", lambda *parts: root.joinpath(*parts))
