@@ -494,6 +494,11 @@ class ComposeOperations:
             else:
                 context.generated_candidates.pop(container.name, None)
             context.rollback_service_models = context.service_models.previous
+            if fallback:
+                context.bootstrap_fallback_services = frozenset(
+                    service for service in restore_services
+                    if service in getattr(context, "bootstrapped_services", ())
+                    and service not in context.initial_running_services)
             if old_compose:
                 context.rollback_compose_files = dict(context.compose_files)
                 context.rollback_compose_files.update(old_compose)
@@ -539,6 +544,8 @@ class ComposeOperations:
         finally:
             if hasattr(context, "rollback_compose_files"):
                 del context.rollback_compose_files
+            if hasattr(context, "bootstrap_fallback_services"):
+                del context.bootstrap_fallback_services
             del context.rollback_service_models
             for path, content in old_compose.items():
                 atomic_write_text_if_changed(path, content)
