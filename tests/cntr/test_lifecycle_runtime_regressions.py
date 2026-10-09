@@ -523,6 +523,50 @@ def test_cold_bootstrap_uses_shared_validation_application_and_final_accounting(
     assert ("example" in models) is (failure is None)
 
 
+@pytest.mark.parametrize("failure", ["apply", "readiness"])
+def test_plain_first_start_failure_stops_new_service(tmp_path, failure):
+    app = Container("app", {"app": {"image": "app:new"}}, tmp_path / "app")
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (app,))
+
+    def apply(context, services):
+        runner.apply_service(context, services[0])
+        if failure == "apply":
+            raise ContainerError("plain apply failed")
+
+    runner.apply_services = apply
+
+    def ready(context, service):
+        if failure == "readiness":
+            raise ContainerError("plain readiness failed")
+
+    app.on_service_started = ready
+    with pytest.raises(ContainerError, match="plain " + failure + " failed"):
+        operations.up(["app"])
+    assert [entry for entry in calls if entry[0] in ("up", "stop")] == [
+        next(entry for entry in calls if entry[0] == "up"),
+        ("stop", "app"),
+    ]
+    assert manager.running_state.get_persisted() == []
+    assert not (tmp_path / "compose/applied/services" / "617070.yml").exists()
+
+
+def test_plain_partial_start_failure_preserves_running_sibling(tmp_path):
+    app = Container("app", {"existing": {"image": "app:old"},
+                             "new": {"image": "app:new"}}, tmp_path / "app")
+    current = ServiceRuntimeState(("app",), "existing", "existing-runtime",
+                                  "running", "healthy", "app:old", None, {})
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (app,), (current,))
+    operations.select = lambda *args, **kwargs: ComposeSelection(
+        (app,), (app,), ("new",), False)
+    app.on_service_started = lambda context, service: (_ for _ in ()).throw(
+        ContainerError("new service unhealthy"))
+    with pytest.raises(ContainerError, match="new service unhealthy"):
+        operations.up(["app"])
+    assert ("stop", "new") in calls
+    assert ("stop", "existing") not in calls
+    assert manager.running_state.get_persisted() == ["app"]
+
+
 @pytest.mark.parametrize("rollback_fails", [False, True])
 def test_plain_restart_rollback_records_only_restored_owner(tmp_path, monkeypatch, rollback_fails):
     app = Container("app", {"app": {"image": "app:new"}, "idle": {}}, tmp_path / "app")
