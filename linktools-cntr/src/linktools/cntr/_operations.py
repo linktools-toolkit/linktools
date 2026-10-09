@@ -246,8 +246,17 @@ class ComposeOperations:
         generations = manager.generated_configs
         context.changed_compose_services = set(context.initial_running_services)
         selection = self._reconcile_selection(explicit, context)
-        context.target_containers = list(selection.target_containers)
-        context.target_services = selection.services
+        # Running generated consumers may need new native providers after
+        # their candidates are rendered. Prepare those providers' hooks before
+        # resolving the final Compose model, without adding them to the apply scope.
+        preparation_roots = tuple(container for container in sync
+            if container in explicit.target_containers or
+            (container.name in generations and any(
+                service in context.initial_running_services
+                for service in container.generation_services)))
+        preparation = self.start_selection(selection, dependency_roots=preparation_roots)
+        context.target_containers = list(preparation.target_containers)
+        context.target_services = preparation.services
 
         # Hooks may prepare env_file inputs; capture the authoritative resolved
         # candidate only after startup preparation, and before any target stops.
