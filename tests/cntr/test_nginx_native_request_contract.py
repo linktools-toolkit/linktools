@@ -298,3 +298,124 @@ def test_native_fixture_template_contract_without_native_processes(fresh_manager
     assert "app.test" in server
     assert "sites/native.conf" in root
     assert "http://127.0.0.1:8082" in business
+
+
+
+def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh_manager, tmp_path):
+    binary = os.environ.get("CNTR_TEST_NGINX") or shutil.which("nginx")
+    if not binary or not shutil.which("openssl"):
+        pytest.skip("Native nginx and openssl are required")
+
+    nginx = fresh_manager.containers["nginx"]
+
+    class Backend(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.server.paths.append(self.path)
+            if self.server.kind == "auth":
+                self.send_response(204)
+                self.send_header("Remote-User", "verified")
+                self.end_headers()
+                return
+            payload = json.dumps({
+                "path": self.path, "user": self.headers.get("X-Auth-User"),
+            }).encode()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(payload)
+
+    with contextlib.ExitStack() as stack:
+        def start_backend(kind):
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
+            server.kind = kind
+            server.paths = []
+            stack.callback(server.server_close)
+            stack.callback(server.shutdown)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            return server
+
+        app = start_backend("app")
+        auth = start_backend("auth")
+        http_port, https_port = _port(), _port()
+        config = {
+            "NGINX_HTTP_PORT": http_port, "NGINX_HTTPS_PORT": https_port,
+            "NGINX_ROOT_DOMAIN": "test",
+        }
+        producer = SimpleNamespace(name="shared-native", env_config=config)
+
+        def site(name, auth_enabled):
+            return SimpleNamespace(
+                producer=producer, local_id=name, file_id=name, var_name=name,
+                server_name="app.test", default=False, https=True, waf=False,
+                auth=auth_enabled, auth_bypass=(r"^/admin/free",) if auth_enabled else (),
+                waf_bypass=(), auth_headers={}, vars={},
+            )
+
+        public = site("public", False)
+        admin = site("admin", True)
+        business = []
+        for member, location in ((public, "/public"), (admin, "/admin")):
+            path = tmp_path / (member.local_id + ".j2")
+            path.write_text(
+                '{% from "nginx/headers.j2" import proxy_headers, route_authorization with context %}'
+                'location ' + location + ' { {{ route_authorization() }} {{ proxy_headers() }} '
+                'proxy_pass http://127.0.0.1:' + str(app.server_port) + '; }')
+            business.append(nginx._render_site_template(
+                producer, path, member, route_auth=True))
+        server = nginx._render_site_template(
+            producer, nginx.get_source_path("templates", "server.conf"), public,
+            business="\n".join(business), sites=(public, admin), route_auth=True)
+        server = server.replace("/etc/certs/live/", str(tmp_path) + "/")
+        server = server.replace("http://authelia:9091", "http://127.0.0.1:" + str(auth.server_port))
+
+        root = nginx._render_site_template(
+            producer, nginx.get_source_path("templates", "nginx.conf"),
+            SimpleNamespace(vars={"generation_id": "native", "waf": False,
+                                  "site_files": ("sites/shared.conf",)}))
+        root = root.replace("include /etc/nginx/mime.types;", "")
+        root = root.replace("/var/log/nginx/error.log", str(tmp_path / "error.log"))
+        root = root.replace("/var/log/nginx/access.log", str(tmp_path / "access.log"))
+        root = root.replace("/var/run/nginx.pid", str(tmp_path / "nginx.pid"))
+        root = root.replace("/run/nginx-health.sock", str(tmp_path / "health.sock"))
+        root = root.replace("worker_processes auto", "worker_processes 1")
+        (tmp_path / "sites").mkdir()
+        (tmp_path / "sites/shared.conf").write_text(server)
+        (tmp_path / "nginx.conf").write_text(root)
+        subprocess.check_call([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-subj", "/CN=app.test", "-keyout", str(tmp_path / "test_key.pem"),
+            "-out", str(tmp_path / "test_fullchain.pem"), "-days", "1"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        command = [binary, "-p", str(tmp_path) + "/", "-c", str(tmp_path / "nginx.conf")]
+        check = subprocess.run(command + ["-t"], capture_output=True, text=True)
+        if "Operation not permitted" in check.stderr:
+            pytest.skip("Native nginx listener is unavailable in this environment")
+        assert check.returncode == 0, check.stderr
+        process = subprocess.Popen(command + ["-g", "daemon off; master_process off;"])
+        stack.callback(process.wait, timeout=5)
+        stack.callback(process.terminate)
+        for _ in range(100):
+            try:
+                with socket.create_connection(("127.0.0.1", https_port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            pytest.fail("Native nginx did not start")
+
+        def request(path):
+            connection = http.client.HTTPSConnection(
+                "127.0.0.1", https_port, timeout=3,
+                context=ssl._create_unverified_context())
+            connection.request("GET", path, headers={"Host": "app.test"})
+            response = connection.getresponse()
+            result = response.status, json.loads(response.read())
+            connection.close()
+            return result
+
+        assert request("/public") == (200, {"path": "/public", "user": None})
+        assert request("/admin") == (200, {"path": "/admin", "user": "verified"})
+        assert request("/admin/free") == (200, {"path": "/admin/free", "user": None})
+        assert auth.paths == ["/api/authz/auth-request"]
