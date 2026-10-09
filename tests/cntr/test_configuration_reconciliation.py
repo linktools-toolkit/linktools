@@ -154,6 +154,19 @@ def test_unrelated_running_sidecar_does_not_prepare_owner_config(tmp_path, monke
     assert not any("running" in call[1] for call in calls)
 
 
+def test_changed_running_sidecar_updates_without_native_generation(tmp_path, monkeypatch):
+    operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=("running",))
+    owner = manager.containers["other"]
+    owner.generation_services = ("stopped",)
+    manager.generated_configs = {"other": owner}
+    owner.on_prepare_config = lambda context: pytest.fail("sidecar update must not prepare generated config")
+    owner.render_config = lambda version: pytest.fail("sidecar update must not render generated config")
+    operations.up(["target"])
+    assert ("apply", ("target",)) in calls
+    assert ("apply", ("running",)) in calls
+    assert not any("stopped" in call[1] for call in calls)
+
+
 @pytest.mark.parametrize("changed", [(), ("stopped",), ("running",), ("running", "stopped")])
 def test_partial_up_applies_pending_running_config_without_starting_stopped_sibling(tmp_path, monkeypatch, changed):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed)
