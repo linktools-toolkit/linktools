@@ -305,17 +305,20 @@ dependencies remain authoritative. Only the affected services are restored.
 Normal Compose dependency readiness has no implicit 30-second total deadline;
 nginx config/TLS acknowledgement and explicit deadlines remain independently bounded.
 A `depends_on` entry with `required: false` does not force its unavailable
-provider into startup, image preparation, or rollback readiness.
+provider into startup or image preparation. When that provider is running or
+explicitly selected, the declared readiness condition still applies during
+normal application and rollback.
 A running generated-config consumer such as nginx expands newly required native
 providers when its generated candidate changes; an independent Redis sidecar
 does not inherit its owner's unrelated provider dependencies.
 `restart app` stops only explicit targets, after all final and required bootstrap candidate validation passes.
-Preparation covers running services and their possible runtime dependencies:
-`CHECK`, `on_starting` and `BEFORE_START` may therefore run for other running
-owners before their hook-dependent changes are known. Application uses the final
-changed-service selection, and `on_started`/`AFTER_START` use only that final
-application scope. Snapshots are captured after startup hooks, so hook-prepared
-environment files are included.
+Preparation covers running generated-config consumers and their potential
+native providers: `CHECK`, `on_starting` and `BEFORE_START` run before the
+final Compose model is resolved, even if an eventual candidate is unchanged.
+Application remains limited to the final changed-service selection, and
+`on_started`/`AFTER_START` use only that final application scope. Independent
+sidecars do not expand their owner's native providers. Snapshots are captured
+after startup hooks, so hook-prepared environment files are included.
 The plan reports the full reconciliation scope and defers runtime-dependent
 update decisions until execution.
 
