@@ -426,11 +426,6 @@ class Container(BaseContainer):
                 source = site.template or self.get_source_path("templates", "default.conf")
                 business = self._render_site_template(
                     site.producer, source, site, route_auth=route_auth)
-                if route_auth and site.auth and (
-                        "auth_request /_internal/auth/{};".format(site.var_name) not in business):
-                    raise ContainerError(
-                        "Nginx site {}/{} must configure location authentication on shared hostname {}".format(
-                            site.producer.name, site.local_id, domain))
                 if len(sites) > 1:
                     business = "# site {}/{}\n{}".format(site.producer.name, site.local_id, business)
                 routes.append(business)
