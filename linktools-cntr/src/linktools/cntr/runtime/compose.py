@@ -447,9 +447,18 @@ class ComposeRunner:
         if model is None:
             model = getattr(context, "compose_model", None) or self.final_model(context)
         for dependency, options in service_dependencies(model["services"][service]).items():
-            if options.get("required", True) is False:
-                continue
             condition = options.get("condition", "service_started")
+            if (options.get("required", True) is False and
+                    dependency not in getattr(context, "target_services", ())):
+                state = self.manager.docker_inspector.get_project_state(context.containers)
+                matches = [item for item in state.services if item.service == dependency]
+                available = any(
+                    item.state in ("running", "restarting") or
+                    (condition == "service_completed_successfully" and
+                     item.state == "exited" and item.exit_code == 0)
+                    for item in matches)
+                if not available:
+                    continue
             if condition == "service_healthy":
                 self.wait_service_healthy(context, dependency, timeout=None)
             elif condition == "service_completed_successfully":
