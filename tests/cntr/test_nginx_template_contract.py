@@ -247,15 +247,67 @@ def test_shared_hostname_routes_merge_with_independent_auth_maps(fresh_manager, 
         assert "auth_request_set $auth_status_" + site.var_name in server
 
 
-def test_shared_hostname_rejects_incompatible_security_policies(fresh_manager):
+def test_shared_hostname_preserves_independent_auth_and_bypass(fresh_manager, tmp_path):
     nginx = fresh_manager.containers["nginx"]
-    api = generation_site(nginx, "api", auth=True, https=True,
-                          auth_bypass=(r"^/api/public/",))
-    web = generation_site(nginx, "web", auth=True, https=True,
-                          auth_bypass=(r"^/web/public/",))
+    public_template = tmp_path / "public.conf"
+    protected_template = tmp_path / "protected.conf"
+    public_template.write_text(
+        '{% from "nginx/headers.j2" import proxy_headers with context %}'
+        'location /public { {{ proxy_headers() }} return 204; }')
+    protected_template.write_text(
+        '{% from "nginx/headers.j2" import proxy_headers with context %}'
+        'location /admin { {{ proxy_headers() }} return 204; }')
+    public = generation_site(nginx, "public", template=public_template, auth=False)
+    protected = generation_site(
+        nginx, "protected", template=protected_template, auth=True, https=True,
+        auth_bypass=(r"^/admin/free",))
+    public._declaration.https = True
+    nginx.__dict__["sites"] = {site.identity: site for site in (public, protected)}
+    files = nginx.render_config("generation")
+    shared = files["sites/" + public.file_id + ".conf"]
+    assert len([name for name in files if name.startswith("sites/") and name != "sites/default.conf"]) == 1
+    assert "auth_request /_internal/auth-deny;" in shared
+    assert "auth_request /_internal/auth/" + protected.var_name + ";" in shared
+    assert "location = /_internal/auth/" + protected.var_name in shared
+    assert "auth_request off;" in shared
+    assert "$auth_skip_" + protected.var_name in shared
+    assert "location /public {" in shared and "location /admin {" in shared
+
+
+def test_shared_hostname_fails_closed_when_custom_auth_is_unmarked(fresh_manager, tmp_path):
+    nginx = fresh_manager.containers["nginx"]
+    source = tmp_path / "custom.conf"
+    source.write_text("location /admin { proxy_pass http://app; }")
+    public = generation_site(nginx, "public", https=True, auth=False)
+    protected = generation_site(nginx, "admin", https=True, auth=True, template=source)
+    nginx.__dict__["sites"] = {site.identity: site for site in (public, protected)}
+    with pytest.raises(ContainerError, match="must configure location authentication"):
+        nginx.render_config("generation")
+
+
+def test_shared_hostname_rejects_incompatible_waf_policies(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    api = generation_site(nginx, "api", waf=True, waf_bypass=(r"^/api/public/",))
+    web = generation_site(nginx, "web", waf=True, waf_bypass=(r"^/web/public/",))
     nginx.__dict__["sites"] = {site.identity: site for site in (api, web)}
     with pytest.raises(ContainerError, match="Incompatible nginx routing policies"):
         nginx.render_config("generation")
+
+
+def test_shared_hostname_normalizes_literal_case(fresh_manager, tmp_path):
+    nginx = fresh_manager.containers["nginx"]
+    api_template = tmp_path / "api.conf"
+    web_template = tmp_path / "web.conf"
+    api_template.write_text("location /api { return 204; }")
+    web_template.write_text("location /web { return 204; }")
+    api = generation_site(nginx, "api", server_name="App.Example.Test", template=api_template)
+    web = generation_site(nginx, "web", server_name="app.example.test", template=web_template)
+    nginx.__dict__["sites"] = {site.identity: site for site in (api, web)}
+    files = nginx.render_config("generation")
+    shared = [contents for name, contents in files.items()
+              if name.startswith("sites/") and name != "sites/default.conf"]
+    assert len(shared) == 1
+    assert "location /api {" in shared[0] and "location /web {" in shared[0]
 
 
 def test_duplicate_locations_remain_visible_to_native_validator(fresh_manager):
