@@ -8,7 +8,7 @@ from enum import Enum
 from pathlib import Path
 
 import pytest
-from linktools.ai.core import IdempotencyStatus, OperationStatus
+from linktools.ai.core import BudgetUsage, IdempotencyStatus, OperationStatus, RunBudget, UsageMetrics
 from linktools.ai.evaluation import CaseRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state._codec import (
@@ -270,16 +270,26 @@ def test_golden_step_event_uses_current_event_type_wire() -> None:
 
 
 @pytest.mark.parametrize("persisted", (False, True))
-def test_declared_fixed_defaults_restore_omitted_domain_fields(persisted: bool) -> None:
-    cursor = ConversationCursor("run")
+def test_declared_wire_defaults_restore_omitted_domain_fields(persisted: bool) -> None:
+    head = TranscriptHeadRecord(TranscriptOwnerDomain.CONVERSATION, "history", 2, 1, HistoryQuality.COMPLETE)
     encode = _encode_persisted_domain if persisted else encode_domain
-    payload = encode(cursor)
-    payload["fields"] = {"agent_run_id": "run"}
-    assert _decode_domain(payload, ConversationCursor, _CURRENT_CODEC, persisted=persisted) == cursor
-    payload["fields"]["message_count"] = 7
-    assert _decode_domain(
-        payload, ConversationCursor, _CURRENT_CODEC, persisted=persisted,
-    ).message_count == 7
+    payload = encode(head)
+    del payload["fields"]["pending"]
+    del payload["fields"]["pending_part_count"]
+    assert _decode_domain(payload, TranscriptHeadRecord, _CURRENT_CODEC, persisted=persisted) == head
+
+
+@pytest.mark.parametrize("value,field_name", (
+    (ConversationCursor("run"), "message_count"),
+    (UsageMetrics(input_tokens=19), "input_tokens"),
+    (BudgetUsage("scope", RunBudget(), total_tokens=21), "total_tokens"),
+))
+def test_constructor_defaults_do_not_replace_required_durable_facts(value: object, field_name: str) -> None:
+    payload = _encode_persisted_domain(value)
+    del payload["fields"][field_name]
+    with pytest.raises(AIError) as raised:
+        _decode_domain(payload, type(value), _CURRENT_CODEC, persisted=True)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.parametrize("field_name", (

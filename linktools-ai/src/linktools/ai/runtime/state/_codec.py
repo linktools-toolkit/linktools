@@ -2053,7 +2053,8 @@ def _dataclass_fields(
         field.name: (
             hints.get(field.name, Any),
             field.init,
-            not field.init or field.default is MISSING,
+            not field.init or field.default is MISSING
+            or field.metadata.get("wire_optional") is not True,
         )
         for field in fields(target)
     })
@@ -2107,9 +2108,9 @@ def _decode_dataclass(
         declared = _dataclass_fields(target)
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-    # Fixed constructor defaults retain their declared meaning when omitted.
-    # Factories may generate new identities/timestamps; computed fields carry
-    # integrity evidence. Both must be present in stored data.
+    # Constructor defaults do not make durable facts optional. Only explicit
+    # wire defaults may fill omissions; factories and computed fields remain
+    # required so recovery cannot invent timestamps or integrity evidence.
     _require_required_keys(raw_fields, frozenset(
         name for name, (_type, _init, required) in declared.items() if required
     ))

@@ -430,8 +430,8 @@ class TranscriptHeadRecord:
     message_count: int
     chunk_count: int
     quality: HistoryQuality
-    pending: RuntimePayloadRef | None = None
-    pending_part_count: int = 0
+    pending: RuntimePayloadRef | None = field(default=None, metadata={"wire_optional": True})
+    pending_part_count: int = field(default=0, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
         if self.message_count < 0 or self.chunk_count < 0:
@@ -660,7 +660,7 @@ class StoredAgentRunCheckpoint:
     projection_digest: str
     # Older checkpoints use the owner's authoritative transcript head rather
     # than an explicit per-checkpoint boundary.
-    transcript_message_count: int | None = None
+    transcript_message_count: int | None = field(default=None, metadata={"wire_optional": True})
     has_context_projection: bool = False
     pending_request_index: int | None = None
 
@@ -1020,8 +1020,8 @@ class ExecutionHistoryHeadRecord:
     state: ExecutionHistoryState
     revision: int
     seal_digest: str | None
-    producer_generation: int = 0
-    producer_claim_id: str | None = None
+    producer_generation: int = field(default=0, metadata={"wire_optional": True})
+    producer_claim_id: str | None = field(default=None, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
         if (
@@ -1239,7 +1239,7 @@ class ExecutionTerminalCommit:
     terminal_event_payload: Mapping[str, JsonValue]
     idempotency: IdempotencyTerminalUpdate | None = None
     operation: OperationTerminalUpdate | None = None
-    producer_generation: int | None = None
+    producer_generation: int | None = field(default=None, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
         if self.producer_generation is not None and (
@@ -2100,7 +2100,7 @@ class ToolOperationAdmission:
     owner: str
     lease_seconds: int
     arguments_payload: StoredPayload | None = None
-    producer_generation: int | None = None
+    producer_generation: int | None = field(default=None, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
         if self.producer_generation is not None and (
