@@ -323,7 +323,8 @@ class Container(BaseContainer):
 
     def _render_site_template(self, container: "BaseContainer", source: "PathType",
                         site: "ResolvedSite | SimpleNamespace", business: "str | None" = None,
-                        sites: "Sequence[ResolvedSite] | None" = None) -> str:
+                        sites: "Sequence[ResolvedSite] | None" = None,
+                        route_auth: bool = False) -> str:
         """Render one location template with unambiguous local/nginx namespaces."""
         nginx = self
         source = Path(source).absolute()
@@ -345,6 +346,8 @@ class Container(BaseContainer):
         extra = {} if business is None else {"business": business}
         if sites is not None:
             extra["sites"] = sites
+        if route_auth:
+            extra["route_auth"] = True
         try:
             return environment.get_template(template_name).render(
                 site=site,
@@ -393,13 +396,16 @@ class Container(BaseContainer):
         from collections import OrderedDict
         groups = OrderedDict()
         for site in active:
-            key = (site.producer.get_config("NGINX_HTTP_PORT"), site.server_name)
+            domain = site.server_name
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]", domain):
+                domain = domain.lower()
+            key = (site.producer.get_config("NGINX_HTTP_PORT"), domain)
             groups.setdefault(key, []).append(site)
         for (port, domain), sites in groups.items():
             leader = sites[0]
             def routing_policy(site):
                 return (
-                    site.https, site.waf, site.auth, site.waf_bypass, site.auth_bypass,
+                    site.https, site.waf, site.waf_bypass,
                     site.producer.get_config("NGINX_HTTPS_PORT") if site.https else None,
                     site.producer.get_config("NGINX_WAF_PORT") if site.waf else None,
                 )
@@ -410,17 +416,26 @@ class Container(BaseContainer):
                         "Incompatible nginx routing policies on {}:{} for {}/{} and {}/{}".format(
                             domain, port, leader.producer.name, leader.local_id,
                             site.producer.name, site.local_id))
+            route_auth = len(sites) > 1 and any(
+                (member.auth, member.auth_bypass) != (leader.auth, leader.auth_bypass)
+                for member in sites[1:])
             leader = next((site for site in sites if site.default), leader)
             routes = []
             for site in sites:
                 source = site.template or self.get_source_path("templates", "default.conf")
-                business = self._render_site_template(site.producer, source, site)
+                business = self._render_site_template(
+                    site.producer, source, site, route_auth=route_auth)
+                if route_auth and site.auth and (
+                        "auth_request /_internal/auth/{};".format(site.var_name) not in business):
+                    raise ContainerError(
+                        "Nginx site {}/{} must configure location authentication on shared hostname {}".format(
+                            site.producer.name, site.local_id, domain))
                 if len(sites) > 1:
                     business = "# site {}/{}\n{}".format(site.producer.name, site.local_id, business)
                 routes.append(business)
             result["sites/" + leader.file_id + ".conf"] = self._render_site_template(
                 leader.producer, self.get_source_path("templates", "server.conf"),
-                leader, business="\n".join(routes), sites=sites)
+                leader, business="\n".join(routes), sites=sites, route_auth=route_auth)
         return result, any(site.waf for site in active)
 
     def render_config(self, generation_id: str) -> "dict[str, str]":
