@@ -215,6 +215,7 @@ class ComposeOperations:
         context.original_applied_compose = {}
         context.applied_compose = {}
         context.applied_generation_services = {}
+        context.locally_restored_services = set()
         context.bootstrapped_services = set()
         context.compose_files = {}
         context.compose_owners = {}
@@ -321,8 +322,16 @@ class ComposeOperations:
                     with record_phase(context, "prepare-config", container=container.name, logger=manager.logger):
                         owner.on_prepare_config(context)
                         candidates[container.name] = GeneratedCandidate(container, owner.render_config)
-                selection = self._reconcile_selection(explicit, context,
-                    {name for name, candidate in candidates.items() if candidate.changed})
+                changed = {name for name, candidate in candidates.items() if candidate.changed}
+                for name, candidate in candidates.items():
+                    if name in changed:
+                        continue
+                    owner = generations[name]
+                    if any(service in context.initial_running_services and
+                           not owner.is_generation_current(context, service, candidate)
+                           for service in owner.generation_services):
+                        changed.add(name)
+                selection = self._reconcile_selection(explicit, context, changed)
             final_services = set(selection.services)
             additional = final_services - required_services
             if additional:
@@ -382,11 +391,7 @@ class ComposeOperations:
                     with record_phase(context, "bootstrap", container=container.name, logger=manager.logger):
                         final_candidate = candidates[container.name]
                         bootstrap = bootstrap_candidates[container.name]
-                        try:
-                            self._publish_candidate(container, bootstrap, context, services, record_applied=False)
-                        except Exception:
-                            pending_restart.difference_update(services)
-                            raise
+                        self._publish_candidate(container, bootstrap, context, services, record_applied=False)
                         context.generated_candidates[container.name] = final_candidate
                         running_services.update(services)
                         bootstrap_available.update(services)
@@ -400,8 +405,8 @@ class ComposeOperations:
                     sync, selection.services, context.compose_model, bootstrap_available,
                     dependency_roots=selection.native_roots)
                 for service in services:
+                    context.applying_service = service
                     container = owners[service]
-                    pending_restart.discard(service)
                     candidate = candidates.get(container.name)
                     if candidate is not None:
                         with record_phase(context, "publish-config", container=container.name, logger=manager.logger):
@@ -412,6 +417,8 @@ class ComposeOperations:
                     state_context = self._make_context(context.commands, ComposeSelection(
                         selection.project_containers, (container,), (service,), False))
                     manager.running_state.mark_started(state_context)
+                    pending_restart.discard(service)
+                    context.applying_service = None
                 for container in sync:
                     if container.name in candidates and not any(name in required_services for name in container.services):
                         self._publish_candidate(container, candidates[container.name], context, ())
@@ -427,9 +434,24 @@ class ComposeOperations:
                         pending_restart.intersection_update(
                             service for service in pending_restart
                             if still_running[service] < originally_running[service])
+                        # A failed stop may have changed actual state even when
+                        # no complete Compose stop was acknowledged.
+                        stopped_owners = tuple(container for container in explicit.target_containers
+                                               if container.name in context.initial_running and
+                                               not any(container.name in item.logical_containers and
+                                                       item.state in ("running", "restarting")
+                                                       for item in observed.services))
+                        if stopped_owners:
+                            status = self._make_context(context.commands, ComposeSelection(
+                                selection.project_containers, stopped_owners, (), False))
+                            manager.running_state.mark_stopped(status)
                     except Exception as inspection_error:
                         raise ContainerError("Restart failed: {}; recovery inspection failed: {}".format(
                             error, inspection_error)) from error
+                failed = getattr(context, "applying_service", None)
+                if stopped and failed in context.initial_running_services:
+                    pending_restart.add(failed)
+                pending_restart.difference_update(context.locally_restored_services)
                 if (stopped or stop_attempted) and pending_restart:
                     from copy import copy
                     try:
@@ -471,12 +493,27 @@ class ComposeOperations:
             pass
         if report:
             render_report(manager.logger, get_records(context))
-        for candidate in candidates.values():
+        if candidates:
             try:
-                candidate.prune()
-            except (OSError, ContainerError) as exc:
-                manager.logger.warning("Unable to prune generated configuration for %s: %s",
-                                       candidate.container.name, exc)
+                observed = manager.docker_inspector.get_project_state(sync)
+            except ContainerError as exc:
+                manager.logger.warning("Generated configuration cleanup skipped: %s", exc)
+            else:
+                running = {service.service for service in observed.services
+                           if service.state in ("running", "restarting")}
+                for candidate in candidates.values():
+                    owner = candidate.container
+                    try:
+                        if any(service in running and
+                               not owner.is_generation_current(context, service, candidate)
+                               for service in owner.generation_services):
+                            manager.logger.warning("Cannot prune unconfirmed generated configuration for %s",
+                                                   owner.name)
+                            continue
+                        candidate.prune()
+                    except (OSError, ContainerError) as exc:
+                        manager.logger.warning("Unable to prune generated configuration for %s: %s",
+                                               owner.name, exc)
 
     def _record_applied_compose(self, container, context, services) -> None:
         import os
@@ -572,6 +609,8 @@ class ComposeOperations:
                     restored_context.target_containers = [container]
                     restored_context.is_full_containers = False
                     self.manager.running_state.mark_started(restored_context)
+                    if hasattr(context, "locally_restored_services"):
+                        context.locally_restored_services.update(running)
                 except Exception as rollback_error:
                     raise ContainerError("{} apply failed: {}; Compose rollback failed: {}".format(
                         container.name, error, rollback_error)) from error
@@ -597,6 +636,7 @@ class ComposeOperations:
             if service not in context.service_models.previous and service not in saved_services:
                 raise ContainerError(
                     "Cannot replace running service {} without a previous Compose model".format(service))
+        self.manager.compose_runner.saved_service_models(context, running)
 
     def _publish_candidate(self, container, candidate, context, services, record_applied=True) -> None:
         self._require_rollback_model(container, context, services)
@@ -673,6 +713,8 @@ class ComposeOperations:
                 restored_context.target_containers = [container]
                 restored_context.is_full_containers = False
                 self.manager.running_state.mark_started(restored_context)
+                if hasattr(context, "locally_restored_services"):
+                    context.locally_restored_services.update(restore_services)
             elif stop_services and not any(
                     service in context.initial_running_services for service in container.services):
                 stopped_context = copy(context)

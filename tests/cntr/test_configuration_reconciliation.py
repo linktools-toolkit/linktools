@@ -62,7 +62,8 @@ def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped"), sideca
         wait_service_healthy=lambda context, service: None,
     )
     manager = SimpleNamespace(
-        project_name="test", data_path=tmp_path, logger=None,
+        project_name="test", data_path=tmp_path,
+        logger=SimpleNamespace(warning=lambda *args: None, error=lambda *args: None),
         containers={c.name: c for c in containers}, integration_snapshot={c.name: () for c in containers},
         generated_configs={}, compose_runner=runner,
         environ=SimpleNamespace(locks=SimpleNamespace(process_lock=lambda key: nullcontext())),
@@ -103,6 +104,7 @@ def test_running_generated_owner_sync_does_not_build_stopped_sibling(tmp_path, m
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
     owner = manager.containers["other"]
     manager.generated_configs = {"other": owner}
+    owner.is_generation_current = lambda context, service, candidate: True
     validated = []
     owner.on_prepare_config = lambda context: validated.append("prepare")
     owner.validate_config = lambda context, candidate: validated.append("validate")
@@ -129,6 +131,7 @@ def test_changed_running_generation_prepares_its_image_only_after_change(tmp_pat
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
     owner = manager.containers["other"]
     manager.generated_configs = {"other": owner}
+    owner.is_generation_current = lambda context, service, candidate: True
     owner.on_prepare_config = lambda context: None
     owner.validate_config = lambda context, candidate: None
     owner.apply_config = lambda context, candidate, services: calls.append(("apply", tuple(services)))

@@ -74,7 +74,8 @@ def manager_at(root, containers, states=(), model=None):
             assert resolved["services"][args[-1]]["image"] == original
         return SimpleNamespace(check_call=lambda: 0, model=resolved)
 
-    manager = SimpleNamespace(project_name="test", data_path=root, logger=None,
+    manager = SimpleNamespace(project_name="test", data_path=root,
+        logger=SimpleNamespace(warning=lambda *args: None, error=lambda *args: None),
         containers={c.name: c for c in containers}, integration_snapshot={c.name: () for c in containers},
         generated_configs={}, iter_integrations=lambda consumer: iter(()),
         environ=SimpleNamespace(locks=SimpleNamespace(process_lock=lambda key: nullcontext())),
@@ -866,3 +867,110 @@ def test_partial_stop_restores_service_when_only_one_replica_was_stopped(tmp_pat
     assert restored == [old]
     assert all(state.state == "running" for state in actual)
     assert manager.running_state.get_persisted() == ["app"]
+
+
+def test_restart_uses_old_dependency_order_after_new_apply_rejected(tmp_path):
+    a = Container("a", {"a": {"image": "a:new"}}, tmp_path / "a")
+    b = Container("b", {"b": {"image": "b:new"}}, tmp_path / "b")
+    old = {"services": {
+        "a": {"image": "a:old", "depends_on": {
+            "b": {"condition": "service_healthy"}}},
+        "b": {"image": "b:old", "healthcheck": {"test": ["CMD", "true"]}}}}
+    states = [
+        ServiceRuntimeState((name,), name, name, "running",
+                            "healthy" if name == "b" else None, "old", None, {})
+        for name in ("a", "b")]
+    operations, manager, runner, calls, restored = manager_at(
+        tmp_path, (a, b), tuple(states))
+    AppliedServiceModels(manager, old).record(("a", "b"))
+    actual = [replace(state, image_id="sha256:" + state.service) for state in states]
+    manager.docker_inspector.get_project_state = lambda containers: ProjectRuntimeState(
+        "test", tuple(actual), "docker")
+    stop = runner.stop
+
+    def stop_targets(context, services):
+        result = stop(context, services)
+        for index, item in enumerate(actual):
+            if item.service in services:
+                actual[index] = replace(item, state="exited", exit_code=0)
+        return result
+
+    runner.stop = stop_targets
+    runner.apply_services = lambda context, services: (_ for _ in ()).throw(
+        ContainerError("new a rejected"))
+    apply_saved = runner.apply_saved_services
+
+    def restore(context, services, files):
+        result = apply_saved(context, services, files)
+        for index, item in enumerate(actual):
+            if item.service in services:
+                actual[index] = replace(item, state="running",
+                    health="healthy" if item.service == "b" else None, exit_code=None)
+        return result
+
+    runner.apply_saved_services = restore
+    with pytest.raises(ContainerError, match="new a rejected"):
+        operations.restart()
+    assert [item.service for item in actual if item.state == "running"] == ["a", "b"]
+    assert restored == [AppliedServiceModels(manager, old).previous[name] for name in ("b", "a")]
+    assert manager.running_state.get_persisted() == ["a", "b"]
+
+
+def test_first_migration_restores_legacy_target_without_unrelated_corrupt_file(tmp_path):
+    app = Container("app", {"app": {"image": "app:new"}}, tmp_path / "app")
+    stopped = Container("stopped", {"stopped": {"image": "stopped:new"}}, tmp_path / "stopped")
+    state = ServiceRuntimeState(("app",), "app", "app", "running",
+                                None, "app:old", None, {})
+    operations, manager, runner, calls, restored = manager_at(
+        tmp_path, (app, stopped), (state,))
+    operations.select = lambda *args, **kwargs: ComposeSelection(
+        (app, stopped), (app,), ("app",), False)
+    root = tmp_path / "compose"
+    root.mkdir(parents=True)
+    (root / "app.yml").write_text("services:\n  app:\n    image: app:old\n")
+    (root / "stopped.yml").write_text("services: [invalid")
+    runner.apply_services = lambda context, services: (_ for _ in ()).throw(
+        ContainerError("new app rejected"))
+
+    with pytest.raises(ContainerError, match="new app rejected"):
+        operations.restart(["app"])
+    assert restored and "app:old" in restored[0]
+    assert not any("stopped" in content for content in restored)
+    assert manager.running_state.get_persisted() == ["app"]
+
+
+def test_first_migration_invalid_required_old_file_fails_before_stop(tmp_path):
+    app = Container("app", {"app": {"image": "app:new"}}, tmp_path / "app")
+    state = ServiceRuntimeState(("app",), "app", "app", "running",
+                                None, "app:old", None, {})
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (app,), (state,))
+    root = tmp_path / "compose"
+    root.mkdir(parents=True)
+    (root / "app.yml").write_text("services: [invalid")
+    with pytest.raises(Exception):
+        operations.restart(["app"])
+    assert not any(item[0] == "stop" for item in calls)
+    assert manager.running_state.get_persisted() == ["app"]
+
+
+def test_partial_stop_failed_recovery_records_actual_stopped_state(tmp_path):
+    app = Container("app", {"app": {"image": "app:new"}}, tmp_path / "app")
+    state = ServiceRuntimeState(("app",), "app", "app", "running",
+                                None, "app:old", None, {})
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (app,), (state,))
+    AppliedServiceModels(manager, runner.final_model(None)).record(("app",))
+    actual = [replace(state, image_id="sha256:app")]
+    manager.docker_inspector.get_project_state = lambda owners: ProjectRuntimeState(
+        "test", tuple(actual), "docker")
+
+    def fail_stop(context, services):
+        actual[0] = replace(actual[0], state="exited", exit_code=0)
+        raise ContainerError("partial stop failed")
+
+    runner.stop = fail_stop
+    runner.apply_saved_services = lambda *args: (_ for _ in ()).throw(
+        ContainerError("old image rejected"))
+    with pytest.raises(ContainerError, match="partial stop failed.*recovery failed"):
+        operations.restart()
+    assert actual[0].state == "exited"
+    assert manager.running_state.get_persisted() == []

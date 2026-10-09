@@ -163,3 +163,31 @@ def test_yaml_alias_identity_does_not_affect_normalization(manager):
     AppliedServiceModels(manager, model).record(("app", "worker"))
     model["services"]["app"]["labels"] = copy.deepcopy(values)
     assert not AppliedServiceModels(manager, model).changed_services
+
+
+def test_unreferenced_named_volume_does_not_recreate_other_services(manager):
+    model = _model()
+    model["services"]["app"]["volumes"] = [
+        {"type": "volume", "source": "appdata", "target": "/data"}]
+    model["volumes"] = {"appdata": {"name": "appdata-v1"}}
+    AppliedServiceModels(manager, model).record(("app", "worker"))
+
+    updated = copy.deepcopy(model)
+    updated["volumes"]["appdata"]["name"] = "appdata-v2"
+    assert AppliedServiceModels(manager, updated).changed_services == frozenset({"app"})
+
+    updated["networks"]["default"]["driver"] = "overlay"
+    assert AppliedServiceModels(manager, updated).changed_services == frozenset({"app", "worker"})
+
+
+def test_secrets_and_configs_affect_only_referencing_service(manager):
+    model = _model()
+    model["secrets"] = {"token": {"file": "/host/token-v1"}}
+    model["configs"] = {"rules": {"file": "/host/rules-v1"}}
+    model["services"]["app"]["secrets"] = [{"source": "token", "target": "api_token"}]
+    model["services"]["app"]["configs"] = [{"source": "rules", "target": "/etc/rules"}]
+    AppliedServiceModels(manager, model).record(("app", "worker"))
+    changed = copy.deepcopy(model)
+    changed["secrets"]["token"]["file"] = "/host/token-v2"
+    changed["configs"]["rules"]["file"] = "/host/rules-v2"
+    assert AppliedServiceModels(manager, changed).changed_services == frozenset({"app"})

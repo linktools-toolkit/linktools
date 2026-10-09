@@ -259,6 +259,18 @@ class BaseContainer(metaclass=AbstractMetaClass):
         """Return the Compose generation marker for this native service."""
         return generation_id if self.generates_config and service == self.name else None
 
+    def is_generation_current(self, context: "EventContext", service: str,
+                              candidate: "GeneratedCandidate") -> bool:
+        """Confirm that the running service actually uses this generation."""
+        marker = self.generation_label(service, candidate.generation_id)
+        if marker is None:
+            return False
+        state = self.manager.docker_inspector.get_project_state(context.containers)
+        matches = [item for item in state.services if item.service == service]
+        return bool(matches and all(
+            item.state == "running" and
+            item.labels.get("io.linktools.cntr.generation") == marker for item in matches))
+
     def render_bootstrap(self, generation_id: str) -> "dict[str, str]":
         """Render an intermediate configuration that can establish readiness."""
         raise NotImplementedError

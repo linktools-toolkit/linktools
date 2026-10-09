@@ -307,7 +307,9 @@ nginx config/TLS acknowledgement and explicit deadlines remain independently bou
 A `depends_on` entry with `required: false` does not force its unavailable
 provider into startup or image preparation. When that provider is running or
 explicitly selected, the declared readiness condition still applies during
-normal application and rollback.
+normal application and rollback. Starting dependencies continue to be observed;
+known unhealthy or failed optional dependencies log a warning and do not block.
+Inspection failures and required dependency failures remain errors.
 A running generated-config consumer such as nginx expands newly required native
 providers when its generated candidate changes; an independent Redis sidecar
 does not inherit its owner's unrelated provider dependencies.
@@ -316,10 +318,14 @@ For batched restarts, an application or post-stop hook failure restores any
 previously running explicit targets that were stopped but have not yet completed
 their application. If Compose stop reports an error, actual runtime state
 determines which targets were stopped before the failure; still-running targets
-are not replaced. The failed application follows its own rollback path;
-previously confirmed applications are not silently reverted. Recovery uses the
-original image IDs, saved models and dependency order. A failure during runtime
-inspection or restoration reports both the operation error and the recovery error.
+are not replaced. The failed application attempts its own rollback; if that fails, the failed
+service rejoins the still-pending restore set. The old dependency graph orders
+the combined recovery so an old provider is restored before its dependent.
+Previously confirmed independent applications are not silently reverted.
+The observed partial stop state updates the running-state cache, while still
+running sibling services or replicas preserve the owner's running marker.
+Recovery uses original image IDs and saved models. A failure during runtime
+inspection or restoration reports both the operation error and recovery error.
 Startup callbacks for selected owners follow the dependency-ordered service
 scope, including native runtime providers.
 Preparation covers running generated-config consumers and their potential
@@ -468,16 +474,28 @@ Site protocol's separate `exposes` and `config_sources` properties. Migrate both
 repositories together; there is no fallback alias.
 
 Generated configuration uses a stable mounted parent, immutable generation
-folders and an atomic `current` link. Final candidates are rendered and validated
-before restart stops a target. nginx loads bootstrap health/rejection config
+folders and an atomic `current` link. A published symlink is not proof that
+the running service acknowledged the generation: existing running consumers are
+checked against their actual runtime version and reconciled if out of sync.
+Native nginx checks its existing generation health endpoint; ordinary generated
+services check their runtime generation marker. Final candidates are rendered
+and validated before restart stops a target. nginx loads bootstrap health/rejection config
 when starting without a serving process; authentication/WAF providers become
 ready before the complete nginx config is activated. nginx health returns the
 loaded generation ID, and failed application restores the previous generation.
-After the entire operation succeeds, generated-config cleanup retains the active
-generation and the preceding generation known to that operation, deleting older
-and abandoned version directories plus their artifact index entries. Failed
+After the entire operation succeeds, generated-config cleanup first verifies
+the running consumers; it retains unconfirmed generations instead of deleting
+directories that a running service might still use. Confirmed cleanup retains
+the active generation and the preceding generation known to that operation,
+deleting older and abandoned version directories plus their artifact index entries. Failed
 operations keep their staged files for diagnosis; a later successful operation
 can discard them. This cleanup never touches certificate or ACME account storage.
+Legacy restore inputs are resolved and checked before stopping a previously
+running service, using only its old Compose files and their actual dependencies
+and shared resources. An unrelated stopped owner's damaged configuration does
+not block recovery. Per-service comparisons project only the service's
+referenced networks, volumes, secrets and configs; saved restore snapshots
+still contain the complete old project.
 Cross-service state is not an atomic transaction; failures remain command errors.
 
 nginx issues and installs its initial certificates while building the image, using

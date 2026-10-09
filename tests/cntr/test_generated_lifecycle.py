@@ -738,3 +738,96 @@ def test_next_successful_generation_prunes_abandoned_validation_candidate(tmp_pa
     assert os.path.isdir(first.path) and os.path.isdir(current.path)
     assert not any(key.startswith(os.path.relpath(abandoned.path, str(manager.data_path)) + os.sep)
                    for key in manager.artifact_index.load())
+
+
+def test_default_generation_confirmation_checks_actual_runtime_marker(tmp_path):
+    owner = _Generated(tmp_path / "generated")
+    candidate = GeneratedCandidate(owner, owner.render_config)
+    runtime = [SimpleNamespace(service="test", state="running",
+                               labels={"io.linktools.cntr.generation": candidate.generation_id})]
+    owner.manager.docker_inspector = SimpleNamespace(
+        get_project_state=lambda containers: SimpleNamespace(services=tuple(runtime)))
+    context = SimpleNamespace(containers=(owner,))
+    assert owner.is_generation_current(context, "test", candidate)
+    runtime[0].labels["io.linktools.cntr.generation"] = "prior"
+    assert not owner.is_generation_current(context, "test", candidate)
+
+
+def test_nginx_uses_existing_health_generation_probe_without_recreate():
+    from _harness import builtin_container_type
+    nginx = object.__new__(builtin_container_type("100-nginx"))
+    responses = [SimpleNamespace(succeeded=True, stdout="expected"),
+                 SimpleNamespace(succeeded=True, stdout="older")]
+    calls = []
+    nginx.manager = SimpleNamespace(compose_runner=SimpleNamespace(
+        exec_service=lambda context, service, args, **kwargs:
+            calls.append((service, args)) or responses.pop(0)))
+    candidate = SimpleNamespace(generation_id="expected")
+    assert nginx.is_generation_current(SimpleNamespace(), "nginx", candidate)
+    assert not nginx.is_generation_current(SimpleNamespace(), "nginx", candidate)
+    assert all(call[0] == "nginx" and "/run/nginx-health.sock" in call[1]
+               for call in calls)
+
+
+def test_reconcile_published_but_unacknowledged_generation(tmp_path):
+    from dataclasses import replace
+    from test_lifecycle_runtime_regressions import Container, manager_at
+    from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
+
+    class Owner(Container):
+        generates_config = True
+
+        def render_config(self, generation_id):
+            return {"config": self.content, "health": generation_id}
+
+        def on_prepare_config(self, context):
+            pass
+
+        def validate_config(self, context, candidate):
+            pass
+
+        def apply_config(self, context, candidate, services):
+            self.manager.compose_runner.apply_services(context, tuple(services))
+
+    app = Container("app", {"app": {"image": "app:target"}}, tmp_path / "app")
+    native = Owner("g", {"g": {"image": "g:target"}}, tmp_path / "g")
+    native.content = "old"
+    runtime = [ServiceRuntimeState(("g",), "g", "g-runtime", "running",
+                                   None, "g:target", None, {}, image_id="sha256:g")]
+    operations, manager, runner, calls, _ = manager_at(tmp_path, (app, native), tuple(runtime))
+    manager.generated_configs["g"] = native
+    manager.artifact_index = ArtifactIndex(manager)
+    AppliedServiceModels(manager, runner.final_model(None)).record(("app", "g"))
+
+    old = GeneratedCandidate(native, native.render_config)
+    old.publish()
+    runtime[0] = replace(runtime[0], labels={"io.linktools.cntr.generation": old.generation_id})
+    native.content = "new"
+    candidate = GeneratedCandidate(native, native.render_config)
+    candidate.publish()
+    manager.docker_inspector.get_project_state = lambda containers: ProjectRuntimeState(
+        "test", tuple(runtime), "docker")
+    command = manager.runtime.create_docker_compose_process
+
+    def process(containers, *args, **kwargs):
+        original = command(containers, *args, **kwargs)
+
+        def invoke():
+            result = original.check_call()
+            if "up" in args and args[-1] == "g":
+                runtime[0] = replace(runtime[0], labels={
+                    "io.linktools.cntr.generation": candidate.generation_id})
+            return result
+        return SimpleNamespace(check_call=invoke)
+
+    manager.runtime.create_docker_compose_process = process
+    operations.select = lambda *args, **kwargs: ComposeSelection(
+        (app, native), (app,), ("app",), False)
+    operations.up(["app"])
+    assert runtime[0].labels["io.linktools.cntr.generation"] == candidate.generation_id
+    assert any("up" in command and command[-1] == "g" for command in calls)
+    assert not os.path.isdir(old.path)
+
+    count = sum("up" in command and command[-1] == "g" for command in calls)
+    operations.up(["app"])
+    assert sum("up" in command and command[-1] == "g" for command in calls) == count

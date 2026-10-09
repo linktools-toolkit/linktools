@@ -368,8 +368,24 @@ class AppliedServiceModels:
 
     @classmethod
     def _projection(cls, model: dict, service: str) -> str:
-        shared = {key: value for key, value in model.items() if key != "services"}
-        return cls._normalize(dict(shared, services={service: model["services"][service]}))
+        spec = model["services"][service]
+        shared = {key: value for key, value in model.items()
+                  if key not in ("services", "networks", "volumes", "secrets", "configs")}
+        for category in ("networks", "volumes", "secrets", "configs"):
+            definitions = model.get(category, {})
+            if category == "networks":
+                if spec.get("network_mode") or spec.get("networks") == []:
+                    names = ()
+                else:
+                    names = spec.get("networks") or ("default",)
+            elif category == "volumes":
+                names = (item.get("source") for item in spec.get("volumes", ())
+                         if isinstance(item, dict) and item.get("type") == "volume")
+            else:
+                names = (item if isinstance(item, str) else item.get("source")
+                         for item in spec.get(category, ()))
+            shared[category] = {name: definitions[name] for name in names if name in definitions}
+        return cls._normalize(dict(shared, services={service: spec}))
 
     @classmethod
     def _normalize(cls, model: dict) -> str:

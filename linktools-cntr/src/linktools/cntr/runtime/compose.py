@@ -458,22 +458,36 @@ class ComposeRunner:
                      item.state == "exited" and item.exit_code == 0)
                     for item in matches)
                 if not available:
+                    self.manager.logger.warning("Optional Compose dependency %s is unavailable", dependency)
                     continue
-            if condition == "service_healthy":
-                self.wait_service_healthy(context, dependency, timeout=None)
-            elif condition == "service_completed_successfully":
-                self.wait_service_completed(context, dependency, timeout=None)
-            elif condition == "service_started":
-                # Normal application already acknowledged each ordered `up`.
-                # Rollback does not start dependencies outside its restore set.
-                if restored:
-                    state = self.manager.docker_inspector.get_project_state(context.containers)
-                    matches = [item for item in state.services if item.service == dependency]
-                    if not matches or any(not (item.state == "running" or
-                            (item.state == "exited" and item.exit_code == 0)) for item in matches):
-                        raise ContainerError("Dependency service {} is unavailable".format(dependency))
-            else:
+            if condition not in ("service_healthy", "service_completed_successfully", "service_started"):
                 raise ContainerError("Unsupported Compose dependency condition: " + str(condition))
+            try:
+                if condition == "service_healthy":
+                    self.wait_service_healthy(context, dependency, timeout=None)
+                elif condition == "service_completed_successfully":
+                    self.wait_service_completed(context, dependency, timeout=None)
+                elif condition == "service_started":
+                    # Normal application already acknowledged each ordered `up`.
+                    # Rollback does not start dependencies outside its restore set.
+                    if restored:
+                        state = self.manager.docker_inspector.get_project_state(context.containers)
+                        matches = [item for item in state.services if item.service == dependency]
+                        if not matches or any(not (item.state == "running" or
+                                (item.state == "exited" and item.exit_code == 0)) for item in matches):
+                            raise ContainerError("Dependency service {} is unavailable".format(dependency))
+            except ContainerError:
+                if options.get("required", True) is False:
+                    observed = self.manager.docker_inspector.get_project_state(context.containers)
+                    matches = [item for item in observed.services if item.service == dependency]
+                    unavailable = not matches or any(
+                        item.state not in ("running", "restarting") or
+                        (condition == "service_healthy" and item.health in (None, "unhealthy"))
+                        for item in matches)
+                    if unavailable:
+                        self.manager.logger.warning("Optional Compose dependency %s is not ready", dependency)
+                        continue
+                raise
 
     def wait_service_completed(self, context: "EventContext", service: str,
                                timeout: "int | None" = 30) -> None:
@@ -527,6 +541,79 @@ class ComposeRunner:
         return order_services(context.containers, tuple(specifications),
                               {"services": graph}, dependency_roots=())
 
+    def _legacy_rollback_files(self, context: "EventContext",
+                               services: "Sequence[str]") -> "list[str]":
+        """Keep only old Compose files needed by these services and their references."""
+        import yaml
+        from ..errors import ContainerError
+
+        owners = {service: owner.name for owner in context.containers for service in owner.services}
+        included = set()
+        checked = set()
+        queue = list(services)
+        models = {}
+        while queue:
+            name = queue.pop()
+            if name in checked:
+                continue
+            checked.add(name)
+            owner = owners.get(name)
+            files = [path for path in context.saved_compose
+                     if context.compose_owners[path] == owner]
+            if not files:
+                raise ContainerError("No previous Compose file for service " + name)
+            for path in files:
+                if path not in models:
+                    try:
+                        data = yaml.safe_load(context.saved_compose[path]) or {}
+                    except yaml.YAMLError:
+                        raise ContainerError("Invalid previous Compose file for service " + name) from None
+                    if not isinstance(data, dict) or not isinstance(data.get("services", {}), dict):
+                        raise ContainerError("Invalid previous Compose model for service " + name)
+                    models[path] = data
+                included.add(path)
+            spec = next((models[path].get("services", {})[name] for path in files
+                         if name in models[path].get("services", {})), None)
+            if not isinstance(spec, dict):
+                raise ContainerError("Missing previous Compose service " + name)
+            queue.extend(service_dependencies(spec))
+
+        # Shared resources can be defined by another owner, independently of
+        # its services. Include those declarations only when referenced.
+        needed = {key: set() for key in ("networks", "volumes", "secrets", "configs")}
+        for path in included:
+            for name, spec in models[path].get("services", {}).items():
+                if name not in checked or not isinstance(spec, dict):
+                    continue
+                networks = spec.get("networks")
+                if networks:
+                    needed["networks"].update(networks)
+                for mount in spec.get("volumes", ()):
+                    if isinstance(mount, dict) and mount.get("type") == "volume":
+                        needed["volumes"].add(mount.get("source"))
+                for category in ("secrets", "configs"):
+                    needed[category].update(item if isinstance(item, str) else item.get("source")
+                                            for item in spec.get(category, ()))
+        for category, names in needed.items():
+            defined = set().union(*(models[path].get(category, {}) for path in included))
+            missing = names - defined
+            for path, content in context.saved_compose.items():
+                if path in included or not missing:
+                    continue
+                try:
+                    data = yaml.safe_load(content) or {}
+                except yaml.YAMLError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                resources = data.get(category)
+                if not isinstance(resources, dict) or not missing.intersection(resources):
+                    continue
+                included.add(path)
+                models[path] = data
+                missing.difference_update(resources)
+        return [text for path, text in context.saved_compose.items() if path in included]
+
     def saved_service_models(self, context: "EventContext",
                              services: "Sequence[str]") -> "dict[str, str]":
         """Resolve and order the original per-service models for one restore set."""
@@ -546,7 +633,8 @@ class ComposeRunner:
                         if not context.saved_compose:
                             from ..errors import ContainerError
                             raise ContainerError("No previous Compose model available for service " + service)
-                        with self._saved_compose_args(context, context.saved_compose.values()) as args:
+                        old_files = self._legacy_rollback_files(context, services)
+                        with self._saved_compose_args(context, old_files) as args:
                             legacy = self._resolved_model(self.manager.runtime.create_docker_process(
                                 *args, *self.config_args(output_format="json"), capture_output=True))
                     model = legacy

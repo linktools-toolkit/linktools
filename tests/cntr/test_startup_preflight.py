@@ -34,6 +34,9 @@ class _Container:
     def get_runtime_requirements(self, required: "set[str]") -> dict:
         return {}
 
+    def is_generation_current(self, context, service, candidate) -> bool:
+        return True
+
     def on_check(self, context: EventContext) -> None:
         pass
 

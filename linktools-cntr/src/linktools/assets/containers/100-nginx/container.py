@@ -304,6 +304,15 @@ class Container(BaseContainer):
     def generation_label(self, service: str, generation_id: str) -> "str | None":
         return None
 
+    def is_generation_current(self, context: "EventContext", service: str,
+                              candidate: "GeneratedCandidate") -> bool:
+        if service != "nginx":
+            return super().is_generation_current(context, service, candidate)
+        result = self.manager.compose_runner.exec_service(context, "nginx", (
+            "curl", "--fail", "--silent", "--max-time", "2", "--unix-socket",
+            "/run/nginx-health.sock", "http://localhost/health"), check=False)
+        return bool(result.succeeded and result.stdout.strip() == candidate.generation_id)
+
     def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
         manager = self.manager
         sites = self.sites
