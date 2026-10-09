@@ -713,6 +713,16 @@ class TaskRepositoryImpl(RepositoryBase):
         transaction: StateTransaction,
         graph_id: str,
     ) -> tuple[TaskNodeView, ...]:
+        _, states = await self._nodes_with_definitions_in_transaction(
+            transaction, graph_id
+        )
+        return states
+
+    async def _nodes_with_definitions_in_transaction(
+        self,
+        transaction: StateTransaction,
+        graph_id: str,
+    ) -> tuple[tuple[TaskNode, ...], tuple[TaskNodeView, ...]]:
         definition_records = await transaction.list_records(
             RecordQuery(
                 parent_digest=self._definition_parent(graph_id),
@@ -741,9 +751,13 @@ class TaskRepositoryImpl(RepositoryBase):
             states[value.node_id] = value
         if set(definitions) != set(states):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return tuple(
-            replace(states[node_id], dependencies=definitions[node_id].dependencies)
-            for node_id in sorted(definitions)
+        ordered = tuple(sorted(definitions))
+        return (
+            tuple(definitions[node_id] for node_id in ordered),
+            tuple(
+                replace(states[node_id], dependencies=definitions[node_id].dependencies)
+                for node_id in ordered
+            ),
         )
 
     async def _node(self, graph_id: str, node_id: str, tenant_id: str) -> TaskNodeView:
@@ -800,20 +814,10 @@ class TaskRepositoryImpl(RepositoryBase):
         self._validate_graph_record(graph_record, graph_id)
         header = await self._decode(graph_record, TaskGraphView)
         _require_canonical_graph_status(header.status)
-        states = await self._nodes_in_transaction(transaction, graph_id)
-        definition_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._definition_parent(graph_id),
-                kind="task_node_definition",
-            )
+        definitions, states = await self._nodes_with_definitions_in_transaction(
+            transaction, graph_id
         )
-        definitions: list[TaskNode] = []
-        for record in definition_records:
-            definition = await self._decode(record, TaskNode)
-            self._validate_definition_record(record, graph_id, definition.node_id)
-            definitions.append(definition)
-        definitions.sort(key=lambda value: value.node_id)
-        graph = TaskGraph(graph_id, tuple(definitions))
+        graph = TaskGraph(graph_id, definitions)
         if tuple(state.node_id for state in states) != tuple(
             node.node_id for node in graph.nodes
         ):
