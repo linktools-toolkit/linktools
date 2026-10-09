@@ -830,3 +830,39 @@ def test_partial_stop_failure_preserves_inspection_failure(tmp_path):
     with pytest.raises(ContainerError, match="partial stop failed.*recovery inspection failed.*Docker unavailable"):
         operations.restart(["app"])
     assert restored == []
+
+
+def test_partial_stop_restores_service_when_only_one_replica_was_stopped(tmp_path):
+    app = Container("app", {"app": {"image": "app:new"}}, tmp_path / "app")
+    states = (
+        ServiceRuntimeState(("app",), "app", "app-1", "running", None, "old", None, {}),
+        ServiceRuntimeState(("app",), "app", "app-2", "running", None, "old", None, {}),
+    )
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (app,), states)
+    model = runner.final_model(None)
+    AppliedServiceModels(manager, model).record(("app",))
+    old = AppliedServiceModels(manager, model).previous["app"]
+    actual = [replace(state, image_id="sha256:app") for state in states]
+    manager.docker_inspector.get_project_state = lambda owners: ProjectRuntimeState(
+        "test", tuple(actual), "docker")
+
+    def fail_during_stop(context, services):
+        calls.append(("stop", *services))
+        actual[0] = replace(actual[0], state="exited", exit_code=0)
+        raise ContainerError("replica stop failed")
+
+    runner.stop = fail_during_stop
+    original = runner.apply_saved_services
+
+    def recover(context, services, files):
+        original(context, services, files)
+        for index, state in enumerate(actual):
+            actual[index] = replace(state, state="running")
+
+    runner.apply_saved_services = recover
+    with pytest.raises(ContainerError, match="replica stop failed"):
+        operations.restart(["app"])
+    assert calls == [("stop", "app")]
+    assert restored == [old]
+    assert all(state.state == "running" for state in actual)
+    assert manager.running_state.get_persisted() == ["app"]
