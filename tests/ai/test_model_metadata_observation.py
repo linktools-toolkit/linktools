@@ -20,6 +20,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._history_projection import StepExecutionHistoryReader
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._runtime_history import RuntimeHistory
+from linktools.ai.runtime._watch_cursor import decode_execution_watch_cursor
 from linktools.ai.runtime import Runtime, RuntimeStorage
 from linktools.ai.runtime.service_api import UsageReadCutoff
 from linktools.ai.runtime.state import RuntimeDomain
@@ -396,7 +397,14 @@ async def test_live_request_progress_precedes_scheduled_canonical_publication(
                 previous_cursor = observed.cursor
             progress = observed.event
             assert progress.durable_seq is None
-            assert observed.cursor == previous_cursor
+            positions = [
+                {} if cursor is None else decode_execution_watch_cursor(
+                    "scheduled-history", principal.tenant_id, execution.execution_id,
+                    cursor, include_content=False,
+                )
+                for cursor in (previous_cursor, observed.cursor)
+            ]
+            assert positions[0] == positions[1]
             assert progress.payload["execution_id"] == execution.execution_id
             assert progress.payload["agent_run_seq"] == progress.payload["model_request_seq"] == 1
             assert "scheduled prompt" not in str(progress.payload)
