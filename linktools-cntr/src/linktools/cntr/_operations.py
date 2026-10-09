@@ -234,11 +234,12 @@ class ComposeOperations:
             context.changed_compose_services = set(context.service_models.changed_services)
             selection = self._reconcile_selection(explicit, context)
             required_services = set(selection.services)
-            generation_targets = {container.name for container in selection.target_containers}
-            generation_targets.update(
+            generation_targets = {
                 container.name for container in sync
-                if container.name in generations and
-                any(name in context.initial_running_services for name in container.generation_services))
+                if container.name in generations and any(
+                    name in required_services or name in context.initial_running_services
+                    for name in container.generation_services)
+            }
             context.changed_image_services = set()
             context.image_preparation_targets = set()
             prepared_pulls, prepared_builds = set(), set()
