@@ -226,6 +226,28 @@ def test_first_upgrade_reports_unrecoverable_missing_compose_snapshot(tmp_path):
     assert GeneratedCandidate.current_id(str(owner.path)) is None
 
 
+def test_cold_bootstrap_ignores_saved_compose_while_other_restores_use_it():
+    commands = []
+    applied_saved = []
+    runner = ComposeRunner(SimpleNamespace(
+        runtime=SimpleNamespace(create_docker_compose_process=lambda containers, *args:
+            commands.append(args) or SimpleNamespace(check_call=lambda: 0))))
+    runner.wait_service_dependencies = lambda *args: None
+    runner.apply_saved_services = lambda context, services, files: applied_saved.append(
+        (tuple(services), files))
+    context = SimpleNamespace(
+        containers=(), is_full_containers=False, generated_candidates={},
+        rollback_service_models={"nginx": "services:\n  nginx:\n    image: old\n"},
+        rollback_compose_files={"old.yml": "services:\n  nginx:\n    image: old\n"},
+        bootstrap_fallback_services={"nginx"},
+    )
+    runner.apply_service(context, "nginx")
+    assert applied_saved == []
+    assert commands and commands[0][-1] == "nginx"
+    runner.apply_service(context, "other")
+    assert applied_saved == [(("other",), context.rollback_compose_files)]
+
+
 def test_isolated_validation_preserves_image_env_and_mounts_without_network_identity():
     runner = ComposeRunner(SimpleNamespace(project_name="project"))
     model = {"services": {"nginx": {"image": "nginx:target", "ports": ["80:80"],
