@@ -634,10 +634,11 @@ def test_plain_restart_rollback_records_only_restored_owner(tmp_path, monkeypatc
         operations.restart(["app", "later"])
     assert calls == [("stop", "app", "later")]
     assert applied == [("app",)]
-    assert restored_services == [("app",)]
-    assert restored == ([] if rollback_fails else [previous["app"]])
+    assert restored_services == [("app",), ("later",)]
+    assert restored == ([] if rollback_fails else [previous["app"], previous["later"]])
     assert AppliedServiceModels(manager, runner.final_model(None)).previous == previous
-    assert manager.running_state.get_persisted() == (["untouched"] if rollback_fails else ["app", "untouched"])
+    assert manager.running_state.get_persisted() == (
+        ["untouched"] if rollback_fails else ["app", "later", "untouched"])
 
 
 @pytest.mark.parametrize("loaded_generation", ["new", "old"])
@@ -711,3 +712,54 @@ def test_nginx_healthy_old_generation_still_requires_bounded_acknowledgment(tmp_
         nginx.apply_config(SimpleNamespace(containers=[nginx]), SimpleNamespace(generation_id="new", path=str(tmp_path / "generation")), ("nginx",))
     assert commands.count("nginx") == 1
     assert clock[0] == 30.0
+
+
+def test_restart_restores_unattempted_targets_after_stop_hook_failure(tmp_path):
+    from contextlib import contextmanager
+
+    app = Container("app", {"app": {"image": "app:new"}}, tmp_path / "app")
+    other = Container("other", {"other": {"image": "other:new"}}, tmp_path / "other")
+    states = tuple(ServiceRuntimeState((name,), name, name, "running", None, "old", None, {})
+                   for name in ("app", "other"))
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (app, other), states)
+    old_model = runner.final_model(None)
+    AppliedServiceModels(manager, old_model).record(("app", "other"))
+    saved = dict(AppliedServiceModels(manager, old_model).previous)
+
+    @contextmanager
+    def broken_stop_hook(context):
+        yield
+        raise ContainerError("on_stopped failed")
+
+    manager.lifecycle.notify_stop = broken_stop_hook
+    with pytest.raises(ContainerError, match="on_stopped failed"):
+        operations.restart()
+    assert calls == [("stop", "app", "other")]
+    assert restored == [saved["app"], saved["other"]]
+    assert manager.running_state.get_persisted() == ["app", "other"]
+
+
+def test_restart_recovers_unattempted_services_in_old_dependency_order(tmp_path):
+    provider = Container("db", {"db": {"image": "db:new"}}, tmp_path / "db")
+    app = Container("app", {"app": {"image": "app:new"}}, tmp_path / "app")
+    app.services["app"]["depends_on"] = {"db": {"condition": "service_started"}}
+    states = tuple(ServiceRuntimeState((name,), name, name, "running", None, "old", None, {})
+                   for name in ("db", "app"))
+    operations, manager, runner, calls, restored = manager_at(tmp_path, (app, provider), states)
+    old = runner.final_model(None)
+    AppliedServiceModels(manager, old).record(("db", "app"))
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fail_after_stop(context):
+        yield
+        raise ContainerError("post-stop rejected")
+
+    manager.lifecycle.notify_stop = fail_after_stop
+    with pytest.raises(ContainerError, match="post-stop rejected"):
+        operations.restart()
+    assert calls == [("stop", "app", "db")]
+    previous = AppliedServiceModels(manager, old).previous
+    assert restored == [previous["db"], previous["app"]]
+    assert manager.running_state.get_persisted() == ["app", "db"]

@@ -145,3 +145,27 @@ def test_selected_optional_dependency_still_orders_before_consumer():
     metrics = Owner("metrics", ("metrics",))
     app.services["app"]["depends_on"] = {"metrics": {"required": False}}
     assert order_services((app, metrics), ("app", "metrics")) == ("metrics", "app")
+
+
+def test_native_provider_callbacks_follow_provider_service_order():
+    consumer = Owner("consumer", ("consumer",))
+    provider = Owner("provider", ("provider",))
+    consumer.get_runtime_requirements = lambda required: (
+        {"provider": ("provider",)} if "consumer" in required else {})
+    selection = ComposeOperations(SimpleNamespace()).start_selection(
+        ComposeSelection((consumer, provider), (consumer,), ("consumer",), False))
+    assert selection.services == ("provider", "consumer")
+    assert tuple(owner.name for owner in selection.target_containers) == ("provider", "consumer")
+
+
+def test_sidecar_callback_order_does_not_expand_owning_container_dependencies():
+    explicit = Owner("explicit", ("explicit",))
+    native = Owner("owner", ("native", "sidecar"), ("native",))
+    native.dependencies = ("unrelated",)
+    unrelated = Owner("unrelated", ("unrelated",))
+    project = (native, explicit, unrelated)
+    selection = ComposeOperations(SimpleNamespace()).start_selection(
+        ComposeSelection(project, (native, explicit), ("sidecar", "explicit"), False),
+        dependency_roots=(explicit,))
+    assert set(selection.services) == {"sidecar", "explicit"}
+    assert "unrelated" not in {owner.name for owner in selection.target_containers}

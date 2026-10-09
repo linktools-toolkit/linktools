@@ -312,6 +312,14 @@ A running generated-config consumer such as nginx expands newly required native
 providers when its generated candidate changes; an independent Redis sidecar
 does not inherit its owner's unrelated provider dependencies.
 `restart app` stops only explicit targets, after all final and required bootstrap candidate validation passes.
+For batched restarts, an application or post-stop hook failure restores any
+previously running explicit targets that were stopped but have not yet completed
+their application. The failed service follows its own rollback path; previously
+confirmed applications are not silently reverted. Recovery uses the original
+image IDs, saved models and dependency order. A failure during restoration
+reports both the operation error and the recovery error.
+Startup callbacks for selected owners follow the dependency-ordered service
+scope, including native runtime providers.
 Preparation covers running generated-config consumers and their potential
 native providers: `CHECK`, `on_starting` and `BEFORE_START` run before the
 final Compose model is resolved, even if an eventual candidate is unchanged.

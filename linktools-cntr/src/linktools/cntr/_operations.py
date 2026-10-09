@@ -354,56 +354,103 @@ class ComposeOperations:
                         container.validate_config(context, bootstrap)
                         bootstrap_candidates[container.name] = bootstrap
 
-            if restart and (explicit.full or explicit.services):
-                stop_context = self._make_context(context.commands, explicit)
-                with manager.lifecycle.notify_stop(stop_context):
-                    with record_phase(context, "stop", command=("stop", *explicit.services), logger=manager.logger):
-                        runner.stop(stop_context, explicit.services)
-                        manager.running_state.mark_stopped(stop_context)
-                running_services.difference_update(stopped_services)
-
-            bootstrap_available = set()
-            for container in sync:
-                services = tuple(service for service in container.bootstrap_services if service in required_services)
-                if not services:
-                    continue
-                if all(service in running_services for service in services):
-                    for service in services:
-                        runner.wait_service_healthy(context, service)
-                    bootstrap_available.update(services)
-                    continue
-                with record_phase(context, "bootstrap", container=container.name, logger=manager.logger):
-                    final_candidate = candidates[container.name]
-                    bootstrap = bootstrap_candidates[container.name]
-                    self._publish_candidate(container, bootstrap, context, services, record_applied=False)
-                    context.generated_candidates[container.name] = final_candidate
-                    running_services.update(services)
-                    bootstrap_available.update(services)
-                    context.bootstrapped_services.update(services)
-                    if (not final_candidate.previous_id and
-                            not any(service in context.initial_running_services for service in services)):
-                        final_candidate.previous_id = bootstrap.generation_id
-                        final_candidate.bootstrap_fallback = True
-
+            pending_restart = set(stopped_services) & context.initial_running_services
             owners = {service: container for container in sync for service in container.services}
-            services = order_services(
-                sync, selection.services, context.compose_model, bootstrap_available,
-                dependency_roots=selection.native_roots)
-            for service in services:
-                container = owners[service]
-                candidate = candidates.get(container.name)
-                if candidate is not None:
-                    with record_phase(context, "publish-config", container=container.name, logger=manager.logger):
-                        self._publish_candidate(container, candidate, context, (service,))
-                else:
-                    with record_phase(context, "up", container=container.name, logger=manager.logger):
-                        self._apply_services_with_rollback(container, context, (service,))
-                state_context = self._make_context(context.commands, ComposeSelection(
-                    selection.project_containers, (container,), (service,), False))
-                manager.running_state.mark_started(state_context)
-            for container in sync:
-                if container.name in candidates and not any(name in required_services for name in container.services):
-                    self._publish_candidate(container, candidates[container.name], context, ())
+            stopped = False
+            try:
+                if restart and (explicit.full or explicit.services):
+                    stop_context = self._make_context(context.commands, explicit)
+                    with manager.lifecycle.notify_stop(stop_context):
+                        with record_phase(context, "stop", command=("stop", *explicit.services), logger=manager.logger):
+                            runner.stop(stop_context, explicit.services)
+                            stopped = True
+                            manager.running_state.mark_stopped(stop_context)
+                    running_services.difference_update(stopped_services)
+
+                bootstrap_available = set()
+                for container in sync:
+                    services = tuple(service for service in container.bootstrap_services if service in required_services)
+                    if not services:
+                        continue
+                    if all(service in running_services for service in services):
+                        for service in services:
+                            runner.wait_service_healthy(context, service)
+                        bootstrap_available.update(services)
+                        continue
+                    with record_phase(context, "bootstrap", container=container.name, logger=manager.logger):
+                        final_candidate = candidates[container.name]
+                        bootstrap = bootstrap_candidates[container.name]
+                        try:
+                            self._publish_candidate(container, bootstrap, context, services, record_applied=False)
+                        except Exception:
+                            pending_restart.difference_update(services)
+                            raise
+                        context.generated_candidates[container.name] = final_candidate
+                        running_services.update(services)
+                        bootstrap_available.update(services)
+                        context.bootstrapped_services.update(services)
+                        if (not final_candidate.previous_id and
+                                not any(service in context.initial_running_services for service in services)):
+                            final_candidate.previous_id = bootstrap.generation_id
+                            final_candidate.bootstrap_fallback = True
+
+                services = order_services(
+                    sync, selection.services, context.compose_model, bootstrap_available,
+                    dependency_roots=selection.native_roots)
+                for service in services:
+                    container = owners[service]
+                    pending_restart.discard(service)
+                    candidate = candidates.get(container.name)
+                    if candidate is not None:
+                        with record_phase(context, "publish-config", container=container.name, logger=manager.logger):
+                            self._publish_candidate(container, candidate, context, (service,))
+                    else:
+                        with record_phase(context, "up", container=container.name, logger=manager.logger):
+                            self._apply_services_with_rollback(container, context, (service,))
+                    state_context = self._make_context(context.commands, ComposeSelection(
+                        selection.project_containers, (container,), (service,), False))
+                    manager.running_state.mark_started(state_context)
+                for container in sync:
+                    if container.name in candidates and not any(name in required_services for name in container.services):
+                        self._publish_candidate(container, candidates[container.name], context, ())
+            except Exception as error:
+                if stopped and pending_restart:
+                    from copy import copy
+                    try:
+                        restore = tuple(service for service in selection.services
+                                        if service in pending_restart)
+                        models = runner.saved_service_models(context, restore)
+                        restore_context = copy(context)
+                        restore_context.generated_candidates = {}
+                        for name, candidate in candidates.items():
+                            if context.applied_generation_services.get(name):
+                                restore_context.generated_candidates[name] = candidate
+                            elif candidate.previous_id is not None:
+                                old = copy(candidate)
+                                old.generation_id = candidate.previous_id
+                                restore_context.generated_candidates[name] = old
+                        restored_native = set()
+                        for service, model in models.items():
+                            container = owners[service]
+                            if (container.name in candidates and container.name not in restored_native
+                                    and not context.applied_generation_services.get(container.name)):
+                                candidates[container.name].restore()
+                                container.rollback_config(context)
+                                restored_native.add(container.name)
+                            runner.apply_saved_services(restore_context, (service,), {"previous.yml": model})
+                            if service in context.initial_healthy_services:
+                                runner.wait_service_healthy(restore_context, service)
+                            else:
+                                runner.wait_service_running(restore_context, service)
+                            container.on_service_started(restore_context, service)
+                            context.service_models.restore((service,))
+                            state_context = self._make_context(context.commands, ComposeSelection(
+                                selection.project_containers, (container,), (service,), False))
+                            manager.running_state.mark_started(state_context)
+                    except Exception as rollback_error:
+                        raise ContainerError("Restart failed: {}; recovery failed: {}".format(
+                            error, rollback_error)) from error
+                raise
         with manager.lifecycle.notify_remove(context):
             pass
         if report:
