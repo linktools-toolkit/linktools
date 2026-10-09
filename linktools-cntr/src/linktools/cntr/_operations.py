@@ -579,10 +579,10 @@ class ComposeOperations:
     def _publish_candidate(self, container, candidate, context, services, record_applied=True) -> None:
         self._require_rollback_model(container, context, services)
         context.generated_candidates[container.name] = candidate
-        candidate.publish()
-        if not services:
-            return
         try:
+            candidate.publish()
+            if not services:
+                return
             container.apply_config(context, candidate, services)
             for service in services:
                 container.on_service_started(context, service)
