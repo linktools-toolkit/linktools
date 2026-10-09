@@ -401,6 +401,8 @@ class ComposeOperations:
             if path not in original:
                 if os.path.exists(destination):
                     os.unlink(destination)
+                self.manager.artifact_index.record({}, remove=(
+                    os.path.relpath(destination, str(self.manager.data_path)),))
                 del applied[path]
                 continue
             content = original[path]
