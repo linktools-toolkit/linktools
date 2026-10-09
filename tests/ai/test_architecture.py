@@ -218,3 +218,28 @@ else:
     raise AssertionError('unknown export was accepted')
 """
     subprocess.run([sys.executable, "-c", script, entry], env=environment, check=True)
+
+
+def test_migration_exports_preserve_owner_identity() -> None:
+    import pickle
+    from linktools.ai import migrate
+    from linktools.ai.migrate import _database, _metrics
+
+    expected = {
+        "build_sql_schema_metadata": _database.build_sql_schema_metadata,
+        "provision_asset_database": _database.provision_asset_database,
+        "provision_database": _database.provision_database,
+        "provision_metrics_database": _metrics.provision_metrics_database,
+        "provision_metrics_sqlite": _metrics.provision_metrics_sqlite,
+        "provision_runtime_database": _database.provision_runtime_database,
+        "validate_metrics_database": _metrics.validate_metrics_database,
+        "validate_metrics_sqlite": _metrics.validate_metrics_sqlite,
+    }
+    assert list(expected) == migrate.__all__
+    assert set(expected) <= set(dir(migrate))
+    for name, value in expected.items():
+        assert getattr(migrate, name) is value
+        assert pickle.loads(pickle.dumps(value)) is value
+    imported: dict[str, object] = {}
+    exec("from linktools.ai.migrate import *", imported)
+    assert {name: imported[name] for name in migrate.__all__} == expected
