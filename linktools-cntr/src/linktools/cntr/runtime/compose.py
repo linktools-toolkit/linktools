@@ -449,7 +449,7 @@ class ComposeRunner:
         for dependency, options in service_dependencies(model["services"][service]).items():
             condition = options.get("condition", "service_started")
             if (options.get("required", True) is False and
-                    dependency not in getattr(context, "target_services", ())):
+                    dependency not in (getattr(context, "target_services", None) or ())):
                 state = self.manager.docker_inspector.get_project_state(context.containers)
                 matches = [item for item in state.services if item.service == dependency]
                 available = any(
