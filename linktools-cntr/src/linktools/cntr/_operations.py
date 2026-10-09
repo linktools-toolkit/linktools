@@ -154,7 +154,11 @@ class ComposeOperations:
         if not ordered_services:
             names = ", ".join(c.name for c in selection.target_containers)
             raise ContainerError(f"No runnable service for {names}")
-        return ComposeSelection(selection.project_containers, ordered, tuple(ordered_services),
+        # Pre-start callbacks follow the same service dependencies as apply.
+        # Keep owners without selected services in their original project order.
+        ordered_owners = tuple(dict.fromkeys(owners[service] for service in ordered_services))
+        ordered_owners += tuple(container for container in ordered if container not in ordered_owners)
+        return ComposeSelection(selection.project_containers, ordered_owners, tuple(ordered_services),
                                 selection.full, frozenset(c.name for c in roots))
 
     def _reconcile_selection(self, explicit, context, changed_generations=()) -> ComposeSelection:
