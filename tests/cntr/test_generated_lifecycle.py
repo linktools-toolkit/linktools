@@ -555,6 +555,30 @@ def test_native_validation_reuses_command_snapshot_or_resolves_fresh(has_snapsho
     assert len(resolved) == (0 if has_snapshot else 2)
 
 
+@pytest.mark.parametrize("image_present,selected", [(False, False), (True, False), (False, True)])
+def test_unselected_running_native_validation_uses_available_image_identity(image_present, selected):
+    model = {"services": {"nginx": {"image": "nginx:target"}}}
+    used = []
+    inspected = []
+    preparer = SimpleNamespace(image_exists=lambda image: inspected.append(image) or image_present)
+    manager = SimpleNamespace(
+        image_preparer=preparer,
+        structured_runner=SimpleNamespace(execute=lambda *args, **kwargs: SimpleNamespace(succeeded=True)),
+        runtime=SimpleNamespace(create_docker_process=lambda *args, **kwargs: None),
+    )
+    runner = ComposeRunner(manager)
+    runner.isolated_service_args = lambda actual, *args: used.append(actual) or []
+    context = SimpleNamespace(
+        compose_model=model, native_running_images={"nginx": "sha256:running"},
+        image_preparation_targets={"nginx"} if selected else set(),
+    )
+    runner.validate_service(context, "nginx", ("nginx", "-t"))
+    expected = "nginx:target" if selected or image_present else "sha256:running"
+    assert used[0]["services"]["nginx"]["image"] == expected
+    assert model["services"]["nginx"]["image"] == "nginx:target"
+    assert inspected == ([] if selected else ["nginx:target"])
+
+
 @pytest.mark.parametrize("has_snapshot", [False, True])
 def test_generation_image_check_reuses_command_snapshot_or_resolves_fresh(has_snapshot):
     from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
