@@ -14,20 +14,20 @@ error_page 401 =302 $auth_redirect_{{ site.var_name }};
 {% else -%}
 auth_request off;
 {% endif -%}
-{% elif site.auth -%}
-set $auth_proof_{{ site.var_name }} 0;
 {% endif -%}
 {%- endmacro %}
 {% macro proxy_headers(overrides=None) -%}
-{{ route_authorization() }}
-
+{% if site.auth -%}
+set $auth_proof_{{ site.var_name }} 0;
+{% endif -%}
 {% for name, value in nginx.header_items(site, overrides) -%}
 proxy_set_header {{ nginx.complex_value(name) }} {{ value }};
 {% endfor -%}
 {%- endmacro %}
 {% macro grpc_headers(overrides=None) -%}
-{{ route_authorization() }}
-
+{% if site.auth -%}
+set $auth_proof_{{ site.var_name }} 0;
+{% endif -%}
 {% for name, value in nginx.header_items(site, overrides) -%}
 grpc_set_header {{ nginx.complex_value(name) }} {{ value }};
 {% endfor -%}
