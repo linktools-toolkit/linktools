@@ -21,7 +21,7 @@ class _Generated(BaseContainer):
     def __init__(self, path):
         self.path = path
         self.manager = SimpleNamespace(data_path=path.parent,
-                                       artifact_index=SimpleNamespace(record=lambda entries: None),
+                                       artifact_index=SimpleNamespace(record=lambda entries, remove=(): None),
                                        running_state=SimpleNamespace(mark_started=lambda context: None))
         self.content = "first"
 
