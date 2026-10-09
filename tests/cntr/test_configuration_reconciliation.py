@@ -24,9 +24,14 @@ class Container(BaseContainer):
         self.services = {service: {} for service in services}
 
 
-def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped")):
+class SidecarContainer(Container):
+    generation_services = ("stopped",)
+
+
+def reconciliation(tmp_path, monkeypatch, changed=("running", "stopped"), sidecar=False):
     target = Container("target", ("target",))
-    other = Container("other", ("running", "stopped"))
+    other_type = SidecarContainer if sidecar else Container
+    other = other_type("other", ("running", "stopped"))
     containers = (target, other)
     calls = []
     paths = {}
@@ -140,9 +145,8 @@ def test_changed_running_generation_prepares_its_image_only_after_change(tmp_pat
 
 
 def test_unrelated_running_sidecar_does_not_prepare_owner_config(tmp_path, monkeypatch):
-    operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
+    operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=(), sidecar=True)
     owner = manager.containers["other"]
-    owner.generation_services = ("stopped",)
     manager.generated_configs = {"other": owner}
     owner.on_prepare_config = lambda context: pytest.fail("sidecar must not prepare native config")
     owner.render_config = lambda version: pytest.fail("sidecar must not render native config")
@@ -155,9 +159,8 @@ def test_unrelated_running_sidecar_does_not_prepare_owner_config(tmp_path, monke
 
 
 def test_changed_running_sidecar_updates_without_native_generation(tmp_path, monkeypatch):
-    operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=("running",))
+    operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=("running",), sidecar=True)
     owner = manager.containers["other"]
-    owner.generation_services = ("stopped",)
     manager.generated_configs = {"other": owner}
     owner.on_prepare_config = lambda context: pytest.fail("sidecar update must not prepare generated config")
     owner.render_config = lambda version: pytest.fail("sidecar update must not render generated config")
