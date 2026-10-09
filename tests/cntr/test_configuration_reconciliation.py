@@ -115,7 +115,6 @@ def test_running_generated_owner_sync_does_not_build_stopped_sibling(tmp_path, m
     assert not any("stopped" in call[1] for call in calls)
 
 
-@pytest.mark.parametrize("changed", [(), ("stopped",), ("running",), ("running", "stopped")])
 def test_changed_running_generation_prepares_its_image_only_after_change(tmp_path, monkeypatch):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
     owner = manager.containers["other"]
@@ -155,6 +154,7 @@ def test_unrelated_running_sidecar_does_not_prepare_owner_config(tmp_path, monke
     assert not any("running" in call[1] for call in calls)
 
 
+@pytest.mark.parametrize("changed", [(), ("stopped",), ("running",), ("running", "stopped")])
 def test_partial_up_applies_pending_running_config_without_starting_stopped_sibling(tmp_path, monkeypatch, changed):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed)
     operations.up(["target"])
