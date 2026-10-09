@@ -17,6 +17,7 @@ from linktools.cntr.artifacts import AppliedServiceModels, GeneratedCandidate
 from linktools.cntr.container import ContainerError
 from linktools.cntr.runtime.compose import ComposeRunner, service_dependencies
 from linktools.cntr.runtime.inspect import ProjectRuntimeState, ServiceRuntimeState
+from linktools.cntr.runtime.images import ImagePlan
 from linktools.cntr.state.running import RunningStateStore
 
 if TYPE_CHECKING:
@@ -64,7 +65,8 @@ def manager_at(root, containers, states=(), model=None):
         environ=SimpleNamespace(locks=SimpleNamespace(process_lock=lambda key: nullcontext())),
         lifecycle=SimpleNamespace(notify_start=lambda ctx: nullcontext(), notify_stop=lambda ctx: nullcontext(),
                                   notify_remove=lambda ctx: nullcontext()),
-        image_preparer=SimpleNamespace(plan=lambda *a, **kw: SimpleNamespace(pull=(), build=())),
+        image_preparer=SimpleNamespace(plan=lambda model, services, **kw:
+            ImagePlan(pull=(), build=(), targets=tuple(services))),
         artifact_index=SimpleNamespace(record=lambda entries: None),
         running_state=SimpleNamespace(mark_started=lambda ctx: None, mark_stopped=lambda ctx: None),
         resolver=SimpleNamespace(resolve_dependencies=lambda selected: [c for c in containers if c in selected]),
@@ -230,6 +232,36 @@ def test_restart_bootstrap_and_rollback_failures_are_both_reported(tmp_path, mon
         operations.restart(["nginx"])
     assert GeneratedCandidate.current_id(str(nginx.get_app_path("generated"))) == prior.generation_id
     assert manager.running_state.get_persisted() == []
+
+
+def test_first_upgrade_failure_restores_legacy_runtime_not_bootstrap(tmp_path, monkeypatch):
+    nginx = NginxContainer("nginx", {"nginx": {"image": "nginx:new"}}, tmp_path / "nginx")
+    old_model = {"services": {"nginx": {"image": "nginx:legacy"}}}
+    operations, manager, runner, calls, restored = manager_at(
+        tmp_path, (nginx,), (running_nginx(),))
+    manager.generated_configs["nginx"] = nginx
+    AppliedServiceModels(manager, old_model).record(("nginx",))
+    previous = AppliedServiceModels(manager, runner.final_model(None)).previous["nginx"]
+    nginx.render_config = lambda generation: {"nginx.conf": "final " + generation}
+    nginx.render_bootstrap = lambda generation: {"nginx.conf": "bootstrap " + generation}
+    nginx.on_prepare_config = lambda context: None
+    nginx.validate_config = lambda context, candidate: None
+    monkeypatch.setattr("linktools.cntr.artifacts.collect_candidates", lambda *args: {})
+    applied = []
+
+    def apply(context, candidate, services):
+        content = Path(candidate.path, "nginx.conf").read_text()
+        applied.append(content.split()[0])
+        if content.startswith("final "):
+            raise ContainerError("final failed")
+
+    nginx.apply_config = apply
+    with pytest.raises(ContainerError, match="final failed"):
+        operations.restart(["nginx"])
+    assert applied == ["bootstrap", "final"]
+    assert GeneratedCandidate.current_id(str(nginx.get_app_path("generated"))) is None
+    assert restored == [previous]
+    assert manager.running_state.get_persisted() == ["nginx"]
 
 
 def test_acme_install_and_runtime_share_config_home():
