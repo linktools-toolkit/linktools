@@ -194,9 +194,10 @@ must not mutate or restore historical derived ACL/OIDC settings.
 ## Native nginx templates
 
 A custom template owns the server's business directives and locations, not its
-listeners, TLS, authentication endpoint or WAF forwarding. Context is exactly
-`site`, `container`, `nginx`, `config`, and `vars`. Read environment values with
-`config.get("KEY")`. Undefined fields fail rendering.
+listeners, TLS, authentication endpoint or WAF forwarding. Context contains
+`site`, `container`, `nginx`, `config`, and `vars`, plus `route_auth=True` only
+when sharing a hostname requires location-level authentication. Read environment
+values with `config.get("KEY")`. Undefined fields fail rendering.
 
 Jinja names start with `local/` (the entry template's directory tree) or
 `nginx/` (builtin templates). Business templates render once. Native nginx
@@ -215,7 +216,15 @@ location / {
 ```
 
 `proxy_headers` and `grpc_headers` share one default header definition and emit
-complete same-level sets. Override names are case-insensitive; values are native
+complete same-level sets. On shared hostnames with different authentication
+requirements, each native location must explicitly call
+`route_authorization()` (also from `nginx/headers.j2`) before its header
+macro. The authorization macro enables that route's declared authentication,
+or turns it off for an unauthenticated route. A missing declaration inherits
+the server's deny-by-default check, rather than exposing an unprotected proxy.
+Explicit native `auth_request off` continues to override inherited protection
+for intentional login endpoints; do not call `route_authorization()` there.
+Override names are case-insensitive; values are native
 nginx complex values, not directives or prequoted strings. `None` or `""` emits
 an empty value so nginx suppresses that header. Adding a separate native
 `proxy_set_header` in a child location stops nginx from inheriting the parent's
@@ -232,11 +241,13 @@ them. Original request values are `$original_scheme`, `$original_host`,
 Generated output consists of `nginx.conf` and one self-contained
 `sites/<site-id>.conf` per effective hostname and listener group (including
 `sites/default.conf` when needed). Multiple declarations with the same
-hostname, HTTP port and compatible HTTPS/WAF/auth routing policy share one
-server and contribute their distinct, once-rendered business locations. Their
-producer/local IDs and per-declaration template variables remain independent.
-Incompatible policies are rejected; duplicate native locations are rejected by
-`nginx -t`, never silently overwritten.
+hostname, HTTP port and compatible HTTPS/WAF listener and WAF policy share one
+server and contribute their distinct, once-rendered business locations. Literal
+and wildcard hostnames are compared without case. Per-route authentication and
+bypass settings may differ, using the explicit location authorization macro
+above. Their producer/local IDs and per-declaration template variables remain
+independent. Incompatible server policies are rejected; duplicate native
+locations are rejected by `nginx -t`, never silently overwritten.
 Read the root for shared request maps and the health listener; read a site file
 for its maps, listeners, WAF path, authentication endpoint, and business locations.
 Business templates are evaluated once and their text is embedded without another
@@ -336,6 +347,11 @@ Implement these methods on the container:
   the selected services and confirms it was loaded. It is also used to restore a
   previous generation on rollback; a successful reload command alone is not an
   acknowledgement
+- `generation_services` defaults to all services of that container and may be
+  overridden when an independent sidecar does not consume generated files.
+  For example, Authelia's Redis sidecar is not a generated-config consumer
+- `rollback_config(context)` restores native migration state when no prior
+  generated version exists; the core restores the saved Compose service model
 
 Other native capabilities do not require generated files:
 
@@ -361,8 +377,10 @@ bootstrap services count as available while ordering the complete application.
 An ordinary running dependency is still applied in dependency order before its
 dependents. On a cold start with no previous generation, a successfully
 acknowledged bootstrap becomes the fallback for a failed final application.
-Rollback can restore previously running services and those acknowledged bootstrap
-services; it must not start unrelated stopped siblings. During first migration,
+Bootstrap is never treated as a pre-operation generation when replacing an old
+running instance. Rollback restores previously running services and cold-start
+bootstrap fallbacks, and stops newly started services whose deployment did not
+complete; it must not start unrelated stopped siblings. During first migration,
 when no previous generated version exists, native state (including the nginx
 certificate pointer) and previously running services are restored using the
 captured prior Compose model instead of treating the missing generation as
@@ -376,12 +394,12 @@ Startup follows one orchestration path:
 1. Run startup checks, `on_starting` and registered pre-start hooks for the
    preparation scope, which can include other running owners. Then resolve the
    authoritative Compose model so hook-prepared environment files are included
-2. Prepare only required images, then call `on_prepare_config` and
-   `render_config` for active generated owners in the reconciled selection.
-   Owners running outside the explicit targets remain eligible for synchronization;
-   stopped, unrelated owners are not prepared
-3. Validate all final generated candidates, reconcile the final changed-service
-   scope, and stage and validate any required intermediate bootstrap candidates
+2. Prepare images for the explicit deployment scope and changed Compose
+   services. Prepare and render candidate files for selected generated owners
+   and running services which actually consume them. A stopped, unrelated
+   generated service is not prepared merely because its sidecar is running
+3. Reconcile generation changes, prepare any newly required images, then
+   validate the final candidates and any required intermediate bootstrap candidates
 4. For restart, stop only the explicit targets after successful validation
 5. Health-check already-running bootstrap services or publish and apply the
    validated intermediate configurations through the core's candidate path
