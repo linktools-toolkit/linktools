@@ -176,6 +176,7 @@ class Container(BaseContainer):
 
 
     generates_config = True
+    generation_services = ("authelia", "authelia-admin")
 
     def on_prepare_config(self, context: "EventContext") -> None:
         secret_path = self.get_app_path("secrets")
