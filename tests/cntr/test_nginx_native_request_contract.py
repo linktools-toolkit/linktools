@@ -315,8 +315,12 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         def do_GET(self):
             self.server.paths.append(self.path)
             if self.server.kind == "auth":
-                self.send_response(204)
-                self.send_header("Remote-User", "verified")
+                status = getattr(self.server, "auth_status", 204)
+                self.send_response(status)
+                if status == 204:
+                    self.send_header("Remote-User", "verified")
+                else:
+                    self.send_header("Location", "https://login.example.test/")
                 self.end_headers()
                 return
             payload = json.dumps({
@@ -419,3 +423,15 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         assert request("/admin") == (200, {"path": "/admin", "user": "verified"})
         assert request("/admin/free") == (200, {"path": "/admin/free", "user": None})
         assert auth.paths == ["/api/authz/auth-request"]
+        app_paths = list(app.paths)
+        auth.auth_status = 401
+        connection = http.client.HTTPSConnection(
+            "127.0.0.1", https_port, timeout=3,
+            context=ssl._create_unverified_context())
+        connection.request("GET", "/admin", headers={"Host": "app.test"})
+        denied = connection.getresponse()
+        assert denied.status == 302
+        assert denied.getheader("Location") == "https://login.example.test/"
+        denied.read()
+        connection.close()
+        assert app.paths == app_paths
