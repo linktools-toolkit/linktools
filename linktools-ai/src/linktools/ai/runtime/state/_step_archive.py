@@ -1402,14 +1402,20 @@ class StateStepArchive(AgentRunStore):
         )
         if await self.get_agent_run(agent_run_id=projection.run.agent_run_id) != projection.run:
             return False
-        head = await self.execution_history_head(projection.run.agent_run_id)
-        record = await self.execution_history_head_record(projection.run.agent_run_id)
-        return head == (
+        head = await self.execution_history_head_record(projection.run.agent_run_id)
+        return (
+            head.event_count,
+            head.checkpoint_count,
+            head.transcript_message_count,
+            head.projection_digest,
+            head.interaction_count,
+        ) == (
             projection.target_event_offset,
             projection.target_checkpoint_offset,
             projection.target_transcript_message_count,
             projection.projection_digest,
-        ) and record.interaction_count == projection.target_interaction_offset
+            projection.target_interaction_offset,
+        )
 
     def bind_history_lock(self, history_lock: _AgentRunHistoryLock) -> None:
         self._history_lock = history_lock
@@ -2105,14 +2111,13 @@ class StateStepArchive(AgentRunStore):
             history_head_guard,
             producer_generation,
         )
+        owner_record, created = await self._ensure_run_with_head_in_transaction(
+            transaction,
+            run,
+        )
         if observation is not None:
-            await self._ensure_run_in_transaction(transaction, run)
             await self._history.commit_observation(transaction, observation)
         if not facts:
-            _owner_record, created = await self._ensure_run_with_head_in_transaction(
-                transaction,
-                run,
-            )
             if (created or observation is not None) and history_head_guard is not None and not supplied_history_head_guard:
                 await self._advance_execution_history_head_in_transaction(
                     transaction,
@@ -2120,7 +2125,6 @@ class StateStepArchive(AgentRunStore):
                 )
             return
         owner = self._agent_run_key(run.agent_run_id)
-        owner_record = await self._ensure_run_in_transaction(transaction, run)
         grouped: dict[str, list[object]] = {
             "event": [],
             "checkpoint": [],
