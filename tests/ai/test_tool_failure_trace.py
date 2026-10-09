@@ -50,7 +50,9 @@ async def test_tool_failure_trace_is_durable_and_does_not_fabricate_a_return(fai
         trace = (await execution.trace(tool_call_id="broken-call")).items
         errors = [item for item in trace if item.payload["kind"] == "TOOL_ERROR"]
         assert len(errors) == 1
-        assert errors[0].payload["status"] == "FAILED"
+        assert errors[0].payload["status"] == ("EFFECT_UNKNOWN" if failure == "fatal" else "FAILED")
+        if failure == "fatal":
+            assert errors[0].payload["error_code"] == ErrorCode.TOOL_EFFECT_UNKNOWN.value
         assert errors[0].payload["duration_ns"] >= 0
         assert errors[0].payload["model_request_seq"] == 1
         history = (await execution.history(tool_call_id="broken-call", include_content=True)).items
