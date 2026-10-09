@@ -124,7 +124,8 @@ def test_redis_reconciliation_preserves_preparation_without_https_requirement(tm
     owner = _Container("authelia", ("authelia", "authelia-admin", "authelia-redis"))
     native = builtin_container_type("102-authelia")
     owner.generation_services = native.generation_services
-    owner.get_config = lambda key: False
+    reads = []
+    owner.get_config = lambda key: reads.append(key) or False
     owner.on_check = lambda context: native.on_check(owner, context)
     case = _case(tmp_path, (target, owner), ("lldap",), {"authelia-redis": "running"})
     case.generated_configs = {"authelia": owner}
@@ -140,6 +141,7 @@ def test_redis_reconciliation_preserves_preparation_without_https_requirement(tm
     after = next(event[1] for event in case.events if event[0] == "after")
     assert set(before) == {"lldap", "authelia-redis"}
     assert set(after) == ({"lldap", "authelia-redis"} if changed else {"lldap"})
+    assert reads == []
 
 
 @pytest.mark.parametrize("action", ["up", "restart"])
@@ -212,6 +214,10 @@ def test_implicit_native_provider_is_prepared_before_its_first_application(
     case.generated_configs = {"nginx": nginx, "authelia": authelia}
     AppliedServiceModels(case, case.model).record(("nginx",))
     events = case.events
+    original_model = case.compose_runner.final_model
+    case.compose_runner.final_model = lambda context: events.append(("final-model",)) or original_model(context)
+    authelia.on_check = lambda context: events.append(("check", "authelia"))
+    authelia.on_starting = lambda context: events.append(("starting", "authelia"))
 
     for owner in (nginx, authelia):
         owner.on_prepare_config = lambda ctx, name=owner.name: events.append(("prepared", name))
@@ -229,6 +235,9 @@ def test_implicit_native_provider_is_prepared_before_its_first_application(
     case.operations.up(["lldap"])
     assert ("prepared", "authelia") in events
     assert ("native-applied", "authelia", ("authelia",)) in events
+    assert events.index(("check", "authelia")) < events.index(("starting", "authelia"))
+    assert events.index(("starting", "authelia")) < events.index(("final-model",))
+    assert events.index(("final-model",)) < events.index(("prepared", "authelia"))
     assert events.index(("prepared", "authelia")) < events.index(
         ("native-applied", "authelia", ("authelia",)))
     assert not any(event == ("native-applied", "authelia", ("authelia-redis",))
