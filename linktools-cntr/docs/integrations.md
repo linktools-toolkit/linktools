@@ -268,10 +268,13 @@ upstreams to Docker runtime DNS.
 
 ## Selection, publication and migration
 
-`dependencies` defines required installed dependencies and startup order.
-An enabled nginx site also needs its installed nginx runtime provider. Flare
-navigation is optional and never creates a startup dependency. Explicitly
-selecting Flare still starts it.
+`dependencies` defines required installed dependencies and startup order
+for an explicitly selected container. A different running service selected only
+for configuration reconciliation follows its own Compose service dependencies,
+without automatically starting the other dependencies of its owning container.
+An enabled nginx site also needs its installed nginx runtime provider when the
+producer is explicitly selected. Flare navigation is optional and never creates
+a startup dependency. Explicitly selecting Flare still starts it.
 
 Every `up` or `restart` resolves the full installed integration snapshot and
 Compose model, then stages and validates generated candidates for the selected
