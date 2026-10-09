@@ -252,16 +252,17 @@ def test_shared_hostname_preserves_independent_auth_and_bypass(fresh_manager, tm
     public_template = tmp_path / "public.conf"
     protected_template = tmp_path / "protected.conf"
     public_template.write_text(
-        '{% from "nginx/headers.j2" import proxy_headers with context %}'
-        'location /public { {{ proxy_headers() }} return 204; }')
+        '{% from "nginx/headers.j2" import proxy_headers, route_authorization with context %}'
+        'location /public { {{ route_authorization() }} {{ proxy_headers() }} '
+        'proxy_pass http://public:8080; }')
     protected_template.write_text(
-        '{% from "nginx/headers.j2" import proxy_headers with context %}'
-        'location /admin { {{ proxy_headers() }} return 204; }')
-    public = generation_site(nginx, "public", template=public_template, auth=False)
+        '{% from "nginx/headers.j2" import proxy_headers, route_authorization with context %}'
+        'location /admin { {{ route_authorization() }} {{ proxy_headers() }} '
+        'proxy_pass http://protected:8080; }')
+    public = generation_site(nginx, "public", template=public_template, https=True, auth=False)
     protected = generation_site(
         nginx, "protected", template=protected_template, auth=True, https=True,
         auth_bypass=(r"^/admin/free",))
-    public._declaration.https = True
     nginx.__dict__["sites"] = {site.identity: site for site in (public, protected)}
     files = nginx.render_config("generation")
     shared = files["sites/" + public.file_id + ".conf"]
