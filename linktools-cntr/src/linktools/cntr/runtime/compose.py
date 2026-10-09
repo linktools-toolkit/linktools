@@ -285,13 +285,25 @@ class ComposeRunner:
         args.extend(["--entrypoint", command[0], image, *command[1:]])
         return args
 
+    def _native_validation_model(self, context: "EventContext", service: str) -> "dict[str, Any]":
+        model = getattr(context, "compose_model", None)
+        if model is None:
+            model = self.final_model(context)
+        running_image = getattr(context, "native_running_images", {}).get(service)
+        if (running_image and service not in getattr(context, "image_preparation_targets", ())
+                and not self.manager.image_preparer.image_exists(model["services"][service].get("image"))):
+            # An unselected running service can still need native validation.
+            # Its running image remains available even if its tag was removed.
+            specification = dict(model["services"][service])
+            specification["image"] = running_image
+            return dict(model, services=dict(model["services"], **{service: specification}))
+        return model
+
     def validate_service(self, context: "EventContext", service: str,
                          command: "Sequence[str]", environment: "Mapping[str, object] | None" = None,
                          network: bool = False, check: bool = True,
                          mount_overrides: "Mapping[str, str] | None" = None) -> "CommandResult":
-        model = getattr(context, "compose_model", None)
-        if model is None:
-            model = self.final_model(context)
+        model = self._native_validation_model(context, service)
         args = self.isolated_service_args(model, service, command, environment, network, mount_overrides)
         result = self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_process(*args, capture_output=True), check=False)
@@ -305,7 +317,7 @@ class ComposeRunner:
     def run_isolated_service(self, context: "EventContext", service: str,
                              command: "Sequence[str]") -> None:
         """Run a one-shot service maintenance command with resolved mounts, no network or ports."""
-        model = getattr(context, "compose_model", None) or self.final_model(context)
+        model = self._native_validation_model(context, service)
         args = self.isolated_service_args(model, service, command)
         result = self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_process(*args, capture_output=True), check=False)
