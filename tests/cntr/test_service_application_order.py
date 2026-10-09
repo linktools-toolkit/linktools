@@ -32,6 +32,17 @@ def test_priority_only_breaks_ties_between_ready_services():
     assert order_services((later, first), ("later", "first")) == ("first", "later")
 
 
+def test_implicit_sidecar_does_not_inherit_owner_strong_dependency_order():
+    provider = Container("nginx", {"nginx": {}}, priority=100)
+    sidecar = Container("authelia", {"authelia-redis": {}}, priority=-100,
+                        dependencies=("nginx",))
+    selected = ("authelia-redis", "nginx")
+
+    assert order_services((sidecar, provider), selected) == ("nginx", "authelia-redis")
+    assert order_services(
+        (sidecar, provider), selected, dependency_roots={"nginx"}) == selected
+
+
 def test_bootstrap_availability_breaks_only_started_or_healthy_edges():
     nginx = Container("nginx", {"nginx": {}}, priority=100)
     provider = Container("provider", {"provider": {"depends_on": {
