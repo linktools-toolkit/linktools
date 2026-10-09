@@ -67,7 +67,7 @@ def manager_at(root, containers, states=(), model=None):
                                   notify_remove=lambda ctx: nullcontext()),
         image_preparer=SimpleNamespace(plan=lambda model, services, **kw:
             ImagePlan(pull=(), build=(), targets=tuple(services))),
-        artifact_index=SimpleNamespace(record=lambda entries: None),
+        artifact_index=SimpleNamespace(record=lambda entries, remove=(): None),
         running_state=SimpleNamespace(mark_started=lambda ctx: None, mark_stopped=lambda ctx: None),
         resolver=SimpleNamespace(resolve_dependencies=lambda selected: [c for c in containers if c in selected]),
         docker_inspector=SimpleNamespace(get_project_state=lambda selected:
