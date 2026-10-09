@@ -417,11 +417,16 @@ class ComposeOperations:
                         self._publish_candidate(container, candidates[container.name], context, ())
             except Exception as error:
                 if stop_attempted and not stopped:
+                    from collections import Counter
                     try:
-                        actual = manager.docker_inspector.get_project_state(sync)
-                        still_running = {service.service for service in actual.services
-                                         if service.state in ("running", "restarting")}
-                        pending_restart.difference_update(still_running)
+                        observed = manager.docker_inspector.get_project_state(sync)
+                        originally_running = Counter(service.service for service in actual.services
+                                                     if service.state in ("running", "restarting"))
+                        still_running = Counter(service.service for service in observed.services
+                                                if service.state in ("running", "restarting"))
+                        pending_restart.intersection_update(
+                            service for service in pending_restart
+                            if still_running[service] < originally_running[service])
                     except Exception as inspection_error:
                         raise ContainerError("Restart failed: {}; recovery inspection failed: {}".format(
                             error, inspection_error)) from error
