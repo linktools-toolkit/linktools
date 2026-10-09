@@ -86,10 +86,57 @@ def test_optional_compose_provider_not_added_to_start_or_build_scope():
 def test_optional_unavailable_dependency_does_not_block_old_model_recovery():
     model = {"services": {"app": {"depends_on": {
         "metrics": {"condition": "service_healthy", "required": False}}}}}
+    inspected = []
     manager = SimpleNamespace(docker_inspector=SimpleNamespace(
-        get_project_state=lambda selected: (_ for _ in ()).throw(
-            AssertionError("Optional dependency must not be polled"))))
+        get_project_state=lambda selected: inspected.append(True) or SimpleNamespace(services=())))
     runner = ComposeRunner(manager)
+    runner.wait_service_dependencies(SimpleNamespace(containers=()), "app", model=model)
+    assert inspected == [True]
+
+
+def test_optional_running_healthy_dependency_still_waits():
+    model = {"services": {"app": {"depends_on": {
+        "metrics": {"condition": "service_healthy", "required": False}}}}}
+    inspector = SimpleNamespace(get_project_state=lambda selected: SimpleNamespace(services=(
+        SimpleNamespace(service="metrics", state="running", health="starting"),)))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=inspector))
+    calls = []
+    runner.wait_service_healthy = lambda ctx, dep, timeout=None: calls.append((dep, timeout))
+    runner.wait_service_dependencies(SimpleNamespace(containers=()), "app", model=model)
+    assert calls == [("metrics", None)]
+
+
+def test_optional_selected_but_unavailable_dependency_retains_readiness_requirement():
+    model = {"services": {"app": {"depends_on": {
+        "metrics": {"condition": "service_healthy", "required": False}}}}}
+    runner = ComposeRunner(SimpleNamespace())
+    calls = []
+    runner.wait_service_healthy = lambda ctx, dep, timeout=None: calls.append((dep, timeout))
+    context = SimpleNamespace(containers=(), target_services=("app", "metrics"))
+    runner.wait_service_dependencies(context, "app", model=model)
+    assert calls == [("metrics", None)]
+
+
+def test_optional_completed_successfully_is_still_checked():
+    model = {"services": {"app": {"depends_on": {
+        "seed": {"condition": "service_completed_successfully", "required": False}}}}}
+    inspector = SimpleNamespace(get_project_state=lambda selected: SimpleNamespace(services=(
+        SimpleNamespace(service="seed", state="exited", exit_code=0),)))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=inspector))
+    calls = []
+    runner.wait_service_completed = lambda ctx, dep, timeout=None: calls.append((dep, timeout))
+    runner.wait_service_dependencies(SimpleNamespace(containers=()), "app", model=model)
+    assert calls == [("seed", None)]
+
+
+def test_optional_stopped_dependency_is_not_polled_for_health():
+    model = {"services": {"app": {"depends_on": {
+        "metrics": {"condition": "service_healthy", "required": False}}}}}
+    inspector = SimpleNamespace(get_project_state=lambda selected: SimpleNamespace(services=(
+        SimpleNamespace(service="metrics", state="exited", health="unhealthy", exit_code=1),)))
+    runner = ComposeRunner(SimpleNamespace(docker_inspector=inspector))
+    runner.wait_service_healthy = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("Stopped optional dependency must not block application"))
     runner.wait_service_dependencies(SimpleNamespace(containers=()), "app", model=model)
 
 
