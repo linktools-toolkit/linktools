@@ -648,3 +648,36 @@ def test_generation_image_check_reuses_command_snapshot_or_resolves_fresh(has_sn
         assert runner.is_generation_current(context, "app", SimpleNamespace(generation_id="id"))
     assert len(resolved) == (0 if has_snapshot else 2)
     assert all(command[-1] == "app:prepared" for command in commands)
+
+
+def test_publication_failure_restores_original_generation_before_runtime_apply(tmp_path):
+    owner = _Generated(tmp_path / "generated")
+    first = GeneratedCandidate(owner, owner.render_config)
+    first.publish()
+    owner.content = "second"
+    candidate = GeneratedCandidate(owner, owner.render_config)
+    models = AppliedServiceModels(owner.manager, {"services": owner.services})
+    models.record(("test",))
+    models = AppliedServiceModels(owner.manager, {"services": owner.services})
+    calls = []
+    owner.apply_config = lambda context, value, services: calls.append(value.generation_id)
+    owner.manager.compose_runner = SimpleNamespace(
+        saved_service_models=lambda context, services: {
+            "test": models.previous["test"]})
+    context = SimpleNamespace(
+        generated_candidates={}, initial_running_services={"test"},
+        native_running_images={"test": "sha256:test"}, containers=(owner,),
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
+        applied_generation_services={}, service_models=models)
+
+    original_publish = candidate.publish
+
+    def fail_after_publish():
+        original_publish()
+        raise RuntimeError("publication failed")
+
+    candidate.publish = fail_after_publish
+    with pytest.raises(RuntimeError, match="publication failed"):
+        ComposeOperations(owner.manager)._publish_candidate(owner, candidate, context, ("test",))
+    assert GeneratedCandidate.current_id(str(owner.path)) == first.generation_id
+    assert calls == [first.generation_id]
