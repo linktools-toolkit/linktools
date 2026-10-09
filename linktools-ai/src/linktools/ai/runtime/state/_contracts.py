@@ -156,11 +156,11 @@ def _validate_tool_arguments_payload(
         raise ValueError("tool arguments payload does not match its digest")
 
 
-def validate_tool_operation_failure(
+def decode_tool_operation_failure(
     error_code: str | None,
     error_payload: StoredPayload | None,
-) -> None:
-    """Require the only durable payload contract allowed for tool failure."""
+) -> str:
+    """Decode the message from the durable tool-failure contract."""
     if (
         error_code
         not in {
@@ -205,6 +205,8 @@ def validate_tool_operation_failure(
         or len(message) > 2048
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    return message
 
 
 def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonValue]:
@@ -1181,7 +1183,7 @@ class ToolOperationRecord:
             if self.result_payload is not None:
                 raise ValueError("failed tool operation cannot carry a result payload")
             try:
-                validate_tool_operation_failure(
+                decode_tool_operation_failure(
                     self.error_code,
                     self.error_payload,
                 )
@@ -1362,6 +1364,25 @@ class ExternalCallRecord:
             )
         except (TypeError, ValueError) as error:
             raise ValueError("external resolution metadata is invalid") from error
+
+
+def deferred_resource_id(
+    contract: str,
+    tenant_id: str,
+    execution_id: str,
+    source_agent_run_id: str,
+    tool_call_id: str,
+) -> str:
+    """Return the durable identity of an approval or external deferred call."""
+    return canonical_sha256(
+        {
+            "contract": contract,
+            "tenant_id": tenant_id,
+            "execution_id": execution_id,
+            "source_agent_run_id": source_agent_run_id,
+            "tool_call_id": tool_call_id,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -2628,7 +2649,8 @@ __all__ = [
     "TaskRepository",
     "TaskRepositories",
     "ToolOperationAdmission",
-    "validate_tool_operation_failure",
+    "decode_tool_operation_failure",
+    "deferred_resource_id",
     "TranscriptChunk",
     "TranscriptHeadRecord",
     "TranscriptOrigin",

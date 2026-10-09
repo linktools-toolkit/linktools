@@ -11,7 +11,7 @@ from ...core import ApprovalDecision, ApprovalStatus, ExternalCallStatus, JsonVa
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
 from ._contracts import ToolOperationRecord
-from ._contracts import ApprovalRecord, ExternalCallRecord, RecoveryCheckpoint, RecoveryCheckpointState, ToolOperationAdmission, validate_tool_operation_failure
+from ._contracts import ApprovalRecord, ExternalCallRecord, RecoveryCheckpoint, RecoveryCheckpointState, ToolOperationAdmission, decode_tool_operation_failure
 from ._plan import RuntimeDomain
 from ._store import (
     RecordReplacement,
@@ -601,7 +601,7 @@ class ToolRepositoryImpl(_RepositoryBase):
 
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord:
         if record.status is ToolOperationStatus.FAILED:
-            validate_tool_operation_failure(record.error_code, record.error_payload)
+            decode_tool_operation_failure(record.error_code, record.error_payload)
 
         async def attempt() -> ToolOperationRecord:
             _require_tenant(record, self._tenant_id)
@@ -1139,7 +1139,7 @@ class ToolRepositoryImpl(_RepositoryBase):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         validate_lease_owner(owner)
         if terminal_status is ToolOperationStatus.FAILED:
-            validate_tool_operation_failure(
+            decode_tool_operation_failure(
                 requested_error,
                 requested_error_payload,
             )

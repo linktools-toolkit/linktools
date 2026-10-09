@@ -3,7 +3,6 @@
 """Runtime-owned tool authorization and durable operation contracts."""
 
 import asyncio
-import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -45,6 +44,7 @@ from .state._durability import (
 )
 from .state._contracts import (
     ToolOperationRecord,
+    decode_tool_operation_failure,
 )
 
 _logger = environ.get_logger("ai.runtime.tool")
@@ -764,39 +764,10 @@ class RuntimeToolOperationBridge:
         self,
         record: ToolOperationRecord,
     ) -> ToolCallRetry | ToolCallFailed:
-        if record.error_payload is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value = await self._payload_json(record.error_payload)
-        if not isinstance(value, dict):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        version = value.get("version")
-        if (
-            not isinstance(version, int)
-            or isinstance(version, bool)
-            or version != 1
-        ):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if set(value) != {"version", "kind", "message"}:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        kind = value.get("kind")
-        message = value.get("message")
-        if not isinstance(kind, str) or not isinstance(message, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if kind == "tool_call_rejected":
-            if record.error_code != ErrorCode.TOOL_RETRY_REQUIRED.value:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                return ToolCallRetry(message)
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if kind == "tool_call_failed":
-            if record.error_code != ErrorCode.TOOL_EXECUTION_FAILED.value:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                return ToolCallFailed(message)
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        message = decode_tool_operation_failure(record.error_code, record.error_payload)
+        if record.error_code == ErrorCode.TOOL_RETRY_REQUIRED.value:
+            return ToolCallRetry(message)
+        return ToolCallFailed(message)
 
     async def _error_payload(
         self,
@@ -947,12 +918,6 @@ class RuntimeToolOperationBridge:
         if payload.ref is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await read_runtime_object(self._recovery_objects, payload.ref)
-
-    async def _payload_json(self, payload: StoredPayload) -> object:
-        try:
-            return json.loads((await self._payload_bytes(payload)).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _run_id(self, ctx: PydanticRunContext[None]) -> str:
         del ctx

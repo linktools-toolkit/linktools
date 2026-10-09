@@ -25,6 +25,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
 from ._contracts import (
+    deferred_resource_id,
     AgentAttemptClaim,
     ApprovalRecord,
     ApprovalRepository,
@@ -51,7 +52,7 @@ from ._contracts import (
     SessionRepository,
     ToolOperationAdmission,
     ToolOperationRecord,
-    validate_tool_operation_failure,
+    decode_tool_operation_failure,
 )
 from ._durability import (
     CommitObservation,
@@ -237,7 +238,7 @@ class RuntimeStateCommands:
         ):
             raise ValueError("external record identity is invalid")
         if tuple(record.approval_id for record in approval_values) != tuple(
-            _deferred_resource_id(
+            deferred_resource_id(
                 "approval-v1",
                 tenant_id,
                 execution_id,
@@ -248,7 +249,7 @@ class RuntimeStateCommands:
         ):
             raise ValueError("approval record ids do not match continuation")
         if tuple(record.call_id for record in external_values) != tuple(
-            _deferred_resource_id(
+            deferred_resource_id(
                 "external-call-v1",
                 tenant_id,
                 execution_id,
@@ -427,7 +428,7 @@ class RuntimeStateCommands:
         if not _same_group(stores):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         approval_ids = tuple(
-            _deferred_resource_id(
+            deferred_resource_id(
                 "approval-v1",
                 self._tenant_id,
                 commit.execution_id,
@@ -437,7 +438,7 @@ class RuntimeStateCommands:
             for item in expected_pending_tools.approvals
         )
         call_ids = tuple(
-            _deferred_resource_id(
+            deferred_resource_id(
                 "external-call-v1",
                 self._tenant_id,
                 commit.execution_id,
@@ -1235,7 +1236,7 @@ class RuntimeStateCommands:
         elif error_code is None or error_payload is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
-            validate_tool_operation_failure(error_code, error_payload)
+            decode_tool_operation_failure(error_code, error_payload)
         expected_status = (
             ToolOperationStatus.COMPLETED
             if result_payload is not None
@@ -2993,24 +2994,6 @@ def _dedupe_stores(stores: Sequence[StateStore]) -> tuple[StateStore, ...]:
         seen.add(identity)
         result.append(store)
     return tuple(result)
-
-
-def _deferred_resource_id(
-    contract: str,
-    tenant_id: str,
-    execution_id: str,
-    source_agent_run_id: str,
-    tool_call_id: str,
-) -> str:
-    return canonical_sha256(
-        {
-            "contract": contract,
-            "tenant_id": tenant_id,
-            "execution_id": execution_id,
-            "source_agent_run_id": source_agent_run_id,
-            "tool_call_id": tool_call_id,
-        }
-    )
 
 
 def _partial_integrity(

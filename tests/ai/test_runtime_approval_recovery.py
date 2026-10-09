@@ -17,10 +17,10 @@ from linktools.ai.core import (
     idempotency_key_digest,
 )
 from linktools.ai.runtime import RuntimeStorage
-from linktools.ai.runtime._approval import approval_id_for_call
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
 from linktools.ai.runtime.state._contracts import (
+    deferred_resource_id,
     ApprovalRecord,
     ExecutionCancelRequestCommit,
     ExecutionRecord,
@@ -33,6 +33,19 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
+
+
+@pytest.mark.parametrize(
+    ("contract", "expected"),
+    (
+        ("approval-v1", "bead2d536b5a928433e619215197f7e6560af20cbbbf93b96c54abd211e20ed2"),
+        ("external-call-v1", "bf0ea41cbe8e9f8d993b2b01cfd9b4fd23fa85a2aec1772c6b946ba0025b5a10"),
+    ),
+)
+def test_deferred_call_id_preserves_durable_projection(
+    contract: str, expected: str,
+) -> None:
+    assert deferred_resource_id(contract, "tenant", "execution", "run", "call") == expected
 
 
 def _binding() -> AgentBindingContract:
@@ -111,7 +124,8 @@ def _approval(
 ) -> ApprovalRecord:
     pending = continuation.approvals[0]
     return ApprovalRecord(
-        approval_id=approval_id_for_call(
+        approval_id=deferred_resource_id(
+            "approval-v1",
             "tenant",
             execution.execution_id,
             continuation.source_agent_run_id,
@@ -194,7 +208,8 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
             tenant_id="tenant",
         )
         approval = await state.recovery.approvals.get(
-            approval_id_for_call(
+            deferred_resource_id(
+                "approval-v1",
                 "tenant",
                 execution.execution_id,
                 continuation.source_agent_run_id,
@@ -227,7 +242,8 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
         "approval-resume"
     )
     try:
-        approval_id = approval_id_for_call(
+        approval_id = deferred_resource_id(
+            "approval-v1",
             "tenant",
             execution.execution_id,
             continuation.source_agent_run_id,
@@ -286,7 +302,8 @@ async def test_deferred_cancel_cancels_pending_approval_and_clears_frontier() ->
         )
         assert committed.status is ExecutionStatus.CANCELLING
         approval = await state.recovery.approvals.get(
-            approval_id_for_call(
+            deferred_resource_id(
+                "approval-v1",
                 "tenant",
                 execution.execution_id,
                 continuation.source_agent_run_id,

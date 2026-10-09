@@ -26,6 +26,20 @@ if TYPE_CHECKING:
     from .state._contracts import StoredUserInput
 
 
+_AGENT_TASK_INPUT_FIELDS = (
+    "kind",
+    "version",
+    "prompt",
+    "parameters",
+    "files",
+    "session_id",
+    "memory_scope",
+    "planning",
+    "thinking",
+)
+_AGENT_TASK_INPUT_FIELD_SET = frozenset(_AGENT_TASK_INPUT_FIELDS)
+
+
 class _AgentTaskContextError(AIError):
     """Marks an error owned by declared result access rather than user code."""
 
@@ -100,18 +114,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        required = {
-            "kind",
-            "version",
-            "prompt",
-            "parameters",
-            "files",
-            "session_id",
-            "memory_scope",
-            "planning",
-            "thinking",
-        }
-        if not required.issubset(value) or value.get("kind") != "agent-task-input":
+        if not _AGENT_TASK_INPUT_FIELD_SET.issubset(value) or value.get("kind") != "agent-task-input":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         prompt = value["prompt"]
         parameters = value["parameters"]
@@ -168,7 +171,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
                 normalized_values["prompt"] = dict(prompt)
                 object.__setattr__(result, "_stored_prompt", stored_prompt)
             for key, item in value.items():
-                if key not in required:
+                if key not in _AGENT_TASK_INPUT_FIELD_SET:
                     normalized_values[key] = normalize_json_value(item)
             object.__setattr__(result, "_values", ImmutableJsonMapping(normalized_values))
             return result
@@ -188,18 +191,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
             return cls()
         if not isinstance(value, Mapping):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        declared_fields = {
-            "kind",
-            "version",
-            "prompt",
-            "parameters",
-            "files",
-            "session_id",
-            "memory_scope",
-            "planning",
-            "thinking",
-        }
-        if ("kind" in value or "version" in value) and not declared_fields.issubset(value):
+        if ("kind" in value or "version" in value) and not _AGENT_TASK_INPUT_FIELD_SET.issubset(value):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if "kind" in value and value.get("kind") != "agent-task-input":
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -229,17 +221,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
             )
             normalized_values = dict(result._values)
             for key, item in value.items():
-                if key not in {
-                    "kind",
-                    "version",
-                    "prompt",
-                    "parameters",
-                    "files",
-                    "session_id",
-                    "memory_scope",
-                    "planning",
-                    "thinking",
-                }:
+                if key not in _AGENT_TASK_INPUT_FIELD_SET:
                     normalized_values[key] = normalize_json_value(item)
             object.__setattr__(result, "_values", ImmutableJsonMapping(normalized_values))
             return result
@@ -255,15 +237,7 @@ class AgentTaskInput(Mapping[str, JsonValue]):
             {
                 key: self._values[key]
                 for key in (
-                    "kind",
-                    "version",
-                    "prompt",
-                    "parameters",
-                    "files",
-                    "session_id",
-                    "memory_scope",
-                    "planning",
-                    "thinking",
+                    *_AGENT_TASK_INPUT_FIELDS,
                     *(key for key in ("capture_context", "capture_files") if key in self._values),
                 )
             }

@@ -59,6 +59,7 @@ from .recovery import (
 )
 from .service_api import ExecutionRequest
 from .state._contracts import (
+    deferred_resource_id,
     ApprovalRecord,
     ConversationCursor,
     ExecutionRecord,
@@ -527,7 +528,7 @@ class _RecoveryCoordinator:
         )
         approval_records = tuple(
             ApprovalRecord(
-                _deferred_id(
+                deferred_resource_id(
                     "approval-v1",
                     self._port.tenant_id,
                     current.execution_id,
@@ -547,7 +548,7 @@ class _RecoveryCoordinator:
         )
         external_records = tuple(
             ExternalCallRecord(
-                _deferred_id(
+                deferred_resource_id(
                     "external-call-v1",
                     self._port.tenant_id,
                     current.execution_id,
@@ -1052,7 +1053,7 @@ class _RecoveryCoordinator:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         deferred_results = DeferredToolResults()
         for pending in recovery.pending_tools.approvals:
-            approval_id = _deferred_id(
+            approval_id = deferred_resource_id(
                 "approval-v1",
                 self._port.tenant_id,
                 current.execution_id,
@@ -1087,7 +1088,7 @@ class _RecoveryCoordinator:
                 record.resolution_metadata
             )
         for pending in recovery.pending_tools.calls:
-            call_id = _deferred_id(
+            call_id = deferred_resource_id(
                 "external-call-v1",
                 self._port.tenant_id,
                 current.execution_id,
@@ -1240,21 +1241,3 @@ def _instruction_paths(
             continue
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return tuple(paths)
-
-
-def _deferred_id(
-    contract: str,
-    tenant_id: str,
-    execution_id: str,
-    source_agent_run_id: str,
-    tool_call_id: str,
-) -> str:
-    return canonical_sha256(
-        {
-            "contract": contract,
-            "tenant_id": tenant_id,
-            "execution_id": execution_id,
-            "source_agent_run_id": source_agent_run_id,
-            "tool_call_id": tool_call_id,
-        }
-    )
