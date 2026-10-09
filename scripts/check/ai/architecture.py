@@ -530,7 +530,12 @@ def _targets_all(target: ast.AST) -> bool:
 
 def _bindings(tree: ast.Module) -> frozenset[str]:
     names: set[str] = set()
-    for node in tree.body:
+    nodes = list(tree.body)
+    if any(isinstance(node, ast.FunctionDef) and node.name == "__getattr__" for node in nodes):
+        for node in tree.body:
+            if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+                nodes.extend(node.body)
+    for node in nodes:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             names.add(node.name)
         elif isinstance(node, ast.Import):
