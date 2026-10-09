@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..container import ContainerError
+from .compose import service_dependencies
 from .structured import StructuredCommandError
 
 if TYPE_CHECKING:
@@ -35,11 +36,9 @@ def _dependencies(services, targets):
         if name not in services:
             raise ImagePreparationError(f"Unknown Compose service dependency: {name}")
         seen.add(name)
-        depends = services[name].get("depends_on", ())
-        if isinstance(depends, dict):
-            depends = depends.keys()
-        for dep in depends or ():
-            visit(dep)
+        for dep, options in service_dependencies(services[name]).items():
+            if options.get("required", True) is not False:
+                visit(dep)
         result.append(name)
 
     for name in targets:

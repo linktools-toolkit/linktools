@@ -10,12 +10,14 @@ Proxy build arguments and action-specific command options are centralized here
 so root, restart, and per-container execution share one command builder.
 """
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence, Mapping
-    from typing import Any, Iterable
+    from typing import Any, Iterable, Iterator
+    from linktools.runtime import Process
     from ..container import BaseContainer
     from ..context import EventContext
     from ..artifacts import GeneratedCandidate
@@ -79,6 +81,8 @@ def order_services(containers: "Iterable[BaseContainer]", services: "Iterable[st
             if dependency in available and condition in ("service_started", "service_healthy"):
                 continue
             if dependency not in pending:
+                if options.get("required", True) is False:
+                    continue
                 raise ContainerError("Unselected Compose dependency {} for {}".format(dependency, name))
             edges.add(dependency)
         if owner.name in roots:
@@ -176,12 +180,11 @@ class ComposeRunner:
         return ComposeOptions(pull=pull, services=list(services))
 
     def final_model(self, context: "EventContext") -> "dict[str, Any]":
-        result = self.manager.structured_runner.execute_json(
-            self.manager.runtime.create_docker_compose_process(
-                context.containers, *self.config_args(output_format="json"),
-                capture_output=True,
-            ), check=True,
-        )
+        return self._resolved_model(self.manager.runtime.create_docker_compose_process(
+            context.containers, *self.config_args(output_format="json"), capture_output=True))
+
+    def _resolved_model(self, process: "Process") -> "dict[str, Any]":
+        result = self.manager.structured_runner.execute_json(process, check=True)
         if not isinstance(result, dict) or not isinstance(result.get("services"), dict):
             from ..errors import ContainerError
             raise ContainerError("Docker Compose returned an invalid final model")
@@ -290,6 +293,13 @@ class ComposeRunner:
         return args
 
     def _native_validation_model(self, context: "EventContext", service: str) -> "dict[str, Any]":
+        if service not in getattr(context, "bootstrap_fallback_services", ()):
+            saved = getattr(context, "rollback_service_models", {}).get(service)
+            if saved is not None:
+                import yaml
+                model = yaml.safe_load(saved)
+                model["services"][service]["image"] = context.native_running_images[service]
+                return model
         model = getattr(context, "compose_model", None)
         if model is None:
             model = self.final_model(context)
@@ -406,48 +416,73 @@ class ComposeRunner:
             self.manager.runtime.create_docker_compose_process(
                 context.containers, "exec", "-T", service, *command, capture_output=True), check=check)
 
-    def wait_service_healthy(self, context: "EventContext", service: str, timeout: int = 30) -> None:
+    def wait_service_healthy(self, context: "EventContext", service: str,
+                             timeout: "int | None" = 30) -> None:
         import time
         from ..errors import ContainerError
-        deadline = time.monotonic() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             state = self.manager.docker_inspector.get_project_state(context.containers)
             matches = [item for item in state.services if item.service == service]
             if matches and all(item.state == "running" and item.health == "healthy" for item in matches):
                 return
-            if time.monotonic() >= deadline:
+            if timeout is None:
+                if not matches:
+                    raise ContainerError("Dependency service {} is unavailable".format(service))
+                if any(item.state not in ("running", "restarting") for item in matches):
+                    raise ContainerError("Dependency service {} is not running".format(service))
+                if any(item.health is None for item in matches):
+                    raise ContainerError("Dependency service {} has no healthcheck".format(service))
+                if any(item.health == "unhealthy" for item in matches):
+                    raise ContainerError("Dependency service {} is unhealthy".format(service))
+            if deadline is not None and time.monotonic() >= deadline:
                 raise ContainerError("Service {} did not become healthy".format(service))
             time.sleep(0.5)
 
-    def wait_service_dependencies(self, context: "EventContext", service: str) -> None:
-        """Honor Compose readiness conditions for every native apply path."""
+    def wait_service_dependencies(self, context: "EventContext", service: str,
+                                  model: "dict[str, Any] | None" = None) -> None:
+        """Use the executing model's conditions without imposing a task deadline."""
         from ..errors import ContainerError
-        model = getattr(context, "compose_model", None) or self.final_model(context)
+        restored = model is not None
+        if model is None:
+            model = getattr(context, "compose_model", None) or self.final_model(context)
         for dependency, options in service_dependencies(model["services"][service]).items():
+            if options.get("required", True) is False:
+                continue
             condition = options.get("condition", "service_started")
             if condition == "service_healthy":
-                self.wait_service_healthy(context, dependency)
+                self.wait_service_healthy(context, dependency, timeout=None)
             elif condition == "service_completed_successfully":
-                self.wait_service_completed(context, dependency)
+                self.wait_service_completed(context, dependency, timeout=None)
             elif condition == "service_started":
-                # The ordered dependency's successful `up -d` acknowledged
-                # startup; one-shot services may already have exited by now.
-                continue
+                # Normal application already acknowledged each ordered `up`.
+                # Rollback does not start dependencies outside its restore set.
+                if restored:
+                    state = self.manager.docker_inspector.get_project_state(context.containers)
+                    matches = [item for item in state.services if item.service == dependency]
+                    if not matches or any(not (item.state == "running" or
+                            (item.state == "exited" and item.exit_code == 0)) for item in matches):
+                        raise ContainerError("Dependency service {} is unavailable".format(dependency))
             else:
                 raise ContainerError("Unsupported Compose dependency condition: " + str(condition))
 
-    def wait_service_completed(self, context: "EventContext", service: str, timeout: int = 30) -> None:
+    def wait_service_completed(self, context: "EventContext", service: str,
+                               timeout: "int | None" = 30) -> None:
         import time
         from ..errors import ContainerError
-        deadline = time.monotonic() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             state = self.manager.docker_inspector.get_project_state(context.containers)
             matches = [item for item in state.services if item.service == service]
-            if any(item.state in ("exited", "dead") and item.exit_code != 0 for item in matches):
+            if any(item.state == "dead" or
+                   (item.state == "exited" and item.exit_code != 0) for item in matches):
                 raise ContainerError("Dependency service {} failed".format(service))
             if matches and all(item.state == "exited" and item.exit_code == 0 for item in matches):
                 return
-            if time.monotonic() >= deadline:
+            if timeout is None and (not matches or any(
+                    item.state not in ("running", "restarting", "exited") for item in matches)):
+                raise ContainerError("Dependency service {} is unavailable".format(service))
+            if deadline is not None and time.monotonic() >= deadline:
                 raise ContainerError("Service {} did not complete successfully".format(service))
             time.sleep(0.5)
 
@@ -456,32 +491,90 @@ class ComposeRunner:
         for service in services:
             self.apply_service(context, service)
 
-    def apply_saved_services(self, context: "EventContext", services: "Sequence[str]",
-                             files: "dict[str, str]") -> None:
-        """Apply the saved model through the same command builder on rollback."""
+    @contextmanager
+    def _saved_compose_args(self, context: "EventContext",
+                            contents: "Iterable[str]") -> "Iterator[list[str]]":
         import tempfile
+        # Normal Compose commands take their base directory from the first
+        # generated file. Temporary rollback files must not change that base.
+        project_directory = os.path.dirname(os.path.abspath(next(iter(context.compose_files))))
         with tempfile.TemporaryDirectory(prefix="cntr-rollback-") as directory:
-            file_args = []
-            for index, content in enumerate(files.values()):
+            args = ["compose", "--project-directory", project_directory,
+                    "--project-name", self.manager.project_name]
+            for index, content in enumerate(contents):
                 path = os.path.join(directory, "{}.yml".format(index))
                 with open(path, "w", encoding="utf-8") as stream:
                     stream.write(content)
-                file_args.extend(["--file", path])
-            import yaml
-            candidates = getattr(context, "generated_candidates", {})
-            labels = {
-                candidate.container.name: {"labels": {
-                    "io.linktools.cntr.generation": candidate.generation_id}}
-                for candidate in candidates.values()
-                if candidate.container.name in services and
-                candidate.container.generation_label(candidate.container.name, candidate.generation_id) is not None
-            }
-            if labels:
-                path = os.path.join(directory, "generation.yml")
-                with open(path, "w", encoding="utf-8") as stream:
-                    yaml.safe_dump({"services": labels}, stream)
-                file_args.extend(["--file", path])
-            for service in services:
+                args.extend(["--file", path])
+            yield args
+
+    def _restore_order(self, context: "EventContext",
+                       specifications: "dict[str, dict[str, Any]]") -> "tuple[str, ...]":
+        # Order only the restore set; external dependencies are checked before
+        # application, never expanded into additional startup targets.
+        graph = {service: {"depends_on": {
+            name: options for name, options in service_dependencies(spec).items()
+            if name in specifications}} for service, spec in specifications.items()}
+        return order_services(context.containers, tuple(specifications),
+                              {"services": graph}, dependency_roots=())
+
+    def saved_service_models(self, context: "EventContext",
+                             services: "Sequence[str]") -> "dict[str, str]":
+        """Resolve and order the original per-service models for one restore set."""
+        import yaml
+        texts, specifications = {}, {}
+        legacy = None
+        for service in dict.fromkeys(services):
+            if service in getattr(context, "bootstrap_fallback_services", ()):
+                model = context.compose_model
+                text = yaml.safe_dump(model)
+            else:
+                text = context.service_models.previous.get(service)
+                if text is not None:
+                    model = yaml.safe_load(text)
+                else:
+                    if legacy is None:
+                        if not context.saved_compose:
+                            from ..errors import ContainerError
+                            raise ContainerError("No previous Compose model available for service " + service)
+                        with self._saved_compose_args(context, context.saved_compose.values()) as args:
+                            legacy = self._resolved_model(self.manager.runtime.create_docker_process(
+                                *args, *self.config_args(output_format="json"), capture_output=True))
+                    model = legacy
+                    text = yaml.safe_dump(model)
+            texts[service] = text
+            specifications[service] = model["services"][service]
+        return {service: texts[service] for service in self._restore_order(context, specifications)}
+
+    def apply_saved_services(self, context: "EventContext", services: "Sequence[str]",
+                             files: "dict[str, str]") -> None:
+        """Restore original images, paths and dependency conditions, not mutable tags."""
+        import yaml
+        from ..errors import ContainerError
+        services = tuple(dict.fromkeys(services))
+        if not services:
+            return
+        if not files:
+            raise ContainerError("No saved Compose files available")
+        overlay = {}
+        for service in services:
+            image = context.native_running_images.get(service)
+            if not image:
+                raise ContainerError("No original image ID for service " + service)
+            overlay[service] = {"image": image}
+        candidates = getattr(context, "generated_candidates", {})
+        for candidate in candidates.values():
+            service = candidate.container.name
+            if service in overlay:
+                label = candidate.container.generation_label(service, candidate.generation_id)
+                if label is not None:
+                    overlay[service]["labels"] = {"io.linktools.cntr.generation": label}
+        contents = [*files.values(), yaml.safe_dump({"services": overlay})]
+        with self._saved_compose_args(context, contents) as args:
+            model = self._resolved_model(self.manager.runtime.create_docker_process(
+                *args, *self.config_args(output_format="json"), capture_output=True))
+            specifications = {service: model["services"][service] for service in services}
+            for service in self._restore_order(context, specifications):
+                self.wait_service_dependencies(context, service, model=model)
                 self.manager.runtime.create_docker_process(
-                    "compose", *file_args, "--project-name", self.manager.project_name,
-                    *self.apply_service_args(service, recreate=True)).check_call()
+                    *args, *self.apply_service_args(service, recreate=True)).check_call()

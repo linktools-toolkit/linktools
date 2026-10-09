@@ -38,6 +38,7 @@ class ComposeSelection:
     target_containers: "tuple[BaseContainer, ...]"
     services: "tuple[str, ...]"
     full: bool
+    native_roots: "frozenset[str]" = frozenset()
 
 
 class ComposeOperations:
@@ -132,7 +133,9 @@ class ComposeOperations:
                     services.update(provider_services)
             for name in tuple(services):
                 owner = owners[name]
-                for dependency in service_dependencies(definitions[name]):
+                for dependency, options in service_dependencies(definitions[name]).items():
+                    if options.get("required", True) is False and dependency not in services:
+                        continue
                     provider = owners.get(dependency)
                     if provider is None:
                         raise ContainerError(f"Compose dependency {dependency!r} for {owner.name} is not installed")
@@ -151,12 +154,14 @@ class ComposeOperations:
         if not ordered_services:
             names = ", ".join(c.name for c in selection.target_containers)
             raise ContainerError(f"No runnable service for {names}")
-        return ComposeSelection(selection.project_containers, ordered, tuple(ordered_services), selection.full)
+        return ComposeSelection(selection.project_containers, ordered, tuple(ordered_services),
+                                selection.full, frozenset(c.name for c in roots))
 
     def _reconcile_selection(self, explicit, context, changed_generations=()) -> ComposeSelection:
         services = set(explicit.services) if not explicit.full else {
             name for container in explicit.target_containers for name in container.services}
         targets = set(explicit.target_containers)
+        native_roots = set(explicit.target_containers)
         for container in explicit.project_containers:
             changed = container.name in changed_generations
             pending = {name for name in container.services if name in context.initial_running_services and
@@ -165,10 +170,12 @@ class ComposeOperations:
             if pending:
                 services.update(pending)
                 targets.add(container)
+                if changed and pending.intersection(container.generation_services):
+                    native_roots.add(container)
         return self.start_selection(ComposeSelection(explicit.project_containers, tuple(targets),
                                                      tuple(services), explicit.full),
                                     getattr(context, "compose_model", None),
-                                    dependency_roots=explicit.target_containers)
+                                    dependency_roots=tuple(native_roots))
 
     def _make_context(self, commands, selection: ComposeSelection) -> "EventContext":
         context = EventContext()
@@ -238,7 +245,7 @@ class ComposeOperations:
         # are knowable; application and after-start use the final closure.
         generations = manager.generated_configs
         context.changed_compose_services = set(context.initial_running_services)
-        selection = self._reconcile_selection(explicit, context, generations)
+        selection = self._reconcile_selection(explicit, context)
         context.target_containers = list(selection.target_containers)
         context.target_services = selection.services
 
@@ -305,9 +312,8 @@ class ComposeOperations:
                         generations[container.name].validate_config(context, candidate)
 
             for container in sync:
-                candidate = candidates.get(container.name)
                 services = tuple(name for name in container.services if name in required_services)
-                self._require_rollback_model(container, candidate, context, services)
+                self._require_rollback_model(container, context, services)
 
             bootstrap_candidates = {}
             available_after_stop = set(running_services)
@@ -355,10 +361,9 @@ class ComposeOperations:
                         final_candidate.bootstrap_fallback = True
 
             owners = {service: container for container in sync for service in container.services}
-            native_scope = self.start_selection(explicit, context.compose_model)
             services = order_services(
                 sync, selection.services, context.compose_model, bootstrap_available,
-                dependency_roots={container.name for container in native_scope.target_containers})
+                dependency_roots=selection.native_roots)
             for service in services:
                 container = owners[service]
                 candidate = candidates.get(container.name)
@@ -457,13 +462,16 @@ class ComposeOperations:
                         container.name, error, rollback_error)) from error
             if running and (previous or any(name in saved_models.previous for name in running)):
                 try:
-                    files = dict(context.compose_files)
-                    files.update(previous)
+                    models = runner.saved_service_models(context, running)
                     for path, content in previous.items():
                         atomic_write_text_if_changed(path, content, mode=0o600)
-                    for service in running:
-                        model = context.service_models.previous.get(service)
-                        runner.apply_saved_services(context, (service,), {"previous.yml": model} if model else files)
+                    for service, model in models.items():
+                        runner.apply_saved_services(context, (service,), {"previous.yml": model})
+                        if service in context.initial_healthy_services:
+                            runner.wait_service_healthy(context, service)
+                        else:
+                            runner.wait_service_running(context, service)
+                        container.on_service_started(context, service)
                     context.service_models.restore(running)
                     self._restore_applied_compose(container, context, previous)
                     restored_context = copy(context)
@@ -475,10 +483,14 @@ class ComposeOperations:
                         container.name, error, rollback_error)) from error
             raise
 
-    def _require_rollback_model(self, container, candidate, context, services) -> None:
+    def _require_rollback_model(self, container, context, services) -> None:
         running = tuple(service for service in services if service in context.initial_running_services)
-        if not running or (candidate is not None and candidate.previous_id is not None):
+        if not running:
             return
+        for service in running:
+            if not context.native_running_images.get(service):
+                raise ContainerError(
+                    "Cannot replace running service {} without its original image ID".format(service))
         import yaml
         saved_services = set()
         for path, owner in context.compose_owners.items():
@@ -493,7 +505,7 @@ class ComposeOperations:
                     "Cannot replace running service {} without a previous Compose model".format(service))
 
     def _publish_candidate(self, container, candidate, context, services, record_applied=True) -> None:
-        self._require_rollback_model(container, candidate, context, services)
+        self._require_rollback_model(container, context, services)
         context.generated_candidates[container.name] = candidate
         candidate.publish()
         if not services:
@@ -537,37 +549,28 @@ class ComposeOperations:
                 context.generated_candidates[container.name] = previous
             else:
                 context.generated_candidates.pop(container.name, None)
-            context.rollback_service_models = context.service_models.previous
+            context.rollback_service_models = {}
             if fallback:
                 context.bootstrap_fallback_services = frozenset(
                     service for service in restore_services
                     if service in getattr(context, "bootstrapped_services", ())
                     and service not in context.initial_running_services)
-            if old_compose:
-                context.rollback_compose_files = dict(context.compose_files)
-                context.rollback_compose_files.update(old_compose)
-
             if stop_services:
                 runner.stop(context, stop_services)
-            if candidate.previous_id:
-                if restore_services:
-                    container.apply_config(context, previous, restore_services)
-            else:
+            if restore_services:
+                context.rollback_service_models = runner.saved_service_models(context, restore_services)
+            if not candidate.previous_id:
                 container.rollback_config(context)
-                saved_files = dict(context.compose_files)
-                saved_files.update(context.saved_compose)
-                for service in restore_services:
-                    model = context.service_models.previous.get(service)
-                    if model is not None:
-                        runner.apply_saved_services(context, (service,), {"previous.yml": model})
-                    elif context.saved_compose:
-                        runner.apply_saved_services(context, (service,), saved_files)
-                    else:
-                        raise ContainerError("No previous Compose model available for service " + service)
-                    if service in getattr(context, "initial_healthy_services", ()):
+            for service, model in context.rollback_service_models.items():
+                if candidate.previous_id:
+                    container.apply_config(context, previous, (service,))
+                else:
+                    runner.apply_saved_services(context, (service,), {"previous.yml": model})
+                    if service in context.initial_healthy_services:
                         runner.wait_service_healthy(context, service)
                     else:
                         runner.wait_service_running(context, service)
+                container.on_service_started(context, service)
 
             context.service_models.restore(affected)
             self._restore_applied_compose(container, context, old_compose)
@@ -586,8 +589,6 @@ class ComposeOperations:
             raise ContainerError("{} apply failed: {}; rollback failed: {}".format(
                 container.name, error, rollback_error)) from error
         finally:
-            if hasattr(context, "rollback_compose_files"):
-                del context.rollback_compose_files
             if hasattr(context, "bootstrap_fallback_services"):
                 del context.bootstrap_fallback_services
             del context.rollback_service_models
