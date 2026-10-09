@@ -146,7 +146,7 @@ class Container(BaseContainer):
             # retains access for content comparison and future rollback.
             if path.stat().st_gid != group:
                 self.runtime.create_process("chgrp", str(group), str(path), privilege=True).check_call()
-            path.chmod(0o640)
+            self.runtime.chmod(path, 0o640)
 
     def rollback_config(self, context: "EventContext") -> None:
         for path, backup in reversed(getattr(context, "flare_migrated_paths", ())):

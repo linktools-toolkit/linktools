@@ -175,9 +175,16 @@ def test_flare_candidate_permissions_preserve_host_owner_and_service_read(tmp_pa
     for name in ("apps.yml", "bookmarks.yml"):
         (tmp_path / name).write_text("links: []\n")
         (tmp_path / name).chmod(0o600)
-    container = instance(builtin("120-flare"))
+    calls = []
+
+    def chmod(path, mode):
+        calls.append((path.name, mode))
+        path.chmod(mode)
+
+    container = instance(builtin("120-flare"), runtime=SimpleNamespace(chmod=chmod))
     container.get_config = lambda key, **kwargs: os.getgid()
     container.validate_config(None, SimpleNamespace(path=str(tmp_path)))
+    assert calls == [("apps.yml", 0o640), ("bookmarks.yml", 0o640)]
     for name in ("apps.yml", "bookmarks.yml"):
         assert (tmp_path / name).stat().st_mode & 0o777 == 0o640
         assert (tmp_path / name).stat().st_uid == os.getuid()

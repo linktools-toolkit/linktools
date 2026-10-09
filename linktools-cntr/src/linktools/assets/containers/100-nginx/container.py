@@ -473,12 +473,12 @@ class Container(BaseContainer):
             source = root / (domain + "_" + name + ".pem")
             if source.is_file():
                 shutil.copy2(str(source), str(directory / source.name))
-        os.chmod(str(directory / (domain + "_key.pem")), 0o600)
+        self.runtime.chmod(directory / (domain + "_key.pem"), 0o600)
         account = self.get_app_path("acme")
         if account.is_dir():
             import shutil
             shutil.copytree(str(account), str(directory / "acme"), symlinks=True)
-            os.chmod(str(directory / "acme"), 0o700)
+            self.runtime.chmod(directory / "acme", 0o700)
         (directory / "primary").write_text(domain + "\n", encoding="utf-8")
         (directory / "domains").write_text("", encoding="utf-8")
         (directory / "build-revision").write_text(self.cert_image_revision, encoding="utf-8")
@@ -488,14 +488,14 @@ class Container(BaseContainer):
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
         secret_path = self.get_app_path("acme-secrets", "dns.env", create_parent=True)
-        os.chmod(str(secret_path.parent), 0o700)
+        self.runtime.chmod(secret_path.parent, 0o700)
         if not secret_path.exists():
             secret_path.touch(mode=0o600)
-        os.chmod(str(secret_path), 0o600)
+        self.runtime.chmod(secret_path, 0o600)
         archive = self.get_app_path("acme-build-account.tar", create_parent=True)
         if not archive.exists():
             archive.touch(mode=0o600)
-        os.chmod(str(archive), 0o600)
+        self.runtime.chmod(archive, 0o600)
 
     def on_starting(self, context: "EventContext") -> None:
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
@@ -526,7 +526,6 @@ class Container(BaseContainer):
         archive = self.get_app_path("acme-build-account.tar")
         with tempfile.NamedTemporaryFile(dir=str(archive.parent), delete=False) as stream:
             temp = stream.name
-            os.chmod(temp, 0o600)
             try:
                 if account.is_dir():
                     with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as output:

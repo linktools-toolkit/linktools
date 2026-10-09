@@ -225,6 +225,32 @@ else:
     assert (build / "seed/acme/domain.conf").read_text() == "Le_Domain='example.test'\n"
 
 
+def test_nginx_host_permissions_use_cntr_runtime(certificate_case, monkeypatch):
+    container, root, _, _ = certificate_case
+    monkeypatch.setattr(container, "get_app_path", lambda *parts, **kwargs: root.joinpath(*parts))
+    (root / "acme-secrets").mkdir()
+    calls = []
+    monkeypatch.setattr(container.runtime, "chmod",
+                        lambda path, mode, recursive=False: calls.append((Path(path), mode, recursive)))
+
+    container.on_prepare()
+    assert calls == [
+        (root / "acme-secrets", 0o700, False),
+        (root / "acme-secrets/dns.env", 0o600, False),
+        (root / "acme-build-account.tar", 0o600, False),
+    ]
+
+    (root / "certs/live").unlink()
+    for suffix, source in (("fullchain", "old.pem"), ("key", "old.key")):
+        shutil.copyfile(str(root / source), str(root / "certs" / ("example.test_" + suffix + ".pem")))
+    container._initialize_certificate_mount("example.test")
+    current = root / "certs" / (root / "certs/live").readlink()
+    assert calls[-2:] == [
+        (current / "example.test_key.pem", 0o600, False),
+        (current / "acme", 0o700, False),
+    ]
+
+
 def test_acme_build_secret_reuses_active_account(certificate_case, monkeypatch):
     import tarfile
     container, root, _, _ = certificate_case
