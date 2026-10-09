@@ -15,7 +15,6 @@ from linktools.cli import BaseCommand, CommandError
 from linktools.core import environ
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
-from linktools.ai.runtime import Execution, ExecutionResult, Runtime
 
 from ._common import (
     _add_local_runtime_arguments,
@@ -26,6 +25,7 @@ from ._common import (
 )
 
 if TYPE_CHECKING:
+    from linktools.ai.runtime import Execution, ExecutionResult, Runtime
     from linktools.cli import CommandParser
 
 _logger = environ.get_logger("commands.ai.run")
@@ -82,7 +82,7 @@ class Command(BaseCommand):
 
 
 async def _emit_result(
-    runtime: Runtime,
+    runtime: "Runtime",
     prompt: str,
     session_id: str,
     memory_scope: str,
@@ -200,7 +200,7 @@ def _tool_event_text(payload: object) -> str:
     return " · ".join(parts)
 
 
-def _raise_for_failure(result: ExecutionResult) -> None:
+def _raise_for_failure(result: "ExecutionResult") -> None:
     if result.status is not ExecutionStatus.SUCCEEDED:
         raise CommandError(
             _failure_message(
@@ -237,7 +237,7 @@ async def _cancel_interrupted_execution(execution: "Execution[object]") -> None:
     await execution.wait()
 
 
-def _result_payload(result: ExecutionResult) -> dict[str, object]:
+def _result_payload(result: "ExecutionResult") -> dict[str, object]:
     diagnostics = result.error_diagnostics
     return {
         "execution_id": result.execution_id,
