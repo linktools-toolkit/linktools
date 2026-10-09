@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.runtime.compose import ComposeRunner, order_services
 
 
@@ -41,6 +42,25 @@ def test_implicit_sidecar_does_not_inherit_owner_strong_dependency_order():
     assert order_services((sidecar, provider), selected) == ("nginx", "authelia-redis")
     assert order_services(
         (sidecar, provider), selected, dependency_roots={"nginx"}) == selected
+
+
+def test_implicit_service_preserves_compose_edges_without_container_dependency_closure():
+    target = Container("target", {"target": {}})
+    owner = Container("owner", {"redis": {"depends_on": ["database"]}},
+                      dependencies=("nginx",))
+    database = Container("database", {"database": {}})
+    nginx = Container("nginx", {"nginx": {}})
+    project = (target, database, nginx, owner)
+    selection = ComposeSelection(project, (target, owner), ("target", "redis"), False)
+    operations = ComposeOperations(SimpleNamespace())
+
+    automatic = operations.start_selection(selection, dependency_roots=(target,))
+    assert "database" in automatic.services
+    assert "nginx" not in automatic.services
+    assert automatic.services.index("database") < automatic.services.index("redis")
+
+    explicit = operations.start_selection(selection)
+    assert "nginx" in explicit.services
 
 
 def test_bootstrap_availability_breaks_only_started_or_healthy_edges():
