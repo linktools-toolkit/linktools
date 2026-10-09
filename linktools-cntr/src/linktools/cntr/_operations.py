@@ -151,7 +151,8 @@ class ComposeOperations:
         for container in explicit.project_containers:
             changed = container.name in changed_generations
             pending = {name for name in container.services if name in context.initial_running_services and
-                       (changed or name in context.changed_compose_services)}
+                       (name in context.changed_compose_services or
+                        (changed and name in container.generation_services))}
             if pending:
                 services.update(pending)
                 targets.add(container)
@@ -237,7 +238,7 @@ class ComposeOperations:
             generation_targets.update(
                 container.name for container in sync
                 if container.name in generations and
-                any(name in context.initial_running_services for name in container.services))
+                any(name in context.initial_running_services for name in container.generation_services))
             context.changed_image_services = set()
             context.image_preparation_targets = set()
             prepared_pulls, prepared_builds = set(), set()
