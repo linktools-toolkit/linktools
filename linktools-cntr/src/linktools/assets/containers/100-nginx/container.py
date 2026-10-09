@@ -497,6 +497,8 @@ class Container(BaseContainer):
     def on_starting(self, context: "EventContext") -> None:
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
+        live = self.get_app_path("certs", "live")
+        context.nginx_certificate_previous = os.readlink(str(live)) if live.is_symlink() else None
         for name in ("certs", "acme"):
             self.get_app_path(name).mkdir(parents=True, exist_ok=True)
         if ("nginx" in context.initial_services and
@@ -700,7 +702,7 @@ class Container(BaseContainer):
             version = os.path.basename(previous) if previous is not None else None
         changed = bool(version and (not live.is_symlink() or
                                     os.readlink(str(live)) != "versions/" + version))
-        if changed and not rollback:
+        if changed and not rollback and previous is MISSING:
             context.nginx_certificate_previous = os.readlink(str(live)) if live.is_symlink() else None
         if rollback and previous is None and live.is_symlink():
             runner.run_isolated_service(context, "nginx",
