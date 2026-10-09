@@ -213,6 +213,9 @@ class ComposeOperations:
             service.service for service in actual.services if service.state in ("running", "restarting"))
         context.initial_healthy_services = frozenset(
             service.service for service in actual.services if service.state == "running" and service.health == "healthy")
+        context.native_running_images = {
+            service.service: service.image_id for service in actual.services
+            if service.state in ("running", "restarting") and service.image_id}
         context.initial_services = frozenset(service.service for service in actual.services)
         # Running owners prepare hook-dependent inputs before their changes
         # are knowable; application and after-start use the final closure.
@@ -228,19 +231,35 @@ class ComposeOperations:
             context.compose_model = model
             context.service_models = AppliedServiceModels(manager, model)
             context.changed_compose_services = set(context.service_models.changed_services)
-            selection = self._reconcile_selection(explicit, context, generations)
+            selection = self._reconcile_selection(explicit, context)
             required_services = set(selection.services)
             generation_targets = {container.name for container in selection.target_containers}
-            image_services = tuple(name for c in sync for name in c.services if name in required_services)
-            image_plan = manager.image_preparer.plan(model, image_services, force_pull=pull)
-            context.changed_image_services = set(image_plan.pull) | set(image_plan.build)
-            if image_plan.pull:
-                with record_phase(context, "pull", command=tuple(runner.pull_args(image_plan.pull)), logger=manager.logger):
-                    runner.pull(context, image_plan.pull)
-            if image_plan.build:
-                with record_phase(context, "build", command=tuple(runner.build_args(
-                        runner.options_for_build(image_plan.build, pull=pull))), logger=manager.logger):
-                    runner.build(context, runner.options_for_build(image_plan.build, pull=pull))
+            generation_targets.update(
+                container.name for container in sync
+                if container.name in generations and
+                any(name in context.initial_running_services for name in container.services))
+            context.changed_image_services = set()
+            prepared_pulls, prepared_builds = set(), set()
+
+            def prepare_images(services):
+                image_plan = manager.image_preparer.plan(model, tuple(services), force_pull=pull)
+                pull_services = tuple(service for service in image_plan.pull if service not in prepared_pulls)
+                build_services = tuple(service for service in image_plan.build if service not in prepared_builds)
+                if pull_services:
+                    with record_phase(context, "pull", command=tuple(runner.pull_args(pull_services)),
+                                      logger=manager.logger):
+                        runner.pull(context, pull_services)
+                if build_services:
+                    options = runner.options_for_build(build_services, pull=pull)
+                    with record_phase(context, "build", command=tuple(runner.build_args(options)),
+                                      logger=manager.logger):
+                        runner.build(context, options)
+                prepared_pulls.update(pull_services)
+                prepared_builds.update(build_services)
+                context.changed_image_services.update(pull_services)
+                context.changed_image_services.update(build_services)
+
+            prepare_images(selection.services)
             candidates = {}
             for container in sync:
                 owner = generations.get(container.name)
@@ -249,16 +268,19 @@ class ComposeOperations:
                         owner.on_prepare_config(context)
                         candidates[container.name] = GeneratedCandidate(container, owner.render_config)
             context.generated_candidates = candidates
+            selection = self._reconcile_selection(explicit, context,
+                {name for name, candidate in candidates.items() if candidate.changed})
+            final_services = set(selection.services)
+            additional = final_services - required_services
+            if additional:
+                prepare_images(tuple(name for name in selection.services if name in additional))
+            required_services = final_services
+            context.target_containers = list(selection.target_containers)
             for container in sync:
                 candidate = candidates.get(container.name)
                 if candidate is not None:
                     with record_phase(context, "validate-config", container=container.name, logger=manager.logger):
                         generations[container.name].validate_config(context, candidate)
-
-            selection = self._reconcile_selection(explicit, context,
-                {name for name, candidate in candidates.items() if candidate.changed})
-            required_services = set(selection.services)
-            context.target_containers = list(selection.target_containers)
 
             for container in sync:
                 candidate = candidates.get(container.name)
