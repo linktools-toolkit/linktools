@@ -110,7 +110,7 @@ def test_running_generated_owner_sync_does_not_build_stopped_sibling(tmp_path, m
     monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate",
                         lambda container, render: SimpleNamespace(
                             container=container, generation_id="saved", previous_id="saved",
-                            changed=False, publish=lambda: None))
+                            changed=False, publish=lambda: None, prune=lambda: None))
     planned = []
 
     def image_plan(model, services, force_pull=False):
@@ -135,7 +135,7 @@ def test_changed_running_generation_prepares_its_image_only_after_change(tmp_pat
     monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate",
                         lambda container, render: SimpleNamespace(
                             container=container, generation_id="next", previous_id="previous",
-                            changed=True, publish=lambda: None))
+                            changed=True, publish=lambda: None, prune=lambda: None))
     planned = []
 
     def plan(model, services, force_pull=False):

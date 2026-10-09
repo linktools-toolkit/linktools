@@ -314,10 +314,12 @@ does not inherit its owner's unrelated provider dependencies.
 `restart app` stops only explicit targets, after all final and required bootstrap candidate validation passes.
 For batched restarts, an application or post-stop hook failure restores any
 previously running explicit targets that were stopped but have not yet completed
-their application. The failed service follows its own rollback path; previously
-confirmed applications are not silently reverted. Recovery uses the original
-image IDs, saved models and dependency order. A failure during restoration
-reports both the operation error and the recovery error.
+their application. If Compose stop reports an error, actual runtime state
+determines which targets were stopped before the failure; still-running targets
+are not replaced. The failed application follows its own rollback path;
+previously confirmed applications are not silently reverted. Recovery uses the
+original image IDs, saved models and dependency order. A failure during runtime
+inspection or restoration reports both the operation error and the recovery error.
 Startup callbacks for selected owners follow the dependency-ordered service
 scope, including native runtime providers.
 Preparation covers running generated-config consumers and their potential
@@ -471,6 +473,11 @@ before restart stops a target. nginx loads bootstrap health/rejection config
 when starting without a serving process; authentication/WAF providers become
 ready before the complete nginx config is activated. nginx health returns the
 loaded generation ID, and failed application restores the previous generation.
+After the entire operation succeeds, generated-config cleanup retains the active
+generation and the preceding generation known to that operation, deleting older
+and abandoned version directories plus their artifact index entries. Failed
+operations keep their staged files for diagnosis; a later successful operation
+can discard them. This cleanup never touches certificate or ACME account storage.
 Cross-service state is not an atomic transaction; failures remain command errors.
 
 nginx issues and installs its initial certificates while building the image, using

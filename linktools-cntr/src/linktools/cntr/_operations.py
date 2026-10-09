@@ -357,11 +357,13 @@ class ComposeOperations:
             pending_restart = set(stopped_services) & context.initial_running_services
             owners = {service: container for container in sync for service in container.services}
             stopped = False
+            stop_attempted = False
             try:
                 if restart and (explicit.full or explicit.services):
                     stop_context = self._make_context(context.commands, explicit)
                     with manager.lifecycle.notify_stop(stop_context):
                         with record_phase(context, "stop", command=("stop", *explicit.services), logger=manager.logger):
+                            stop_attempted = True
                             runner.stop(stop_context, explicit.services)
                             stopped = True
                             manager.running_state.mark_stopped(stop_context)
@@ -414,7 +416,16 @@ class ComposeOperations:
                     if container.name in candidates and not any(name in required_services for name in container.services):
                         self._publish_candidate(container, candidates[container.name], context, ())
             except Exception as error:
-                if stopped and pending_restart:
+                if stop_attempted and not stopped:
+                    try:
+                        actual = manager.docker_inspector.get_project_state(sync)
+                        still_running = {service.service for service in actual.services
+                                         if service.state in ("running", "restarting")}
+                        pending_restart.difference_update(still_running)
+                    except Exception as inspection_error:
+                        raise ContainerError("Restart failed: {}; recovery inspection failed: {}".format(
+                            error, inspection_error)) from error
+                if (stopped or stop_attempted) and pending_restart:
                     from copy import copy
                     try:
                         restore = tuple(service for service in selection.services
@@ -455,6 +466,12 @@ class ComposeOperations:
             pass
         if report:
             render_report(manager.logger, get_records(context))
+        for candidate in candidates.values():
+            try:
+                candidate.prune()
+            except (OSError, ContainerError) as exc:
+                manager.logger.warning("Unable to prune generated configuration for %s: %s",
+                                       candidate.container.name, exc)
 
     def _record_applied_compose(self, container, context, services) -> None:
         import os

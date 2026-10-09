@@ -229,7 +229,8 @@ def test_implicit_native_provider_is_prepared_before_its_first_application(
     def candidate(owner, render):
         return SimpleNamespace(container=owner, changed=True, previous_id=None,
                                generation_id="next-" + owner.name, changed_files=(),
-                               publish=lambda: None, restore=lambda: None)
+                               publish=lambda: None, restore=lambda: None,
+                               prune=lambda: events.append(("pruned", owner.name)))
 
     monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate", candidate)
     case.operations.up(["lldap"])
@@ -240,5 +241,7 @@ def test_implicit_native_provider_is_prepared_before_its_first_application(
     assert events.index(("final-model",)) < events.index(("prepared", "authelia"))
     assert events.index(("prepared", "authelia")) < events.index(
         ("native-applied", "authelia", ("authelia",)))
+    assert events.index(("native-applied", "authelia", ("authelia",))) < events.index(
+        ("pruned", "authelia"))
     assert not any(event == ("native-applied", "authelia", ("authelia-redis",))
                    for event in events)

@@ -3,11 +3,12 @@
 """Generated candidates preserve the active tree until validation succeeds."""
 import os
 from pathlib import Path
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 
-from linktools.cntr.artifacts import AppliedServiceModels, GeneratedCandidate
+from linktools.cntr.artifacts import AppliedServiceModels, ArtifactIndex, GeneratedCandidate
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.container import BaseContainer, ContainerError
 from linktools.cntr.runtime.compose import ComposeRunner
@@ -494,7 +495,8 @@ def test_partial_update_applies_navigation_only_if_flare_is_running(fresh_manage
 
     def candidate(container, render):
         return SimpleNamespace(container=container, changed=True, generation_id="candidate", previous_id=None,
-                               publish=lambda: published.append(container.name), restore=lambda: None)
+                               publish=lambda: published.append(container.name), restore=lambda: None,
+                               prune=lambda: None)
 
     monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate", candidate)
     fresh_manager.compose_operations.up(["portainer"])
@@ -681,3 +683,58 @@ def test_publication_failure_restores_original_generation_before_runtime_apply(t
         ComposeOperations(owner.manager)._publish_candidate(owner, candidate, context, ("test",))
     assert GeneratedCandidate.current_id(str(owner.path)) == first.generation_id
     assert calls == [first.generation_id]
+
+
+def test_successful_generation_pruning_keeps_current_and_previous_and_updates_index(tmp_path):
+    owner = _Generated(tmp_path / "generated")
+    manager = owner.manager
+    manager.project_name = "test"
+    manager.environ = SimpleNamespace(locks=SimpleNamespace(
+        process_lock=lambda key: nullcontext()))
+    manager.artifact_index = ArtifactIndex(manager)
+
+    first = GeneratedCandidate(owner, owner.render_config)
+    first.publish()
+    owner.content = "second"
+    second = GeneratedCandidate(owner, owner.render_config)
+    second.publish()
+    owner.content = "third"
+    third = GeneratedCandidate(owner, owner.render_config)
+    third.publish()
+    marker = owner.path / "user-backup"
+    marker.mkdir()
+    first_key = os.path.relpath(os.path.join(first.path, "config"), str(manager.data_path))
+    current_key = os.path.relpath(os.path.join(third.path, "config"), str(manager.data_path))
+    assert first_key in manager.artifact_index.load()
+
+    third.prune()
+    assert not os.path.exists(first.path)
+    assert os.path.isdir(second.path) and os.path.isdir(third.path)
+    assert GeneratedCandidate.current_id(str(owner.path)) == third.generation_id
+    assert first_key not in manager.artifact_index.load()
+    assert current_key in manager.artifact_index.load()
+    assert marker.is_dir()
+
+
+def test_next_successful_generation_prunes_abandoned_validation_candidate(tmp_path):
+    owner = _Generated(tmp_path / "generated")
+    manager = owner.manager
+    manager.project_name = "test"
+    manager.environ = SimpleNamespace(locks=SimpleNamespace(
+        process_lock=lambda key: nullcontext()))
+    manager.artifact_index = ArtifactIndex(manager)
+
+    first = GeneratedCandidate(owner, owner.render_config)
+    first.publish()
+    owner.content = "candidate-rejected"
+    abandoned = GeneratedCandidate(owner, owner.render_config)
+    assert os.path.isdir(abandoned.path)
+    owner.content = "candidate-accepted"
+    current = GeneratedCandidate(owner, owner.render_config)
+    current.publish()
+    current.prune()
+
+    assert not os.path.exists(abandoned.path)
+    assert os.path.isdir(first.path) and os.path.isdir(current.path)
+    assert not any(key.startswith(os.path.relpath(abandoned.path, str(manager.data_path)) + os.sep)
+                   for key in manager.artifact_index.load())

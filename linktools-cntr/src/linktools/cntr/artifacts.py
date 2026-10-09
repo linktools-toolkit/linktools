@@ -300,6 +300,29 @@ class GeneratedCandidate:
     def restore(self) -> None:
         self.activate(self.previous_id)
 
+    def prune(self) -> None:
+        """Retain the active generation and the preceding rollback version."""
+        import shutil
+
+        keep = {self.current_id(self.root), self.previous_id}
+        obsolete = [
+            entry.path for entry in os.scandir(self.root)
+            if entry.name not in keep and len(entry.name) == 32
+            and all(char in "0123456789abcdef" for char in entry.name)
+            and entry.is_dir(follow_symlinks=False)
+        ]
+        if not obsolete:
+            return
+        base = str(self.container.manager.data_path)
+        prefixes = tuple(os.path.relpath(path, base) + os.sep for path in obsolete)
+        index = self.container.manager.artifact_index
+        stale = tuple(path for path in index.load()
+                      if any(path.startswith(prefix) for prefix in prefixes))
+        if stale:
+            index.record({}, remove=stale)
+        for path in obsolete:
+            shutil.rmtree(path)
+
 
 class AppliedServiceModels:
     """Track each service's applied model, retaining project support for rollback."""
