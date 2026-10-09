@@ -289,15 +289,27 @@ class ComposeOperations:
 
             prepare_images(selection.services)
             candidates = {}
-            for container in sync:
-                owner = generations.get(container.name)
-                if owner is not None and container.name in generation_targets:
+            context.generated_candidates = candidates
+            while True:
+                pending = [
+                    container for container in sync
+                    if container.name in generations and container.name not in candidates
+                    and (container.name in generation_targets or
+                         any(name in selection.services for name in container.generation_services))
+                ]
+                if not pending:
+                    break
+                additional = set(selection.services) - required_services
+                if additional:
+                    prepare_images(tuple(name for name in selection.services if name in additional))
+                    required_services.update(additional)
+                for container in pending:
+                    owner = generations[container.name]
                     with record_phase(context, "prepare-config", container=container.name, logger=manager.logger):
                         owner.on_prepare_config(context)
                         candidates[container.name] = GeneratedCandidate(container, owner.render_config)
-            context.generated_candidates = candidates
-            selection = self._reconcile_selection(explicit, context,
-                {name for name, candidate in candidates.items() if candidate.changed})
+                selection = self._reconcile_selection(explicit, context,
+                    {name for name, candidate in candidates.items() if candidate.changed})
             final_services = set(selection.services)
             additional = final_services - required_services
             if additional:
