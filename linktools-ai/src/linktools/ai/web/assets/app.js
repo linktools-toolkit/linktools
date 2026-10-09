@@ -1,7 +1,7 @@
-import {terminal, modelKey, historyKey, upsertModel, mergePage, readSSE, metricValue} from './console.js';
+import {terminal, upsertModel, mergePage, readSSE, metricValue, duration, modelLabel, usageLabel, promptLayers} from './console.js';
 
 const $ = id => document.getElementById(id);
-const state = {config:null, view:'sessions', list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false,
+const state = {config:null, view:'sessions', list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',
   execution:null, executionGeneration:0, tab:'overview', details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
   liveText:'', liveThinking:'', pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, selectedSession:null, selectedExecution:null};
@@ -49,7 +49,7 @@ async function mutate(path, payload) {
 function setDisabled() {
   const readonly=!state.config || state.config.read_only;
   document.querySelectorAll('[data-view]').forEach(node=>node.disabled=!state.config);
-  $('settings').disabled=!state.config;
+  $('settings').disabled=!state.config;$('open-record').disabled=!state.config;
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
   ['send','planning','thinking','memory','files','prompt'].forEach(id => $(id).disabled=readonly || state.session?.status === 'CLOSED' || !state.selectedSession);
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
@@ -65,7 +65,8 @@ function setView(view, refreshSelection=true) {
   state.view=view;
   document.querySelectorAll('[data-view]').forEach(node => node.classList.toggle('active', node.dataset.view===view));
   $('page-title').textContent={sessions:'Conversations',executions:'Executions',metrics:'Metrics'}[view];
-  $('execution-filters').hidden=view !== 'executions'; $('filter-form').hidden=view === 'metrics';
+  $('execution-filters').hidden=view !== 'executions'; $('filter-form').hidden=view === 'metrics';$('open-form').hidden=view==='metrics';
+  if(view!=='metrics')$('open-kind').value=view==='sessions'?'session':'execution';
   $('filter-label').textContent=view === 'executions' ? 'Filter loaded executions':'Filter loaded conversations';
   $('filter').placeholder=view === 'executions' ? 'Execution ID or status':'Title or session ID';
   $('metrics-view').hidden=view !== 'metrics';
@@ -80,19 +81,35 @@ function setView(view, refreshSelection=true) {
 async function loadList(more=false) {
   const generation=++state.listGeneration, view=state.view;
   if (view === 'metrics') return;
+  $('list-action').value='paged';setListFilterAvailability();
   const params=new URLSearchParams({limit:'50'});
   if (more && state.listCursor) params.set('cursor',state.listCursor);
   if (view === 'executions') {
-    if ($('filter-agent').value.trim()) params.set('agent_id',$('filter-agent').value.trim());
-    if ($('filter-session').value.trim()) params.set('session_id',$('filter-session').value.trim());
-    if ($('filter-parent').value.trim()) params.set('parent_execution_id',$('filter-parent').value.trim());
+    if ($('filter-agent').value.trim()) params.set('agent_id',$('filter-agent').value);
+    if ($('filter-session').value.trim()) params.set('session_id',$('filter-session').value);
+    if ($('filter-parent').value.trim()) params.set('parent_execution_id',$('filter-parent').value);
   }
   const payload=await api(`/api/${view}?${params}`);
   if (generation !== state.listGeneration || view !== state.view) return;
   const key=item => view==='sessions' ? item.session_id:item.execution_id;
   state.list=more ? mergePage(state.list,payload.items,key):payload.items;
   state.listCursor=payload.next_cursor; $('list-more').hidden=!state.listCursor; $('list-scope').hidden=!payload.recent_only;
+  $('list-scope').textContent='Showing recent sessions in read-only mode';
   renderList();
+}
+function setListFilterAvailability() {
+  ['filter-agent','filter-session','filter-parent'].forEach(id=>$(id).disabled=$('list-action').value==='recent');
+}
+async function loadRecentExecutions() {
+  if(state.actionsPending.has('recent-scan'))return;
+  state.actionsPending.add('recent-scan');const generation=++state.listGeneration;
+  try {
+    const payload=await api('/api/executions?recent=true&limit=20');
+    if(generation!==state.listGeneration || state.view!=='executions')return;
+    state.list=payload.items;state.listCursor=null;$('list-more').hidden=true;
+    $('list-scope').textContent='Newest 20 by creation time · scanned visible execution metadata';$('list-scope').hidden=false;
+    renderList();
+  } finally {state.actionsPending.delete('recent-scan');}
 }
 function renderList() {
   clear('list'); const filter=$('filter').value.trim().toLowerCase();
@@ -118,11 +135,32 @@ function navigate(sessionId, executionId) {
   if (location.hash===next) return openSelection(sessionId,executionId);
   location.hash=next;
 }
+function openExact(event) {
+  event.preventDefault();if(!state.config)return;
+  const id=$('open-id').value, session=$('open-kind').value==='session';
+  if(!id.trim())return;
+  setView(session?'sessions':'executions',false);
+  return navigate(session?id:null,session?null:id);
+}
+async function readSession(id) {
+  try {return await api(sessionURL(id,'',{limit:'50'}));}
+  catch(error) {
+    if(error.code!=='SESSION_HISTORY_UNAVAILABLE')throw error;
+    const payload=await api(sessionURL(id,'',{include_timeline:'false'}));
+    return {...payload,timeline_error:error.message};
+  }
+}
+function renderSessionHeader() {
+  if(!state.session)return;
+  $('conversation-title').textContent=state.session.metadata?.title || 'Conversation';
+  $('conversation-meta').textContent=`${state.selectedSession} · ${state.session.agent_id} · ${state.session.status} · history ${state.session.history_quality}`;
+  $('session-details').replaceChildren(rawDetail(state.session,'Session metadata'));
+}
 async function openSelection(sessionId, executionId) {
   const generation=++state.generation;
   stopStream(); state.cursor=null; state.liveText=''; state.liveThinking=''; state.models.clear(); state.events.clear();
   state.selectedSession=sessionId || null; state.selectedExecution=executionId || null;
-  state.session=null; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;
+  state.session=null; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;state.timelineError='';
   $('sidebar').classList.remove('open'); $('metrics-view').hidden=true; $('welcome').hidden=Boolean(sessionId || executionId);
   $('conversation-view').hidden=!sessionId && !executionId;
   $('composer').hidden=!sessionId; $('conversation-title').textContent='Loading…';
@@ -131,12 +169,10 @@ async function openSelection(sessionId, executionId) {
   if (!sessionId && !executionId) return;
   try {
     if (sessionId) {
-      const payload=await api(sessionURL(sessionId,"",{limit:"50"}));
+      const payload=await readSession(sessionId);
       if (generation!==state.generation) return;
-      state.session=payload.session; state.turns=payload.timeline.items; state.turnCursor=payload.timeline.next_cursor;
-      $('conversation-title').textContent=state.session.metadata?.title || 'Conversation';
-      $('conversation-meta').textContent=`${sessionId} · ${state.session.agent_id} · ${state.session.status} · history ${state.session.history_quality}`;
-      $('session-details').replaceChildren(rawDetail(state.session,'Session metadata'));
+      state.session=payload.session;state.turns=payload.timeline?.items || [];state.turnCursor=payload.timeline?.next_cursor || null;state.timelineError=payload.timeline_error || '';
+      renderSessionHeader();
       executionId=executionId || state.session.active_execution_id || state.turns.at(-1)?.execution_id;
       renderConversation();
     } else {
@@ -150,6 +186,7 @@ async function moreTurns() {
   const generation=state.generation;
   const payload=await api(sessionURL(state.selectedSession,"",{limit:"50",cursor:state.turnCursor}));
   if (generation!==state.generation) return;
+  state.session=payload.session;renderSessionHeader();
   state.turns=mergePage(payload.timeline.items,state.turns,item=>item.execution_id); state.turnCursor=payload.timeline.next_cursor; state.hasEarlierTurns=true;
   renderConversation({prepend:true});
 }
@@ -157,6 +194,7 @@ function renderConversation({prepend=false}={}) {
   const container=$('conversation'), previousTop=container.scrollTop, previousHeight=container.scrollHeight;
   const follows=previousTop+container.clientHeight>=previousHeight-40;
   clear('conversation'); $('turns-more').hidden=!state.turnCursor;
+  if(state.timelineError)$('conversation').append(element('p','empty',`${state.timelineError} · Session metadata is available. Browse its executions for retained detail; previously loaded turns may be incomplete.`));
   state.turns.forEach(turn => {
     const section=element('article','turn');
     const heading=element('div','turn-heading'); heading.append(element('span','',date(turn.created_at)),element('span','badge',turn.status));
@@ -176,7 +214,7 @@ function renderConversation({prepend=false}={}) {
     if (turn.error_code) section.append(element('p','muted',`${turn.error_code} · ${text(turn.safe_error_details)}`));
     $('conversation').append(section);
   });
-  if (!state.turns.length) $('conversation').append(element('p','empty',state.selectedSession ? 'Ready when you are. Send a message to start this conversation.':'Inspect this execution using the panels on the right.'));
+  if (!state.turns.length && !state.timelineError) $('conversation').append(element('p','empty',state.selectedSession ? 'Ready when you are. Send a message to start this conversation.':'Inspect this execution using the panels on the right.'));
   const live=element('section','turn'); live.id='live'; $('conversation').append(live); renderLive();
   container.scrollTop=prepend?previousTop+container.scrollHeight-previousHeight:follows?container.scrollHeight:previousTop;
 }
@@ -252,12 +290,14 @@ function renderDetails() {
   state.details.forEach(item=>{
     const card=element('div','detail-card');
     if(state.tab==='models') {
-      card.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`),element('p','',`Run ${item.agent_run_seq} · depth ${item.depth} · ${item.purpose}`),element('p','',`${short(item.execution_id)} · ${item.model.model || item.model.model_identity || item.model.provider || 'model'}`));
-      if(item.usage) card.append(element('p','',`${item.usage.input_tokens ?? '—'} input / ${item.usage.output_tokens ?? '—'} output tokens`));
+      card.append(element('h3','',`Request ${item.model_request_seq} · ${item.status}`),element('p','',`Run ${item.agent_run_seq} · depth ${item.depth} · ${item.purpose}`),element('p','',`${short(item.execution_id)} · ${modelLabel(item.model)} · ${duration(item.duration_ns)}`));
+      if(item.usage)card.append(element('p','',usageLabel(item.usage)));
+      if(item.request && item.content_included!==false){const layers=element('details');layers.append(element('summary','','Prompt architecture'),properties(Object.fromEntries(promptLayers(item.request))));card.append(layers);}
+      else card.append(element('p','muted','Prompt content is not available yet.'));
       card.append(rawDetail(item,'Prompt, response & metadata'));
       if(item.execution_id!==state.selectedExecution)card.append(button('Open subagent',async()=>selectExecution(item.execution_id)));
     } else if(state.tab==='trace') {
-      const row=item.payload || {}; card.append(element('h3','',`${row.kind || 'Step'} · ${row.status || ''}`),element('p','',`${row.scope || ''}/${row.agent_run_seq || ''} · step ${row.step_index ?? '—'} · ${row.tool_name || 'request '+(row.model_request_seq ?? '—')}`),rawDetail(item));
+      const row=item.payload || {}; card.append(element('h3','',`#${item.step_event_seq} · ${row.kind || 'Step'} · ${row.status || ''}`),element('p','',`${row.scope || ''}/${row.agent_run_seq || ''} · step ${row.step_index ?? '—'} · ${row.tool_name || 'request #'+(row.model_request_seq ?? '—')}`),element('p','',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`),rawDetail(item));
       const selectors={}; ['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
       if(row.call_id)selectors.tool_call_id=row.call_id;
       card.append(button('Read content',async()=>{if(item.execution_id!==state.selectedExecution)await selectExecution(item.execution_id);state.tab='history';await loadDetail(false,selectors);}));
@@ -279,12 +319,14 @@ function renderDetails() {
 async function refreshSelected() {
   const generation=state.generation, executionGeneration=state.executionGeneration, sessionId=state.selectedSession, id=state.selectedExecution;
   if(sessionId) {
-    const payload=await api(sessionURL(sessionId,"",{limit:"50"}));
+    const payload=await readSession(sessionId);
     if(generation!==state.generation || executionGeneration!==state.executionGeneration || id!==state.selectedExecution)return;
-    state.session=payload.session;state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;
+    state.session=payload.session;state.timelineError=payload.timeline_error || '';renderSessionHeader();
+    if(payload.timeline){state.turns=mergePage(state.turns,payload.timeline.items,item=>item.execution_id);if(!state.hasEarlierTurns)state.turnCursor=payload.timeline.next_cursor;}
+    else{state.turnCursor=null;state.hasEarlierTurns=false;}
     const selected=state.turns.find(item=>item.execution_id===id);
-    if(selected?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
-    renderConversation();
+    if(payload.timeline && selected?.conversation_committed){state.liveText='';state.liveThinking='';state.events.clear();}
+    renderConversation();setDisabled();
   }
   if(id) {
     const info=await api(`/api/executions/${enc(id)}`);
@@ -426,7 +468,7 @@ async function loadMetrics(event) {
     const card=element('article','metric-card');card.append(element('h3','',result.metric.replace('linktools.','').replaceAll('.',' / ').replaceAll('_',' ')));
     if(result.points.length===1)card.append(element('div','value',metricValue(result,result.points[0])));
     else {const table=element('table');result.points.forEach(point=>{const row=element('tr');row.append(element('td','',point.dimensions.map(d=>d.join('=')).join(', ') || date(point.bucket_start)),element('td','',metricValue(result,point)));table.append(row);});const wrap=element('div','metric-points');wrap.append(table);card.append(wrap);}
-    card.append(element('p','',`${result.aggregation} · ${result.points.reduce((sum,item)=>sum+item.sample_count,0)} samples`),element('p','',`${date(result.window_start)} → ${date(result.window_end)}`),rawDetail(result));$('metric-results').append(card);
+    card.append(element('p','',`${result.aggregation} · ${result.unit} · ${result.points.reduce((sum,item)=>sum+item.sample_count,0)} samples`),element('p','',`${date(result.window_start)} → ${date(result.window_end)}`),rawDetail(result));$('metric-results').append(card);
   });
 }
 async function exportResult() {
@@ -435,7 +477,7 @@ async function exportResult() {
 }
 function showSettings() {
   clear('settings-content'); const config=state.config;if(!config)return;
-  $('settings-content').append(properties({Workspace:config.workspace,Namespace:config.namespace,Model:config.model || 'Not configured',Vision:config.vision,'API key':config.api_key_configured?'Configured':'Not configured','Base URL':config.base_url_configured?'Configured':'Default','Runtime DB':config.runtime_db,'Object store':config.object_store,'Metrics DB':config.metrics_db,Mode:config.read_only?'Read-only':'Local execution'}));
+  $('settings-content').append(properties({Workspace:config.workspace,'Asset root':config.asset_root,Namespace:config.namespace,Model:config.model || 'Not configured',Vision:config.vision,'API key':config.api_key_configured?'Configured':'Not configured','Base URL':config.base_url_configured?'Configured':'Default','Runtime DB':config.runtime_db,'Object store':config.object_store,'Metrics DB':config.metrics_db,Mode:config.read_only?'Read-only':'Local execution'}));
   const card=element('div','detail-card');card.append(element('h3','','Captured capabilities'));config.capabilities.forEach(item=>card.append(element('p','',`${item.kind} · ${item.id} · revision ${item.revision}`)));if(!config.capabilities.length)card.append(element('p','','Capability composition is loaded when an execution Runtime starts.'));$('settings-content').append(card);$('settings-dialog').showModal();
 }
 async function bootstrap() {
@@ -451,7 +493,9 @@ $('new-session').onclick=openNew;$('welcome-new').onclick=openNew;$('new-form').
 $('composer').onsubmit=sendMessage;$('prompt').onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();$('composer').requestSubmit();}};
 $('menu').onclick=()=>$('sidebar').classList.toggle('open');
 $('options-toggle').onclick=()=>$('composer-options').hidden=!$('composer-options').hidden;
-$('filter').oninput=renderList;$('filter-form').onsubmit=event=>{event.preventDefault();loadList().catch(showError);};
+$('open-form').onsubmit=event=>{Promise.resolve(openExact(event)).catch(showError);};
+$('filter').oninput=renderList;$('list-action').onchange=setListFilterAvailability;
+$('filter-form').onsubmit=event=>{event.preventDefault();(state.view==='executions' && $('list-action').value==='recent'?loadRecentExecutions():loadList()).catch(showError);};
 $('list-more').onclick=()=>loadList(true).catch(showError);$('turns-more').onclick=()=>moreTurns().catch(showError);
 $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showError);
 $('refresh').onclick=()=>{notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}await refreshSelected();if(state.execution && !terminal(state.execution.status) && !state.stream && !state.config.read_only){state.cursor=null;watchExecution(state.selectedExecution,state.generation).catch(showError);}})().catch(showError);};

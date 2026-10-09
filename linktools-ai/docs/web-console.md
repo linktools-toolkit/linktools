@@ -1,8 +1,9 @@
 # Local Web console
 
 The console adds a local browser interface to the same Runtime used by the AI
-commands. It does not replace the commands or create another execution store,
-conversation database, scheduler, recovery coordinator, or metric aggregator.
+commands. The CLI now contains only `ai-run`, `ai-acp`, and `ai-web`; the five
+inspection commands are consolidated here. Runtime still owns the execution
+store, conversation history, scheduling, recovery, and metrics.
 
 ## Start
 
@@ -58,16 +59,29 @@ staging release before treating long-lived writable operation as validated.
 This console branch uses the published master APIs and does not incorporate
 unpublished persistence or lifecycle changes.
 
-## Interface and command coverage
+## Command consolidation and coverage
 
-| Existing command | Console surface | Runtime source |
+`ai-history`, `ai-session`, `ai-status`, `ai-trace`, and `ai-metrics`, including
+their `lt ai` / `python -m linktools ai` forms, are intentionally removed. There
+are no compatibility aliases. Start `ai-web --read-only` to inspect an existing
+workspace, then choose Session or Execution in **Open exact ID** to open a known
+identity. `ai-run` and `ai-acp` remain available for terminal execution and ACP
+stdio clients. Runtime library APIs are unchanged.
+
+The former viewers had no filter or export flags. Their optional session or
+execution IDs, required trace execution ID, and optional metric name map to the
+controls below. `ai-run --json` remains available, alongside final-result JSON
+download in the execution inspector. Full public records can be expanded in
+place; diagnostic exception messages remain redacted to protect credentials.
+
+| Command capability | Console surface | Runtime source |
 | --- | --- | --- |
 | `ai-run` | New conversation, composer, planning/thinking/memory/files, live text and tool/subagent progress, Stop, final JSON download | Agent/Session `start`, Execution `watch`/`cancel`, RuntimeHistory `result` |
-| `ai-session` | Session list, status/revision/CWD/active execution, paged turns, create/rename/fork/close | RuntimeSessions and RuntimeHistory session APIs |
-| `ai-history` | Executions and inspector: metadata, complete paged history, transcript, model prompts/responses and usage | RuntimeHistory `list_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
-| `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators and content drill-down | RuntimeHistory `trace` and filtered `history` |
-| `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
-| `ai-status` | Runtime & capabilities: workspace/storage locations, model, vision, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one CapabilityGroup capture |
+| Former `ai-session` | Session list, status/revision/CWD/active execution, paged turns, create/rename/fork/close | RuntimeSessions and RuntimeHistory session APIs |
+| Former `ai-history` | Paged executions, explicit newest-by-time scan, metadata, complete paged history/transcript, seven-layer prompt architecture, model request/response/duration/cache usage | RuntimeHistory `list_executions`, `recent_executions`, `inspect_execution`, `history`, `transcript`, `model_interactions` |
+| Former `ai-trace` | Metadata timeline with source execution, run/request/step/tool locators, duration, purpose, token usage and content drill-down | RuntimeHistory `trace` and filtered `history` |
+| Former `ai-metrics` | Twelve-metric summary, named metric, time window, dimensions/correlation filters, grouping, aggregation and buckets | Metrics `query` |
+| Former `ai-status` | Runtime & capabilities: workspace/storage locations, model, vision, credential presence, captured Agent/Tool/Skill/MCP identities | CLI composition and one CapabilityGroup capture |
 | `ai-acp` | Equivalent explicit session create/load/continue/fork/close/cancel interactions; ACP itself remains a separate stdio transport | The same public Session and Execution APIs |
 
 Retry, fork, recovery and external-effect resolution are explicit actions in the
@@ -77,12 +91,28 @@ child execution preserves its identity rather than treating its events as a
 root model call. Full JSON details preserve public fields that do not fit the
 compact presentation.
 
+The **Models & prompt** tab summarizes system/fixed/dynamic instructions,
+conversation context, attachment media types, tools and output contracts from
+the selected recorded request. It does not duplicate the instruction mirror or
+fetch trace content in the background. Full prompts/responses remain expandable.
+
 List filters follow public API semantics. Execution queries support session,
 agent and parent identity filters. The text search filters only loaded rows;
 it is not a global full-text search. Cursor pages are passed through unchanged.
+Normal execution browsing uses repository cursor order. To reproduce the former
+exact newest list, select **Newest 20 (metadata scan)** under Execution order and
+apply it explicitly. The current public API scans visible metadata in O(N); this
+mode has no cursor or server filters and is never triggered by refresh/polling.
+To inspect all executions for a session (including non-conversation children),
+use its Session ID filter in Executions rather than only the conversation turns.
+
 Read-only `RuntimeHistory` currently exposes a recent-session list rather than a
 paged session index; the UI labels this limitation. Writable mode uses the
-paged RuntimeSessions API. Browsing an exact session still pages its turns.
+paged RuntimeSessions API. Browsing an exact session still pages its turns. If
+the Runtime reports unavailable session history, the console reads metadata
+separately and shows the history error explicitly. Status, revision, working
+directory and active execution remain inspectable without pretending that the
+conversation is empty.
 
 ## Observation and ownership
 

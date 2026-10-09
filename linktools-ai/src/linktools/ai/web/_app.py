@@ -195,8 +195,11 @@ class _Console:
     async def session(self, request: Request) -> Response:
         history = self.require_history()
         identity = _text(request.query_params, "session_id")
+        include_timeline = request.query_params.get("include_timeline", "true")
+        if include_timeline not in {"true", "false"}:
+            raise ValueError("include_timeline must be true or false")
         return _json({"session": await history.inspect_session(identity, principal=self.principal),
-                      "timeline": await history.session_timeline(identity, principal=self.principal, **_paging(request))})
+                      "timeline": None if include_timeline == "false" else await history.session_timeline(identity, principal=self.principal, **_paging(request))})
 
     async def session_action(self, request: Request) -> Response:
         runtime = self.require_runtime()
@@ -224,6 +227,15 @@ class _Console:
         return _json({"error_code": "ACTION_NOT_FOUND"}, 404)
 
     async def executions(self, request: Request) -> Response:
+        if request.query_params.get("recent", "false") not in {"true", "false"}:
+            raise ValueError("recent must be true or false")
+        if request.query_params.get("recent") == "true":
+            if any(request.query_params.get(key) for key in ("cursor", "session_id", "agent_id", "parent_execution_id")):
+                raise ValueError("recent scan does not support cursors or filters")
+            items = () if self.history is None else await self.history.recent_executions(
+                principal=self.principal, limit=int(_paging(request)["limit"]),
+            )
+            return _json({"items": items, "next_cursor": None, "recent_scan": True})
         if self.history is None:
             return _json({"items": [], "next_cursor": None})
         return _json(await self.history.list_executions(ListExecutionRequest(

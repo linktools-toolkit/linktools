@@ -41,7 +41,7 @@ globalThis.document={getElementById:id=>nodes.get(id),createElement:tag=>new Ele
 globalThis.window={addEventListener:(name,handler)=>{if(!handlers.has(name))handlers.set(name,[]);handlers.get(name).push(handler);}};
 let hash='';globalThis.location={get hash(){return hash;},set hash(value){hash=value;queueMicrotask(()=>handlers.get('hashchange')?.forEach(handler=>handler()));}};
 let counter=0;Object.defineProperty(globalThis,"crypto",{value:{randomUUID:()=>`request-${++counter}`},configurable:true});globalThis.confirm=()=>true;globalThis.prompt=()=> 'Retry prompt';
-const calls=[],delays=new Map(),timelineOverrides=new Map(),streamBlocks=new Map();
+const calls=[],delays=new Map(),timelineOverrides=new Map(),streamBlocks=new Map(),detailResponses=new Map(),unavailableTimelines=new Set();
 const info=(id,session_id=id[0])=>({execution_id:id,agent_id:'default',session_id,status:'SUCCEEDED',binding_kind:'agent',lineage_kind:'ROOT',created_at:'2026-01-01T00:00:00Z',started_at:'2026-01-01T00:00:00Z',terminal_at:'2026-01-01T00:00:01Z'});
 const sessions=new Map(['a','b'].map(id=>[id,{session_id:id,agent_id:'default',status:'OPEN',revision:0,history_quality:'complete',metadata:{title:id==='a'?'Alpha':'Beta'}}]));
 const executions=new Map([['a-run',info('a-run')],['b-run',info('b-run')]]);
@@ -51,14 +51,14 @@ function deferred(path){let release;const promise=new Promise(resolve=>{release=
 let forkAttempts=0;
 globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
-  calls.push({key,method,body});
+  calls.push({key,method,body,query:Object.fromEntries(url.searchParams)});
   if(delays.has(method+' '+key))return delays.get(method+' '+key);
-  if(key==='/api/config')return response({read_only:false,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
+  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',read_only:false,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
   if(key==='/api/sessions'&&method==='GET')return response({items:[...sessions.values()],next_cursor:null});
-  if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null});
+  if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
+  if(detailResponses.has(key))return response(detailResponses.get(key));
   if(key==='/api/metrics')return response({items:[]});
-  const session=key.match(/^\/api\/sessions\/([^/]+)$/);
-  if(session)return response({session:sessions.get(session[1]),timeline:timeline(session[1])});
+  if(url.pathname==='/api/session'){const id=url.searchParams.get('session_id');if(url.searchParams.get('include_timeline')==='false')return response({session:sessions.get(id),timeline:null});if(unavailableTimelines.has(id))return response({code:'SESSION_HISTORY_UNAVAILABLE'},503);return response({session:sessions.get(id),timeline:timeline(id)});}
   const execution=key.match(/^\/api\/executions\/([^/]+)$/);
   if(execution)return response(executions.get(execution[1]) || info(execution[1],null));
   if(key.endsWith('/events') && streamBlocks.has(key.split('/')[3]))return new Response(new ReadableStream({start(controller){streamBlocks.get(key.split('/')[3]).controller=controller;},cancel(){}}));
@@ -163,4 +163,67 @@ assert.equal(node('metrics-view').hidden,false);assert.equal(node('conversation-
 assert.equal(node('metric-name').tagName,'INPUT');
 executions.set('orphan',{...info('orphan',null),status:'RECOVERY_REQUIRED'});location.hash='#execution=orphan';await settle();
 assert.equal(node('composer').hidden,true);assert.equal(node('stop-run').hidden,false);assert.ok(node('live'));
+
+// Exact-ID lookup preserves opaque sessions and distinguishes standalone executions.
+const opaque=' ../team/conversation?notes#你好 ';
+sessions.set(opaque,{...sessions.get('a'),session_id:opaque,metadata:{title:'Opaque conversation'}});
+timelineOverrides.set(opaque,{items:[],next_cursor:null});
+node('open-kind').value='session';node('open-id').value=opaque;node('open-form').requestSubmit();await settle();
+assert.equal(new URLSearchParams(location.hash.slice(1)).get('session'),opaque);
+assert.equal(node('conversation-title').textContent,'Opaque conversation');
+node('open-kind').value='execution';node('open-id').value='b-run';node('open-form').requestSubmit();await settle();
+assert.equal(location.hash,'#execution=b-run');assert.equal(node('composer').hidden,true);
+
+// Former history/trace summaries remain human-readable without an eager trace fetch.
+const beforeTrace=calls.filter(call=>call.key.endsWith('/trace')).length;
+detailResponses.set('/api/executions/b-run/models',{items:[{execution_id:'b-run',agent_run_seq:1,depth:0,model_request_seq:1,purpose:'agent',status:'SUCCEEDED',model:{model_name:'Recorded model'},duration_ns:1000,usage:{input_tokens:10,output_tokens:4,cache_read_tokens:3,cache_write_tokens:2},request:{messages:[{parts:[{part_kind:'system-prompt',content:'real system prompt'}]}],parameters:{instruction_parts:[{name:'workspace',content:'fixed',dynamic:false}],output_mode:'text'}},content_included:true}],next_cursor:null});
+tab('models').click();await settle();
+assert.match(node('inspector-content').textContent,/Recorded model · 1.000 us/);
+assert.match(node('inspector-content').textContent,/3 cache read \/ 2 cache write/);
+assert.match(node('inspector-content').textContent,/Prompt architecture/);
+assert.match(node('inspector-content').textContent,/System Prompt1 part\(s\) · ~18 chars/);
+assert.match(node('inspector-content').textContent,/Fixed Instructions \(F0\/F1\)/);
+assert.equal(calls.filter(call=>call.key.endsWith('/trace')).length,beforeTrace);
+detailResponses.set('/api/executions/b-run/trace',{items:[{execution_id:'b-run',step_event_seq:1,payload:{kind:'MODEL_RESPONSE',status:'SUCCEEDED',scope:'root',agent_run_seq:1,step_index:0,model_request_seq:1,purpose:'agent',duration_ns:2000000,token_usage:{input_tokens:10,output_tokens:4}}}],next_cursor:null});
+tab('trace').click();await settle();
+assert.match(node('inspector-content').textContent,/request #1/);
+assert.match(node('inspector-content').textContent,/agent · 2.000 ms · 10 in \/ 4 out/);
+
+// Exact newest ordering is an explicit scan action, never a refresh side effect.
+view('executions').click();await settle();
+const scans=()=>calls.filter(call=>call.query.recent==='true').length;
+assert.equal(scans(),0);
+node('list-action').value='recent';node('list-action').onchange();
+assert.equal(node('filter-session').disabled,true);
+node('filter-form').requestSubmit();node('filter-form').requestSubmit();await settle();assert.equal(scans(),1);
+assert.match(node('list-scope').textContent,/scanned visible execution metadata/);
+node('refresh').click();await settle();assert.equal(scans(),1);
+assert.equal(node('list-action').value,'paged');assert.equal(node('filter-session').disabled,false);
+node('filter-session').value=opaque;node('filter-form').requestSubmit();await settle();
+assert.equal(calls.filter(call=>call.key==='/api/executions').at(-1).query.session_id,opaque);
+node('settings').click();assert.match(node('settings-content').textContent,/Asset root\/workspace\/\.linktools/);node('settings-dialog').close();
+
+// Unavailable history cannot hide readable metadata or make refresh show stale values.
+unavailableTimelines.add('a');sessions.set('a',{...sessions.get('a'),revision:3,cwd:'old/path',history_quality:'partial',active_execution_id:null});
+node('open-kind').value='session';node('open-id').value='a';node('open-form').requestSubmit();await settle();
+assert.equal(node('conversation-title').textContent,'Alpha');
+assert.match(node('session-details').textContent,/"revision": 3/);
+assert.match(node('conversation').textContent,/SESSION_HISTORY_UNAVAILABLE/);
+assert.doesNotMatch(node('conversation').textContent,/Ready when you are/);
+assert.ok(calls.some(call=>call.key==='/api/sessions/a' && call.query.include_timeline==='false'));
+sessions.set('a',{...sessions.get('a'),revision:4,cwd:'new/path',active_execution_id:'other-run'});
+node('refresh').click();await settle();
+assert.match(node('session-details').textContent,/"revision": 4/);
+assert.match(node('session-details').textContent,/new\/path/);
+assert.match(node('session-details').textContent,/other-run/);
+assert.doesNotMatch(node('session-details').textContent,/old\/path/);
+
+// Refresh reconciles controls even when an empty session has no execution.
+sessions.set(opaque,{...sessions.get(opaque),status:'OPEN',active_execution_id:null});
+node('open-kind').value='session';node('open-id').value=opaque;node('open-form').requestSubmit();await settle();
+assert.equal(node('send').disabled,false);
+sessions.set(opaque,{...sessions.get(opaque),status:'CLOSED'});
+node('refresh').click();await settle();
+assert.match(node('conversation-meta').textContent,/CLOSED/);
+assert.equal(node('send').disabled,true);assert.equal(node('prompt').disabled,true);
 console.log('DOM contracts passed: stale navigation/detail/action, disabled stale controls, uncertain fork, interrupted dialog, repeated submit, metrics navigation');

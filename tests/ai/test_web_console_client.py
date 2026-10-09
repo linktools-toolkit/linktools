@@ -18,7 +18,7 @@ def test_web_client_preserves_identity_and_reads_fragmented_streams() -> None:
 import {readFileSync} from 'node:fs';
 import assert from 'node:assert/strict';
 const source=readFileSync(process.argv[1], 'utf8');
-const {modelKey,historyKey,upsertModel,mergePage,parseSSE,readSSE,metricValue}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const {modelKey,historyKey,upsertModel,mergePage,parseSSE,readSSE,metricValue,duration,modelLabel,usageLabel,promptLayers}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const items=new Map();
 const base={execution_id:'root',agent_run_seq:1,model_request_seq:1};
 upsertModel(items,{...base,status:'SUCCEEDED',usage:{input_tokens:2}});
@@ -41,6 +41,30 @@ assert.equal(observed[0].id,'cursor');
 assert.equal(observed[1].event,'snapshot');
 assert.equal(metricValue({metric:'linktools.execution.failure_ratio',unit:'ratio'},{value:0.125}),'12.5%');
 assert.equal(metricValue({metric:'duration',unit:'ns'},{value:null}),'—');
+assert.equal(duration(999),'999 ns');
+assert.equal(duration(1000),'1.000 us');
+assert.equal(duration(2000000),'2.000 ms');
+assert.equal(metricValue({metric:'duration',unit:'ns'},{value:1000}),'1.000 us');
+assert.equal(modelLabel({model_name:'specific',route_id:'route',name:'name',model:'model'}),'specific');
+assert.equal(modelLabel({route_id:'route'}),'route');
+assert.equal(modelLabel({name:'recorded-model'}),'recorded-model');
+assert.equal(usageLabel({input_tokens:10,output_tokens:4,cache_read_tokens:3,cache_write_tokens:2}),'10 in / 4 out · 3 cache read / 2 cache write');
+const layers=Object.fromEntries(promptLayers({
+ instructions:['duplicate instruction mirror'],
+ messages:[{parts:[{part_kind:'system-prompt',content:'real system prompt'},{part_kind:'user-prompt',content:['hello',{media_type:'image/png',size:2048,digest:'a'.repeat(64)}]}]}],
+ parameters:{instruction_parts:[{content:'fixed workspace guidance',name:'workspace',dynamic:false},{content:'repository overlay',name:'repository',dynamic:true}],function_tools:[{name:'read_file'}],native_tools:[],revealed_tool_names:['read_file'],deferred_capability_ids:[],output_mode:'text',allow_text_output:true,allow_image_output:false}
+}));
+assert.equal(Object.keys(layers).length,7);
+assert.equal(layers['System Prompt'],'1 part(s) · ~18 chars');
+assert.match(layers['Fixed Instructions (F0/F1)'],/sources: workspace/);
+assert.match(layers['Dynamic Instructions (O)'],/sources: repository/);
+assert.equal(layers['Conversation Context'],'1 message(s) · 1 part(s) · user-prompt=1');
+assert.equal(layers['Input Attachments'],'1 attachment · image/png');
+assert.equal(layers['Tool Contract'],'1 function · 0 native · 1 revealed · 0 deferred capabilities');
+assert.equal(layers['Model Output Contract'],'mode=text · text output=yes · image output=no');
+assert.doesNotMatch(JSON.stringify(layers),/duplicate instruction mirror|real system prompt|fixed workspace guidance|repository overlay/);
+assert.equal(Object.fromEntries(promptLayers({messages:[{parts:[{kind:'system-prompt',content:'你好🌱'}]}]}))['System Prompt'],'1 part(s) · ~3 chars');
+
 '''
     result = subprocess.run([node, "--input-type=module", "-e", script, str(source)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
