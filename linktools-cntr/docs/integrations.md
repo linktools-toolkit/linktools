@@ -501,10 +501,11 @@ Cross-service state is not an atomic transaction; failures remain command errors
 nginx issues and installs its initial certificates during a single-stage image build,
 using `ACME_SERVER` (default `letsencrypt`), optional `ACME_ACCOUNT_EMAIL`,
 and the selected DNS API. Before building, cntr writes DNS credentials to the
-host-private `<APP_PATH>/nginx/acme-dns.env` (mode `0600`). BuildKit mounts this
+host-private `<APP_PATH>/nginx/acme-secrets/dns.env` (mode `0600`). BuildKit mounts this
 file and the persisted ACME account archive as build secrets; no DNS credential is
 declared through Dockerfile `ENV`, Compose service environment or a build argument.
-The runtime container receives only a read-only file secret. `nginx-acme` loads
+The runtime container receives a read-only private directory mount, so atomic
+credential rotations become visible without a container restart. `nginx-acme` loads
 that file into the ACME subprocess environment for issuance or cron renewal,
 removing provider credential assignments that acme.sh saves in its account and
 domain configuration. A DNS credential rotation updates the host file without

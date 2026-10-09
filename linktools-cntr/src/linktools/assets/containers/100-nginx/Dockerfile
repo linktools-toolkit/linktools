@@ -10,7 +10,7 @@ RUN chmod +x /usr/local/bin/nginx-certificates /usr/local/bin/nginx-reload /usr/
     ln -s /opt/acme/acme.sh /usr/bin/acme.sh
 
 RUN --mount=type=secret,id=cntr_acme_account \
-    --mount=type=secret,id=cntr_acme_dns,required=true \
+    --mount=type=secret,id=cntr_acme_dns,target=/run/acme-secrets/dns.env,required=true \
     --mount=type=tmpfs,target=/root/.acme.sh \
     mkdir -p /root/.acme.sh /etc/certs && \
     if [ -s /run/secrets/cntr_acme_account ]; then \

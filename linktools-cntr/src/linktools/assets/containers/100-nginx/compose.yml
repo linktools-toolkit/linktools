@@ -14,8 +14,7 @@ services:
       - '{{ (APP_PATH/"certs") | mkdir | chown }}:/etc/certs'
       - '{{ (APP_PATH/"acme") | mkdir | chown }}:/root/.acme.sh'
 #   {% if NGINX_HTTPS_ENABLE %}
-    secrets:
-      - cntr_acme_dns
+      - '{{ container.get_app_path("acme-secrets") }}:/run/acme-secrets:ro'
 #   {% endif %}
     command: ["nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/generated/current/nginx.conf", "-g", "daemon off;"]
 #   {% if NGINX_HTTPS_ENABLE %}
@@ -49,5 +48,5 @@ secrets:
   cntr_acme_account:
     file: '{{ container.get_app_path("acme-build-account.tar") }}'
   cntr_acme_dns:
-    file: '{{ container.get_app_path("acme-dns.env") }}'
+    file: '{{ container.get_app_path("acme-secrets", "dns.env") }}'
 # {% endif %}

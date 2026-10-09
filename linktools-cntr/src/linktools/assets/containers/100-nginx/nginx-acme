@@ -3,7 +3,7 @@ set -eu
 
 state=$1
 shift
-credentials=/run/secrets/cntr_acme_dns
+credentials=/run/acme-secrets/dns.env
 
 strip_credentials() {
     test -d "$state" || return 0

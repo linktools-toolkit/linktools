@@ -97,7 +97,7 @@ else:
     (tmp_path / "acme-dns.env").write_text("export CF_Token='fake-token'\n")
     helper = container.get_source_path("nginx-acme").read_text()
     for before, after in (
-        ("/run/secrets/cntr_acme_dns", str(tmp_path / "acme-dns.env")),
+        ("/run/acme-secrets/dns.env", str(tmp_path / "acme-dns.env")),
         ("/opt/acme/acme.sh", str(client)),
     ):
         helper = helper.replace(before, after)
@@ -138,16 +138,16 @@ def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_cas
     assert "--issue --force" in dockerfile
     assert "COPY nginx-certificates nginx-reload nginx-acme" in dockerfile
     assert "--mount=type=secret,id=cntr_acme_account" in dockerfile
-    assert "--mount=type=secret,id=cntr_acme_dns,required=true" in dockerfile
+    assert "--mount=type=secret,id=cntr_acme_dns,target=/run/acme-secrets/dns.env,required=true" in dockerfile
     assert "ENV CF_Token" not in dockerfile
     assert "/opt/nginx-initial/certs" in dockerfile
     assert "nginx-certificates renew" in dockerfile
     service = container.docker_compose["services"]["nginx"]
     assert service["build"]["secrets"] == ["cntr_acme_account", "cntr_acme_dns"]
-    assert service["secrets"] == ["cntr_acme_dns"]
+    assert any("/run/acme-secrets:ro" in value for value in service["volumes"])
     assert "CF_Token" not in service["environment"]
     assert container.docker_compose["secrets"]["cntr_acme_dns"]["file"] == str(
-        container.get_app_path("acme-dns.env"))
+        container.get_app_path("acme-secrets", "dns.env"))
     old_image = service["image"]
     container.__dict__["acme_ssl_domains"] = ["example.test", "*.example.test", "*.code.example.test"]
     container.__dict__.pop("cert_image_revision", None)
@@ -229,11 +229,12 @@ def test_acme_build_secret_reuses_active_account(certificate_case, monkeypatch):
     import tarfile
     container, root, _, _ = certificate_case
     monkeypatch.setattr(container, "get_app_path", lambda *parts, **kwargs: root.joinpath(*parts))
+    (root / "acme-secrets").mkdir()
     container.on_prepare()
     container.on_starting(SimpleNamespace(initial_services=()))
     archive = root / "acme-build-account.tar"
     assert archive.stat().st_mode & 0o777 == 0o600
-    dns = root / "acme-dns.env"
+    dns = root / "acme-secrets/dns.env"
     assert dns.stat().st_mode & 0o777 == 0o600
     assert "export CF_Token='fake-token'" in dns.read_text()
     with tarfile.open(str(archive)) as stream:

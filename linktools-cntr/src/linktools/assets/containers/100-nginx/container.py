@@ -487,6 +487,19 @@ class Container(BaseContainer):
     def on_prepare(self) -> None:
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
+        secret_path = self.get_app_path("acme-secrets", "dns.env", create_parent=True)
+        os.chmod(str(secret_path.parent), 0o700)
+        if not secret_path.exists():
+            secret_path.touch(mode=0o600)
+        os.chmod(str(secret_path), 0o600)
+        archive = self.get_app_path("acme-build-account.tar", create_parent=True)
+        if not archive.exists():
+            archive.touch(mode=0o600)
+        os.chmod(str(archive), 0o600)
+
+    def on_starting(self, context: "EventContext") -> None:
+        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            return
         from linktools.cntr.artifacts import atomic_write_text_if_changed
         values = []
         for key, field in self.extend_configs.items():
@@ -496,16 +509,8 @@ class Container(BaseContainer):
             if "\n" in value or "\r" in value:
                 raise ContainerError("DNS credentials must be single-line values")
             values.append("export {}={}\n".format(key, shlex.quote(value)))
-        atomic_write_text_if_changed(self.get_app_path("acme-dns.env", create_parent=True),
+        atomic_write_text_if_changed(self.get_app_path("acme-secrets", "dns.env"),
                                      "".join(values), mode=0o600)
-        archive = self.get_app_path("acme-build-account.tar", create_parent=True)
-        if not archive.exists():
-            archive.touch(mode=0o600)
-        os.chmod(str(archive), 0o600)
-
-    def on_starting(self, context: "EventContext") -> None:
-        if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
-            return
         live = self.get_app_path("certs", "live")
         context.nginx_certificate_previous = os.readlink(str(live)) if live.is_symlink() else None
         for name in ("certs", "acme"):
