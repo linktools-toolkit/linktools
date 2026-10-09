@@ -258,14 +258,13 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         value = _decode_step(record.data)
         if not isinstance(value, ModelInteractionRecord):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        expected = self._stored_interaction(value)
         if (
-            record.key_digest != expected.key_digest
-            or record.scope_digest != expected.scope_digest
-            or record.parent_digest != expected.parent_digest
-            or record.kind != expected.kind
-            or record.sort_key != expected.sort_key
-            or record.state != expected.state
+            record.key_digest != self._interaction_key(value.agent_run_id, value.model_request_seq)
+            or record.scope_digest is not None
+            or record.parent_digest != self._agent_run_key(value.agent_run_id)
+            or record.kind != "model_interaction"
+            or record.sort_key != _interaction_sort_key(value.model_request_seq)
+            or record.state != value.status
             or record.lease_owner is not None
             or record.lease_fence != 0
             or record.lease_expires_at is not None

@@ -951,6 +951,8 @@ def validate_record_identity(record: StoredRecord) -> None:
         if value is not None and (not isinstance(value, bytes) or len(value) != 32):
             raise ValueError(f"record {name} is invalid")
     encode_sort_key(record.sort_key)
+    if type(record.data) is ImmutableJsonMapping:
+        return
     try:
         canonical_json_bytes(dict(record.data))
     except (TypeError, ValueError) as error:
