@@ -68,7 +68,7 @@ from pydantic_ai.tools import (
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 
-from ..agent import AgentBinding, CompiledAgent, AssistantTextOutput
+from ..agent import AgentBinding, CompiledAgent, AssistantTextOutput, output_validation_error
 from ..asset import AssetMaterializer, AssetStoreReader
 from ..capability import (
     AgentContext,
@@ -1368,6 +1368,17 @@ def _execution_error(
     provider_error = model_binding_error(error)
     if provider_error is not None:
         return provider_error
+    if isinstance(error, (UnexpectedModelBehavior, ValidationError)):
+        output_error = output_validation_error(
+            error,
+            code=(
+                ErrorCode.MODEL_RESPONSE_INVALID
+                if isinstance(error, UnexpectedModelBehavior)
+                else ErrorCode.OUTPUT_VALIDATION_FAILED
+            ),
+        )
+        if output_error is not None:
+            return output_error
     diagnostics = ErrorDiagnostics.from_exception(error)
     if isinstance(error, UsageLimitExceeded):
         return AIError(
