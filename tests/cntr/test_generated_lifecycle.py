@@ -121,6 +121,7 @@ def test_first_upgrade_failure_restores_running_service_without_previous_generat
         apply_saved_services=lambda context, services, files: calls.append(
             ("restore", tuple(services), tuple(files.values()))),
         wait_service_running=lambda context, service: calls.append(("running", service)),
+        wait_service_healthy=lambda context, service: calls.append(("healthy", service)),
     )
     owner.manager.running_state = SimpleNamespace(
         mark_started=lambda context: calls.append(("state", context.target_containers[0].name)),
@@ -129,7 +130,7 @@ def test_first_upgrade_failure_restores_running_service_without_previous_generat
     owner.apply_config = lambda context, candidate, services: (_ for _ in ()).throw(
         RuntimeError("new failed"))
     context = SimpleNamespace(
-        generated_candidates={}, initial_running_services={"test"},
+        generated_candidates={}, initial_running_services={"test"}, initial_healthy_services={"test"},
         saved_compose={str(old_compose): old_compose.read_text()},
         compose_files={str(old_compose): "services:\n  test:\n    image: new:test\n"},
         compose_owners={str(old_compose): "test"}, applied_compose={},
@@ -142,7 +143,7 @@ def test_first_upgrade_failure_restores_running_service_without_previous_generat
     assert calls == [
         ("native",),
         ("restore", ("test",), ("services:\n  test:\n    image: legacy:test\n",)),
-        ("running", "test"),
+        ("healthy", "test"),
         ("state", "test"),
     ]
 
@@ -155,7 +156,11 @@ def test_first_deployment_failure_does_not_start_unrelated_services(tmp_path):
     owner.apply_config = lambda context, candidate, services: (_ for _ in ()).throw(
         RuntimeError("first failed"))
     owner.manager.compose_runner = SimpleNamespace(
+        stop=lambda context, services: calls.append(("stop", tuple(services))),
         apply_saved_services=lambda *args: pytest.fail("unexpected rollback deployment"))
+    owner.manager.running_state = SimpleNamespace(
+        mark_stopped=lambda context: calls.append(("stopped",)),
+        mark_started=lambda context: pytest.fail("unexpected restored running service"))
     context = SimpleNamespace(
         generated_candidates={}, initial_running_services=set(),
         saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
@@ -164,8 +169,44 @@ def test_first_deployment_failure_does_not_start_unrelated_services(tmp_path):
     )
     with pytest.raises(RuntimeError, match="first failed"):
         ComposeOperations(owner.manager)._publish_candidate(owner, candidate, context, ("test",))
-    assert calls == ["native"]
+    assert calls == [("stop", ("test",)), "native", ("stopped",)]
     assert GeneratedCandidate.current_id(str(owner.path)) is None
+
+
+def test_partial_cold_generated_start_failure_stops_all_new_siblings(tmp_path):
+    owner = _Generated(tmp_path / "generated")
+    owner.services = {"test": {}, "sidecar": {}}
+    candidate = GeneratedCandidate(owner, owner.render_config)
+    events = []
+
+    def apply(context, value, services):
+        events.append(("apply", tuple(services)))
+        if services == ("sidecar",):
+            raise RuntimeError("sidecar failed")
+
+    owner.apply_config = apply
+    owner.manager.compose_runner = SimpleNamespace(
+        stop=lambda context, services: events.append(("stop", tuple(services))),
+    )
+    owner.manager.running_state = SimpleNamespace(
+        mark_stopped=lambda context: events.append(("stopped",)),
+        mark_started=lambda context: pytest.fail("unexpected restarted old service"))
+    context = SimpleNamespace(
+        generated_candidates={}, initial_running_services=set(),
+        saved_compose={}, compose_files={}, compose_owners={}, applied_compose={},
+        applied_generation_services={}, service_models=AppliedServiceModels(
+            owner.manager, {"services": owner.services}),
+    )
+    operations = ComposeOperations(owner.manager)
+    operations._publish_candidate(owner, candidate, context, ("test",))
+    with pytest.raises(RuntimeError, match="sidecar failed"):
+        operations._publish_candidate(owner, candidate, context, ("sidecar",))
+    assert events == [
+        ("apply", ("test",)), ("apply", ("sidecar",)),
+        ("stop", ("test", "sidecar")), ("stopped",),
+    ]
+    assert GeneratedCandidate.current_id(str(owner.path)) is None
+    assert not (tmp_path / "compose/applied/services" / "74657374.yml").exists()
 
 
 def test_first_upgrade_reports_unrecoverable_missing_compose_snapshot(tmp_path):
