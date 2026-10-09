@@ -287,6 +287,10 @@ Explicit targets and their runtime dependencies are ensured running. Other
 services are updated only when their configuration changed and they are already
 running; stopped sibling services are not started by configuration reconciliation.
 A partial command can therefore apply pending changes to other running services.
+If an ordinary service first started by this operation fails to apply or become
+ready, that service is stopped and its newly written applied snapshot is
+reverted; any originally running sibling remains untouched. If cleanup itself
+fails, both the original and cleanup errors are reported.
 When no resolved snapshot exists yet, a running service is reconciled once to
 establish it; rollback uses the previous saved Compose file where available.
 Historical external environment-file contents cannot be recovered retroactively.
