@@ -189,6 +189,7 @@ class ComposeOperations:
         runner = manager.compose_runner
         import os
         context.saved_compose = {}
+        context.original_applied_compose = {}
         context.applied_compose = {}
         context.applied_generation_services = {}
         context.bootstrapped_services = set()
@@ -202,9 +203,12 @@ class ComposeOperations:
             context.compose_owners[path] = owner
             try:
                 applied = os.path.join(str(manager.data_path), "compose", "applied", owner + ".yml")
-                with open(applied if os.path.exists(applied) else path, encoding="utf-8") as stream:
+                was_applied = os.path.exists(applied)
+                with open(applied if was_applied else path, encoding="utf-8") as stream:
                     previous = stream.read()
                     context.saved_compose[path] = previous
+                    if was_applied:
+                        context.original_applied_compose[path] = previous
             except FileNotFoundError:
                 previous = None
         actual = manager.docker_inspector.get_project_state(selection.project_containers)
@@ -389,10 +393,17 @@ class ComposeOperations:
         import os
         from .artifacts import atomic_write_text_if_changed, sha256_of
         applied = context.applied_compose
-        for path, content in previous.items():
-            if path not in applied:
+        original = getattr(context, "original_applied_compose", previous)
+        for path in tuple(applied):
+            if context.compose_owners[path] != container.name:
                 continue
             destination = os.path.join(str(self.manager.data_path), "compose", "applied", container.name + ".yml")
+            if path not in original:
+                if os.path.exists(destination):
+                    os.unlink(destination)
+                del applied[path]
+                continue
+            content = original[path]
             atomic_write_text_if_changed(destination, content)
             applied[path] = content
             self.manager.artifact_index.record({os.path.relpath(destination, str(self.manager.data_path)): {
