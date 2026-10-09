@@ -21,6 +21,9 @@ release-dependencies:
   - linktools>=0.10.0
 
 optional-dependencies:
+  web:
+    - starlette>=1.0.0,<2.0.0
+    - uvicorn>=0.30.0,<1.0.0
   sqlalchemy:
     - sqlalchemy[asyncio]>=2.0.51,<3.0.0
   sqlite:

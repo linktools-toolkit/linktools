@@ -58,6 +58,19 @@ Useful options:
 - `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.
 
+### Local Web console
+
+```bash
+python manage.py install --editable 'linktools-ai[web]'
+ai-web --project /workspace/project --model your-model
+ai-web --project /workspace/project --read-only
+```
+
+Open `http://127.0.0.1:8765` for conversations, live execution, history,
+model/tool details, metrics and Runtime status. Existing commands stay available.
+See the [Web console guide](docs/web-console.md) for command coverage, local
+security, read-only operation and the current upstream writable-startup caveat.
+
 ### Python
 
 ```python
