@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+state=$1
+shift
+credentials=/run/secrets/cntr_acme_dns
+
+strip_credentials() {
+    test -d "$state" || return 0
+    find "$state" -type f -name '*.conf' -exec sed -i '/^SAVED_[A-Za-z0-9_]*=/d' {} +
+    for key in $(sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$credentials"); do
+        find "$state" -type f -name '*.conf' -exec sed -i "/^$key=/d" {} +
+    done
+}
+
+strip_credentials
+status=0
+(
+    set -a
+    . "$credentials"
+    set +a
+    /opt/acme/acme.sh --home /opt/acme --config-home "$state" "$@"
+) || status=$?
+strip_credentials
+exit "$status"

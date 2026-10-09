@@ -111,12 +111,13 @@ preissued image certificate and matching ACME account into a candidate version
 only if the active certificate is insufficient, and verifies SAN coverage and
 the private key. The selected `certs/live` symlink changes atomically and
 rolls back on failure. The previous account remains preserved; newer images
-bring their own versioned ACME state for subsequent cron renewals. The
-separate signing build stage keeps DNS-provider `ENV` values out of the final
-image's environment metadata. The final image still contains sensitive
-certificate keys and ACME state under `/opt/nginx-initial`; do not publish it
-to an untrusted registry. Real CA issuance and image-key distribution still
-require target-environment review.
+bring their own versioned ACME state for subsequent cron renewals. The single-stage build reads DNS credentials through a BuildKit secret backed
+by a private host file; the Nginx service environment does not expose them.
+Only ACME subprocesses receive those environment variables, and saved DNS
+fields are removed after ACME invocation. The image still contains
+certificate keys and ACME account state under `/opt/nginx-initial`;
+do not publish it to an untrusted registry. Real CA issuance and image-key
+distribution still require target-environment review.
 
 ## Remaining acceptance gates
 

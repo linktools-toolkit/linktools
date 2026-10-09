@@ -180,12 +180,6 @@ class Container(BaseContainer):
             ])
         return ""
 
-    def acme_dns_environment_value(self, field: ConfigField) -> str:
-        value = str(self.get_config(field))
-        if "\n" in value or "\r" in value:
-            raise ContainerError("DNS credentials must be single-line values for Dockerfile ENV")
-        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
-
     def shell_quote(self, value: object) -> str:
         return shlex.quote(str(value))
 
@@ -493,6 +487,17 @@ class Container(BaseContainer):
     def on_prepare(self) -> None:
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
+        from linktools.cntr.artifacts import atomic_write_text_if_changed
+        values = []
+        for key, field in self.extend_configs.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise ContainerError("Invalid DNS environment variable name: " + key)
+            value = str(self.get_config(field))
+            if "\n" in value or "\r" in value:
+                raise ContainerError("DNS credentials must be single-line values")
+            values.append("export {}={}\n".format(key, shlex.quote(value)))
+        atomic_write_text_if_changed(self.get_app_path("acme-dns.env", create_parent=True),
+                                     "".join(values), mode=0o600)
         archive = self.get_app_path("acme-build-account.tar", create_parent=True)
         if not archive.exists():
             archive.touch(mode=0o600)

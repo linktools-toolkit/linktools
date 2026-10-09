@@ -162,7 +162,7 @@ case "$1" in
             main=$(cat "$root/live/primary")
             account="$root/live/acme"
             renewal="$root/live/renewal"
-            "$acme" --home /opt/acme --config-home "$account" --cron >/dev/null
+            /usr/local/bin/nginx-acme "$account" --cron >/dev/null
             chown -R "$owner" "$account" "$renewal"
             if test -s "$renewal/${main}_fullchain.pem" &&
                { ! cmp -s "$renewal/${main}_fullchain.pem" "$root/live/${main}_fullchain.pem" ||

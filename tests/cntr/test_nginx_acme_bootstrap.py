@@ -83,6 +83,8 @@ elif "--install-cert" in args:
                        ("--key-file", "new.key")):
         shutil.copyfile(str(root / name), args[args.index(flag) + 1])
 elif "--cron" in args:
+    if os.environ.get("CF_Token") != "fake-token":
+        raise SystemExit("The ACME process did not receive the DNS credential")
     if os.environ.get("MOCK_RENEW"):
         root = Path(os.environ["MOCK_CERTIFICATES"])
         target = Path(os.environ["MOCK_RENEWAL"])
@@ -92,7 +94,18 @@ else:
     raise SystemExit(3)
 """)
     client.chmod(0o755)
+    (tmp_path / "acme-dns.env").write_text("export CF_Token='fake-token'\n")
+    helper = container.get_source_path("nginx-acme").read_text()
+    for before, after in (
+        ("/run/secrets/cntr_acme_dns", str(tmp_path / "acme-dns.env")),
+        ("/opt/acme/acme.sh", str(client)),
+    ):
+        helper = helper.replace(before, after)
+    helper_path = tmp_path / "bin/nginx-acme"
+    helper_path.write_text(helper)
+    helper_path.chmod(0o755)
     script = container.get_source_path("nginx-certificates").read_text()
+    script = script.replace("/usr/local/bin/nginx-acme", str(helper_path))
     for before, after in (
         ("/etc/certs", str(certs)),
         ("/root/.acme.sh", str(tmp_path / "acme")),
@@ -120,39 +133,44 @@ def _run(path, environ, *args):
 def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_case):
     container, _, _, _ = certificate_case
     dockerfile = container.docker_file
-    assert "AS acme-build" in dockerfile and "--issue --force" in dockerfile
-    assert "COPY nginx-certificates nginx-reload" in dockerfile
-    assert "COPY --from=acme-build /opt/nginx-initial" in dockerfile
+    assert dockerfile.count("FROM nginx:") == 1
+    assert "AS acme-build" not in dockerfile
+    assert "--issue --force" in dockerfile
+    assert "COPY nginx-certificates nginx-reload nginx-acme" in dockerfile
     assert "--mount=type=secret,id=cntr_acme_account" in dockerfile
-    assert container.docker_compose["services"]["nginx"]["build"]["secrets"] == ["cntr_acme_account"]
-    assert dockerfile.rfind("ENV CF_Token") < dockerfile.rfind("FROM nginx:")
+    assert "--mount=type=secret,id=cntr_acme_dns,required=true" in dockerfile
+    assert "ENV CF_Token" not in dockerfile
     assert "/opt/nginx-initial/certs" in dockerfile
     assert "nginx-certificates renew" in dockerfile
-    assert container.docker_compose["services"]["nginx"]["environment"]["CF_Token"] == "fake-token"
-    assert container.docker_compose["services"]["nginx"]["build"]
-    old_image = container.docker_compose["services"]["nginx"]["image"]
+    service = container.docker_compose["services"]["nginx"]
+    assert service["build"]["secrets"] == ["cntr_acme_account", "cntr_acme_dns"]
+    assert service["secrets"] == ["cntr_acme_dns"]
+    assert "CF_Token" not in service["environment"]
+    assert container.docker_compose["secrets"]["cntr_acme_dns"]["file"] == str(
+        container.get_app_path("acme-dns.env"))
+    old_image = service["image"]
     container.__dict__["acme_ssl_domains"] = ["example.test", "*.example.test", "*.code.example.test"]
     container.__dict__.pop("cert_image_revision", None)
     container.__dict__.pop("docker_compose", None)
     assert container.docker_compose["services"]["nginx"]["image"] != old_image
 
-
 def _build_run(container, root):
-    text = container.docker_file
-    marker = "RUN --mount=type=secret,id=cntr_acme_account \\"
-    if marker not in text:
-        raise AssertionError("ACME issuance must run inside the builder stage")
-    command = text.split(marker, 1)[1].split("FROM nginx:", 1)[0].strip()
+    lines = container.docker_file.splitlines()
+    start = next(i for i, line in enumerate(lines)
+                 if line.startswith("RUN --mount=type=secret,id=cntr_acme_account"))
+    end = next(i for i in range(start + 1, len(lines))
+               if lines[i].startswith("RUN printf"))
+    command = "\n".join(line for line in lines[start + 1:end]
+                        if not line.strip().startswith("--mount=")).strip()
     for source, target in (
         ("/etc/certs", root / "certs"),
         ("/root/.acme.sh", root / "acme"),
         ("/opt/nginx-initial", root / "seed"),
-        ("/opt/acme/acme.sh", root.parent / "bin/acme.sh"),
+        ("/usr/local/bin/nginx-acme", root.parent / "bin/nginx-acme"),
         ("/run/secrets/cntr_acme_account", root / "build-account.tar"),
     ):
         command = command.replace(source, str(target))
     return command
-
 
 @pytest.mark.parametrize("reuse_account", [False, True])
 def test_dockerfile_issues_certificate_and_seeds_account_at_build_time(certificate_case, reuse_account):
@@ -184,6 +202,8 @@ if "--issue" in args:
         account.write_text("build-account")
     home.joinpath("domains").write_text(",".join(
         args[index + 1] for index, value in enumerate(args[:-1]) if value == "--domain"))
+    home.joinpath("account.conf").write_text("SAVED_CF_Token='fake-token'\\n")
+    home.joinpath("domain.conf").write_text("CF_Token='fake-token'\\nLe_Domain='example.test'\\n")
 elif "--install-cert" in args:
     if not home.joinpath("account.key").exists():
         sys.exit(8)
@@ -201,6 +221,8 @@ else:
     assert (build / "seed/acme/account.key").read_text() == ("existing-account-key" if reuse_account else "build-account")
     assert (build / "seed/certs/example.test_fullchain.pem").read_text() == "preissued"
     assert (build / "acme/domains").read_text().startswith("example.test,*.example.test")
+    assert "fake-token" not in (build / "seed/acme/account.conf").read_text()
+    assert (build / "seed/acme/domain.conf").read_text() == "Le_Domain='example.test'\n"
 
 
 def test_acme_build_secret_reuses_active_account(certificate_case, monkeypatch):
@@ -211,6 +233,9 @@ def test_acme_build_secret_reuses_active_account(certificate_case, monkeypatch):
     container.on_starting(SimpleNamespace(initial_services=()))
     archive = root / "acme-build-account.tar"
     assert archive.stat().st_mode & 0o777 == 0o600
+    dns = root / "acme-dns.env"
+    assert dns.stat().st_mode & 0o777 == 0o600
+    assert "export CF_Token='fake-token'" in dns.read_text()
     with tarfile.open(str(archive)) as stream:
         assert stream.extractfile("account.key").read() == b"existing-account-key"
 

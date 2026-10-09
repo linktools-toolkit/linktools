@@ -498,15 +498,19 @@ referenced networks, volumes, secrets and configs; saved restore snapshots
 still contain the complete old project.
 Cross-service state is not an atomic transaction; failures remain command errors.
 
-nginx issues and installs its initial certificates while building the image, using
-`ACME_SERVER` (default `letsencrypt`), optional `ACME_ACCOUNT_EMAIL`, and the
-selected DNS API. DNS credentials are written directly as Dockerfile `ENV`
-values for initial issuance and retained in the image. DNS credential values must
-be single-line; CR or LF characters fail rendering with a clear error. Compose
-also supplies the configured values as runtime environment variables for cron renewal. ACME account
-and domain configuration is preserved with the initial certificate state.
-Images and build contexts contain DNS credentials, certificates, private keys and
-ACME account state: protect them and the build cache as secrets; do not publish them.
+nginx issues and installs its initial certificates during a single-stage image build,
+using `ACME_SERVER` (default `letsencrypt`), optional `ACME_ACCOUNT_EMAIL`,
+and the selected DNS API. Before building, cntr writes DNS credentials to the
+host-private `<APP_PATH>/nginx/acme-dns.env` (mode `0600`). BuildKit mounts this
+file and the persisted ACME account archive as build secrets; no DNS credential is
+declared through Dockerfile `ENV`, Compose service environment or a build argument.
+The runtime container receives only a read-only file secret. `nginx-acme` loads
+that file into the ACME subprocess environment for issuance or cron renewal,
+removing provider credential assignments that acme.sh saves in its account and
+domain configuration. A DNS credential rotation updates the host file without
+requiring the nginx image to be rebuilt solely to change credentials.
+Certificate private keys and ACME account keys remain in the resulting image
+under `/opt/nginx-initial`; do not publish the image to an untrusted registry.
 
 Deployment seeds only empty certificate/ACME mounts from the image, then validates
 expiry and domain coverage offline. Existing mounts (including account keys and
