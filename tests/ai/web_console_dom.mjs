@@ -264,12 +264,20 @@ await newTurn.children[0].children.find(child=>child.tagName==='BUTTON').click()
 const stream=streamBlocks.get('a-new');
 stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'a-new',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'New execution text'}}},cursor:null})+'\n\n'));
 await settle();assert.match(node('live').textContent,/New execution text/);
-const liveEvent=(event_type,seq,depth=0)=>stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:depth?'child':'a-new',agent_id:'default',depth,event:{event_type,event_seq:seq,payload:{}}},cursor:null})+'\n\n'));
+const liveEvent=(event_type,seq,depth=0,payload={})=>stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:depth?'child':'a-new',agent_id:'default',depth,event:{event_type,durable_seq:seq,payload}},cursor:null})+'\n\n'));
 liveEvent('TOOL_CALL_STARTED',1);await settle();assert.equal(node('live-activity').open,false);
 node('live-activity').open=true;node('live-activity').ontoggle();node('live-activity').children[0].focus();liveEvent('MODEL_REQUEST_STARTED',2);await settle();assert.equal(node('live-activity').open,true);assert.equal(document.activeElement,node('live-activity').children[0]);
-liveEvent('EXECUTION_FAILED',3,1);liveEvent('MODEL_REQUEST_FAILED',4);liveEvent('TOOL_CALL_FAILED',5);await settle();
-for(const name of ['execution failed','model request failed','tool call failed'])assert.ok(node('live').children.some(child=>child.className.includes('live-event') && child.textContent.includes(name)));
-const focusedChild=node('live').children.find(child=>child.className.includes('live-event') && child.textContent.includes('execution failed')).children.find(child=>child.tagName==='BUTTON');focusedChild.focus();liveEvent('TOOL_CALL_STARTED',6);await settle();assert.equal(document.activeElement.dataset.liveFocus,focusedChild.dataset.liveFocus);
+liveEvent('EXECUTION_FAILED',3,1);
+liveEvent('MODEL_REQUEST_FINISHED',4,0,{agent_run_seq:1,model_request_seq:1,status:'FAILED'});
+liveEvent('TOOL_CALL_FINISHED',5,0,{agent_run_seq:1,call_id:'failed-call',tool_name:'query',status:'FAILED',error_code:'TOOL_RETRY_REQUIRED'});
+liveEvent('MODEL_REQUEST_FINISHED',6,0,{agent_run_seq:1,model_request_seq:2,status:'CANCELLED'});
+liveEvent('TOOL_CALL_FINISHED',7,0,{agent_run_seq:1,call_id:'successful-call',tool_name:'query',status:'SUCCEEDED'});
+for(const [index,event] of ['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','CANCEL_REQUESTED','EXECUTION_CANCELLED'].entries())liveEvent(event,8+index);
+await settle();
+for(const name of ['execution failed','model request finished · FAILED','tool call finished · FAILED · TOOL_RETRY_REQUIRED','model request finished · CANCELLED','execution start unknown','execution recovery required','cancel requested','execution cancelled'])assert.ok(node('live').children.some(child=>child.className.includes('live-event') && child.textContent.includes(name)),name);
+assert.ok(node('live-activity').children.some(child=>child.className.includes('live-event') && child.textContent.includes('tool call finished · SUCCEEDED')));
+assert.ok(!node('live').children.some(child=>child.className.includes('live-event') && child.textContent.includes('SUCCEEDED')));
+const focusedChild=node('live').children.find(child=>child.className.includes('live-event') && child.textContent.includes('execution failed')).children.find(child=>child.tagName==='BUTTON');focusedChild.focus();liveEvent('TOOL_CALL_STARTED',12,0,{agent_run_seq:1,call_id:'next-call'});await settle();assert.equal(document.activeElement.dataset.liveFocus,focusedChild.dataset.liveFocus);
 releaseRefresh({session:sessions.get('a'),timeline:timeline('a')});await settle();
 assert.match(node('live').textContent,/New execution text/);assert.equal(node('live-activity').open,true);
 const focusBeforeRefresh=document.activeElement.dataset.liveFocus;
@@ -290,9 +298,15 @@ assert.equal(node('composer').hidden,true);assert.equal(node('inspector').hidden
 // Status alone never initiates cleanup; one stopped-executor confirmation gates it.
 const recoveries=()=>calls.filter(call=>call.key==='/api/executions/orphan/recover');
 const cancellations=()=>calls.filter(call=>call.key==='/api/executions/orphan/cancel');
+tab('recovery').click();await settle();
+for(const status of ['START_UNKNOWN','WAITING_DEFERRED','WAITING_RETRY','FINALIZING','SUCCEEDED']){
+  executions.set('orphan',{...info('orphan',null),status});node('refresh').click();await settle();
+  assert.equal(node('resume-run').disabled,true,status);
+}
 for(const status of ['PENDING_START','STARTED','CANCELLING','RECOVERY_REQUIRED']){
   executions.set('orphan',{...info('orphan',null),status});node('refresh').click();await settle();
   assert.equal(node('end-stopped').disabled,false);
+  assert.equal(node('resume-run').disabled,false,status);
   assert.equal(recoveries().length,0);assert.equal(cancellations().length,0);
 }
 let recoveryConfirmation='';

@@ -84,9 +84,10 @@ function setDisabled() {
   ['send','planning','thinking','memory','files','prompt'].forEach(id => $(id).disabled=readonly || state.session?.status === 'CLOSED' || !state.selectedSession);
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
   const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
+  const recoverable=['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status);
   ['retry','fork-run','end-stopped'].forEach(id => $(id).disabled=readonly || !state.execution || ending);
-  $('end-stopped').disabled ||= !['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status) && state.endReadbackId!==state.selectedExecution;
-  if($('resume-run'))$('resume-run').disabled=readonly || !state.execution || terminal(state.execution.status) || ending || state.recoveryReadbackId===state.selectedExecution || state.actionsPending.has(`${state.selectedExecution}:recover`);
+  $('end-stopped').disabled ||= !recoverable && state.endReadbackId!==state.selectedExecution;
+  if($('resume-run'))$('resume-run').disabled=readonly || !recoverable || ending || state.recoveryReadbackId===state.selectedExecution || state.actionsPending.has(`${state.selectedExecution}:recover`);
   $('export').disabled=!state.execution || !terminal(state.execution.status);
   const stoppable=!readonly && state.execution && !terminal(state.execution.status);
   $('stop-run').hidden=!stoppable || Boolean(state.selectedSession && state.session?.active_execution_id===state.selectedExecution);
@@ -264,13 +265,14 @@ function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   if (state.liveText) { live.append(element('div','message-label',`LIVE · ${state.execution?.agent_id || 'AGENT'} · ${short(state.selectedExecution)}`),element('div','message',state.liveText)); }
   const events=[...state.events.values()].slice(-12),activity=element('details','tool-message');activity.id='live-activity';activity.open=state.liveActivityOpen;
   activity.ontoggle=()=>{if($('live-activity')===activity)state.liveActivityOpen=activity.open;};
-  const attention=item=>['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','MODEL_REQUEST_FAILED','TOOL_CALL_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type);
+  const attention=item=>['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type)
+    || ['MODEL_REQUEST_FINISHED','TOOL_CALL_FINISHED'].includes(item.event.event_type) && ['FAILED','CANCELLED'].includes(item.event.payload?.status);
   const ordinary=events.filter(item=>!attention(item)).length;
   const summary=element('summary','',`Activity · ${ordinary} recent events`);summary.dataset.liveFocus='summary';activity.append(summary);
   let restoreFocus=liveFocus==='summary' && ordinary ? summary:null;
   events.forEach(item => {
     const payload=item.event.payload || {};
-    const row=element('div',`live-event${item.depth?' child':''}`,`${item.depth?'↳ ':''}${item.agent_id || 'task'} · ${item.event.event_type.replaceAll('_',' ').toLowerCase()}${payload.tool_name?' · '+payload.tool_name:''}${payload.call_id?' #'+short(payload.call_id):''}`);
+    const row=element('div',`live-event${item.depth?' child':''}`,`${item.depth?'↳ ':''}${item.agent_id || 'task'} · ${item.event.event_type.replaceAll('_',' ').toLowerCase()}${payload.status?' · '+payload.status:''}${payload.error_code?' · '+payload.error_code:''}${payload.tool_name?' · '+payload.tool_name:''}${payload.call_id?' #'+short(payload.call_id):''}`);
     if(item.depth){const inspect=button('Inspect subagent',async()=>{showInspector(true,true);await selectExecution(item.execution_id);});inspect.dataset.liveFocus=eventKey(item);row.append(inspect);if(liveFocus===inspect.dataset.liveFocus)restoreFocus=inspect;}
     (attention(item)?live:activity).append(row);
   });
