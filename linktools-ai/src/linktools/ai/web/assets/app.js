@@ -353,7 +353,14 @@ function renderDetails() {
       const row=item.payload || {}; card.append(element('h3','',`#${item.step_event_seq} · ${row.kind || 'Step'} · ${row.status || ''}`),element('p','',`${row.scope || ''}/${row.agent_run_seq || ''} · step ${row.step_index ?? '—'} · ${row.tool_name || 'request #'+(row.model_request_seq ?? '—')}`),element('p','',`${row.purpose || '—'} · ${duration(row.duration_ns)}${row.token_usage?' · '+usageLabel(row.token_usage):''}`),rawDetail(item));
       const selectors={}; ['agent_run_seq','model_request_seq','step_index','tool_call_id'].forEach(key=>{if(row[key]!=null)selectors[key]=row[key];});
       if(row.call_id)selectors.tool_call_id=row.call_id;
-      card.append(button('Read content',async()=>{if(item.execution_id!==state.selectedExecution)await selectExecution(item.execution_id);state.tab='history';await loadDetail(false,selectors);}));
+      card.append(button('Read content',async()=>{
+        if(item.execution_id!==state.selectedExecution){
+          const generation=state.generation,selection=selectExecution(item.execution_id),executionGeneration=state.executionGeneration;
+          await selection;
+          if(generation!==state.generation || executionGeneration!==state.executionGeneration || item.execution_id!==state.selectedExecution || state.tab!=='trace')return;
+        }
+        state.tab='history';await loadDetail(false,selectors);
+      }));
       if(row.child_execution_id)card.append(button('Open subagent',async()=>navigate(null,row.child_execution_id)));
     } else if(state.tab==='recovery') {
       card.append(element('h3','',item.tool_name),element('p','',`Effect outcome unknown · ${item.tool_call_id}`),rawDetail(item));

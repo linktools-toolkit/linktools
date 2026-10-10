@@ -1458,6 +1458,8 @@ class _SqlTransaction:
             conditions.append(table.c.stream_digest == _hex(query.stream_digest))
         if query.states is not None:
             conditions.append(table.c.state.in_(tuple(query.states)))
+        if query.after_sequence is not None:
+            conditions.append(table.c.sequence > query.after_sequence)
         if query.through_sequence is not None:
             conditions.append(table.c.sequence <= query.through_sequence)
         if query.compactable is not None:

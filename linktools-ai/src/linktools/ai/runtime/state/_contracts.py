@@ -2303,6 +2303,7 @@ class OperationLedgerRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         limit: int,
         states: frozenset[OperationStatus] | None = None,
+        after_sequence: int | None = None,
     ) -> tuple[OperationLedgerRecord, ...]: ...
     async def compact_terminal(
         self,

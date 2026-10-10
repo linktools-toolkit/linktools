@@ -162,6 +162,40 @@ releaseModels({items:[{model_request_seq:999,status:'SUCCEEDED',model:{},executi
 assert.match(node('inspector-content').textContent,/History marker/);
 assert.doesNotMatch(node('inspector-content').textContent,/999/);
 
+// A child trace read cannot apply its selectors after the user changes selection.
+detailResponses.set('/api/executions/b-run/trace',{items:[{execution_id:'trace-child',step_event_seq:1,payload:{agent_run_seq:7,model_request_seq:9}}],next_cursor:null});
+tab('trace').click();await settle();
+const readChild=node('inspector-content').children[0].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read content');
+const releaseTraceChild=deferred('GET /api/executions/trace-child');
+readChild.click();await tick();location.hash='#session=a';await settle();tab('models').click();await settle();
+const afterTraceNavigation=calls.length;
+releaseTraceChild(info('trace-child','b'));await settle();
+assert.equal(location.hash,'#session=a');
+assert.match(all.find(element=>element.dataset.tab==='models').className,/\bactive\b/);
+assert.ok(!calls.slice(afterTraceNavigation).some(call=>call.key==='/api/executions/a-run/history'));
+detailResponses.delete('/api/executions/b-run/trace');
+
+for(const destination of ['tab','execution','current']){
+  location.hash='#session=b';await settle();
+  detailResponses.set('/api/executions/b-run/trace',{items:[{execution_id:'trace-child',step_event_seq:1,payload:{agent_run_seq:7,model_request_seq:9}}],next_cursor:null});
+  tab('trace').click();await settle();
+  const read=node('inspector-content').children[0].children.find(child=>child.tagName==='BUTTON' && child.textContent==='Read content');
+  const release=deferred('GET /api/executions/trace-child');read.click();await tick();
+  if(destination==='tab')tab('models').click();
+  if(destination==='execution')location.hash='#session=b&execution=b-run';
+  await settle();const beforeReadback=calls.length;release(info('trace-child','b'));await settle();
+  const content=calls.slice(beforeReadback).filter(call=>call.key.endsWith('/history'));
+  if(destination==='current'){
+    assert.equal(content.length,1);assert.equal(content[0].key,'/api/executions/trace-child/history');
+    assert.equal(content[0].query.agent_run_seq,'7');assert.equal(content[0].query.model_request_seq,'9');
+  }else{
+    assert.equal(content.length,0,destination);
+    if(destination==='tab')assert.match(all.find(element=>element.dataset.tab==='models').className,/\bactive\b/);
+    else assert.match(node('execution-meta').textContent,/b-run/);
+  }
+  detailResponses.delete('/api/executions/b-run/trace');
+}
+
 // A pending execution action cannot navigate away from a newer selection.
 location.hash='#session=a';await settle();
 const releaseRetry=deferred('POST /api/executions/a-run/retry');

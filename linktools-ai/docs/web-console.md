@@ -119,11 +119,11 @@ place; diagnostic exception messages remain redacted to protect credentials.
 | `ai-acp` | Equivalent explicit session create/load/continue/fork/close/cancel interactions; ACP itself remains a separate stdio transport | The same public Session and Execution APIs |
 
 Retry, fork, recovery and external-effect resolution are explicit actions in the
-execution inspector. Recovery uses the Runtime's actual operation ID and fence;
-the console never assumes whether an external effect was applied. Selecting a
-child execution preserves its identity rather than treating its events as a
-root model call. Full JSON details preserve public fields that do not fit the
-compact presentation.
+execution inspector. External-effect resolution uses the Runtime's actual
+operation ID and fence; the console never assumes whether an external effect
+was applied. Selecting a child execution preserves its identity rather than
+treating its events as a root model call. Full JSON details preserve public
+fields that do not fit the compact presentation.
 
 The **Models & prompt** tab summarizes system/fixed/dynamic instructions,
 conversation context, attachment media types, tools and output contracts from

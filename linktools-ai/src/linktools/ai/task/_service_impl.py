@@ -57,6 +57,7 @@ from ._submission import (
 )
 from ._metrics import _TaskMetricProjector
 from ._service import (
+    TaskBoundExecutionRecovery,
     TaskEffectResolutionRequest,
     TaskGraphLauncher,
     TaskGraphService,
@@ -345,6 +346,7 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         local_waiter: "_LocalTaskWaiter | None" = None,
         preflight: "_TaskGraphPreflight | None" = None,
+        bound_execution_recovery: TaskBoundExecutionRecovery | None = None,
         metric_recorder: MetricRecorder | None = None,
         metric_source_namespace: str | None = None,
     ) -> None:
@@ -357,6 +359,7 @@ class DefaultTaskGraphService(TaskGraphService):
         self._launcher = launcher
         self._local_waiter = local_waiter
         self._preflight = preflight
+        self._bound_execution_recovery = bound_execution_recovery
         self._metric_projector = (
             None
             if metric_recorder is None or metric_source_namespace is None
@@ -883,6 +886,12 @@ class DefaultTaskGraphService(TaskGraphService):
                 graph_id,
                 tenant_id,
                 state,
+            )
+
+        if admission is not None and self._bound_execution_recovery is not None:
+            await self._bound_execution_recovery.recover_bound_executions(
+                graph_id,
+                request,
             )
 
         if view.status is TaskStatus.RECOVERY_REQUIRED:
@@ -1783,6 +1792,10 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             fallback_backoff = 1.0
             while True:
+                generation = self._local_activity_generation(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
                 state = await self._persistence.tasks.graph_state(
                     graph_id,
                     tenant_id=tenant_id,
@@ -1805,10 +1818,12 @@ class DefaultTaskGraphService(TaskGraphService):
                     failure = waiter.graph_failure(graph_id, tenant_id=tenant_id)
                     if failure is not None:
                         raise failure
-                generation = self._local_activity_generation(
-                    graph_id,
-                    tenant_id=tenant_id,
-                )
+                if generation is not None and self._local_activity_generation(
+                    graph_id, tenant_id=tenant_id,
+                ) is None:
+                    # A retired local owner may have committed after our read.
+                    fallback_backoff = 1.0
+                    continue
                 fallback_backoff = await self._wait_graph_activity_opportunity(
                     graph_id,
                     tenant_id=tenant_id,

@@ -58,6 +58,7 @@ from ._runner import (
     TaskNodeRunResult,
 )
 from ._service import (
+    TaskBoundExecutionRecovery,
     TaskEffectResolutionRequest,
     TaskGraphLauncher,
     TaskGraphQueryService,
@@ -77,6 +78,7 @@ __all__ = [
     "LocalTaskGraphLauncher",
     "RecoverGraphRequest",
     "TaskBindingContract",
+    "TaskBoundExecutionRecovery",
     "TaskDependency",
     "TaskDependencyState",
     "TaskArtifactPublisher",

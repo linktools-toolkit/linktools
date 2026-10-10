@@ -509,6 +509,7 @@ class _MemoryTransaction:
                 or operation.stream_digest == query.stream_digest
             )
             and (query.states is None or operation.state in query.states)
+            and (query.after_sequence is None or operation.sequence > query.after_sequence)
             and (
                 query.through_sequence is None
                 or operation.sequence <= query.through_sequence

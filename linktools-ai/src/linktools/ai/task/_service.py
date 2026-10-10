@@ -112,6 +112,16 @@ class TaskGraphQueryService(Protocol):
         ...
 
 
+class TaskBoundExecutionRecovery(Protocol):
+    """Recover only executions durably bound to an authorized graph."""
+
+    async def recover_bound_executions(
+        self,
+        graph_id: str,
+        request: RecoverGraphRequest,
+    ) -> None: ...
+
+
 class TaskGraphService(TaskGraphQueryService, Protocol):
     async def describe_submission(
         self, request: TaskGraphRequest
@@ -248,6 +258,7 @@ class TaskGraphLauncher(Protocol):
 
 
 __all__ = [
+    "TaskBoundExecutionRecovery",
     "TaskEffectResolutionRequest",
     "TaskGraphLauncher",
     "TaskGraphQueryService",

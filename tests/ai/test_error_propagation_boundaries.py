@@ -333,8 +333,10 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
             self,
             checkpoint: object,
             value: object,
+            *,
+            recovery_operation: object = None,
         ) -> bool:
-            del checkpoint
+            del checkpoint, recovery_operation
             assert value is execution
             return True
 

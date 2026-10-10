@@ -174,15 +174,22 @@ class RuntimeExecutions(Generic[AppT]):
         self._ensure_open()
         return await self._service.resolve_tool_effect(execution_id, request)
 
-    async def recover(self, execution_id: str, *, principal: Principal) -> ExecutionHandle:
-        """Explicitly take over recoverable work after its previous executor stopped.
+    async def recover(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        idempotency_key: str | None = None,
+    ) -> ExecutionHandle:
+        """Take over recoverable work after its previous executor stopped.
 
-        Each invocation competes for the authorized revision. Inspect canonical
-        state after an uncertain response; a fresh invocation is not an
-        idempotent retry and can supersede a previous recovery attempt.
+        Reusing a key observes the same recovery attempt. Without a key each
+        invocation can supersede an earlier attempt.
         """
         self._ensure_open()
-        return await self._service.recover(execution_id, principal=principal)
+        return await self._service.recover(
+            execution_id, principal=principal, idempotency_key=idempotency_key,
+        )
 
     async def trace(
         self,
