@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
     from typing import Any, Callable
     from ..container import BaseContainer
-    from ..context import EventContext
+    from ..context import OperationContext
     from ..manager import ContainerManager
 
 
@@ -106,7 +106,7 @@ class LifecycleDispatcher:
             yield LifecycleStep(container, HookPhase.BEFORE_START)
         yield LifecycleStep(phase=HookPhase.BEFORE_START)
 
-    def _dispatch_steps(self, steps: "Iterable[LifecycleStep]", context: "EventContext") -> None:
+    def _dispatch_steps(self, steps: "Iterable[LifecycleStep]", context: "OperationContext") -> None:
         for step in steps:
             if step.callback is not None:
                 self._invoke_callback(getattr(step.container, step.callback), context)
@@ -115,19 +115,19 @@ class LifecycleDispatcher:
                 owner.hooks.call(step.phase, context, reverse=step.reverse)
 
     @contextlib.contextmanager
-    def notify_start(self, context: "EventContext") -> "Iterator[None]":
+    def notify_start(self, context: "OperationContext") -> "Iterator[None]":
         self._dispatch_steps(self._iter_start_steps(lambda: context.target_containers), context)
         yield
         self._dispatch_steps(self.iter_steps("up", context.target_containers, after=True), context)
 
     @contextlib.contextmanager
-    def notify_stop(self, context: "EventContext") -> "Iterator[None]":
+    def notify_stop(self, context: "OperationContext") -> "Iterator[None]":
         self._dispatch_steps(self.iter_steps("down", context.target_containers, after=False), context)
         yield
         self._dispatch_steps(self.iter_steps("down", context.target_containers, after=True), context)
 
     @contextlib.contextmanager
-    def notify_remove(self, context: "EventContext") -> "Iterator[None]":
+    def notify_remove(self, context: "OperationContext") -> "Iterator[None]":
         yield
 
         # context.containers is always the FULL installed project (see

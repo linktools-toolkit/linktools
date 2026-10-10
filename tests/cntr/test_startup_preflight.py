@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from _harness import builtin_container_type
-from linktools.cntr import ContainerError, EventContext
+from linktools.cntr import ContainerError, OperationContext
 from linktools.cntr._operations import ComposeOperations, ComposeSelection
 from linktools.cntr.artifacts import AppliedServiceModels, ArtifactIndex, compose_candidate
 from linktools.cntr.runtime.images import ImagePlan
@@ -37,13 +37,13 @@ class _Container:
     def is_generation_current(self, context, service, candidate) -> bool:
         return True
 
-    def on_check(self, context: EventContext) -> None:
+    def on_check(self, context: OperationContext) -> None:
         pass
 
-    def on_starting(self, context: EventContext) -> None:
+    def on_starting(self, context: OperationContext) -> None:
         self.manager.events.append(("prepare", self.name))
 
-    def on_service_started(self, context: EventContext, service: str) -> None:
+    def on_service_started(self, context: OperationContext, service: str) -> None:
         pass
 
 
@@ -110,7 +110,7 @@ def test_authelia_https_check_only_applies_to_native_consumers(services: "tuple[
     reads = []
     owner = SimpleNamespace(generation_services=native.generation_services,
                             get_config=lambda key: reads.append(key) or False)
-    context = EventContext(target_services=services)
+    context = OperationContext(target_services=services)
     required = services is None or any(name in services for name in native.generation_services)
     if required:
         with pytest.raises(ContainerError, match="Authelia requires HTTPS"):

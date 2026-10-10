@@ -23,7 +23,7 @@ from linktools.cntr.state.running import RunningStateStore
 
 if TYPE_CHECKING:
     from typing import AbstractSet, Iterable, Mapping
-    from linktools.cntr import ContainerManager, EventContext
+    from linktools.cntr import ContainerManager, OperationContext
 
 
 BuiltinNginxContainer = builtin_container_type("100-nginx")
@@ -391,19 +391,19 @@ def test_container_policy_controls_bootstrap_order_and_changed_running_updates(
         def generation_label(self, service: str, generation_id: str) -> "str | None":
             return None
 
-        def on_prepare_config(self, context: "EventContext") -> None:
+        def on_prepare_config(self, context: "OperationContext") -> None:
             pass
 
         def render_config(self, generation_id: str) -> "dict[str, str]":
             return {"config": self.content, "generation": generation_id}
 
-        def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+        def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
             pass
 
         def render_bootstrap(self, generation_id: str) -> "dict[str, str]":
             return {"config": "bootstrap " + generation_id}
 
-        def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
+        def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
                   services: "Iterable[str]") -> None:
             for service in services:
                 self.manager.compose_runner.apply_service(context, service)
@@ -498,13 +498,13 @@ def test_cold_bootstrap_uses_shared_validation_application_and_final_accounting(
         def render_bootstrap(self, generation_id: str) -> "dict[str, str]":
             return {"config": "bootstrap", "generation": generation_id}
 
-        def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+        def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
             phase = Path(candidate.path, "config").read_text()
             events.append(("validate", phase))
             if failure == "validation" and phase == "bootstrap":
                 raise ContainerError("bootstrap validation failed")
 
-        def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
+        def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
                          services: "Iterable[str]") -> None:
             phase = Path(candidate.path, "config").read_text()
             events.append(("apply", phase))

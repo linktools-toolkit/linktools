@@ -18,7 +18,7 @@ from linktools.rich import prompt
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
     from typing import Any
-    from linktools.cntr import EventContext, Integrations
+    from linktools.cntr import OperationContext, Integrations
     from linktools.cntr.artifacts import GeneratedCandidate
 
 
@@ -137,7 +137,7 @@ class Container(BaseContainer):
             "bookmarks.yml": yaml.safe_dump(bookmarks, allow_unicode=True),
         }
 
-    def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
         group = self.get_config("DOCKER_GID", type=int)
         for name in ("apps.yml", "bookmarks.yml"):
             path = Path(candidate.path) / name
@@ -148,14 +148,14 @@ class Container(BaseContainer):
                 self.runtime.create_process("chgrp", str(group), str(path), privilege=True).check_call()
             self.runtime.chmod(path, 0o640)
 
-    def rollback_config(self, context: "EventContext") -> None:
+    def rollback_config(self, context: "OperationContext") -> None:
         for path, backup in reversed(getattr(context, "flare_migrated_paths", ())):
             if path.is_symlink():
                 path.unlink()
             if backup is not None:
                 backup.rename(path)
 
-    def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
+    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
                  services: "Iterable[str]") -> None:
         if "flare" not in services:
             return

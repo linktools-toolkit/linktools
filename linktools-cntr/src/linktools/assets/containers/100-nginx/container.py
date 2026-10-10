@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from linktools.cntr.integration import ResolvedSite
     from collections.abc import Iterable, Sequence
     from typing import AbstractSet, Any, Mapping
-    from linktools.cntr import EventContext
+    from linktools.cntr import OperationContext
     from linktools.cntr.artifacts import GeneratedCandidate
     from linktools.types import PathType
 
@@ -192,7 +192,7 @@ class Container(BaseContainer):
             self.get_config("NGINX_DEFAULT_PORT")
         )
 
-    def on_check(self, context: "EventContext") -> None:
+    def on_check(self, context: "OperationContext") -> None:
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
@@ -298,7 +298,7 @@ class Container(BaseContainer):
     def generation_label(self, service: str, generation_id: str) -> "str | None":
         return None
 
-    def is_generation_current(self, context: "EventContext", service: str,
+    def is_generation_current(self, context: "OperationContext", service: str,
                               candidate: "GeneratedCandidate") -> bool:
         if service != "nginx":
             return super().is_generation_current(context, service, candidate)
@@ -497,7 +497,7 @@ class Container(BaseContainer):
             archive.touch(mode=0o600)
         self.runtime.chmod(archive, 0o600)
 
-    def on_starting(self, context: "EventContext") -> None:
+    def on_starting(self, context: "OperationContext") -> None:
         if not self.get_config("NGINX_HTTPS_ENABLE", type=bool):
             return
         from linktools.cntr.artifacts import atomic_write_text_if_changed
@@ -536,7 +536,7 @@ class Container(BaseContainer):
                 raise
         os.replace(temp, str(archive))
 
-    def on_prepare_config(self, context: "EventContext") -> None:
+    def on_prepare_config(self, context: "OperationContext") -> None:
         from uuid import uuid4
         import shutil
 
@@ -620,7 +620,7 @@ class Container(BaseContainer):
                 else:
                     shutil.copy2(str(path), str(destination))
 
-    def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
         manager = self.manager
         command = ("nginx", "-p", "/etc/nginx/", "-c",
                    "/etc/nginx/generated/{}/nginx.conf".format(candidate.generation_id), "-t")
@@ -663,7 +663,7 @@ class Container(BaseContainer):
         raise ContainerError("Native validation failed for service nginx{} (exit {})".format(
             diagnostic, result.returncode))
 
-    def confirm(self, context: "EventContext", generation_id: str,
+    def confirm(self, context: "OperationContext", generation_id: str,
                 timeout: int = 30) -> None:
         import time
         deadline = time.monotonic() + timeout
@@ -683,7 +683,7 @@ class Container(BaseContainer):
                 'location = /health { default_type text/plain; return 200 "' + generation_id + '"; }}\n'
                 'server { listen ' + str(self.get_config("NGINX_HTTP_PORT")) + ' default_server; return 503; }\n}\n'}
 
-    def rollback_config(self, context: "EventContext") -> None:
+    def rollback_config(self, context: "OperationContext") -> None:
         previous = getattr(context, "nginx_certificate_previous", MISSING)
         if previous is MISSING:
             return
@@ -701,7 +701,7 @@ class Container(BaseContainer):
                 if temporary.is_symlink():
                     temporary.unlink()
 
-    def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
+    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
                      services: "Iterable[str]") -> None:
         if "nginx" not in services:
             return

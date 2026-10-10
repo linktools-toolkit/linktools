@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from typing import Any, Iterable, Iterator
     from linktools.runtime import Process
     from ..container import BaseContainer
-    from ..context import EventContext
+    from ..context import OperationContext
     from ..artifacts import GeneratedCandidate
     from .structured import CommandResult
     from ..manager import ContainerManager
@@ -120,7 +120,7 @@ class ComposeRunner:
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
 
-    def collect_services(self, context: "EventContext") -> "list[str]":
+    def collect_services(self, context: "OperationContext") -> "list[str]":
         """Service names for the targeted containers; empty for "all" runs."""
         if context.is_full_containers:
             return []
@@ -163,7 +163,7 @@ class ComposeRunner:
         args.extend(options.services)
         return args
 
-    def build(self, context: "EventContext", options: ComposeOptions) -> int:
+    def build(self, context: "OperationContext", options: ComposeOptions) -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, *self.build_args(options)
         ).check_call()
@@ -171,7 +171,7 @@ class ComposeRunner:
     def pull_args(self, services: "Sequence[str]") -> "list[str]":
         return ["pull", "--ignore-buildable", *services]
 
-    def pull(self, context: "EventContext", services: "Sequence[str]") -> int:
+    def pull(self, context: "OperationContext", services: "Sequence[str]") -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, *self.pull_args(services)
         ).check_call()
@@ -179,7 +179,7 @@ class ComposeRunner:
     def options_for_build(self, services: "Sequence[str]", pull: bool = False) -> ComposeOptions:
         return ComposeOptions(pull=pull, services=list(services))
 
-    def final_model(self, context: "EventContext") -> "dict[str, Any]":
+    def final_model(self, context: "OperationContext") -> "dict[str, Any]":
         return self._resolved_model(self.manager.runtime.create_docker_compose_process(
             context.containers, *self.config_args(output_format="json"), capture_output=True))
 
@@ -190,17 +190,17 @@ class ComposeRunner:
             raise ContainerError("Docker Compose returned an invalid final model")
         return result
 
-    def up(self, context: "EventContext", options: ComposeOptions) -> int:
+    def up(self, context: "OperationContext", options: ComposeOptions) -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, *self.up_args(options)
         ).check_call()
 
-    def stop(self, context: "EventContext", services: "Sequence[str]") -> int:
+    def stop(self, context: "OperationContext", services: "Sequence[str]") -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, "stop", *services
         ).check_call()
 
-    def down(self, context: "EventContext", services: "Sequence[str]") -> int:
+    def down(self, context: "OperationContext", services: "Sequence[str]") -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, "down", *services
         ).check_call()
@@ -226,7 +226,7 @@ class ComposeRunner:
 
     def config(
             self,
-            context: "EventContext",
+            context: "OperationContext",
             services: "Sequence[str]" = (),
             output_format: "str | None" = None,
             quiet: bool = False,
@@ -292,7 +292,7 @@ class ComposeRunner:
         args.extend(["--entrypoint", command[0], image, *command[1:]])
         return args
 
-    def _native_validation_model(self, context: "EventContext", service: str) -> "dict[str, Any]":
+    def _native_validation_model(self, context: "OperationContext", service: str) -> "dict[str, Any]":
         if service not in getattr(context, "bootstrap_fallback_services", ()):
             saved = getattr(context, "rollback_service_models", {}).get(service)
             if saved is not None:
@@ -313,7 +313,7 @@ class ComposeRunner:
             return dict(model, services=dict(model["services"], **{service: specification}))
         return model
 
-    def validate_service(self, context: "EventContext", service: str,
+    def validate_service(self, context: "OperationContext", service: str,
                          command: "Sequence[str]", environment: "Mapping[str, object] | None" = None,
                          network: bool = False, check: bool = True,
                          mount_overrides: "Mapping[str, str] | None" = None) -> "CommandResult":
@@ -328,7 +328,7 @@ class ComposeRunner:
                 service, result.returncode))
         return result
 
-    def run_isolated_service(self, context: "EventContext", service: str,
+    def run_isolated_service(self, context: "OperationContext", service: str,
                              command: "Sequence[str]") -> None:
         """Run a one-shot service maintenance command with resolved mounts, no network or ports."""
         model = self._native_validation_model(context, service)
@@ -348,7 +348,7 @@ class ComposeRunner:
         args.append(service)
         return args
 
-    def apply_service(self, context: "EventContext", service: str, recreate: bool = False) -> int:
+    def apply_service(self, context: "OperationContext", service: str, recreate: bool = False) -> int:
         if service not in getattr(context, "bootstrap_fallback_services", ()):
             previous = getattr(context, "rollback_service_models", {}).get(service)
             if previous is not None:
@@ -376,7 +376,7 @@ class ComposeRunner:
             return self.manager.runtime.create_docker_compose_process(
                 context.containers, "--file", path, *args).check_call()
 
-    def is_generation_current(self, context: "EventContext", service: str, candidate: "GeneratedCandidate") -> bool:
+    def is_generation_current(self, context: "OperationContext", service: str, candidate: "GeneratedCandidate") -> bool:
         if (service in getattr(context, "changed_image_services", ()) or
                 service in getattr(context, "changed_compose_services", ())):
             return False
@@ -395,7 +395,7 @@ class ComposeRunner:
         target_id = result.stdout.strip()
         return bool(target_id) and all(item.image_id == target_id for item in matches)
 
-    def wait_service_running(self, context: "EventContext", service: str, timeout: int = 30) -> None:
+    def wait_service_running(self, context: "OperationContext", service: str, timeout: int = 30) -> None:
         import time
         from ..errors import ContainerError
         deadline = time.monotonic() + timeout
@@ -408,13 +408,13 @@ class ComposeRunner:
                 raise ContainerError("Service {} did not become running".format(service))
             time.sleep(0.5)
 
-    def exec_service(self, context: "EventContext", service: str, command: "Sequence[str]",
+    def exec_service(self, context: "OperationContext", service: str, command: "Sequence[str]",
                      check: bool = True) -> "CommandResult":
         return self.manager.structured_runner.execute(
             self.manager.runtime.create_docker_compose_process(
                 context.containers, "exec", "-T", service, *command, capture_output=True), check=check)
 
-    def wait_service_healthy(self, context: "EventContext", service: str,
+    def wait_service_healthy(self, context: "OperationContext", service: str,
                              timeout: "int | None" = 30) -> None:
         import time
         from ..errors import ContainerError
@@ -437,7 +437,7 @@ class ComposeRunner:
                 raise ContainerError("Service {} did not become healthy".format(service))
             time.sleep(0.5)
 
-    def wait_service_dependencies(self, context: "EventContext", service: str,
+    def wait_service_dependencies(self, context: "OperationContext", service: str,
                                   model: "dict[str, Any] | None" = None) -> None:
         """Use the executing model's conditions without imposing a task deadline."""
         from ..errors import ContainerError
@@ -487,7 +487,7 @@ class ComposeRunner:
                         continue
                 raise
 
-    def wait_service_completed(self, context: "EventContext", service: str,
+    def wait_service_completed(self, context: "OperationContext", service: str,
                                timeout: "int | None" = 30) -> None:
         import time
         from ..errors import ContainerError
@@ -507,13 +507,13 @@ class ComposeRunner:
                 raise ContainerError("Service {} did not complete successfully".format(service))
             time.sleep(0.5)
 
-    def apply_services(self, context: "EventContext", services: "Sequence[str]") -> None:
+    def apply_services(self, context: "OperationContext", services: "Sequence[str]") -> None:
         """Apply the dependency-ordered selection supplied by the orchestrator."""
         for service in services:
             self.apply_service(context, service)
 
     @contextmanager
-    def _saved_compose_args(self, context: "EventContext",
+    def _saved_compose_args(self, context: "OperationContext",
                             contents: "Iterable[str]") -> "Iterator[list[str]]":
         import tempfile
         # Normal Compose commands take their base directory from the first
@@ -529,7 +529,7 @@ class ComposeRunner:
                 args.extend(["--file", path])
             yield args
 
-    def _restore_order(self, context: "EventContext",
+    def _restore_order(self, context: "OperationContext",
                        specifications: "dict[str, dict[str, Any]]") -> "tuple[str, ...]":
         # Order only the restore set; external dependencies are checked before
         # application, never expanded into additional startup targets.
@@ -539,7 +539,7 @@ class ComposeRunner:
         return order_services(context.containers, tuple(specifications),
                               {"services": graph}, dependency_roots=())
 
-    def _legacy_rollback_files(self, context: "EventContext",
+    def _legacy_rollback_files(self, context: "OperationContext",
                                services: "Sequence[str]") -> "list[str]":
         """Keep only old Compose files needed by these services and their references."""
         import yaml
@@ -612,7 +612,7 @@ class ComposeRunner:
                 missing.difference_update(resources)
         return [text for path, text in context.saved_compose.items() if path in included]
 
-    def saved_service_models(self, context: "EventContext",
+    def saved_service_models(self, context: "OperationContext",
                              services: "Sequence[str]") -> "dict[str, str]":
         """Resolve and order the original per-service models for one restore set."""
         import yaml
@@ -641,7 +641,7 @@ class ComposeRunner:
             specifications[service] = model["services"][service]
         return {service: texts[service] for service in self._restore_order(context, specifications)}
 
-    def apply_saved_services(self, context: "EventContext", services: "Sequence[str]",
+    def apply_saved_services(self, context: "OperationContext", services: "Sequence[str]",
                              files: "dict[str, str]") -> None:
         """Restore original images, paths and dependency conditions, not mutable tags."""
         import yaml

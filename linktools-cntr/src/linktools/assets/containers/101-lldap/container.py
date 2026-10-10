@@ -14,7 +14,7 @@ from linktools.decorator import cached_property
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Any
-    from linktools.cntr import EventContext, Integrations
+    from linktools.cntr import OperationContext, Integrations
     from linktools.cntr.artifacts import GeneratedCandidate
     from linktools.types import PathType
     from linktools.core import ConfigResolver
@@ -49,7 +49,7 @@ class Container(BaseContainer):
             ), category="container"),
         ]
 
-    def on_check(self, context: "EventContext") -> None:
+    def on_check(self, context: "OperationContext") -> None:
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if not domain or "." not in domain:
             raise ContainerError(f"Invalid domain `{domain}` for LDAP, "
@@ -58,7 +58,7 @@ class Container(BaseContainer):
 
     generates_config = True
 
-    def on_prepare_config(self, context: "EventContext") -> None:
+    def on_prepare_config(self, context: "OperationContext") -> None:
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
         self.get_app_path("data").mkdir(parents=True, exist_ok=True)
@@ -71,13 +71,13 @@ class Container(BaseContainer):
             "ldap_user_pass": str(self.get_config("LLDAP_ADMIN_PASSWORD")),
         }
 
-    def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
         # The builtin TOML contains only fixed database/key locations. LLDAP has
         # no standalone config validator; readiness is checked after application.
         if not self.get_config("LLDAP_ADMIN_PASSWORD"):
             raise ContainerError("LLDAP administrator password must not be empty")
 
-    def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
+    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
                  services: "Iterable[str]") -> None:
         if "lldap" not in services:
             return

@@ -8,7 +8,7 @@ import os
 
 import _harness
 
-from linktools.cntr.context import EventContext
+from linktools.cntr.context import OperationContext
 
 
 def _repo_with_field_only_container(tmp_path, name="repo_src"):
@@ -63,7 +63,7 @@ def test_notify_remove_registers_configs_for_a_repo_container_removed_while_runn
 
     manager.running_state._set(["repo_src"])
 
-    ctx = EventContext()
+    ctx = OperationContext()
     ctx.commands = ["up"]
     # A full-project context that no longer includes this container --
     # simulates it having been uninstalled while still running.

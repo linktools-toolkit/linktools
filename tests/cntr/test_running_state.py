@@ -10,7 +10,7 @@ import pytest
 
 import linktools.cntr.__main__ as cntr_main
 import linktools.cntr.commands._shared as cntr_shared
-from linktools.cntr.context import EventContext
+from linktools.cntr.context import OperationContext
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
 from linktools.cntr.runtime.images import ImagePlan
@@ -46,7 +46,7 @@ def _record(manager, monkeypatch, fail=False):
 
 
 def _partial_ctx(manager, name):
-    ctx = EventContext()
+    ctx = OperationContext()
     ctx.commands = ["up"]
     ctx.containers = manager.installed_state.get(resolve=True)
     ctx.target_containers = [c for c in ctx.containers if c.name == name]
@@ -111,7 +111,7 @@ def test_mark_stopped_partial_removes_targets(fresh_manager):
 
 def test_mark_started_full_writes_target_set(fresh_manager):
     fresh_manager.running_state._set(["stale"])
-    ctx = EventContext()
+    ctx = OperationContext()
     ctx.commands = ["up"]
     ctx.containers = fresh_manager.installed_state.get(resolve=False)
     ctx.target_containers = ctx.containers
@@ -124,7 +124,7 @@ def test_mark_started_full_writes_target_set(fresh_manager):
 
 def test_mark_stopped_full_clears(fresh_manager):
     fresh_manager.running_state._set(["nginx", "portainer"])
-    ctx = EventContext()
+    ctx = OperationContext()
     ctx.commands = ["down"]
     ctx.containers = fresh_manager.installed_state.get(resolve=False)
     ctx.target_containers = ctx.containers
@@ -191,7 +191,7 @@ def test_manager_get_running_containers_and_load_dump_wrappers_are_gone(fresh_ma
 def test_dispatcher_reconciles_removed_container_out_of_running_state(fresh_manager, monkeypatch):
     fresh_manager.running_state._set(["nginx", "flare"])
 
-    ctx = EventContext()
+    ctx = OperationContext()
     ctx.commands = ["up"]
     ctx.containers = [c for c in fresh_manager.containers.values() if c.name != "flare"]
     ctx.target_containers = ctx.containers

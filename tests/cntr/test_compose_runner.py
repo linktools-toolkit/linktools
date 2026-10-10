@@ -8,7 +8,7 @@ explicit build, pull, up, stop/down, and config commands it is asked to run.
 import pytest
 
 from linktools.cntr.container import ContainerError
-from linktools.cntr.context import EventContext
+from linktools.cntr.context import OperationContext
 from linktools.cntr.runtime.compose import ComposeOptions, ComposeRunner
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -22,7 +22,7 @@ def _no_proxy_env(monkeypatch):
 
 
 def _ctx(manager, target_names=None, is_full=False):
-    ctx = EventContext()
+    ctx = OperationContext()
     ctx.commands = ["up"]
     ctx.containers = manager.installed_state.get(resolve=True)
     if is_full:
@@ -46,7 +46,7 @@ def test_collect_services_partial_collects_target_services(fresh_manager):
 
 def test_collect_services_no_services_raises(fresh_manager):
     runner = fresh_manager.compose_runner
-    ctx = EventContext()
+    ctx = OperationContext()
     ctx.commands = ["up"]
     ctx.containers = []
     ctx.target_containers = []

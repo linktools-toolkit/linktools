@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .container import ContainerError
-from .context import EventContext
+from .context import OperationContext
 from .execution.model import get_records, record_phase, render_report
 from .runtime.compose import order_services, service_dependencies
 
@@ -183,8 +183,8 @@ class ComposeOperations:
                                     getattr(context, "compose_model", None),
                                     dependency_roots=tuple(native_roots))
 
-    def _make_context(self, commands, selection: ComposeSelection) -> "EventContext":
-        context = EventContext()
+    def _make_context(self, commands, selection: ComposeSelection) -> "OperationContext":
+        context = OperationContext()
         context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
         context.containers = list(selection.project_containers)
         context.target_containers = list(selection.target_containers)

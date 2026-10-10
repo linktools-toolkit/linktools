@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from ..container import BaseContainer
-    from ..context import EventContext
+    from ..context import OperationContext
     from ..manager import ContainerManager
 
 
@@ -77,7 +77,7 @@ class RunningStateStore:
         except RuntimeStateUnavailable:
             return self.get_persisted()
 
-    def mark_started(self, context: "EventContext") -> None:
+    def mark_started(self, context: "OperationContext") -> None:
         """Record the context's target containers as running (after a successful up)."""
         targets = set(c.name for c in context.target_containers)
         if context.is_full_containers:
@@ -86,7 +86,7 @@ class RunningStateStore:
         else:
             self._mutate(lambda current: current | targets)
 
-    def mark_stopped(self, context: "EventContext") -> None:
+    def mark_stopped(self, context: "OperationContext") -> None:
         """Record the context's target containers as stopped (after a successful down)."""
         targets = {c.name for c in context.target_containers}
         if context.is_full_containers:

@@ -4,7 +4,7 @@
 import pytest
 
 from linktools.cntr.container import BaseContainer
-from linktools.cntr.context import EventContext
+from linktools.cntr.context import OperationContext
 from linktools.cntr.lifecycle import HookCycleError, HookPhase, HookRegistry, HookValidationError
 
 
@@ -61,7 +61,7 @@ def lifecycle_case(fresh_manager, monkeypatch, tmp_path):
     monkeypatch.setattr(fresh_manager.running_state, "mark_stopped", fail)
     monkeypatch.setattr(fresh_manager.artifact_index, "record", fail)
     monkeypatch.setattr("linktools.cntr.execution.planner.collect_candidates", lambda *args: {})
-    context = EventContext()
+    context = OperationContext()
     context.target_containers = [first, second]
     return fresh_manager, (first, second), context, events
 
@@ -257,9 +257,9 @@ def test_partial_restart_starts_runtime_provider_without_stopping_it(lifecycle_c
 
     selection = manager.compose_operations.select([target.name], metadata_only=True, for_start=True)
     start_selection = manager.compose_operations.start_selection(selection)
-    start_context = EventContext()
+    start_context = OperationContext()
     start_context.target_containers = start_selection.target_containers
-    stop_context = EventContext()
+    stop_context = OperationContext()
     stop_context.target_containers = selection.target_containers
     with manager.lifecycle.notify_start(start_context):
         with manager.lifecycle.notify_stop(stop_context):

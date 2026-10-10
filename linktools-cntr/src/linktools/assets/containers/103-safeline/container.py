@@ -12,7 +12,7 @@ from linktools.decorator import cached_property
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Any
-    from linktools.cntr import EventContext, Integrations
+    from linktools.cntr import OperationContext, Integrations
 
 
 class Container(BaseContainer):
@@ -61,6 +61,6 @@ class Container(BaseContainer):
         ).call()
 
 
-    def on_service_started(self, context: "EventContext", service: str) -> None:
+    def on_service_started(self, context: "OperationContext", service: str) -> None:
         if service == "safeline-mgt":
             self.manager.compose_runner.wait_service_healthy(context, service)

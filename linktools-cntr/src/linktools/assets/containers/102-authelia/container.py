@@ -20,7 +20,7 @@ from linktools.decorator import cached_property
 if TYPE_CHECKING:
     from collections.abc import Iterable
     from typing import Any, Mapping
-    from linktools.cntr import EventContext, Integrations
+    from linktools.cntr import OperationContext, Integrations
     from linktools.cntr.artifacts import GeneratedCandidate
     from linktools.types import PathType
 
@@ -150,7 +150,7 @@ class Container(BaseContainer):
             sort_keys=False, allow_unicode=True,
         )
 
-    def on_check(self, context: "EventContext") -> None:
+    def on_check(self, context: "OperationContext") -> None:
         if context.target_services is not None and not any(
                 service in context.target_services for service in self.generation_services):
             return
@@ -188,7 +188,7 @@ class Container(BaseContainer):
             return sha256_of(path.read_text(encoding="utf-8"))
         return super().generation_label(service, generation_id)
 
-    def on_prepare_config(self, context: "EventContext") -> None:
+    def on_prepare_config(self, context: "OperationContext") -> None:
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
         self.get_app_path("config").mkdir(parents=True, exist_ok=True)
@@ -206,7 +206,7 @@ class Container(BaseContainer):
         result["authentication_backend_ldap_password"] = str(self.get_config("AUTHELIA_LDAP_PASSWORD"))
         return result
 
-    def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
         root = "/generated/" + candidate.generation_id
         command = ["authelia", "config", "validate"]
         command.extend("--config=" + root + "/" + name for name in (
@@ -225,7 +225,7 @@ class Container(BaseContainer):
             raise ContainerError("Native validation failed for service authelia{} (exit {})".format(
                 diagnostic, result.returncode))
 
-    def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
+    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
                  services: "Iterable[str]") -> None:
         runner = self.manager.compose_runner
         services = tuple(services)

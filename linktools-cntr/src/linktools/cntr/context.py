@@ -9,8 +9,8 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class EventContext:
-    """Lifecycle event context passed to container hooks.
+class OperationContext:
+    """Shared context for a container operation and its lifecycle hooks.
 
     Plain (non-frozen, non-slots) dataclass so callers can set attributes
     dynamically. ``is_full_containers`` defaults to True; every caller sets

@@ -12,7 +12,7 @@ from .structured import StructuredCommandError
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from typing import Any
-    from ..context import EventContext
+    from ..context import OperationContext
     from ..manager import ContainerManager
 
 
@@ -91,7 +91,7 @@ class ImagePreparer:
             return False
         raise ImagePreparationError(f"Unable to inspect image `{image}`: {result.stderr.strip()}")
 
-    def execute(self, context: "EventContext", model: "dict[str, Any]", services: "Sequence[str]" = (), force_pull: bool = False) -> ImagePlan:
+    def execute(self, context: "OperationContext", model: "dict[str, Any]", services: "Sequence[str]" = (), force_pull: bool = False) -> ImagePlan:
         plan = self.plan(model, services, force_pull=force_pull)
         if plan.pull:
             self.manager.compose_runner.pull(context, list(plan.pull))

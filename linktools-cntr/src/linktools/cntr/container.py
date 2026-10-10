@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from .artifacts import GeneratedCandidate
     from .integration import Integrations
     from .manager import ContainerManager
-    from .context import EventContext
+    from .context import OperationContext
     from .repo.context import RepositoryConfigContext
     from .lifecycle.hooks import HookRegistry
     from .runtime.compose import ComposeRunner
@@ -237,21 +237,21 @@ class BaseContainer(metaclass=AbstractMetaClass):
         """Declare native providers needed by the selected project services."""
         return {}
 
-    def on_prepare_config(self, context: "EventContext") -> None:
+    def on_prepare_config(self, context: "OperationContext") -> None:
         """Prepare native inputs after images are ready, before validation."""
         pass
 
     def render_config(self, generation_id: str) -> "dict[str, str]":
         raise NotImplementedError
 
-    def validate_config(self, context: "EventContext", candidate: "GeneratedCandidate") -> None:
+    def validate_config(self, context: "OperationContext", candidate: "GeneratedCandidate") -> None:
         raise NotImplementedError
 
-    def apply_config(self, context: "EventContext", candidate: "GeneratedCandidate",
+    def apply_config(self, context: "OperationContext", candidate: "GeneratedCandidate",
                      services: "Iterable[str]") -> None:
         raise NotImplementedError
 
-    def rollback_config(self, context: "EventContext") -> None:
+    def rollback_config(self, context: "OperationContext") -> None:
         """Restore native state when no previously generated configuration exists."""
         pass
 
@@ -259,7 +259,7 @@ class BaseContainer(metaclass=AbstractMetaClass):
         """Return the Compose generation marker for this native service."""
         return generation_id if self.generates_config and service in self.generation_services else None
 
-    def is_generation_current(self, context: "EventContext", service: str,
+    def is_generation_current(self, context: "OperationContext", service: str,
                               candidate: "GeneratedCandidate") -> bool:
         """Confirm that the running service actually uses this generation."""
         marker = self.generation_label(service, candidate.generation_id)
@@ -275,26 +275,26 @@ class BaseContainer(metaclass=AbstractMetaClass):
         """Render an intermediate configuration that can establish readiness."""
         raise NotImplementedError
 
-    def on_service_started(self, context: "EventContext", service: str) -> None:
+    def on_service_started(self, context: "OperationContext", service: str) -> None:
         """Confirm native readiness before dependent services are applied."""
         pass
 
-    def on_check(self, context: "EventContext") -> None:
+    def on_check(self, context: "OperationContext") -> None:
         pass
 
-    def on_starting(self, context: "EventContext") -> None:
+    def on_starting(self, context: "OperationContext") -> None:
         pass
 
-    def on_started(self, context: "EventContext") -> None:
+    def on_started(self, context: "OperationContext") -> None:
         pass
 
-    def on_stopping(self, context: "EventContext") -> None:
+    def on_stopping(self, context: "OperationContext") -> None:
         pass
 
-    def on_stopped(self, context: "EventContext") -> None:
+    def on_stopped(self, context: "OperationContext") -> None:
         pass
 
-    def on_removed(self, context: "EventContext") -> None:
+    def on_removed(self, context: "OperationContext") -> None:
         pass
 
     @subcommand("up", help="deploy this container")
@@ -389,14 +389,14 @@ class BaseContainer(metaclass=AbstractMetaClass):
     def get_config_later(self, key: "ConfigKeyType", type: "ConfigType | None" = None, default: "Any" = MISSING) -> "T":
         return lazy_load(self.env_config.get, self._resolve_config_key(key), type=type, default=default)
 
-    def make_exec_context(self, commands: "str | Iterable[str]") -> "EventContext":
-        from .context import EventContext
+    def make_exec_context(self, commands: "str | Iterable[str]") -> "OperationContext":
+        from .context import OperationContext
 
         containers = self.manager.installed_state.get(resolve=True)
         if self not in containers:
             raise ContainerError(f"{self} is not installed")
 
-        context = EventContext()
+        context = OperationContext()
         context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
         context.containers = containers
         context.target_containers = [self]
@@ -541,11 +541,11 @@ class SourceContainer(BaseContainer):
     def get_docker_context_path(self) -> "Path":
         return self._context_path
 
-    def on_starting(self, context: "EventContext") -> None:
+    def on_starting(self, context: "OperationContext") -> None:
         if "pull" in context.commands:
             utils.remove_file(self.get_app_path("source"))
 
-    def on_removed(self, context: "EventContext") -> None:
+    def on_removed(self, context: "OperationContext") -> None:
         utils.remove_file(self.get_app_path("source"))
 
 
