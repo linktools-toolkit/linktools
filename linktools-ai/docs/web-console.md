@@ -38,6 +38,31 @@ invoke recovery. It also works without a model configuration. An unconfigured
 model automatically selects this mode. Missing history and metrics stores are
 shown as empty/unavailable, without provisioning them through a history read.
 
+### Finding details and controls
+
+The default conversation view keeps messages and the session's current state
+in focus. Session occupancy comes from its active execution identity; inspecting
+an older turn does not substitute that turn's status for the session's owner.
+**View active execution** returns to the owner when a different turn is selected.
+
+- **Details** opens session metadata and the selected execution's Overview,
+  History, Transcript, Models & prompt, Trace, and Recovery panels. Usage,
+  full JSON, result export, parent/subagent links, and detail paging stay here.
+  Inspecting a turn or opening an exact execution reveals the panel. Closing it
+  returns focus to Details without stopping observation or changing selection.
+- **Actions** groups conversation rename/fork/close and execution retry/fork/end.
+  Stop remains directly available outside the collapsed panel. Resume and
+  external-effect decisions remain in Recovery; read-only mode disables writes.
+- **Message options** contains planning, thinking, memory scope and attachments.
+  The send shortcut and earlier-turn paging remain available in the main view.
+- **Execution filters** and **Open exact ID** expand in the sidebar; applied
+  filters, explicit newest-20 scans and list paging retain their original scope.
+  Metrics and Runtime settings keep their sidebar entries.
+- Tool/thinking content and ordinary live activity expand on demand. Failure,
+  recovery, cancellation and input-required events remain visible, as do request
+  errors and observation interruptions. A healthy connection is not presented as
+  a second execution status.
+
 ### Shared storage and explicit recovery
 
 The default local SQL Runtime can open alongside another process using the same

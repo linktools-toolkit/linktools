@@ -3,21 +3,26 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 
+const readOnly=process.argv[3]==='readonly';
 const root=process.argv[2], html=readFileSync(resolve(root,'index.html'),'utf8');
 class Element {
   constructor(tag='div') {
     this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.hidden=false;this.disabled=false;
-    this.value='';this.checked=false;this.open=false;this.className='';this.scrollTop=0;this.clientHeight=300;this._text='';
+    this.isConnected=false;this.value='';this.checked=false;this.open=false;this.className='';this.scrollTop=0;this.clientHeight=300;this._text='';
     this.classList={toggle:(name,on)=>{const names=new Set(this.className.split(' ').filter(Boolean));if(on??!names.has(name))names.add(name);else names.delete(name);this.className=[...names].join(' ');},remove:name=>this.classList.toggle(name,false),add:name=>this.classList.toggle(name,true)};
   }
   get id(){return this._id;}
   set id(value){this._id=value;nodes.set(value,this);}
   get textContent(){return this._text+this.children.map(child=>child.textContent || '').join('');}
-  set textContent(value){this._text=String(value);this.children=[];}
+  set textContent(value){this.replaceChildren();this._text=String(value);}
   get scrollHeight(){return this.children.length*80;}
-  append(...children){this.children.push(...children);}
-  replaceChildren(...children){this._text='';this.children=[...children];}
-  focus(){}
+  connect(value){this.isConnected=value;if(this.id){if(value)nodes.set(this.id,this);else if(nodes.get(this.id)===this)nodes.delete(this.id);}this.children.forEach(child=>child.connect?.(value));if(!value && document.activeElement===this)document.activeElement=null;}
+  append(...children){this.children.push(...children);children.forEach(child=>{child.parentElement=this;child.connect?.(this.isConnected);});}
+  replaceChildren(...children){this.children.forEach(child=>child.connect?.(false));this._text='';this.children=[];this.append(...children);}
+  focus(){document.activeElement=this;}
+  scrollIntoView(){}
+  setAttribute(name,value){this.attributes ??= {};this.attributes[name]=String(value);}
+  getAttribute(name){return this.attributes?.[name];}
   showModal(){this.open=true;}
   close(){this.open=false;}
   click(){if(!this.disabled)return this.onclick?.({preventDefault(){},target:this});}
@@ -31,13 +36,14 @@ for(const match of html.matchAll(/<([a-z][a-z0-9-]*)\b([^>]*)>/gi)){
     if(name==='id'){node.id=value;nodes.set(value,node);}
     else if(name.startsWith('data-'))node.dataset[name.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase())]=value;
     else if(name==='value')node.value=value;
+    else if(name.startsWith('aria-'))node.setAttribute(name,value);
     else if(name==='class')node.className=value;
     else if(name==='hidden')node.hidden=true;
   }
-  all.push(node);
+  node.isConnected=true;all.push(node);
 }
 const handlers=new Map();
-globalThis.document={getElementById:id=>nodes.get(id),createElement:tag=>new Element(tag),querySelectorAll:selector=>all.filter(node=>Object.hasOwn(node.dataset,selector.slice(6,-1)))};
+globalThis.document={getElementById:id=>nodes.get(id)?.isConnected?nodes.get(id):null,createElement:tag=>new Element(tag),querySelectorAll:selector=>all.filter(node=>Object.hasOwn(node.dataset,selector.slice(6,-1)))};
 globalThis.window={addEventListener:(name,handler)=>{if(!handlers.has(name))handlers.set(name,[]);handlers.get(name).push(handler);}};
 let hash='';globalThis.location={get hash(){return hash;},set hash(value){hash=value;queueMicrotask(()=>handlers.get('hashchange')?.forEach(handler=>handler()));}};
 let counter=0;Object.defineProperty(globalThis,"crypto",{value:{randomUUID:()=>`request-${++counter}`},configurable:true});globalThis.confirm=()=>true;globalThis.prompt=()=> 'Retry prompt';
@@ -53,7 +59,7 @@ globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
   calls.push({key,method,body,query:Object.fromEntries(url.searchParams)});
   if(delays.has(method+' '+key))return delays.get(method+' '+key);
-  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',read_only:false,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
+  if(key==='/api/config')return response({asset_root:'/workspace/.linktools',read_only:readOnly,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
   if(key==='/api/sessions'&&method==='GET')return response({items:[...sessions.values()],next_cursor:null});
   if(key==='/api/executions' && endMode?.listError)throw new Error('list unavailable');
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
@@ -100,12 +106,48 @@ const source=readFileSync(resolve(root,'app.js'),'utf8').replace("'./console.js'
 await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const tick=()=>new Promise(resolve=>setTimeout(resolve,10));
 const settle=async()=>{for(let i=0;i<5;i++)await tick();};
-const node=id=>nodes.get(id),tab=name=>all.find(element=>element.dataset.tab===name),view=name=>all.find(element=>element.dataset.view===name);
+const node=id=>nodes.get(id),tab=name=>({click(){if(node('inspector').hidden)node('inspector-toggle').click();return all.find(element=>element.dataset.tab===name).click();}}),view=name=>all.find(element=>element.dataset.view===name);
 await settle();
 assert.equal(node('list').children.length,2);
 location.hash='#session=a';await settle();
 assert.equal(node('conversation-title').textContent,'Alpha');
 assert.match(node('conversation').textContent,/a answer/);
+
+// Progressive disclosure keeps explicit controls, focus, and authoritative ownership.
+assert.equal(node('inspector').hidden,true);assert.equal(node('current-status').textContent,'Session available');
+assert.equal(node('inspector-toggle').getAttribute('aria-expanded'),'false');
+const beforeDetails=calls.length;node('inspector-toggle').click();
+assert.equal(node('inspector').hidden,false);assert.equal(document.activeElement,node('inspector-close'));
+assert.equal(node('inspector-toggle').getAttribute('aria-expanded'),'true');
+node('inspector-close').click();assert.equal(document.activeElement,node('inspector-toggle'));
+assert.equal(node('inspector').hidden,true);assert.equal(calls.length,beforeDetails);
+node('action-menu').open=true;node('action-menu').onkeydown({key:'Escape'});
+assert.equal(node('action-menu').open,false);assert.equal(document.activeElement,node('actions-toggle'));
+node('options-toggle').click();assert.equal(node('composer-options').hidden,false);
+assert.equal(node('options-toggle').getAttribute('aria-expanded'),'true');node('options-toggle').click();
+for(const id of ['planning','thinking','memory','files','rename-session','fork-session','close-session','retry','fork-run','end-stopped','export','detail-more','turns-more','list-more'])assert.ok(node(id),`missing retained control ${id}`);
+assert.match(html,/<details id="action-menu"[\s\S]*?id="rename-session"[\s\S]*?id="end-stopped"[\s\S]*?<\/details>/);
+assert.match(html,/<details id="open-tools"[\s\S]*?id="open-record"[\s\S]*?<\/details>/);
+assert.deepEqual(all.filter(item=>item.dataset.tab).map(item=>item.dataset.tab),['overview','history','transcript','models','trace','recovery']);
+if(readOnly){
+  for(const id of ['send','prompt','planning','thinking','memory','files','new-session','retry','fork-run','end-stopped','rename-session','fork-session','close-session'])assert.equal(node(id).disabled,true,id);
+  assert.equal(node('connection').hidden,false);assert.equal(node('connection').textContent,'Read-only');
+  node('inspector-toggle').click();assert.equal(node('inspector').hidden,false);assert.equal(node('export').disabled,false);
+  tab('history').click();await settle();assert.match(node('inspector-content').textContent,/History marker/);
+  tab('recovery').click();await settle();assert.match(node('inspector-content').textContent,/require an execution Runtime/);
+  node('open-tools').open=true;node('open-kind').value='execution';node('open-id').value='b-run';node('open-form').requestSubmit();await settle();
+  assert.equal(node('inspector').hidden,false);assert.equal(node('open-record').disabled,false);
+  assert.equal(calls.filter(call=>call.method==='POST').length,0);
+  console.log('Read-only disclosure contracts passed');process.exit(0);
+}
+sessions.get('a').active_execution_id='active-other';executions.set('active-other',{...info('active-other','a'),status:'STARTED'});
+location.hash='#session=a&execution=a-run';await settle();
+assert.equal(node('current-status').textContent,'Session occupied');assert.equal(node('show-active').hidden,false);
+assert.doesNotMatch(node('current-status').textContent,/SUCCEEDED/);
+node('show-active').click();await settle();assert.match(node('current-status').textContent,/Session occupied · STARTED/);
+assert.equal(node('inspector').hidden,false);assert.equal(node('cancel').hidden,false);
+node('inspector-close').click();assert.equal(node('cancel').hidden,false);
+sessions.get('a').active_execution_id=null;location.hash='#session=a';await settle();
 
 // A session response cannot overwrite a newer navigation.
 const releaseA=deferred('GET /api/sessions/a');
@@ -158,6 +200,13 @@ const releaseSend=deferred('POST /api/sessions/a/messages');node('prompt').value
 node('composer').requestSubmit();node('composer').requestSubmit();await tick();
 assert.equal(calls.filter(call=>call.key==='/api/sessions/a/messages').length,1);
 node('prompt').value='Next draft';releaseSend({execution_id:'a-run'});await settle();assert.equal(node('prompt').value,'Next draft');
+assert.equal(node('inspector').hidden,true,'Send must preserve the conversation-only view');
+for(const open of [false,true]){
+  if(node('inspector').hidden===open)node('inspector-toggle').click();
+  const renamed=deferred('POST /api/sessions/a/update');node('rename-session').click();await tick();renamed({session_id:'a'});await settle();
+  assert.equal(node('inspector').hidden,!open,'Rename must preserve the panel choice');
+}
+node('inspector-close').click();
 
 // Known admission rejection gets a new key only on the next explicit send.
 for(const code of ['SESSION_BUSY','SESSION_CONFLICT']) {
@@ -215,8 +264,17 @@ await newTurn.children[0].children.find(child=>child.tagName==='BUTTON').click()
 const stream=streamBlocks.get('a-new');
 stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:'a-new',agent_id:'default',depth:0,event:{event_type:'ASSISTANT_TEXT_DELTA',payload:{text:'New execution text'}}},cursor:null})+'\n\n'));
 await settle();assert.match(node('live').textContent,/New execution text/);
+const liveEvent=(event_type,seq,depth=0)=>stream.controller.enqueue(new TextEncoder().encode('data: '+JSON.stringify({type:'event',item:{execution_id:depth?'child':'a-new',agent_id:'default',depth,event:{event_type,event_seq:seq,payload:{}}},cursor:null})+'\n\n'));
+liveEvent('TOOL_CALL_STARTED',1);await settle();assert.equal(node('live-activity').open,false);
+node('live-activity').open=true;node('live-activity').ontoggle();node('live-activity').children[0].focus();liveEvent('MODEL_REQUEST_STARTED',2);await settle();assert.equal(node('live-activity').open,true);assert.equal(document.activeElement,node('live-activity').children[0]);
+liveEvent('EXECUTION_FAILED',3,1);liveEvent('MODEL_REQUEST_FAILED',4);liveEvent('TOOL_CALL_FAILED',5);await settle();
+for(const name of ['execution failed','model request failed','tool call failed'])assert.ok(node('live').children.some(child=>child.className.includes('live-event') && child.textContent.includes(name)));
+const focusedChild=node('live').children.find(child=>child.className.includes('live-event') && child.textContent.includes('execution failed')).children.find(child=>child.tagName==='BUTTON');focusedChild.focus();liveEvent('TOOL_CALL_STARTED',6);await settle();assert.equal(document.activeElement.dataset.liveFocus,focusedChild.dataset.liveFocus);
 releaseRefresh({session:sessions.get('a'),timeline:timeline('a')});await settle();
-assert.match(node('live').textContent,/New execution text/);
+assert.match(node('live').textContent,/New execution text/);assert.equal(node('live-activity').open,true);
+const focusBeforeRefresh=document.activeElement.dataset.liveFocus;
+node('refresh').click();await settle();assert.equal(node('live-activity').open,true);
+assert.equal(document.activeElement.dataset.liveFocus,focusBeforeRefresh);
 stream.controller.close();streamBlocks.delete('a-new');timelineOverrides.delete('a');
 executions.set('a-new',{...info('a-new'),status:'SUCCEEDED'});
 await settle();
@@ -227,7 +285,7 @@ releaseAgain({session:sessions.get('a'),timeline:timeline('a')});await settle();
 assert.equal(node('metrics-view').hidden,false);assert.equal(node('conversation-view').hidden,true);
 assert.equal(node('metric-name').tagName,'INPUT');
 executions.set('orphan',{...info('orphan',null),status:'RECOVERY_REQUIRED'});location.hash='#execution=orphan';await settle();
-assert.equal(node('composer').hidden,true);assert.equal(node('stop-run').hidden,false);assert.ok(node('live'));
+assert.equal(node('composer').hidden,true);assert.equal(node('inspector').hidden,false);assert.equal(document.activeElement,node('inspector-close'));node('inspector-close').click();assert.equal(node('stop-run').hidden,false);assert.ok(node('live'));
 
 // Status alone never initiates cleanup; one stopped-executor confirmation gates it.
 const recoveries=()=>calls.filter(call=>call.key==='/api/executions/orphan/recover');
@@ -392,7 +450,7 @@ assert.match(node('list-scope').textContent,/scanned visible execution metadata/
 node('refresh').click();await settle();assert.equal(scans(),1);
 assert.equal(node('list-action').value,'paged');assert.equal(node('filter-session').disabled,false);
 node('filter-session').value=opaque;node('filter-form').requestSubmit();await settle();
-assert.equal(calls.filter(call=>call.key==='/api/executions').at(-1).query.session_id,opaque);
+assert.equal(calls.filter(call=>call.key==='/api/executions').at(-1).query.session_id,opaque);assert.match(node('execution-filter-summary').textContent,/1 applied/);
 node('settings').click();assert.match(node('settings-content').textContent,/Asset root\/workspace\/\.linktools/);node('settings-dialog').close();
 
 // Unavailable history cannot hide readable metadata or make refresh show stale values.
@@ -417,5 +475,5 @@ assert.equal(node('send').disabled,false);
 sessions.set(opaque,{...sessions.get(opaque),status:'CLOSED'});
 node('refresh').click();await settle();
 assert.match(node('conversation-meta').textContent,/CLOSED/);
-assert.equal(node('send').disabled,true);assert.equal(node('prompt').disabled,true);
+assert.equal(node('send').disabled,true);assert.equal(node('prompt').disabled,true);assert.equal(node('current-status').textContent,'Session CLOSED');
 console.log('DOM contracts passed: stale navigation/detail/action, disabled stale controls, uncertain fork, interrupted dialog, repeated submit, metrics navigation');

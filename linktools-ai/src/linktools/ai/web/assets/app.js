@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',
   execution:null, executionGeneration:0, tab:'overview', details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
-  liveText:'', liveThinking:'', pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, selectedSession:null, selectedExecution:null};
+  liveText:'', liveThinking:'', liveActivityOpen:false, pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
 const text = value => typeof value === 'string' ? value : json(value);
 const short = value => value ? String(value).slice(0, 12) : '—';
@@ -31,7 +31,25 @@ function showError(error) {
     $('notice').append(rawDetail({operation_id:error.details.operation_id,safe_details:error.details.safe_details},'Error details'));
   }
 }
-function connection(label, failed=false) { $('connection').textContent=label; $('connection').classList.toggle('error', failed); }
+function connection(label, failed=false) { $('connection').textContent=label==='Read-only'?label:`Observation: ${label}`; $('connection').hidden=!failed && label!=='Read-only'; $('connection').classList.toggle('error', failed); }
+function showInspector(open, focus=false) {
+  $('inspector').hidden=!open;$('inspector-toggle').setAttribute('aria-expanded',String(open));
+  if(focus){const target=open?$('inspector-close'):$('inspector-toggle');target.focus();if(open)target.scrollIntoView({block:'nearest'});}
+}
+function renderCurrentState() {
+  const owner=state.session?.active_execution_id,info=state.execution;
+  let label='No execution selected';
+  if(state.session) {
+    if(state.session.status!=='OPEN')label=`Session ${state.session.status}${owner?' · occupied':''}`;
+    else if(owner)label=`Session occupied${owner===info?.execution_id?' · '+info.status:''}`;
+    else label='Session available';
+  } else if(info)label=`Selected execution: ${info.status}`;
+  else if(state.selectedExecution || state.selectedSession)label='Loading…';
+  $('current-status').textContent=label;
+  $('current-status').classList.toggle('error',state.session?.status==='CLEANUP_REQUIRED' || Boolean(info && (!state.session || owner===info.execution_id) && ['FAILED','START_UNKNOWN','RECOVERY_REQUIRED'].includes(info.status)));
+  $('show-active').hidden=!owner || owner===state.selectedExecution;
+  $('stop-run').setAttribute('aria-label',`Stop selected execution ${state.selectedExecution || ''}`);
+}
 async function api(path, {body, signal}={}) {
   const response = await fetch(path, {method:body ? 'POST':'GET', signal, cache:'no-store',
     headers:body ? {'Content-Type':'application/json', 'X-LinkTools-Console':'1'} : {},
@@ -58,6 +76,7 @@ async function mutate(path, payload, {newAttemptOn=[]}={}) {
   finally { operation.running=null; }
 }
 function setDisabled() {
+  renderCurrentState();
   const readonly=!state.config || state.config.read_only;
   document.querySelectorAll('[data-view]').forEach(node=>node.disabled=!state.config);
   $('settings').disabled=!state.config;$('open-record').disabled=!state.config;
@@ -70,7 +89,7 @@ function setDisabled() {
   if($('resume-run'))$('resume-run').disabled=readonly || !state.execution || terminal(state.execution.status) || ending || state.recoveryReadbackId===state.selectedExecution || state.actionsPending.has(`${state.selectedExecution}:recover`);
   $('export').disabled=!state.execution || !terminal(state.execution.status);
   const stoppable=!readonly && state.execution && !terminal(state.execution.status);
-  $('stop-run').hidden=!stoppable;
+  $('stop-run').hidden=!stoppable || Boolean(state.selectedSession && state.session?.active_execution_id===state.selectedExecution);
   $('cancel').hidden=!stoppable || state.session?.active_execution_id!==state.selectedExecution;
   $('stop-run').disabled=ending;$('cancel').disabled=ending;
   $('fork-session').disabled=readonly || !state.session || state.actionsPending.has(`session:${state.selectedSession}:fork`);
@@ -79,7 +98,7 @@ function setView(view, refreshSelection=true) {
   state.view=view;
   document.querySelectorAll('[data-view]').forEach(node => node.classList.toggle('active', node.dataset.view===view));
   $('page-title').textContent={sessions:'Conversations',executions:'Executions',metrics:'Metrics'}[view];
-  $('execution-filters').hidden=view !== 'executions'; $('filter-form').hidden=view === 'metrics';$('open-form').hidden=view==='metrics';
+  $('execution-filters').hidden=view !== 'executions'; $('filter-form').hidden=view === 'metrics';$('open-tools').hidden=view==='metrics';
   if(view!=='metrics')$('open-kind').value=view==='sessions'?'session':'execution';
   $('filter-label').textContent=view === 'executions' ? 'Filter loaded executions':'Filter loaded conversations';
   $('filter').placeholder=view === 'executions' ? 'Execution ID or status':'Title or session ID';
@@ -105,6 +124,7 @@ async function loadList(more=false) {
   }
   const payload=await api(`/api/${view}?${params}`);
   if (generation !== state.listGeneration || view !== state.view) return;
+  if(view==='executions'){const count=['agent_id','session_id','parent_execution_id'].filter(key=>params.has(key)).length;$('execution-filter-summary').textContent=`Execution filters${count?' · '+count+' applied':''}`;}
   const key=item => view==='sessions' ? item.session_id:item.execution_id;
   state.list=more ? mergePage(state.list,payload.items,key):payload.items;
   state.listCursor=payload.next_cursor; $('list-more').hidden=!state.listCursor; $('list-scope').hidden=!payload.recent_only;
@@ -121,6 +141,7 @@ async function loadRecentExecutions() {
     const payload=await api('/api/executions?recent=true&limit=20');
     if(generation!==state.listGeneration || state.view!=='executions')return;
     state.list=payload.items;state.listCursor=null;$('list-more').hidden=true;
+    $('execution-filter-summary').textContent='Execution filters · Newest 20';
     $('list-scope').textContent='Newest 20 by creation time · scanned visible execution metadata';$('list-scope').hidden=false;
     renderList();
   } finally {state.actionsPending.delete('recent-scan');}
@@ -167,16 +188,18 @@ async function readSession(id) {
 function renderSessionHeader() {
   if(!state.session)return;
   $('conversation-title').textContent=state.session.metadata?.title || 'Conversation';
-  $('conversation-meta').textContent=`${state.selectedSession} · ${state.session.agent_id} · ${state.session.status} · history ${state.session.history_quality}`;
+  $('conversation-meta').textContent=`${state.session.agent_id}${state.session.status==='CLOSED'?' · CLOSED':''}${state.session.history_quality!=='complete'?' · history '+state.session.history_quality:''}`;
   $('session-details').replaceChildren(rawDetail(state.session,'Session metadata'));
 }
-async function openSelection(sessionId, executionId) {
+async function openSelection(sessionId, executionId, {preserveInspector=false}={}) {
   const generation=++state.generation;
-  stopStream(); state.cursor=null; state.liveText=''; state.liveThinking=''; state.models.clear(); state.events.clear();
+  stopStream(); state.cursor=null; state.liveText=''; state.liveThinking=''; state.liveActivityOpen=false;state.models.clear(); state.events.clear();
   state.selectedSession=sessionId || null; state.selectedExecution=executionId || null;
   state.session=null; state.execution=null; state.turns=[]; state.turnCursor=null; state.hasEarlierTurns=false;state.timelineError='';
+  const explicitExecution=Boolean(executionId) || state.view==='executions';$('action-menu').open=false;
   $('sidebar').classList.remove('open'); $('metrics-view').hidden=true; $('welcome').hidden=Boolean(sessionId || executionId);
   $('conversation-view').hidden=!sessionId && !executionId;
+  if(!preserveInspector)showInspector(explicitExecution,explicitExecution && Boolean(sessionId || executionId));
   $('composer').hidden=!sessionId; $('conversation-title').textContent='Loading…';
   $('conversation-meta').textContent=''; clear('session-details'); clear('conversation'); clear('inspector-content');
   setDisabled(); renderList(); notice(state.config?.read_only ? 'Read-only mode. Start ai web with a configured model to run agents.':'');
@@ -205,6 +228,7 @@ async function moreTurns() {
   renderConversation({prepend:true});
 }
 function renderConversation({prepend=false}={}) {
+  const liveFocus=document.activeElement?.dataset?.liveFocus;
   const container=$('conversation'), previousTop=container.scrollTop, previousHeight=container.scrollHeight;
   const follows=previousTop+container.clientHeight>=previousHeight-40;
   clear('conversation'); $('turns-more').hidden=!state.turnCursor;
@@ -212,7 +236,7 @@ function renderConversation({prepend=false}={}) {
   state.turns.forEach(turn => {
     const section=element('article','turn');
     const heading=element('div','turn-heading'); heading.append(element('span','',date(turn.created_at)),element('span','badge',turn.status));
-    heading.append(button('Inspect ↗',async()=>selectExecution(turn.execution_id,state.generation)));
+    heading.append(button('Details',async()=>{showInspector(true,true);await selectExecution(turn.execution_id,state.generation);}));
     section.append(heading);
     section.append(element('div','message user',typeof turn.user_input==='string' ? turn.user_input : text(turn.user_input)));
     const replies=turn.items.filter(item=>item.item_kind!=='user');
@@ -229,26 +253,34 @@ function renderConversation({prepend=false}={}) {
     $('conversation').append(section);
   });
   if (!state.turns.length && !state.timelineError) $('conversation').append(element('p','empty',state.selectedSession ? 'Ready when you are. Send a message to start this conversation.':'Inspect this execution using the panels on the right.'));
-  const live=element('section','turn'); live.id='live'; $('conversation').append(live); renderLive();
+  const live=element('section','turn'); live.id='live'; $('conversation').append(live); renderLive(liveFocus);
   container.scrollTop=prepend?previousTop+container.scrollHeight-previousHeight:follows?container.scrollHeight:previousTop;
 }
-function renderLive() {
+function renderLive(liveFocus=document.activeElement?.dataset?.liveFocus) {
   const live=$('live'); if (!live) return;
   const container=$('conversation'), follows=container.scrollTop+container.clientHeight>=container.scrollHeight-40;
   live.replaceChildren();
   if (state.liveThinking) { const detail=element('details','tool-message'); detail.append(element('summary','','Thinking'),element('pre','',state.liveThinking)); live.append(detail); }
   if (state.liveText) { live.append(element('div','message-label',`LIVE · ${state.execution?.agent_id || 'AGENT'} · ${short(state.selectedExecution)}`),element('div','message',state.liveText)); }
-  [...state.events.values()].slice(-12).forEach(item => {
+  const events=[...state.events.values()].slice(-12),activity=element('details','tool-message');activity.id='live-activity';activity.open=state.liveActivityOpen;
+  activity.ontoggle=()=>{if($('live-activity')===activity)state.liveActivityOpen=activity.open;};
+  const attention=item=>['EXECUTION_START_UNKNOWN','EXECUTION_RECOVERY_REQUIRED','EXECUTION_FAILED','MODEL_REQUEST_FAILED','TOOL_CALL_FAILED','CANCEL_REQUESTED','EXECUTION_CANCELLED','APPROVAL_REQUESTED','EXTERNAL_REQUESTED'].includes(item.event.event_type);
+  const ordinary=events.filter(item=>!attention(item)).length;
+  const summary=element('summary','',`Activity · ${ordinary} recent events`);summary.dataset.liveFocus='summary';activity.append(summary);
+  let restoreFocus=liveFocus==='summary' && ordinary ? summary:null;
+  events.forEach(item => {
     const payload=item.event.payload || {};
     const row=element('div',`live-event${item.depth?' child':''}`,`${item.depth?'↳ ':''}${item.agent_id || 'task'} · ${item.event.event_type.replaceAll('_',' ').toLowerCase()}${payload.tool_name?' · '+payload.tool_name:''}${payload.call_id?' #'+short(payload.call_id):''}`);
-    if(item.depth)row.append(button('Inspect subagent',async()=>selectExecution(item.execution_id)));
-    live.append(row);
+    if(item.depth){const inspect=button('Inspect subagent',async()=>{showInspector(true,true);await selectExecution(item.execution_id);});inspect.dataset.liveFocus=eventKey(item);row.append(inspect);if(liveFocus===inspect.dataset.liveFocus)restoreFocus=inspect;}
+    (attention(item)?live:activity).append(row);
   });
+  if(ordinary)live.append(activity);
+  restoreFocus?.focus({preventScroll:true});
   if(follows)container.scrollTop=container.scrollHeight;
 }
 async function selectExecution(id, generation=state.generation) {
   const executionGeneration=++state.executionGeneration;
-  stopStream(); state.cursor=null; state.liveText=''; state.liveThinking=''; state.models.clear(); state.events.clear();
+  stopStream(); state.cursor=null; state.liveText=''; state.liveThinking=''; state.liveActivityOpen=false;state.models.clear(); state.events.clear();
   state.selectedExecution=id; state.execution=null;setDisabled();clear('inspector-content');renderLive();
   $('execution-meta').textContent=`Loading ${id}…`;
   const info=await api(`/api/executions/${enc(id)}`);
@@ -258,6 +290,7 @@ async function selectExecution(id, generation=state.generation) {
 }
 function renderExecution() {
   const info=state.execution; if (!info) return;
+  renderCurrentState();
   $('execution-meta').replaceChildren(element('strong','',`${info.agent_id || info.task_id || 'Execution'} · ${info.status}`),element('div','mono',info.execution_id));
   if (info.parent_execution_id) $('execution-meta').append(button('↑ Parent execution',async()=>navigate(null,info.parent_execution_id)));
 }
@@ -406,7 +439,7 @@ async function sendMessage(event) {
     // Rejected admission is terminal for its key; another explicit send is a new attempt.
     const result=await mutate(sessionURL(sessionId,"messages"),{prompt:promptValue,planning:$('planning').checked,thinking:$('thinking').checked,memory_scope:$('memory').value,files:$('files').value.split('\n').map(s=>s.trim()).filter(Boolean)}, {newAttemptOn:['SESSION_BUSY','SESSION_CONFLICT']});
     if(generation!==state.generation)return;
-    if($('prompt').value===promptValue)$('prompt').value=''; await openSelection(sessionId,result.execution_id); await loadList();
+    if($('prompt').value===promptValue)$('prompt').value=''; await openSelection(sessionId,result.execution_id,{preserveInspector:true}); await loadList();
   } catch(error){
     if(generation!==state.generation || sessionId!==state.selectedSession)return;
     if(['SESSION_BUSY','SESSION_CONFLICT'].includes(error.code))error.message+='; this message was not started. Check the current execution, then send again when the session is available.';
@@ -445,7 +478,7 @@ async function sessionAction(action) {
     const result=await mutate(sessionURL(id,action),payload);
     if(action==='fork')state.pendingForks.delete(id);
     if(generation!==state.generation || id!==state.selectedSession){await loadList();return;}
-    if(action==='fork')navigate(result.session_id,null);else await openSelection(id,state.selectedExecution);
+    if(action==='fork')navigate(result.session_id,null);else await openSelection(id,state.selectedExecution,{preserveInspector:true});
     await loadList();
   } finally {state.actionsPending.delete(key);setDisabled();}
 }
@@ -565,7 +598,11 @@ window.addEventListener('hashchange',()=>fromHash().catch(showError));window.add
 $('new-session').onclick=openNew;$('welcome-new').onclick=openNew;$('new-form').onsubmit=createSession;
 $('composer').onsubmit=sendMessage;$('prompt').onkeydown=event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)){event.preventDefault();$('composer').requestSubmit();}};
 $('menu').onclick=()=>$('sidebar').classList.toggle('open');
-$('options-toggle').onclick=()=>$('composer-options').hidden=!$('composer-options').hidden;
+$('options-toggle').onclick=()=>{const open=$('composer-options').hidden;$('composer-options').hidden=!open;$('options-toggle').setAttribute('aria-expanded',String(open));};
+$('inspector-toggle').onclick=()=>showInspector($('inspector').hidden,true);
+$('inspector-close').onclick=()=>showInspector(false,true);
+$('show-active').onclick=()=>{const id=state.session?.active_execution_id;if(id){showInspector(true,true);selectExecution(id).catch(showError);}};
+$('action-menu').onkeydown=event=>{if(event.key==='Escape'){$('action-menu').open=false;$('actions-toggle').focus();}};
 $('open-form').onsubmit=event=>{Promise.resolve(openExact(event)).catch(showError);};
 $('filter').oninput=renderList;$('list-action').onchange=setListFilterAvailability;
 $('filter-form').onsubmit=event=>{event.preventDefault();(state.view==='executions' && $('list-action').value==='recent'?loadRecentExecutions():loadList()).catch(showError);};
