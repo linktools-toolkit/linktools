@@ -248,7 +248,7 @@ class TaskEngine(Generic[AppT]):
 
     async def _prepare_trial_submission(
         self, submission: TaskGraphSubmission,
-    ) -> tuple[TaskGraphSubmission, bool]:
+    ) -> bool:
         runtime = self._runtime
         runtime._ensure_open()
         task_runtime = runtime._require_task_node_runtime()
@@ -258,7 +258,8 @@ class TaskEngine(Generic[AppT]):
         )
         assert activation is not None
         try:
-            return await self._graph_service.prepare_described_with_disposition(submission)
+            _, created = await self._graph_service.prepare_described_with_disposition(submission)
+            return created
         finally:
             await task_runtime.finish_graph_activation(
                 submission.graph.graph_id, submission.ref.tenant_id,

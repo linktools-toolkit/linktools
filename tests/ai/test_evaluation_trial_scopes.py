@@ -491,7 +491,12 @@ async def test_admitted_agent_reconciles_after_real_runtime_reopen_with_original
             await _until(lambda: len(closed) == 3)
             recovered_targets = [(descriptor, workspace) for descriptor, workspace in opened
                                  if descriptor.scorer_slot_id is None]
-            assert len(recovered_targets) == 2 and recovered_targets[0] == recovered_targets[1]
+            assert len(recovered_targets) == 2
+            initial_scope, initial_workspace = recovered_targets[0]
+            reopened_scope, reopened_workspace = recovered_targets[1]
+            assert initial_workspace == reopened_workspace
+            assert initial_scope.newly_prepared and not reopened_scope.newly_prepared
+            assert reopened_scope == replace(initial_scope, newly_prepared=False)
             assert recovered_targets[1][0].submission == original_submission
             assert all(descriptor.principal == PRINCIPAL for descriptor, _ in opened)
             assert all((workspace / "retained.txt").exists() for _, workspace in opened)

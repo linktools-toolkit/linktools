@@ -169,9 +169,10 @@ launching its graph. `newly_prepared` is true only for the call that definitivel
 created that submission. A host may use this one-time permission to initialize
 missing trial resources. Existing, cancelled, and uncertain-commit submissions
 return false: reopen retained resources or reject the entry with a diagnostic
-error instead of silently creating an empty replacement. The returned
-`submission` includes native input normalization and the frozen binding capture.
-This flag is call-local, not a lease, a liveness test, or an isolation guarantee.
+error instead of silently creating an empty replacement. The descriptor retains
+the original durable intent's `submission`; native start separately loads its
+prepared input normalization and binding capture. This flag is call-local, not
+a lease, a liveness test, or an isolation guarantee.
 
 A crash after preparation but before resource creation intentionally leaves no
 new creation permission on retry. Restore the same logical resources before

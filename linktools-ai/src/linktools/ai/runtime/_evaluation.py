@@ -456,10 +456,10 @@ class RuntimeEvaluations:
             @asynccontextmanager
             async def open_scope() -> AsyncIterator["TaskEngine"]:
                 planning = engine if intent.scorer_slot_id is None else engine.with_definitions(self._recorder)
-                submission, created = await planning._prepare_trial_submission(intent.submission)
+                created = await planning._prepare_trial_submission(intent.submission)
                 async with trial_scope(EvaluationTrialScope(
                     record.experiment_id, intent.trial, intent.slot_id, record.manifest.principal,
-                    submission, intent.scorer_slot_id, newly_prepared=created,
+                    intent.submission, intent.scorer_slot_id, newly_prepared=created,
                 )) as selected:
                     yield selected
 
