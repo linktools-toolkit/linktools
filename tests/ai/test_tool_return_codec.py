@@ -165,6 +165,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
         model=SimpleNamespace(materialize=lambda: TestModel()),
         spec=SimpleNamespace(id="agent", revision=1),
         selected_tools=(),
+        mcp_servers=(),
     )
     binding = SimpleNamespace(
         compiled_agent=compiled_agent,
