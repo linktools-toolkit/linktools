@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Optional Git operations for repositories: capability gating, clone,
-update (clone-on-demand / branch checkout / fast-forward or force sync) and
+update (branch checkout / fast-forward or force sync) and
 read-only revision/dirty inspection.
 
 Never imports dulwich directly -- all Dulwich-backed behaviour is reached
@@ -20,11 +20,12 @@ from ..container import ContainerError
 
 if TYPE_CHECKING:
     import logging
-    from typing import Any
+    from typing import Optional
+    from linktools.types import PathType
     from ..manager import ContainerManager
 
 
-RepoGitResult = namedtuple("RepoGitResult", ["success", "revision", "dirty", "error"])
+RepoGitResult = namedtuple("RepoGitResult", ["success", "revision", "error"])
 
 
 class RepoGit(object):
@@ -72,21 +73,16 @@ class RepoGit(object):
         if not self.available:
             self.warn_unavailable("Updating Git repositories")
             return RepoGitResult(
-                success=False, revision=None, dirty=None,
+                success=False, revision=None,
                 error=self._warning_message("Updating Git repositories"),
             )
 
-        if not os.path.exists(repo_path):
-            self.logger.info("Update git repository: %s" % url)
-            GitRepository.clone(self.manager.environ, url, repo_path, branch)
-            with GitRepository(self.manager.environ, repo_path) as repo:
-                return RepoGitResult(success=True, revision=repo.head_sha(),
-                                      dirty=repo.is_dirty(), error=None)
-
         repo = GitRepository.open_if_valid(self.manager.environ, repo_path)
         if repo is None:
-            # Not a git repository (e.g. a local symlinked repo) -- nothing to sync.
-            return RepoGitResult(success=True, revision=None, dirty=None, error=None)
+            return RepoGitResult(
+                success=False, revision=None,
+                error="Repository checkout is missing or unusable: %s" % repo_path,
+            )
 
         with repo:
             self.logger.info("Update git repository: %s" % url)
@@ -105,9 +101,9 @@ class RepoGit(object):
                     "Re-run with --force to reset to remote." % url
                 ) from None
             return RepoGitResult(success=True, revision=repo.head_sha(),
-                                  dirty=repo.is_dirty(), error=None)
+                                  error=None)
 
-    def inspect(self, repo_path: "Any") -> "dict":
+    def inspect(self, repo_path: "Optional[PathType]") -> "dict":
         if not self.available:
             self.warn_unavailable("Reading Git repository metadata")
             return {

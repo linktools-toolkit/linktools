@@ -1,0 +1,134 @@
+#!/bin/sh
+set -eu
+umask 077
+
+base=/etc/certs
+seed=/opt/nginx-initial
+revision=$(cat "$seed/revision")
+main=$(cat "$seed/primary")
+root="$base/$revision"
+versions="$root/versions"
+owner=$(stat -c '%u:%g' "$base")
+mkdir -p "$versions"
+touch "$base/.acme.lock"
+chown "$owner" "$base/.acme.lock"
+exec 9>"$base/.acme.lock"
+flock -x 9
+
+verify() (
+    directory=$1
+    fullchain="$directory/${main}_fullchain.pem"
+    key="$directory/${main}_key.pem"
+    test -s "$fullchain" && test -s "$key" || return 1
+    openssl x509 -in "$fullchain" -noout -checkend 0 >/dev/null || return 1
+    cert_key=$(openssl x509 -in "$fullchain" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256) || return 1
+    file_key=$(openssl pkey -in "$key" -pubout -outform DER | openssl dgst -sha256) || return 1
+    test "$cert_key" = "$file_key" || return 1
+    while IFS= read -r domain || test -n "$domain"; do
+        test -n "$domain" || continue
+        case "$domain" in
+            \*.*)
+                openssl x509 -in "$fullchain" -noout -ext subjectAltName |
+                    tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+                    grep -Fx -- "DNS:$domain" >/dev/null || return 1 ;;
+            *) openssl x509 -in "$fullchain" -noout -checkhost "$domain" >/dev/null || return 1 ;;
+        esac
+    done < "$seed/domains"
+)
+
+configure() (
+    directory=$1
+    /opt/acme/acme.sh --home /opt/acme --config-home "$directory/acme" --install-cert -d "$main" \
+        --cert-file "$directory/renewal/${main}_cert.pem" \
+        --key-file "$directory/renewal/${main}_key.pem" \
+        --fullchain-file "$directory/renewal/${main}_fullchain.pem" --reloadcmd ':' >/dev/null
+)
+
+publish() {
+    ln -s "versions/$1" "$root/.next-$$"
+    mv -Tf "$root/.next-$$" "$root/live"
+}
+
+reload_tls() (
+    directory="$versions/$1"
+    verify "$directory" || return 1
+    nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -t || return 1
+    nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -s reload || return 1
+    expected=$(openssl x509 -in "$directory/${main}_fullchain.pem" -noout -fingerprint -sha256) || return 1
+    deadline=$(($(date +%s) + 30))
+    while test "$(date +%s)" -lt "$deadline"; do
+        actual=$(timeout 2 openssl s_client -connect "127.0.0.1:${NGINX_HTTPS_PORT:?}" \
+                 -servername "$main" </dev/null 2>/dev/null |
+                 openssl x509 -noout -fingerprint -sha256 2>/dev/null || :)
+        test "$actual" = "$expected" && return 0
+        sleep 1
+    done
+    return 1
+)
+
+case "$1" in
+    install|check)
+        action=$1
+        if test -L "$root/live" && verify "$root/live"; then
+            if test "$action" = install; then
+                test -d "$root/live/acme" || { echo 'Active certificate has no ACME state' >&2; exit 1; }
+            fi
+            exit 0
+        fi
+        source="$seed/certs"
+        account="$seed/acme"
+        if test "$action" = check && test -d "$root/previous" && verify "$root/previous"; then
+            source="$root/previous"
+        fi
+        verify "$source"
+        destination=$(mktemp -d "$versions/initial-XXXXXXXXXX")
+        id=$(basename "$destination")
+        for suffix in cert key fullchain; do
+            if test -f "$source/${main}_${suffix}.pem"; then
+                cp "$source/${main}_${suffix}.pem" "$destination/${main}_${suffix}.pem"
+            fi
+        done
+        if test "$action" = install; then
+            mkdir "$destination/acme" "$destination/renewal"
+            cp -a "$account/." "$destination/acme/"
+            configure "$destination"
+        fi
+        chown -R "$owner" "$root"
+        publish "$id"
+        ;;
+    renew)
+        test -L "$root/live" || exit 0
+        previous=$(basename "$(readlink "$root/live")")
+        directory="$versions/$previous"
+        /usr/local/bin/nginx-acme "$directory/acme" --cron >/dev/null
+        chown -R "$owner" "$directory/acme" "$directory/renewal"
+        renewal="$directory/renewal"
+        if test -s "$renewal/${main}_fullchain.pem" &&
+           { ! cmp -s "$renewal/${main}_fullchain.pem" "$directory/${main}_fullchain.pem" ||
+             ! cmp -s "$renewal/${main}_key.pem" "$directory/${main}_key.pem"; }; then
+            verify "$renewal"
+            destination=$(mktemp -d "$versions/renew-XXXXXXXXXX")
+            id=$(basename "$destination")
+            mkdir "$destination/renewal"
+            cp -a "$directory/acme" "$destination/acme"
+            for suffix in cert key fullchain; do
+                if test -f "$renewal/${main}_${suffix}.pem"; then
+                    cp "$renewal/${main}_${suffix}.pem" "$destination/${main}_${suffix}.pem"
+                fi
+            done
+            configure "$destination"
+            chown -R "$owner" "$destination"
+            publish "$id"
+            if ! reload_tls "$id"; then
+                publish "$previous"
+                if ! reload_tls "$previous"; then
+                    echo 'TLS renewal failed; restoring the served certificate also failed' >&2
+                    exit 2
+                fi
+                echo 'TLS renewal failed; previous served certificate restored' >&2
+                exit 1
+            fi
+        fi
+        ;;
+    *) echo 'Usage: nginx-certificates {install|check|renew}' >&2; exit 2 ;;
+esac

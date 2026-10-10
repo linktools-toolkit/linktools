@@ -2,16 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """Strict image preparation for the final Docker Compose model."""
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..container import ContainerError
+from .compose import service_dependencies
 from .structured import StructuredCommandError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from typing import Any
-    from ..context import EventContext
     from ..manager import ContainerManager
 
 
@@ -35,11 +37,9 @@ def _dependencies(services, targets):
         if name not in services:
             raise ImagePreparationError(f"Unknown Compose service dependency: {name}")
         seen.add(name)
-        depends = services[name].get("depends_on", ())
-        if isinstance(depends, dict):
-            depends = depends.keys()
-        for dep in depends or ():
-            visit(dep)
+        for dep, options in service_dependencies(services[name]).items():
+            if options.get("required", True) is not False:
+                visit(dep)
         result.append(name)
 
     for name in targets:
@@ -53,24 +53,115 @@ class ImagePreparer:
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
 
-    def plan(self, model: "dict[str, Any]", services: "Sequence[str]" = (), force_pull: bool = False) -> ImagePlan:
+    BUILD_LABEL = "io.linktools.cntr.build-revision"
+    BUILD_ARG = "CNTR_BUILD_REVISION"
+
+    def with_build_revisions(self, model: "dict[str, Any]", containers,
+                             targets: "Sequence[str]") -> "dict[str, Any]":
+        """Inject managed build metadata into the ephemeral resolved model."""
+        owners = {name: owner for owner in containers for name in owner.services}
+        services = dict(model["services"])
+        for name in targets:
+            spec = services[name]
+            if spec.get("build") is None:
+                continue
+            build = dict(spec["build"])
+            build["pull"] = False
+            revision = owners[name].get_build_revision(name)
+            if revision is not None:
+                if not isinstance(revision, str) or not revision:
+                    raise ImagePreparationError("Invalid build revision for " + name)
+                labels = dict(build.get("labels") or {})
+                args = dict(build.get("args") or {})
+                if self.BUILD_LABEL in labels or self.BUILD_ARG in args:
+                    raise ImagePreparationError("Reserved build metadata in " + name)
+                identity = {
+                    "revision": revision, "dockerfile": owners[name].docker_file,
+                    "build": build, "platform": spec.get("platform"),
+                }
+                digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
+                        separators=(",", ":")).encode("utf-8")).hexdigest()
+                labels[self.BUILD_LABEL] = digest
+                args[self.BUILD_ARG] = digest
+                build["labels"], build["args"] = labels, args
+            services[name] = dict(spec, build=build)
+        return dict(model, services=services)
+
+    def image_id(self, image: str) -> str:
+        """Resolve a local image ID before application without querying registries."""
+        process = self.manager.runtime.create_docker_process(
+            "image", "inspect", "--format", "{{.Id}}", image, capture_output=True)
+        try:
+            result = self.manager.structured_runner.execute_text(process, check=False)
+        except (OSError, StructuredCommandError) as exc:
+            raise ImagePreparationError("Cannot inspect image {}: {}".format(image, exc)) from exc
+        if not result.succeeded or not result.stdout.strip():
+            raise ImagePreparationError("Cannot resolve local image ID for " + image)
+        return result.stdout.strip()
+
+    def image_revision(self, image: str) -> "str | None":
+        """Read a local image label; never resolve or pull from a registry."""
+        command = self.manager.runtime.create_docker_process(
+            "image", "inspect", "--format", "{{json .Config.Labels}}", image,
+            capture_output=True)
+        try:
+            result = self.manager.structured_runner.execute_text(command, check=False)
+        except (OSError, StructuredCommandError) as exc:
+            raise ImagePreparationError("Cannot inspect build metadata for {}: {}".format(
+                image, exc)) from exc
+        if not result.succeeded:
+            raise ImagePreparationError("Cannot inspect build metadata for {}: {}".format(
+                image, result.stderr.strip()))
+        try:
+            labels = json.loads(result.stdout)
+        except (TypeError, ValueError) as exc:
+            raise ImagePreparationError("Invalid image label output for " + image) from exc
+        if labels is not None and not isinstance(labels, dict):
+            raise ImagePreparationError("Invalid image labels for " + image)
+        return (labels or {}).get(self.BUILD_LABEL)
+
+    def verify_builds(self, model: "dict[str, Any]", services: "Sequence[str]") -> None:
+        """Do not accept an incomplete or mislabeled build as successful."""
+        for name in services:
+            spec = model["services"][name]
+            image = spec["image"]
+            if not self.image_exists(image):
+                raise ImagePreparationError("Built image is missing: " + image)
+            expected = (spec.get("build") or {}).get("labels", {}).get(self.BUILD_LABEL)
+            if expected is not None and self.image_revision(image) != expected:
+                raise ImagePreparationError("Built image revision mismatch for " + name)
+
+    def plan(self, model: "dict[str, Any]", services: "Sequence[str]" = (),
+             force_pull: bool = False, refresh_services: "Sequence[str] | None" = None) -> ImagePlan:
         all_services = model["services"]
         targets = list(all_services) if not services else _dependencies(all_services, services)
+        refreshing = set(targets if refresh_services is None and force_pull else (refresh_services or ()))
+        if not force_pull:
+            refreshing.clear()
         build, pull = [], []
-        image_state = {}
-        pull_images = set()
+        image_state, pull_images, revisions, build_images = {}, set(), {}, set()
         for name in targets:
             service = all_services[name]
             image = service.get("image")
-            has_build = service.get("build") is not None
+            definition = service.get("build")
+            has_build = definition is not None
             if not isinstance(image, str) or not image.strip():
-                raise ImagePreparationError(f"Service `{name}` has no valid image")
+                raise ImagePreparationError("Service {} has no valid image".format(name))
+            expected = (definition.get("labels") or {}).get(self.BUILD_LABEL) if has_build else None
+            if has_build and image in revisions and revisions[image] != expected:
+                raise ImagePreparationError("Conflicting build revisions for image " + image)
+            if has_build:
+                revisions[image] = expected
             if image not in image_state:
                 image_state[image] = self.image_exists(image)
             exists = image_state[image]
-            if has_build and (force_pull or not exists):
-                build.append(name)
-            elif not has_build and (force_pull or not exists) and image not in pull_images:
+            refresh = name in refreshing
+            if has_build and (refresh or not exists or
+                              (expected is not None and self.image_revision(image) != expected)):
+                if image not in build_images:
+                    build.append(name)
+                    build_images.add(image)
+            elif not has_build and (refresh or not exists) and image not in pull_images:
                 pull.append(name)
                 pull_images.add(image)
         return ImagePlan(tuple(build), tuple(pull), tuple(targets))
@@ -91,12 +182,3 @@ class ImagePreparer:
         if "no such image" in message or "not found" in message:
             return False
         raise ImagePreparationError(f"Unable to inspect image `{image}`: {result.stderr.strip()}")
-
-    def execute(self, context: "EventContext", model: "dict[str, Any]", services: "Sequence[str]" = (), force_pull: bool = False) -> ImagePlan:
-        plan = self.plan(model, services, force_pull=force_pull)
-        if plan.pull:
-            self.manager.compose_runner.pull(context, list(plan.pull))
-        if plan.build:
-            options = self.manager.compose_runner.options_for_build(plan.build, pull=force_pull)
-            self.manager.compose_runner.build(context, options)
-        return plan

@@ -13,14 +13,15 @@ from linktools.core import AliasProvider, ConfigField, LazyProvider, PromptProvi
 from linktools.decorator import cached_property
 
 from .container import BaseContainer, ContainerError, NoContainerInstalledError
+from .ext import Integration
 from .runtime.process import DEFAULT_DOCKER_HOST
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from typing import Any
+    from typing import Any, Iterator, Tuple, Mapping, Optional
     from linktools.core import CacheNamespace, ConfigStore, Environ
     from .registry.registry import ContainerResolver
-    from .registry.loader import ContainerLoader
+    from .registry.loader import ContainerLoader, ContainerLoadError
     from ._operations import ComposeOperations
     from .runtime.compose import ComposeRunner
     from .runtime.process import RuntimeProcessFactory
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
     from .runtime.inspect import DockerInspector
     from .runtime.images import ImagePreparer
     from .lifecycle.dispatcher import LifecycleDispatcher
-    from .lifecycle.hooks import HookListView, HookRegistry
+    from .lifecycle.hooks import HookRegistry
     from .state.running import RunningStateStore
     from .state import InstalledStateStore
     from .repo.service import RepoService
@@ -63,7 +64,7 @@ class ContainerManager:
         # failures (import/on_init errors) from the last time containers
         # were discovered, for callers (e.g. Doctor) that want to report
         # them instead of only the log-only warning.
-        self.container_load_errors: "list[Any]" = []
+        self.container_load_errors: "list[ContainerLoadError]" = []
 
         self.docker_container_name = "container.py"
         self.docker_compose_names = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
@@ -232,16 +233,6 @@ class ContainerManager:
         return HookRegistry(owner=self, scope="manager")
 
     @cached_property
-    def start_hooks(self) -> "HookListView":
-        from .lifecycle.hooks import HookPhase
-        return self.hooks.legacy_view(HookPhase.BEFORE_START)
-
-    @cached_property
-    def stop_hooks(self) -> "HookListView":
-        from .lifecycle.hooks import HookPhase
-        return self.hooks.legacy_view(HookPhase.AFTER_STOP)
-
-    @cached_property
     def compose_runner(self) -> "ComposeRunner":
         # CLI and per-container exec route through this so both share one
         # docker-compose argument builder.
@@ -315,17 +306,52 @@ class ContainerManager:
         from .repo.service import RepoService
         return RepoService(self)
 
+    @cached_property
+    def integration_snapshot(self) -> "Mapping[str, Tuple[Integration, ...]]":
+        """Freeze declaration structure once without resolving its lazy values."""
+        from collections import OrderedDict
+        from collections.abc import Mapping
+        from types import MappingProxyType
+
+        result = OrderedDict()
+        for producer in self.installed_state.get(resolve=True):
+            integrations = producer.integrations
+            if isinstance(integrations, (Mapping, str, bytes)):
+                raise ContainerError("Invalid integrations in " + producer.name)
+            try:
+                declarations = tuple(integrations)
+            except TypeError:
+                raise ContainerError("Invalid integrations in " + producer.name)
+            for declaration in declarations:
+                if not isinstance(declaration, Integration):
+                    raise ContainerError("Invalid integration in %s: expected Integration" % producer.name)
+                name = declaration.consumer
+                if not isinstance(name, str) or name not in self.containers:
+                    raise ContainerError("Unknown integration consumer %r in %s" % (name, producer.name))
+            result[producer.name] = declarations
+        return MappingProxyType(result)
+
+    def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, Integration]]":
+        """Yield read-only declaration inputs from the command's installed snapshot."""
+        if consumer_name not in self.containers:
+            raise ContainerError("Unknown integration consumer: " + consumer_name)
+        snapshot = self.integration_snapshot
+        if consumer_name not in snapshot:
+            return
+        for producer_name, declarations in snapshot.items():
+            for declaration in declarations:
+                if declaration.consumer == consumer_name:
+                    yield self.containers[producer_name], declaration
+
     def load_installed_config_metadata(self) -> "list[BaseContainer]":
         """Load installed containers and register their own config fields,
-        without running any container's ``on_prepare()`` (arbitrary
-        third-party file writes, network access, hook registration) or
-        touching ``docker_file``/``docker_compose``.
+        without preparing operation inputs or touching
+        ``docker_file``/``docker_compose``.
 
         Safe for anything that only needs config metadata: config
         set/get/list/explain/validate/reload, Root ``list``, Plan, Doctor.
         Returns ``[]`` when nothing is installed instead of raising -- see
-        ``prepare_installed_containers`` for the raising, side-effectful
-        variant real execution (up/down/restart/exec) needs.
+        ``prepare_installed_containers`` for the variant that rejects an empty installed project.
         """
         containers = self.installed_state.get(resolve=True)
         for container in self.containers.values():
@@ -335,17 +361,8 @@ class ContainerManager:
         return containers
 
     def prepare_installed_containers(self) -> "list[BaseContainer]":
-        self.logger.debug(f"Load container type: {self.container_type}")  # 加载容器类型
+        """Load installed declarations without lifecycle side effects."""
         containers = self.load_installed_config_metadata()
         if not containers:
             raise NoContainerInstalledError("No container installed")
-        for container in containers:
-            container.on_prepare()
-        for container in containers:
-            if container.docker_file and self.debug:  # 加载每个容器的dockerfile
-                self.logger.debug(f"Generate Dockerfile for {container.name}")
-            if container.docker_compose and self.debug:  # 加载每个容器的docker-compose.yml
-                self.logger.debug(f"Generate docker-compose.yml for {container.name}")
-            if container.exposes and self.debug:
-                self.logger.debug(f"Load exposes for {container.name}")
         return containers

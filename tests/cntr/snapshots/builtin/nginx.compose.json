@@ -4,13 +4,37 @@
       "name": "aio-nginx"
     }
   },
+  "secrets": {
+    "cntr_acme_account": {
+      "file": "<APP_DATA>/nginx/acme-build-account.tar"
+    },
+    "cntr_acme_dns": {
+      "file": "<APP_DATA>/nginx/acme-secrets/dns.env"
+    }
+  },
   "services": {
     "nginx": {
       "build": {
         "context": "<ASSETS>/100-nginx",
-        "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile"
+        "dockerfile": "<DATA>/container/dockerfile/nginx.Dockerfile",
+        "secrets": [
+          "cntr_acme_account",
+          "cntr_acme_dns"
+        ]
       },
+      "command": [
+        "nginx",
+        "-p",
+        "/etc/nginx/",
+        "-c",
+        "/etc/nginx/managed/nginx.conf",
+        "-g",
+        "daemon off;"
+      ],
       "container_name": "aio-nginx",
+      "environment": {
+        "NGINX_HTTPS_PORT": "443"
+      },
       "healthcheck": {
         "interval": "5s",
         "start_interval": "1s",
@@ -18,27 +42,40 @@
         "test": [
           "CMD",
           "curl",
-          "http://localhost:80/"
+          "--fail",
+          "--silent",
+          "--unix-socket",
+          "/run/nginx-health.sock",
+          "http://localhost/health"
         ]
       },
       "hostname": "nginx",
-      "image": "aio-nginx",
+      "image": "aio-nginx:2e68d2662819db9f",
       "logging": {
         "driver": "json-file",
         "options": {
           "max-size": "10m"
         }
       },
-      "networks": [
-        "nginx"
-      ],
+      "networks": {
+        "nginx": null,
+        "safeline-ce": {
+          "aliases": [
+            "nginx-origin"
+          ],
+          "ipv4_address": "172.22.242.253"
+        }
+      },
       "ports": [
         "80:80",
         "443:443"
       ],
       "restart": "unless-stopped",
       "volumes": [
-        "<APP_DATA>/nginx/conf.d:/etc/nginx/conf.d"
+        "<APP_DATA>/nginx/generated/current:/etc/nginx/managed:ro",
+        "<APP_DATA>/nginx/certs:/etc/certs",
+        "<APP_DATA>/nginx/acme:/root/.acme.sh",
+        "<APP_DATA>/nginx/acme-secrets:/run/acme-secrets:ro"
       ]
     }
   }

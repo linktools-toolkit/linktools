@@ -114,6 +114,84 @@ def test_multiple_ids_are_inspected(inspector, fresh_manager, monkeypatch):
     assert {s.service for s in state.services} == {"nginx", "extra"}
 
 
+@pytest.mark.parametrize("host_key,compose_key", [
+    ("NetworkMode", "network_mode"), ("IpcMode", "ipc"), ("PidMode", "pid"),
+])
+@pytest.mark.parametrize("reference", ["id", "runtime_name"])
+def test_namespace_bindings_use_exact_same_project_runtime_identity(
+        inspector, fresh_manager, monkeypatch, host_key, compose_key, reference):
+    owner = _service_container(fresh_manager, "nginx", ["db", "worker"])
+    provider = dict(_item(name="/aio-db-1", service="db"), Id="a" * 64, HostConfig={})
+    identity = provider["Id"] if reference == "id" else "aio-db-1"
+    consumer = dict(_item(name="/aio-worker-1", service="worker"), Id="b" * 64,
+                    HostConfig={host_key: "container:" + identity})
+    calls = []
+    _stub_dispatched(monkeypatch, fresh_manager, provider["Id"] + "\n" + consumer["Id"],
+                     lambda ids: calls.append(ids) or [consumer, provider])
+
+    state = inspector.get_project_state([owner])
+
+    services = {item.service: item for item in state.services}
+    assert services["worker"].namespace_bindings == {compose_key: "service:db"}
+    assert services["db"].namespace_bindings == {}
+    assert calls == [[provider["Id"], consumer["Id"]]]
+
+
+def test_volume_bindings_preserve_access_mode_and_resolve_runtime_names(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["db", "worker"])
+    provider = dict(_item(name="/aio-db-1", service="db"), Id="a" * 64, HostConfig={})
+    consumer = dict(_item(name="/aio-worker-1", service="worker"), Id="b" * 64,
+                    HostConfig={"VolumesFrom": [provider["Id"] + ":ro", "aio-db-1:rw", "external-owner:ro"]})
+    _stub_ids(monkeypatch, fresh_manager, provider["Id"] + "\n" + consumer["Id"])
+    _stub_inspect(monkeypatch, fresh_manager, [provider, consumer])
+
+    state = inspector.get_project_state([owner])
+
+    assert next(item for item in state.services if item.service == "worker").namespace_bindings == {
+        "volumes_from": ["db:ro", "db:rw", "container:external-owner:ro"],
+    }
+
+
+@pytest.mark.parametrize("reference", ["foreign_id", "foreign_name", "removed_id", "id_prefix", "service_name"])
+def test_namespace_bindings_never_guess_foreign_or_unknown_providers(
+        inspector, fresh_manager, monkeypatch, reference):
+    owner = _service_container(fresh_manager, "nginx", ["db", "worker"])
+    provider = dict(_item(name="/aio-db-1", service="db"), Id="a" * 64)
+    foreign = dict(_item(name="/foreign-db-1", project="foreign", service="db"), Id="c" * 64)
+    identity = {"foreign_id": foreign["Id"], "foreign_name": "foreign-db-1", "removed_id": "d" * 64,
+                "id_prefix": provider["Id"][:12], "service_name": "db"}[reference]
+    consumer = dict(_item(name="/aio-worker-1", service="worker"), Id="b" * 64,
+                    HostConfig={"NetworkMode": "container:" + identity, "IpcMode": "container:" + identity,
+                                "PidMode": "container:" + identity, "VolumesFrom": [identity + ":ro"]})
+    calls = []
+    ids = [provider["Id"], consumer["Id"], foreign["Id"]]
+    _stub_dispatched(monkeypatch, fresh_manager, "\n".join(ids),
+                     lambda batch: calls.append(batch) or [provider, consumer, foreign])
+
+    state = inspector.get_project_state([owner])
+
+    assert {item.service for item in state.services} == {"db", "worker"}
+    assert next(item for item in state.services if item.service == "worker").namespace_bindings == {
+        "network_mode": "container:" + identity,
+        "ipc": "container:" + identity,
+        "pid": "container:" + identity,
+        "volumes_from": ["container:" + identity + ":ro"],
+    }
+    assert calls == [ids]
+
+
+def test_absent_host_config_does_not_claim_observed_empty_namespaces(inspector, fresh_manager, monkeypatch):
+    owner = _service_container(fresh_manager, "nginx", ["nginx", "extra"])
+    _stub_ids(monkeypatch, fresh_manager, "a" * 64 + "\n" + "b" * 64)
+    _stub_inspect(monkeypatch, fresh_manager, [dict(_item(), Id="a" * 64),
+        dict(_item(name="/aio-extra", service="extra"), Id="b" * 64, HostConfig={})])
+
+    services = {item.service: item for item in inspector.get_project_state([owner]).services}
+
+    assert services["nginx"].namespace_bindings is None
+    assert services["extra"].namespace_bindings == {}
+
+
 def test_duplicate_ids_are_deduped_stably(inspector, fresh_manager, monkeypatch):
     nginx = _service_container(fresh_manager, "nginx", ["nginx"])
     seen_ids = []
@@ -458,6 +536,23 @@ def test_running_container_names_excludes_fully_stopped_container(inspector, fre
     _stub_inspect(monkeypatch, fresh_manager, [_item(name="/x1", service="a", status="exited")])
     state = inspector.get_project_state([nginx])
     assert state.running_container_names == []
+
+
+def test_initial_service_views_use_actual_running_replicas_and_return_separate_maps(inspector, fresh_manager, monkeypatch):
+    nginx = _service_container(fresh_manager, "nginx", ["nginx", "stopped"])
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\ndef456def456\n012345abcdef\n")
+    live = dict(_item(status="RUNNING"), Image="sha256:live")
+    stopped_replica = dict(_item(status="exited"), Image="sha256:stopped-replica")
+    stopped_service = dict(_item(service="stopped", status="exited"), Image="sha256:stopped")
+    _stub_inspect(monkeypatch, fresh_manager, [live, stopped_replica, stopped_service])
+    state = inspector.get_project_state([nginx])
+    assert state.existing_services == {"nginx", "stopped"}
+    assert state.running_services == {"nginx"}
+    assert state.running_images == {"nginx": "sha256:live"}
+    assert state.image_ids["stopped"] == "sha256:stopped"
+    changed = state.running_images
+    changed["nginx"] = "mutated"
+    assert state.running_images == {"nginx": "sha256:live"}
 
 
 def test_project_and_backend_are_from_manager(inspector, fresh_manager, monkeypatch):

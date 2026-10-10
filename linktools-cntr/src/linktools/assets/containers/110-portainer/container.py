@@ -5,12 +5,13 @@ from typing import TYPE_CHECKING
 
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
+from linktools.runtime import lazy_load
 from linktools.cntr import BaseContainer
+from linktools.cntr.ext import Flare, Nginx, Authelia, load_nginx_url, load_port_url
 
 if TYPE_CHECKING:
+    from linktools.cntr import Integrations
     from typing import Any
-    from collections.abc import Iterable
-    from linktools.cntr import ExposeLink
 
 
 class Container(BaseContainer):
@@ -19,25 +20,28 @@ class Container(BaseContainer):
     def configs(self) -> "dict[str, Any]":
         return dict(
             PORTAINER_TAG="alpine",
-            PORTAINER_DOMAIN=self.get_nginx_domain(),
+            PORTAINER_DOMAIN=Nginx.domain(self),
             PORTAINER_AUTH_ENABLE=ConfigField(cast=bool, default=True),
             PORTAINER_PORT=ConfigField(cast=int, default=9000),
         )
 
     @cached_property
-    def exposes(self) -> "Iterable[ExposeLink]":
+    def integrations(self) -> "Integrations":
         return [
-            self.expose_public("Portainer", "docker", "Docker管理工具", self.load_nginx_url(
-                "PORTAINER_DOMAIN",
-                proxy_url="http://portainer:9000",
-                auth_enable=self.get_config("PORTAINER_AUTH_ENABLE"),
-                auth_extra={
-                    "acl_bypass": ["\\.(css|js)$"],
-                    "oidc_redirect_uris": ["{base_url}"]
-                }
-            )),
-            self.expose_container("Portainer", "docker", "Docker管理工具", self.load_port_url(
-                "PORTAINER_PORT",
+            Flare.container("Portainer", "docker", load_port_url(
+                self, "PORTAINER_PORT",
                 https=False
             )),
+            Nginx.site(
+                server_name=self.get_config_later("PORTAINER_DOMAIN"),
+                link=Flare.public("Portainer", "docker", "Docker管理工具"),
+                proxy="http://portainer:9000",
+                auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
+                auth_bypass=(r"\.(css|js)$",),
+            ),
+            Authelia.oidc(
+                (load_nginx_url(self, "web"),),
+                enabled=lazy_load(lambda: self.get_config("PORTAINER_AUTH_ENABLE")
+                                  and self.get_config("NGINX_AUTH_ENABLE")),
+            ),
         ]

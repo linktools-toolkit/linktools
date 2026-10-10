@@ -11,7 +11,6 @@ import shutil
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from ..capabilities.cntr import __cap_cntr__
 from .repo.service import safe_display_url
 
 if TYPE_CHECKING:
@@ -216,46 +215,34 @@ class Doctor:
 
     def check_repos(self) -> "list[Finding]":
         findings: "list[Finding]" = []
-        from linktools.core import ProjectProfile
-        from linktools.cntr.repo.requirements import ensure_requirement
-        from linktools.errors import ConfigError, ConfigValidationError
         for raw_url, meta in self.manager.repos.get_all().items():
-            # Never the raw dict key -- a repository persisted before P1-07
-            # rejected credential-bearing URLs at add() time may still carry
-            # one (e.g. https://user:token@host/repo.git), and every finding
-            # here is user-visible output (text log and --json).
             url = safe_display_url(raw_url)
-            repo_path = meta.get("repo_path")
-            if not repo_path or not os.path.exists(repo_path):
-                continue
-
-            # Same load+gate ContainerLoader/RepoService.add use before
-            # accepting a repo: an invalid .linktools.json is reported, not
-            # silently skipped -- Doctor must never report a repo as clean
-            # just because it has nothing to check.
-            file_config = None
             try:
-                file_config = ProjectProfile.for_root(repo_path)
-            except ConfigError as exc:
+                info = self.manager.repos.describe(raw_url, meta)
+            except Exception as exc:  # noqa: BLE001 - one repo must not hide the rest
                 findings.append(Finding(
-                    WARN, f"repo `{url}` has an invalid .linktools.json: {exc}",
+                    WARN, f"repo `{url}` could not be inspected: {exc}",
                     code=REPO_CONFIG_INVALID, component=url))
-
-            if file_config is not None:
-                try:
-                    ensure_requirement(file_config, "linktools-cntr", __cap_cntr__.version)
-                except ConfigValidationError as exc:
-                    findings.append(Finding(
-                        WARN, f"repo `{url}` {exc}",
-                        code=REPO_INCOMPATIBLE, component=url))
-
-            if os.path.islink(repo_path):
-                findings.append(Finding(INFO, f"repo `{url}` is a local symlink ({repo_path}).", component=url))
                 continue
 
-            if self.manager.repos.git.inspect(repo_path).get("dirty"):
+            error = info.get("repository_error") or info.get("local_config_error")
+            if error:
                 findings.append(Finding(
-                    INFO, f"repo `{url}` has uncommitted changes.", code=REPO_DIRTY, component=url))
+                    WARN, f"repo `{url}` is unusable: {error}",
+                    code=REPO_CONFIG_INVALID, component=url))
+            for issue in info["compatibility_issues"]:
+                findings.append(Finding(
+                    WARN, f"repo `{url}` {issue}",
+                    code=REPO_INCOMPATIBLE, component=url))
+
+            if info["available"] and info["repo_type"] == "local":
+                findings.append(Finding(
+                    INFO, f"repo `{url}` is a local repository ({info['repo_path']}).",
+                    component=url))
+            if info["git"].get("dirty"):
+                findings.append(Finding(
+                    INFO, f"repo `{url}` has uncommitted changes.",
+                    code=REPO_DIRTY, component=url))
         return findings
 
     def check_artifacts(self, containers: "Iterable[BaseContainer]") -> "list[Finding]":

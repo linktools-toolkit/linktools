@@ -1,13 +1,18 @@
 services:
   lldap:
     image: 'lldap/lldap:{{ LLDAP_TAG }}'
+    command: ['run', '--config-file', '/generated/lldap_config.toml']
+    healthcheck:
+      test: ['CMD', '/app/lldap', 'healthcheck', '--config-file', '/generated/lldap_config.toml']
     environment:
       - UID=0
       - GID=0
       - LLDAP_LDAP_BASE_DN={{ LLDAP_BASE_DN }}
       - LLDAP_JWT_SECRET_FILE=/secrets/jwt_secret
-      - LLDAP_LDAP_USER_PASS_FILE=/secrets/ldap_user_pass
+      - LLDAP_LDAP_USER_PASS_FILE=/generated/ldap_user_pass
     volumes:
+      - '{{ APP_PATH/"generated/current/lldap_config.toml" }}:/generated/lldap_config.toml:ro'
+      - '{{ APP_PATH/"generated/current/ldap_user_pass" }}:/generated/ldap_user_pass:ro'
       - '{{ (APP_PATH/"data") | mkdir | chown }}:/data'
       - '{{ (APP_PATH/"secrets") | mkdir | chown }}:/secrets:ro'
 #   {% if LLDAP_PORT > 0 or LLDAP_WEB_PORT > 0 %}

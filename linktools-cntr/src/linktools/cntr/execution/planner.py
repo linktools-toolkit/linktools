@@ -16,11 +16,11 @@ from typing import TYPE_CHECKING
 
 from ..artifacts import collect_candidates, sha256_of
 from ..container import ContainerError
-from ..runtime.compose import ComposeOptions
-from ..runtime.structured import redact_command
+from ..runtime.structured import StructuredCommandError, redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
 
 if TYPE_CHECKING:
+    from typing import Any
     from ..manager import ContainerManager
 
 PLAN_SCHEMA_VERSION = 1
@@ -37,6 +37,16 @@ class ExecutionPlanner:
             names: "list[str] | None" = None,
             pull: bool = False,
     ) -> "ExecutionPlan":
+        from linktools.core import Config
+        with Config.read_only_resolution():
+            return self._plan(action, names=names, pull=pull)
+
+    def _plan(
+            self,
+            action: str,
+            names: "list[str] | None" = None,
+            pull: bool = False,
+    ) -> "ExecutionPlan":
         if action not in ("up", "restart", "down"):
             raise ContainerError(f"Unsupported plan action: {action!r}; expected up/restart/down")
 
@@ -45,11 +55,18 @@ class ExecutionPlanner:
         # a third-party container's on_prepare() (arbitrary file writes/
         # network access/hook registration) just to describe what a real
         # up/restart/down would do.
-        selection = manager.compose_operations.select(names, metadata_only=True)
+        selection = manager.compose_operations.select(names, for_start=action != "down")
+        unresolved_selection = False
+        try:
+            start_selection = manager.compose_operations.start_selection(selection, privilege=False) if action != "down" else selection
+        except (StructuredCommandError, OSError):
+            unresolved_selection = True
+            start_selection = selection
 
         candidates = collect_candidates(manager, selection.project_containers)
+        artifact_index = manager.artifact_index.load()
         artifacts = [
-            self._planned_artifact(dest, kind, container_name, content)
+            self._planned_artifact(dest, kind, container_name, content, artifact_index)
             for dest, (kind, container_name, content) in candidates.items()
         ]
         candidate_files = {dest: content for dest, (_, _, content) in candidates.items()}
@@ -59,24 +76,32 @@ class ExecutionPlanner:
         # forms its --file set the same way, one container at a time, and
         # Compose's multi-file merge is order-sensitive. Never re-sort this.
         compose_files = [p for p in candidate_files if p.endswith((".yml", ".yaml"))]
-        file_args = []
-        for path in compose_files:
-            file_args.extend(["--file", path])
-        file_args.extend(["--project-name", manager.project_name])
+        file_args = manager.compose_runner.compose_args(compose_files)[1:]
 
         commands = []
         services = list(selection.services)
-        if action == "restart":
-            commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
-        if action in ("up", "restart"):
-            options = ComposeOptions(remove_orphans=selection.full, services=list(selection.services))
-            commands.append(self._planned_command(
-                "up", [*file_args, *manager.compose_runner.up_args(options)]))
+        stop_services = ()
+        if not unresolved_selection and action == "restart" and (selection.full or services):
+            stop_services = tuple(service for service in start_selection.services
+                                  if selection.full or service in services)
+            commands.append(self._planned_command("stop", [*file_args, "stop", *stop_services]))
+        if not unresolved_selection and action in ("up", "restart"):
+            services_to_start = start_selection.services
+            for service in services_to_start:
+                commands.append(self._planned_command(
+                    "up", [*file_args, *manager.compose_runner.apply_service_args(service, remove_orphans=selection.full)]))
         elif action == "down":
             commands.append(self._planned_command("down", [*file_args, "down", *services]))
 
         hooks = []
-        for step in manager.lifecycle.iter_steps(action, selection.target_containers):
+        lifecycle_action = "up" if action == "restart" and not selection.full and not services else action
+        stop_containers = selection.target_containers
+        if action == "restart":
+            stop_containers = tuple(container for container in selection.target_containers
+                                    if set(container.services).intersection(stop_services))
+        steps = () if unresolved_selection else manager.lifecycle.iter_steps(
+            lifecycle_action, start_selection.target_containers, stop_containers=stop_containers)
+        for step in steps:
             if step.phase is None:
                 continue
             owner = step.container if step.container is not None else manager
@@ -94,6 +119,18 @@ class ExecutionPlanner:
                 ))
 
         warnings = []
+        if unresolved_selection:
+            warnings.append("Compose profile selection could not be resolved; startup commands and hooks "
+                            "are omitted until native Compose configuration is available.")
+        if action in ("up", "restart"):
+            warnings.append("Only selected services, their requirements and running declared consumers are applied. "
+                            "Prepared file content changes recreate affected consumers; ordinary configuration "
+                            "updates do not invoke a container-specific reload lifecycle. Preparation, image "
+                            "availability and native checks are resolved during execution, before restart stops.")
+        if action == "restart":
+            warnings.append("Restart prepares selected inputs and images, then checks "
+                            "them before stopping only the explicitly selected services. Runtime providers "
+                            "are included in startup hooks and application, not in the explicit stop set.")
         preflight = "skipped"
         if action in ("up", "restart") and candidate_files:
             preflight = manager.docker_inspector.preflight_candidates(candidate_files)
@@ -116,9 +153,10 @@ class ExecutionPlanner:
             preflight=preflight,
         )
 
-    def _planned_artifact(self, dest: str, kind: str, container: str, content: str) -> "PlannedArtifact":
+    def _planned_artifact(self, dest: str, kind: str, container: str, content: str,
+                          artifact_index: "dict[str, dict[str, Any]]") -> "PlannedArtifact":
         rel_path = os.path.relpath(dest, str(self.manager.data_path))
-        existing = self.manager.artifact_index.load().get(rel_path)
+        existing = artifact_index.get(rel_path)
         old_sha256 = existing.get("sha256") if existing else None
         new_sha256 = sha256_of(content)
         if old_sha256 is None:

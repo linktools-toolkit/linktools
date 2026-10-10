@@ -14,7 +14,7 @@ from separate manager instances.
 """
 import threading
 
-from linktools.cntr.context import EventContext
+from linktools.cntr.context import OperationContext
 from _harness import install_deterministic_interaction, _reset_global_config
 
 
@@ -48,11 +48,11 @@ def _two_managers_with_both_containers_installed(tmp_path, monkeypatch):
 
 
 def _partial_ctx(manager, name):
-    ctx = EventContext()
-    ctx.commands = ["up"]
-    ctx.containers = manager.installed_state.get(resolve=True)
-    ctx.target_containers = [c for c in ctx.containers if c.name == name]
-    ctx.is_full_containers = False
+    ctx = OperationContext()
+    ctx.actions = ["up"]
+    ctx.project_containers = manager.installed_state.get(resolve=True)
+    ctx.target_containers = [c for c in ctx.project_containers if c.name == name]
+    ctx.is_full_project = False
     return ctx
 
 

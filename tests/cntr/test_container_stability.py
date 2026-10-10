@@ -9,10 +9,6 @@ from linktools.cntr.container import (
     BaseContainer,
     ContainerError,
     ContainerTemplateError,
-    ExposeCategory,
-    ExposeLink,
-    ExposeMixin,
-    NginxMixin,
     SimpleContainer,
     SourceContainer,
 )
@@ -22,7 +18,6 @@ from linktools.decorator import _CachedProperty
 def test_public_names_importable_from_container_module():
     for cls in (
         AbstractMetaClass, BaseContainer, ContainerError, ContainerTemplateError,
-        ExposeCategory, ExposeLink, ExposeMixin, NginxMixin,
         SimpleContainer, SourceContainer,
     ):
         assert cls is not None
@@ -34,8 +29,8 @@ def test_container_class_module_identity_unchanged():
     assert SimpleContainer.__module__ == "linktools.cntr.container"
 
 
-def test_base_container_mro_unchanged():
-    assert BaseContainer.__bases__ == (ExposeMixin, NginxMixin)
+def test_base_container_has_no_integration_mixins():
+    assert BaseContainer.__bases__ == (object,)
     assert type(BaseContainer) is AbstractMetaClass
 
 
@@ -45,8 +40,6 @@ _DESCRIPTOR_TYPES = {
     "docker_file": _CachedProperty,
     "services": _CachedProperty,
     "hooks": _CachedProperty,
-    "start_hooks": _CachedProperty,
-    "stop_hooks": _CachedProperty,
 }
 
 
@@ -63,7 +56,7 @@ def _pick_container(fresh_manager):
 
 def test_cached_properties_store_on_the_container_instance(fresh_manager):
     container = _pick_container(fresh_manager)
-    for name in ("docker_compose", "docker_file", "services", "hooks", "start_hooks", "stop_hooks"):
+    for name in ("docker_compose", "docker_file", "services", "hooks"):
         first = getattr(container, name)
         second = getattr(container, name)
         assert first is second
@@ -172,5 +165,4 @@ def test_source_container_context_path_uses_overridden_source_properties(fresh_m
             pass
 
     container = _Custom(fresh_manager, tmp_path, name="999-custom")
-    assert container.get_docker_context_path() == container._context_path
-    assert container._context_path.endswith("unpacked")
+    assert container.get_docker_context_path() == container._source_root / "current" / "unpacked"

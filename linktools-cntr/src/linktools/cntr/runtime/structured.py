@@ -45,7 +45,7 @@ _REDACTED = "***"
 # e.g. --build-arg http_proxy=http://user:pass@host -- the value, not the
 # whole token, needs redacting. Shared with execution/report.py so a
 # command is never displayed unredacted through either path.
-_VALUE_BEARING_FLAGS = ("--build-arg",)
+_VALUE_BEARING_FLAGS = ("--build-arg", "--env")
 
 
 def redact_command(args: "tuple[str, ...] | None") -> "tuple[str, ...] | None":

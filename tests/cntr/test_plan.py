@@ -29,7 +29,8 @@ def _no_real_processes(monkeypatch, fresh_manager):
 
     monkeypatch.setattr(fresh_manager.compose_runner, "build", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "pull", fail)
-    monkeypatch.setattr(fresh_manager.compose_runner, "up", fail)
+    monkeypatch.setattr(fresh_manager.compose_runner, "apply_service", fail)
+    monkeypatch.setattr(fresh_manager.compose_runner, "apply_saved_services", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "stop", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "down", fail)
     monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", lambda *a, **k: object())
@@ -42,7 +43,7 @@ def _no_real_processes(monkeypatch, fresh_manager):
     )
 
 
-def test_plan_never_invokes_hooks(fresh_manager, monkeypatch):
+def test_plan_never_invokes_lifecycle_hooks(fresh_manager, monkeypatch):
     calls = []
     monkeypatch.setattr(
         LifecycleDispatcher,
@@ -51,8 +52,8 @@ def test_plan_never_invokes_hooks(fresh_manager, monkeypatch):
     )
     monkeypatch.setattr(
         HookRegistry,
-        "call",
-        lambda self, phase, context=None, reverse=False: calls.append(1),
+        "_invoke",
+        lambda self, hook, context: calls.append(1),
     )
 
     fresh_manager.planner.plan("up")
@@ -81,7 +82,8 @@ def test_plan_up_full(fresh_manager):
     expected = {c.name for c in fresh_manager.prepare_installed_containers()}
     assert set(plan.resolved_containers) == expected
     assert expected
-    assert [c.phase for c in plan.commands] == ["up"]
+    assert plan.commands and all(c.phase == "up" for c in plan.commands)
+    assert all("--no-deps" in c.args for c in plan.commands)
 
 
 def test_plan_resolved_containers_include_dependencies_of_a_partial_target(fresh_manager):
@@ -100,7 +102,9 @@ def test_plan_up_partial_matches_real_selection(fresh_manager):
 
 def test_plan_restart_includes_stop_and_up(fresh_manager):
     plan = fresh_manager.planner.plan("restart", names=["portainer"])
-    assert [c.phase for c in plan.commands] == ["stop", "up"]
+    assert plan.commands[0].phase == "stop"
+    assert all(c.phase == "up" for c in plan.commands[1:])
+    assert plan.commands[0].args[-2:] == ("stop", "portainer")
 
 
 def test_plan_down_includes_down_command(fresh_manager):
@@ -110,7 +114,8 @@ def test_plan_down_includes_down_command(fresh_manager):
 
 def test_plan_pull_keeps_compose_side_pull_disabled(fresh_manager):
     plan = fresh_manager.planner.plan("up", names=["portainer"], pull=True)
-    assert [c.phase for c in plan.commands] == ["up"]
+    assert plan.commands and all(c.phase == "up" for c in plan.commands)
+    assert all("--no-deps" in c.args for c in plan.commands)
     up_command = plan.commands[0]
     assert "never" in up_command.args
     assert "always" not in up_command.args
@@ -362,23 +367,104 @@ def test_plan_text_render_never_contains_raw_proxy_secret(fresh_manager, monkeyp
 
 def test_plan_up_command_matches_runtime_builder_exactly(fresh_manager):
     plan = fresh_manager.planner.plan("up", names=["portainer"])
-    selection = fresh_manager.compose_operations.select(["portainer"])
-    options = ComposeOptions(
-        remove_orphans=selection.full,
-        services=list(selection.services),
-    )
-    expected_tail = tuple(fresh_manager.compose_runner.up_args(options))
-    up_command = plan.commands[0]
-    assert up_command.args[-len(expected_tail):] == expected_tail
+    for command in plan.commands:
+        expected_tail = tuple(fresh_manager.compose_runner.apply_service_args(command.args[-1]))
+        assert command.args[-len(expected_tail):] == expected_tail
+
+
+def test_restart_plan_with_named_config_only_target_has_no_stop(monkeypatch, fresh_manager):
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
+
+    plan = fresh_manager.planner.plan("restart", names=["portainer"])
+
+    assert plan.targets == ("portainer",)
+    assert plan.services == ()
+    assert all(command.phase != "stop" for command in plan.commands)
+    assert all(hook.phase not in ("before-stop", "after-stop") for hook in plan.hooks)
+
+
+def test_restart_plan_mixed_targets_only_stops_explicit_services(monkeypatch, fresh_manager):
+    monkeypatch.setattr(fresh_manager.containers["portainer"], "services", {})
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
+
+    plan = fresh_manager.planner.plan("restart", names=["portainer", "nginx"])
+
+    stops = [command for command in plan.commands if command.phase == "stop"]
+    assert len(stops) == 1
+    assert stops[0].args[-2:] == ("stop", "nginx")
 
 
 def test_plan_restart_up_command_matches_runtime_builder_exactly(fresh_manager):
     plan = fresh_manager.planner.plan("restart", names=["portainer"])
-    selection = fresh_manager.compose_operations.select(["portainer"])
-    options = ComposeOptions(
-        remove_orphans=selection.full,
-        services=list(selection.services),
-    )
-    expected_tail = tuple(fresh_manager.compose_runner.up_args(options))
-    up_command = next(command for command in plan.commands if command.phase == "up")
-    assert up_command.args[-len(expected_tail):] == expected_tail
+    assert plan.commands[0].phase == "stop"
+    assert plan.commands[0].args[-2:] == ("stop", "portainer")
+    for command in plan.commands[1:]:
+        expected_tail = tuple(fresh_manager.compose_runner.apply_service_args(command.args[-1]))
+        assert command.args[-len(expected_tail):] == expected_tail
+
+
+def test_plan_excludes_unselected_authentication_admin(fresh_manager, monkeypatch):
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
+    plan = fresh_manager.planner.plan("up", ["portainer"])
+    commands = [command.args for command in plan.commands if command.phase == "up"]
+    assert not any(command[-1] == "authelia-admin" for command in commands)
+    assert any(command[-1] == "authelia" for command in commands)
+
+
+def test_plan_preserves_interleaved_service_dependency_order(fresh_manager, monkeypatch):
+    from linktools.cntr._operations import ComposeSelection
+    operations = fresh_manager.compose_operations
+    explicit = operations.select(["portainer"], for_start=True)
+    selected = ComposeSelection(explicit.project_containers,
+                                (fresh_manager.containers["authelia"], fresh_manager.containers["portainer"]),
+                                ("authelia-redis", "portainer", "authelia"), False)
+    monkeypatch.setattr(operations, "start_selection", lambda selection, **kwargs: selected)
+    monkeypatch.setattr(fresh_manager.docker_inspector, "preflight_candidates", lambda *args: "passed")
+    plan = fresh_manager.planner.plan("up", ["portainer"])
+    assert [command.args[-1] for command in plan.commands if command.phase == "up"] == list(selected.services)
+
+
+def test_plan_loads_artifact_index_once_per_call(fresh_manager, monkeypatch):
+    loads = []
+    original = fresh_manager.artifact_index.load
+
+    def load():
+        loads.append(None)
+        return original()
+
+    monkeypatch.setattr(fresh_manager.artifact_index, "load", load)
+    for action in ("up", "down"):
+        plan = fresh_manager.planner.plan(action)
+        assert len(plan.artifacts) > 1
+    assert len(loads) == 2
+
+
+def test_plan_reports_unresolved_native_profile_selection(fresh_manager, monkeypatch):
+    from linktools.cntr.runtime.structured import StructuredCommandError
+
+    def unresolved(*args, **kwargs):
+        raise StructuredCommandError("native profile resolution unavailable")
+
+    monkeypatch.setattr(fresh_manager.compose_operations, "start_selection", unresolved)
+    plan = fresh_manager.planner.plan("restart")
+    assert plan.commands == ()
+    assert plan.hooks == ()
+    assert any("profile selection could not be resolved" in warning for warning in plan.warnings)
+
+
+def test_plan_restart_stop_hooks_match_resolved_active_services(fresh_manager, monkeypatch):
+    from linktools.cntr._operations import ComposeSelection
+    selection = fresh_manager.compose_operations.select(for_start=True)
+    active = selection.project_containers[0]
+    resolved = ComposeSelection(selection.project_containers, (active,), tuple(active.services), True)
+    def start_selection(*args, **kwargs):
+        assert kwargs["privilege"] is False
+        return resolved
+
+    monkeypatch.setattr(fresh_manager.compose_operations, "start_selection", start_selection)
+    seen = []
+    monkeypatch.setattr(fresh_manager.lifecycle, "iter_steps", lambda *a, **kw: seen.append(kw["stop_containers"]) or ())
+    plan = fresh_manager.planner.plan("restart")
+    assert seen == [(active,)]
+    assert plan.commands[0].args[-len(active.services):] == tuple(active.services)

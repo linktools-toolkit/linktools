@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Single implementation behind both the root lifecycle shortcuts
-(``ct-cntr up/restart/down``) and the ``ct-cntr compose`` final-model
-rendering command.
-
-The CLI layer only defines arguments/help/routing; this module owns target
-selection, hook dispatch and state updates so the two entry points can never
-drift from each other.
-"""
+"""One preparation, validation and service-application path for cntr commands."""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .container import ContainerError
-from .context import EventContext
+from .errors import ContainerError
+from .context import OperationContext
 from .execution.model import get_records, record_phase, render_report
-from .runtime.compose import ComposeOptions
+from .runtime.compose import namespace_dependencies, order_services, order_service_subset, service_dependencies
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Sequence, Iterable
     from .container import BaseContainer
     from .manager import ContainerManager
     from .runtime.inspect import ProjectRuntimeState
@@ -25,15 +18,6 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ComposeSelection:
-    """Resolved target selection for a single compose operation.
-
-    ``project_containers`` is the full installed project (used to build the
-    complete ``--file`` set); ``target_containers``/``services`` are the
-    user's explicit selection (used for the trailing SERVICE filter and hook
-    dispatch). ``full`` is True when the user selected nothing, i.e. the
-    whole project is the target.
-    """
-
     project_containers: "tuple[BaseContainer, ...]"
     target_containers: "tuple[BaseContainer, ...]"
     services: "tuple[str, ...]"
@@ -41,199 +25,649 @@ class ComposeSelection:
 
 
 class ComposeOperations:
-    """Compose lifecycle operations and final-model rendering, shared by
-    the root ``up``/``restart``/``down`` commands and the ``compose``
-    command."""
-
-    def __init__(self, manager: "ContainerManager"):
+    def __init__(self, manager: "ContainerManager") -> None:
         self.manager = manager
 
     def select(self, names: "Sequence[str] | None" = None, with_dependencies: bool = False,
-              metadata_only: bool = False) -> ComposeSelection:
-        """Resolve the target selection. ``metadata_only=True`` (used by
-        ExecutionPlanner, which must stay read-only) registers config
-        fields without running any container's ``on_prepare()`` -- real
-        execution (``up``/``restart``/``down``/``compose``) always needs
-        the full prepare instead."""
-        manager = self.manager
-        if metadata_only:
-            project_containers = tuple(manager.load_installed_config_metadata())
-            if not project_containers:
-                from .container import NoContainerInstalledError
-                raise NoContainerInstalledError("No container installed")
-        else:
-            project_containers = tuple(manager.prepare_installed_containers())
-
+               for_start: bool = False) -> ComposeSelection:
+        project = tuple(self.manager.load_installed_config_metadata())
+        if not project:
+            from .container import NoContainerInstalledError
+            raise NoContainerInstalledError("No container installed")
         if not names:
-            return ComposeSelection(
-                project_containers=project_containers,
-                target_containers=project_containers,
-                services=(),
-                full=True,
-            )
-
-        installed_names = {c.name for c in project_containers}
-        unknown = [name for name in names if name not in installed_names]
+            return ComposeSelection(project, project, (), True)
+        installed = {container.name for container in project}
+        unknown = [name for name in names if name not in installed]
         if unknown:
-            raise ContainerError(f"Container(s) not installed: {', '.join(unknown)}")
-
-        target_containers = tuple(c for c in project_containers if c.name in names)
+            raise ContainerError("Container(s) not installed: " + ", ".join(unknown))
+        targets = tuple(container for container in project if container.name in names)
         if with_dependencies:
-            target_containers = tuple(manager.resolver.resolve_dependencies(target_containers))
+            targets = tuple(self.manager.resolver.resolve_dependencies(targets))
+        services = tuple(dict.fromkeys(service for container in targets for service in container.services))
+        if not services and not for_start:
+            raise ContainerError("No service found in selected containers")
+        return ComposeSelection(project, targets, services, False)
 
-        services: "list[str]" = []
-        seen: "set[str]" = set()
-        for container in target_containers:
-            for service_name in container.services.keys():
-                if service_name not in seen:
-                    seen.add(service_name)
-                    services.append(service_name)
-        if not services:
-            names_desc = ", ".join(c.name for c in target_containers)
-            raise ContainerError(f"No service found in container(s) `{names_desc}`")
+    def start_selection(self, selection: ComposeSelection, model: "dict | None" = None,
+                        running_services: "Iterable[str] | None" = None,
+                        privilege: "bool | None" = None) -> ComposeSelection:
+        """Select container groups and providers, then order only real Compose edges."""
+        installed = {container.name: container for container in selection.project_containers}
+        owners = {service: container for container in selection.project_containers for service in container.services}
+        definitions = model["services"] if model is not None else {
+            service: container.services[service] for service, container in owners.items()}
+        if model is None and selection.full and any(spec.get("profiles") for spec in definitions.values()):
+            native_model = self.manager.compose_runner.final_model(self._make_context("up", selection), privilege=privilege)
+            return self.start_selection(selection, native_model, running_services, privilege)
+        groups = {container for container in selection.target_containers
+                  if not container.services or set(container.services).intersection(definitions)}
+        providers = set(groups)
+        targets = set(groups)
+        services = set(selection.services) if selection.services else {
+            service for container in groups for service in container.services}
+        services.intersection_update(definitions)
+        running = set(running_services or ())
+        previous_consumers = {}
+        if running:
+            for entry in self.manager.artifact_index.load().values():
+                if entry.get("kind") != "generated-config":
+                    continue
+                consumer = installed.get(entry.get("container"))
+                if consumer is None or not set(consumer.services).intersection(running):
+                    continue
+                for producer in entry.get("producers", ()):
+                    previous_consumers.setdefault(producer, set()).add(consumer)
+        while True:
+            before = set(groups), set(providers), set(targets), set(services)
+            for container in tuple(groups):
+                for name in container.dependencies:
+                    if name not in installed:
+                        raise ContainerError("Required dependency {!r} for {} is not installed".format(
+                            name, container.name))
+                    groups.add(installed[name])
+                    providers.add(installed[name])
+                    targets.add(installed[name])
+                    services.update(set(installed[name].services).intersection(definitions))
+            required = {container.name for container in providers}
+            for container in selection.project_containers:
+                for name, selected in container.get_runtime_requirements(required).items():
+                    if name not in installed:
+                        raise ContainerError("Required provider {!r} is not installed".format(name))
+                    providers.add(installed[name])
+                    targets.add(installed[name])
+                    services.update(set(selected).intersection(definitions))
+            if running:
+                for producer in tuple(providers):
+                    exposed = {consumer.name for consumer in previous_consumers.get(producer.name, ())}
+                    for declaration in self.manager.integration_snapshot.get(producer.name, ()):
+                        exposed.add(declaration.consumer)
+                        attached = getattr(declaration, "link", None)
+                        if attached is not None:
+                            exposed.add(attached.consumer)
+                    for name in exposed:
+                        consumer = installed.get(name)
+                        if consumer is None:
+                            continue
+                        active = set(consumer.services) & running & set(definitions)
+                        if active:
+                            providers.add(consumer)
+                            targets.add(consumer)
+                            services.update(active)
+            for service in tuple(services):
+                for dependency, options in service_dependencies(definitions[service]).items():
+                    if options.get("required", True) is False and dependency not in services:
+                        continue
+                    if dependency not in owners or dependency not in definitions:
+                        raise ContainerError("Compose dependency {!r} for {} is not installed".format(
+                            dependency, service))
+                    services.add(dependency)
+                    targets.add(owners[dependency])
+            if before == (groups, providers, targets, services):
+                break
+        if model is None and any(spec.get("profiles") for spec in definitions.values()):
+            expanded = ComposeSelection(selection.project_containers,
+                                        tuple(container for container in selection.project_containers if container in targets),
+                                        tuple(service for service in owners if service in services), selection.full)
+            native_model = self.manager.compose_runner.final_model(self._make_context("up", expanded), privilege=privilege)
+            return self.start_selection(selection, native_model, running_services, privilege)
+        ordered = order_services(selection.project_containers,
+                                 tuple(service for service in owners if service in services), model)
+        if not ordered:
+            raise ContainerError("No runnable service in the selected scope")
+        target_order = tuple(dict.fromkeys(owners[service] for service in ordered))
+        target_order += tuple(container for container in selection.project_containers
+                              if container in targets and container not in target_order
+                              and not container.services)
+        return ComposeSelection(selection.project_containers, target_order, tuple(ordered), selection.full)
 
-        return ComposeSelection(
-            project_containers=project_containers,
-            target_containers=target_containers,
-            services=tuple(services),
-            full=False,
+    def _make_context(self, commands, selection: ComposeSelection) -> OperationContext:
+        return OperationContext(
+            actions=[commands] if isinstance(commands, str) else list(filter(None, commands)),
+            project_containers=list(selection.project_containers),
+            target_containers=list(selection.target_containers),
+            target_services=selection.services or tuple(
+                service for container in selection.target_containers for service in container.services),
+            is_full_project=selection.full,
         )
 
-    def _make_context(self, commands, selection: ComposeSelection) -> "EventContext":
-        context = EventContext()
-        context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
-        context.containers = list(selection.project_containers)
-        context.target_containers = list(selection.target_containers)
-        context.is_full_containers = selection.full
-        return context
-
     def up(self, names: "Sequence[str] | None" = None, pull: bool = False,
-          report: bool = False) -> None:
-        manager = self.manager
-        selection = self.select(names)
-        context = self._make_context(["up", pull and "pull"], selection)
-        options = ComposeOptions(remove_orphans=selection.full, services=list(selection.services))
-
-        container_scope = None if context.is_full_containers else ",".join(
-            c.name for c in context.target_containers)
-
-        with manager.lifecycle.notify_start(context):
-            model = manager.compose_runner.final_model(context)
-            preparation = manager.image_preparer
-            image_plan = preparation.plan(model, selection.services, force_pull=pull)
-            if image_plan.pull:
-                with record_phase(context, "pull", command=tuple(manager.compose_runner.pull_args(image_plan.pull)),
-                                  container=container_scope, logger=manager.logger):
-                    manager.compose_runner.pull(context, image_plan.pull)
-            if image_plan.build:
-                build_options = manager.compose_runner.options_for_build(image_plan.build, pull=pull)
-                with record_phase(context, "build", command=tuple(manager.compose_runner.build_args(build_options)),
-                                  container=container_scope, logger=manager.logger):
-                    manager.compose_runner.build(context, build_options)
-            with record_phase(context, "up", command=tuple(manager.compose_runner.up_args(options)),
-                              container=container_scope, logger=manager.logger):
-                manager.compose_runner.up(context, options)
-            # Recorded immediately after the runtime change succeeds, still
-            # inside this `with` block -- notify_start's on_started/
-            # AFTER_START hooks run in its __exit__, after this point but
-            # still before the `with` returns. If a hook then throws, the
-            # command still fails, but persisted state already reflects
-            # what's actually running instead of lagging behind it.
-            manager.running_state.mark_started(context)
-
-        with manager.lifecycle.notify_remove(context):
-            pass
-
-        if report:
-            render_report(manager.logger, get_records(context))
+           report: bool = False) -> None:
+        with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):
+            self._start(names, pull, report, restart=False)
 
     def restart(self, names: "Sequence[str] | None" = None, pull: bool = False,
-               report: bool = False) -> None:
+                report: bool = False) -> None:
+        with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):
+            self._start(names, pull, report, restart=True)
+
+    def _start(self, names, pull, report, restart):
+        import os
+        from .artifacts import (AppliedServiceModels, bind_prepared_files, collect_candidates,
+                                publish_prepared_files, prune_prepared_files)
+
         manager = self.manager
-        selection = self.select(names)
-        context = self._make_context(["restart", pull and "pull"], selection)
-        options = ComposeOptions(remove_orphans=selection.full, services=list(selection.services))
+        runner = manager.compose_runner
+        explicit = self.select(names, for_start=True)
+        requested_services = {service for container in explicit.target_containers for service in container.services}
+        warned_actions = set()
 
-        container_scope = None if context.is_full_containers else ",".join(
-            c.name for c in context.target_containers)
+        def warn_collateral(service, action, reason):
+            key = service, action
+            if restart or explicit.full or service in requested_services or key in warned_actions:
+                return
+            owner = owners.get(service)
+            manager.logger.warning("Partial up will %s service %s (container %s) outside the requested containers: %s",
+                                   action, service, owner.name if owner else "unknown", reason)
+            warned_actions.add(key)
 
-        with manager.lifecycle.notify_stop(context):
-            with record_phase(context, "stop", command=("stop", *selection.services),
-                              container=container_scope, logger=manager.logger):
-                manager.compose_runner.stop(context, selection.services)
-            # Recorded immediately after stop succeeds, still inside this
-            # `with` (before notify_stop's on_stopped/AFTER_STOP hooks) --
-            # if build/up below then fails, persisted state must reflect
-            # that the targets are actually stopped, not still show them
-            # running from before this restart began.
-            manager.running_state.mark_stopped(context)
+        saved_compose = {}
+        for path, (kind, owner, _) in collect_candidates(manager, explicit.project_containers).items():
+            if kind != "compose":
+                continue
+            legacy = os.path.join(str(manager.data_path), "compose", "applied", owner + ".yml")
+            source = legacy if os.path.exists(legacy) else path
+            try:
+                with open(source, encoding="utf-8") as stream:
+                    saved_compose[path] = stream.read()
+            except FileNotFoundError:
+                pass
+        # Runtime inspection renders Compose files, so retain recovery inputs first.
+        actual = manager.docker_inspector.get_project_state(explicit.project_containers)
+        initial = actual.running_services
+        selection = self.start_selection(explicit, running_services=initial)
+        refresh = frozenset(self.start_selection(explicit).services) if pull else frozenset()
+        context = self._make_context(["restart" if restart else "up", pull and "pull"], selection)
+        context.refresh_services = refresh
+        context.initial_runtime_state = actual
+        context.previous_compose_contents = saved_compose
 
         with manager.lifecycle.notify_start(context):
-            model = manager.compose_runner.final_model(context)
-            preparation = manager.image_preparer
-            image_plan = preparation.plan(model, selection.services, force_pull=pull)
+            if (tuple(context.target_containers) != selection.target_containers or
+                    tuple(context.target_services) != selection.services):
+                raise ContainerError("Lifecycle callbacks cannot change the resolved operation targets")
+            if any(spec.get("profiles") for container in selection.project_containers
+                   for spec in container.services.values()):
+                raw_model = runner.final_model(context, preserve_disabled=True)
+            else:
+                raw_model = runner.final_model(context)
+            ordered = order_services(selection.project_containers, selection.services, raw_model)
+            selection = ComposeSelection(selection.project_containers, selection.target_containers,
+                                         ordered, selection.full)
+            context.target_services = selection.services
+            owners = {service: container for container in selection.project_containers for service in container.services}
+            model_store = AppliedServiceModels(manager, raw_model, retained_services=initial)
+            context.service_models = model_store
+            missing = set(initial).intersection(raw_model["services"]).difference(model_store.previous)
+            while missing:
+                legacy = self._legacy_recovery_services(context, selection.services, missing)
+                if not legacy:
+                    break
+                model_store.retain_previous(runner.saved_service_models(context, tuple(sorted(legacy))))
+                missing.difference_update(legacy)
+            model = bind_prepared_files(context, raw_model, model_store.previous)
+            context.compose_model = manager.image_preparer.with_build_revisions(
+                model, selection.project_containers, selection.services)
+            model_store.set_model(context.compose_model)
+            image_plan = manager.image_preparer.plan(
+                context.compose_model, selection.services, force_pull=pull,
+                refresh_services=context.refresh_services)
             if image_plan.pull:
-                with record_phase(context, "pull", command=tuple(manager.compose_runner.pull_args(image_plan.pull)),
-                                  container=container_scope, logger=manager.logger):
-                    manager.compose_runner.pull(context, image_plan.pull)
+                with record_phase(context, "pull", command=tuple(runner.pull_args(image_plan.pull)),
+                                  logger=manager.logger):
+                    runner.pull(context, image_plan.pull)
             if image_plan.build:
-                build_options = manager.compose_runner.options_for_build(image_plan.build, pull=pull)
-                with record_phase(context, "build", command=tuple(manager.compose_runner.build_args(build_options)),
-                                  container=container_scope, logger=manager.logger):
-                    manager.compose_runner.build(context, build_options)
-            with record_phase(context, "up", command=tuple(manager.compose_runner.up_args(options)),
-                              container=container_scope, logger=manager.logger):
-                manager.compose_runner.up(context, options)
-            # See up()'s identical comment -- recorded before
-            # on_started/AFTER_START hooks run.
-            manager.running_state.mark_started(context)
+                refreshing = tuple(name for name in image_plan.build if name in context.refresh_services)
+                unchanged = tuple(name for name in image_plan.build if name not in context.refresh_services)
+                for services, update in ((unchanged, False), (refreshing, True)):
+                    if not services:
+                        continue
+                    options = runner.options_for_build(services, pull=update)
+                    with record_phase(context, "build", command=tuple(runner.build_args(options)),
+                                      logger=manager.logger):
+                        for service in services:
+                            warn_collateral(service, "build", "the requested image refresh requires a rebuild" if update else
+                                            "the required image is missing or its build inputs changed")
+                        runner.build(context, options)
+                        manager.image_preparer.verify_builds(context.compose_model, services)
+            target_image_ids = {name: manager.image_preparer.image_id(
+                context.compose_model["services"][name]["image"]) for name in selection.services}
+            with record_phase(context, "check", logger=manager.logger):
+                manager.lifecycle.check(context)
+                self._require_rollback_models(context, selection.services)
 
-        with manager.lifecycle.notify_remove(context):
-            pass
+            stop_set = set(explicit.services or (
+                service for container in explicit.target_containers for service in container.services)) if restart else set()
+            stop_set.intersection_update(selection.services)
+            pending_restart = stop_set & initial
+            running = set(initial)
+            failed = None
+            applied_services = []
+            updated, recreated = set(), set()
+            stop_attempted = False
+            stopped = False
+            try:
+                if stop_set:
+                    stop_targets = tuple(container for container in explicit.target_containers
+                                         if set(container.services).intersection(stop_set))
+                    stop_selection = ComposeSelection(explicit.project_containers, stop_targets,
+                                                      tuple(service for service in selection.services if service in stop_set),
+                                                      explicit.full)
+                    stop_context = self._make_context(context.actions, stop_selection)
+                    stop_context.compose_model = context.compose_model
+                    with manager.lifecycle.notify_stop(stop_context):
+                        stop_attempted = True
+                        with record_phase(context, "stop", command=("stop", *stop_selection.services), logger=manager.logger):
+                            runner.stop(stop_context, stop_selection.services)
+                        stopped = True
+                        running.difference_update(stop_set)
+                        self._update_running_state(context, running, explicit.target_containers)
+                for service in selection.services:
+                    failed = service
+                    spec = context.compose_model["services"][service]
+                    before_image = context.initial_runtime_state.running_images.get(service)
+                    image_changed = service in initial and before_image != target_image_ids[service]
+                    binds = set(namespace_dependencies(spec))
+                    recreate = (service in model_store.changed_services or image_changed or
+                                bool(binds & recreated))
+                    cascade = any(options.get("restart") and dependency in updated for
+                                  dependency, options in service_dependencies(spec).items())
+                    with record_phase(context, "up", container=owners[service].name, logger=manager.logger):
+                        if cascade and service in initial and not recreate and service not in stop_set:
+                            warn_collateral(service, "restart", "a declared dependency was updated")
+                            runner.restart_service(context, service)
+                        else:
+                            if manager.image_preparer.image_id(spec["image"]) != target_image_ids[service]:
+                                raise ContainerError("Selected image changed during deployment: " + service)
+                            if spec.get("scale") == 0 or spec.get("deploy", {}).get("replicas") == 0:
+                                if service in context.initial_runtime_state.existing_services:
+                                    warn_collateral(service, "remove", "the desired service scale is zero")
+                            elif recreate or service not in initial:
+                                action = "recreate" if service in context.initial_runtime_state.existing_services and recreate else "start"
+                                reason = ("a namespace provider was replaced" if binds & recreated else
+                                          "the selected image changed" if image_changed else
+                                          "the required service configuration changed" if service in initial else
+                                          "the required service is not running")
+                                warn_collateral(service, action, reason)
+                            runner.apply_service(context, service, recreate=recreate)
+                        active = runner.wait_service_ready(context, service)
+                        model_store.record((service,))
+                    if active:
+                        running.add(service)
+                    else:
+                        running.discard(service)
+                    pending_restart.discard(service)
+                    self._update_running_state(context, running, (owners[service],))
+                    applied_services.append(service)
+                    if recreate or service not in initial:
+                        recreated.add(service)
+                    if recreate or cascade or service in stop_set or service not in initial:
+                        updated.add(service)
+                    failed = None
+                for service, recreate in self._dependent_actions(
+                        context, selection.services, initial, updated, recreated):
+                    failed = service
+                    owner = owners.get(service)
+                    with record_phase(context, "restart-dependent", container=owner.name if owner else None,
+                                      logger=manager.logger):
+                        import yaml
+                        saved = runner.saved_service_models(context, (service,))
+                        previous_model = yaml.safe_load(saved[service])
+                        if recreate:
+                            warn_collateral(service, "recreate", "a namespace provider was replaced")
+                            runner.apply_saved_services(context, (service,),
+                                                        {"previous.yml": saved[service]})
+                        else:
+                            warn_collateral(service, "restart", "a declared dependency was updated")
+                            runner.restart_service(context, service, model=previous_model)
+                        runner.wait_service_ready(context, service, model=previous_model)
+                    failed = None
+            except (Exception, KeyboardInterrupt) as error:
+                try:
+                    restore = set()
+                    if stop_attempted and not stopped:
+                        from collections import Counter
+                        observed = manager.docker_inspector.get_project_state(selection.project_containers)
+                        original_counts = Counter(item.service for item in actual.services
+                                                  if item.state in ("running", "restarting"))
+                        observed_counts = Counter(item.service for item in observed.services
+                                                  if item.state in ("running", "restarting"))
+                        restore.update(service for service in pending_restart
+                                       if observed_counts[service] < original_counts[service])
+                        running = set(observed_counts)
+                    elif stopped:
+                        restore.update(pending_restart)
+                    cleanup = set()
+                    if failed is not None:
+                        affected = self._shared_input_consumers(context, failed, applied_services) | {failed}
+                        restore.update(affected & initial)
+                        cleanup = affected - initial
+                        if cleanup:
+                            discarded = set(cleanup)
+                            for service, _ in self._dependent_actions(
+                                    context, restore | cleanup, running, set(), discarded,
+                                    applied=set(applied_services) - restore, namespace_only=True):
+                                if service in initial:
+                                    restore.add(service)
+                                else:
+                                    cleanup.add(service)
+                                discarded.add(service)
+                            temporary = self._stopped_namespace_providers(context, cleanup, consumers=restore)
+                            restore.update(temporary)
+                            cleanup.difference_update(temporary)
+                            stopped_new = tuple(service for service in reversed(selection.services) if service in cleanup)
+                            if stopped_new:
+                                for service in stopped_new:
+                                    warn_collateral(service, "stop", "deployment recovery is discarding a new dependency")
+                                runner.stop(context, stopped_new)
+                                running.difference_update(cleanup)
+                                self._update_running_state(context, running, tuple(dict.fromkeys(
+                                    owners[service] for service in stopped_new if service in owners)))
+                                model_store.restore(stopped_new)
+                        else:
+                            temporary = set()
+                    else:
+                        temporary = set()
+                    touched = restore | cleanup
+                    successful = set(applied_services) - restore - cleanup
+                    actions = {service: True for service in (*context.compose_model["services"], *model_store.previous)
+                               if service in restore}
+                    actions.update(self._dependent_actions(
+                        context, restore | cleanup, running, (updated & successful) | restore,
+                        (recreated & successful) | restore, applied=successful))
+                    if actions:
+                        import yaml
+                        # Capture all old inputs before mutation; order old and current actions together.
+                        saved = runner.saved_service_models(context, tuple(
+                            service for service in (*context.compose_model["services"], *model_store.previous)
+                            if service in actions and service not in successful))
+                        models = {service: (context.compose_model if service in successful else
+                                            yaml.safe_load(saved[service])) for service in actions}
+                        specifications = {service: model["services"][service] for service, model in models.items()}
+                        ordered_recovery = order_service_subset(context.project_containers, specifications)
+                        original_images = actual.image_ids
+                        temporary_attempted = set()
 
+                        def stop_temporary():
+                            targets = tuple(service for service in reversed(ordered_recovery)
+                                            if service in temporary_attempted)
+                            if targets:
+                                for service in targets:
+                                    warn_collateral(service, "stop", "restore the namespace provider's original stopped state")
+                                runner.stop(context, targets)
+                                running.difference_update(targets)
+                                self._update_running_state(context, running, tuple(dict.fromkeys(
+                                    owners[service] for service in targets if service in owners)))
+
+                        try:
+                            for service in ordered_recovery:
+                                if actions[service]:
+                                    if service in successful:
+                                        spec = specifications[service]
+                                        if manager.image_preparer.image_id(spec["image"]) != target_image_ids[service]:
+                                            raise ContainerError("Selected image changed during recovery: " + service)
+                                        warn_collateral(service, "recreate", "deployment recovery changed a namespace provider")
+                                        runner.apply_service(context, service, recreate=True)
+                                    elif service in temporary:
+                                        temporary_attempted.add(service)
+                                        warn_collateral(service, "temporarily start", "deployment recovery must restore live namespace consumers")
+                                        runner.apply_saved_services(context, (service,), {"previous.yml": saved[service]},
+                                                                    image_ids=original_images)
+                                    else:
+                                        warn_collateral(service, "restore", "deployment recovery must restore dependency bindings or shared inputs")
+                                        runner.apply_saved_services(context, (service,), {"previous.yml": saved[service]})
+                                else:
+                                    warn_collateral(service, "restart", "deployment recovery changed a declared dependency")
+                                    runner.restart_service(context, service, model=models[service])
+                                active = runner.wait_service_ready(context, service, model=models[service])
+                                if active:
+                                    running.add(service)
+                                else:
+                                    running.discard(service)
+                                touched.add(service)
+                                if service in owners:
+                                    self._update_running_state(context, running, (owners[service],))
+                                if service in restore:
+                                    model_store.restore((service,))
+                        except Exception as recovery_error:
+                            try:
+                                stop_temporary()
+                            except Exception as stop_error:
+                                raise ContainerError("Recovery failed: {}; stopping temporary providers failed: {}".format(
+                                    recovery_error, stop_error)) from recovery_error
+                            raise
+                        stop_temporary()
+                    self._update_running_state(context, running, tuple(dict.fromkeys(
+                        owners[service] for service in touched if service in owners)))
+                except Exception as recovery_error:
+                    raise ContainerError("Operation failed: {}; recovery failed: {}".format(
+                        str(error) or type(error).__name__, recovery_error)) from error
+                raise
+            try:
+                publish_prepared_files(context, selection.services)
+            except Exception as error:
+                raise ContainerError("Services were applied; publishing file references failed: {}".format(error)) from error
+        manager.lifecycle.reconcile_removed(context)
+        try:
+            prune_prepared_files(context, model_store)
+        except (OSError, ContainerError) as error:
+            manager.logger.warning("Prepared file cleanup failed: %s", error)
         if report:
             render_report(manager.logger, get_records(context))
+
+    def _dependent_actions(self, context, selected, running, updated, recreated,
+                           applied=(), namespace_only=False):
+        """Propagate only declared Compose restart edges and stale namespace binds."""
+        # Unknown legacy services have no trustworthy dependency model to act on.
+        known = set(context.service_models.previous) | set(applied)
+        if context.is_full_project:
+            known.intersection_update(context.compose_model["services"])
+        running = set(running).intersection(known)
+        definitions = {}
+        for name in running:
+            model = None if name in applied else context.service_models.previous_model(name)
+            if model is None:
+                model = context.compose_model
+            definitions[name] = model["services"][name]
+        pending = {name: definitions[name] for name in sorted(running - set(selected))}
+        for name in order_service_subset(context.project_containers, pending):
+            rebuild = self._dependency_action(definitions[name], updated, recreated, namespace_only)
+            if rebuild is not None:
+                yield name, rebuild
+                updated.add(name)
+                if rebuild:
+                    recreated.add(name)
+
+    def _dependency_action(self, spec, updated, recreated, namespace_only=False):
+        binds = set(namespace_dependencies(spec))
+        if binds & recreated:
+            return True
+        if not namespace_only and any(options.get("restart") and parent in updated
+                                      for parent, options in service_dependencies(spec).items()):
+            return False
+        return None
+
+    def _legacy_recovery_services(self, context, selected, missing):
+        """Resolve old inputs only for selected services and their live dependents."""
+        import yaml
+        if not missing:
+            return set()
+        definitions = {}
+        for text in context.previous_compose_contents.values():
+            try:
+                old = yaml.safe_load(text) or {}
+            except yaml.YAMLError:
+                continue
+            if isinstance(old, dict) and isinstance(old.get("services", {}), dict):
+                for service, spec in old.get("services", {}).items():
+                    if service in missing and isinstance(spec, dict):
+                        definitions.setdefault(service, []).append(spec)
+        native_dependencies, native_namespaces = {}, {}
+        for item in context.initial_runtime_state.services:
+            if item.service not in definitions or item.service not in missing:
+                continue
+            bindings = getattr(item, "namespace_bindings", None)
+            if bindings is not None:
+                native_namespaces[item.service] = bindings
+            label = item.labels.get("com.docker.compose.depends_on")
+            if label is None:
+                continue
+            dependencies = native_dependencies.setdefault(item.service, {})
+            for entry in filter(None, label.split(",")):
+                fields = entry.split(":")
+                restart = len(fields) < 3 or fields[2].lower() in ("1", "t", "true")
+                prior = dependencies.get(fields[0], {}).get("restart", False)
+                dependencies[fields[0]] = {"restart": prior or restart}
+        for service in context.initial_runtime_state.running_services:
+            model = context.service_models.previous_model(service)
+            if model is not None:
+                definitions[service] = [model["services"][service]]
+        updated, recreated = set(selected), set(selected)
+        pending = (set(definitions) & set(context.initial_runtime_state.running_services)) - updated
+        if context.is_full_project:
+            pending.intersection_update(context.service_models.current)
+        while pending:
+            affected = set()
+            for service in pending:
+                if service in native_dependencies:
+                    dependencies = native_dependencies[service]
+                    actions = {self._dependency_action({"depends_on": dependencies}, updated, recreated)}
+                else:
+                    actions = {self._dependency_action(spec, updated, set()) for spec in definitions[service]}
+                namespaces = [native_namespaces[service]] if service in native_namespaces else definitions[service]
+                actions.update(self._dependency_action(spec, (), recreated, namespace_only=True) for spec in namespaces)
+                if True in actions or False in actions:
+                    affected.add(service)
+                    updated.add(service)
+                    if True in actions:
+                        recreated.add(service)
+            if not affected:
+                break
+            pending.difference_update(affected)
+        return set(missing) & set(definitions) & updated
+
+    def _shared_input_consumers(self, context, failed, applied):
+        """Restore applied peers only when they share a changed file input."""
+        from pathlib import Path
+
+        def changed_sources(service):
+            if service not in context.compose_model["services"]:
+                return []
+            previous = context.service_models.previous_model(service)
+            old = previous["services"][service] if previous is not None else {}
+            mounts = {item["target"]: item["source"] for item in old.get("volumes", ())
+                      if isinstance(item, dict) and item.get("type") == "bind"}
+            return [Path(item["source"]) for item in context.compose_model["services"][service].get("volumes", ())
+                    if isinstance(item, dict) and item.get("type") == "bind" and
+                    mounts.get(item["target"]) != item["source"]]
+
+        sources = {service: changed_sources(service) for service in applied}
+        changed = changed_sources(failed)
+        affected = set()
+        while True:
+            found = {service for service, inputs in sources.items() if service not in affected and any(
+                source == other or (source.is_dir() and source in other.parents) or
+                (other.is_dir() and other in source.parents)
+                for source in changed for other in inputs)}
+            if not found:
+                return affected
+            affected.update(found)
+            changed.extend(source for service in found for source in sources[service])
+
+    def _require_rollback_models(self, context, services):
+        from .errors import ContainerError
+        running = tuple(service for service in services if service in context.initial_runtime_state.running_services)
+        for service in running:
+            if not context.initial_runtime_state.running_images.get(service):
+                raise ContainerError("Cannot replace running service {} without its original image ID".format(service))
+        if running:
+            self.manager.compose_runner.saved_service_models(context, running)
+        captured = set()
+        images = context.initial_runtime_state.image_ids
+        while True:
+            stopped = self._stopped_namespace_providers(context, services) - captured
+            if not stopped:
+                break
+            for service in stopped:
+                if not images.get(service):
+                    raise ContainerError("Cannot replace namespace provider {} without its original image ID".format(service))
+            context.service_models.retain_previous(self.manager.compose_runner.saved_service_models(
+                context, tuple(sorted(stopped))))
+            captured.update(stopped)
+
+    def _stopped_namespace_providers(self, context, services, consumers=None):
+        """Find old stopped providers needed to preserve observed live namespaces."""
+        actual = context.initial_runtime_state
+        candidates = set(services) & (actual.existing_services - actual.running_services)
+        pending = list(actual.running_services if consumers is None else consumers)
+        result, checked = set(), set()
+        while pending:
+            consumer = pending.pop()
+            if consumer in checked:
+                continue
+            checked.add(consumer)
+            saved = context.service_models.previous_model(consumer)
+            if saved is None:
+                continue
+            spec = saved["services"][consumer]
+            dependencies = set(namespace_dependencies(spec))
+            for provider in dependencies & candidates:
+                result.add(provider)
+                pending.append(provider)
+        return result
+
+    def _update_running_state(self, context, running, containers):
+        from copy import copy
+        for container in containers:
+            state = copy(context)
+            state.target_containers = [container]
+            state.is_full_project = False
+            if set(container.services) & running:
+                self.manager.running_state.mark_started(state)
+            else:
+                self.manager.running_state.mark_stopped(state)
 
     def down(self, names: "Sequence[str] | None" = None, report: bool = False) -> None:
-        manager = self.manager
-        selection = self.select(names)
-        context = self._make_context("down", selection)
-        container_scope = None if context.is_full_containers else ",".join(
-            c.name for c in context.target_containers)
+        with self.manager.environ.locks.process_lock("cntr:project:" + self.manager.project_name):
+            manager = self.manager
+            selection = self.select(names)
+            context = self._make_context("down", selection)
+            with manager.lifecycle.notify_stop(context):
+                with record_phase(context, "down", command=("down", *selection.services), logger=manager.logger):
+                    manager.compose_runner.down(context, selection.services)
+                manager.running_state.mark_stopped(context)
+            manager.lifecycle.reconcile_removed(context)
+            if report:
+                render_report(manager.logger, get_records(context))
 
-        with manager.lifecycle.notify_stop(context):
-            with record_phase(context, "down", command=("down", *selection.services),
-                              container=container_scope, logger=manager.logger):
-                manager.compose_runner.down(context, selection.services)
-            # See up()'s identical comment -- recorded before
-            # on_stopped/AFTER_STOP hooks run.
-            manager.running_state.mark_stopped(context)
-
-        with manager.lifecycle.notify_remove(context):
-            pass
-
-        if report:
-            render_report(manager.logger, get_records(context))
-
-    def render(
-            self,
-            names: "Sequence[str] | None" = None,
-            with_dependencies: bool = False,
-            output_format: "str | None" = None,
-            check: bool = False,
-    ) -> "int | None":
-        """``ct-cntr compose``: the final resolved Docker Compose model for
-        the installed project (or ``--check`` to only validate it)."""
+    def render(self, names: "Sequence[str] | None" = None, with_dependencies: bool = False,
+               output_format: "str | None" = None, check: bool = False) -> "int | None":
         selection = self.select(names, with_dependencies=with_dependencies)
         context = self._make_context("compose", selection)
         return self.manager.compose_runner.config(
-            context, selection.services, output_format=output_format, quiet=check,
-        )
+            context, selection.services, output_format=output_format, quiet=check)
 
     def status(self) -> "tuple[tuple[BaseContainer, ...], ProjectRuntimeState]":
-        """Full-project actual status: always queries every
-        installed container -- the CONTAINER filter for ``ct-cntr status`` is
-        a display-only narrowing, applied by the caller."""
-        project_containers = tuple(self.manager.prepare_installed_containers())
-        state = self.manager.docker_inspector.get_project_state(project_containers)
-        return project_containers, state
+        from linktools.core import Config
+        with Config.read_only_resolution():
+            containers = tuple(self.manager.load_installed_config_metadata())
+            return containers, self.manager.docker_inspector.get_project_state(containers)

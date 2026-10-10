@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Flare container definition."""
+import os
+from collections import OrderedDict
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import yaml
 
-from linktools import utils
+from linktools.cntr import BaseContainer, ContainerError
+from linktools.cntr.ext import Flare, Nginx, load_port_url
 from linktools.core import ConfigField, LazyProvider
 from linktools.decorator import cached_property
-from linktools.cntr import BaseContainer
-from linktools.cntr.container import ExposeMixin, ExposeLink, ExposeCategory
 from linktools.errors import ConfigNotFoundError
 from linktools.rich import prompt
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
     from typing import Any
-    from collections.abc import Iterable
-    from linktools.cntr import EventContext
+    from linktools.cntr import OperationContext, Integrations
 
 
 class Container(BaseContainer):
@@ -28,7 +30,7 @@ class Container(BaseContainer):
             # `configs` declares the field's cast/provider/default); this
             # container must not redeclare it with a different default.
             FLARE_TAG="latest",
-            FLARE_DOMAIN=self.get_nginx_domain(""),
+            FLARE_DOMAIN=Nginx.domain(self, ""),
             FLARE_PORT=ConfigField(cast=int, default=5000),
             FLARE_AUTH_ENABLE=ConfigField(cast=bool, default=True),
             FLARE_LOGIN_ENABLE=ConfigField(cast=bool, default=False),
@@ -58,72 +60,109 @@ class Container(BaseContainer):
         return prompt("FLARE_PASSWORD")
 
     @cached_property
-    def exposes(self) -> "Iterable[ExposeLink]":
+    def integrations(self) -> "Integrations":
         return [
-            self.expose_container("Flare", "bookmark", "主页", self.load_port_url("FLARE_PORT", https=False)),
+            Flare.container(
+                "Flare", "bookmark", load_port_url(self, "FLARE_PORT", https=False),
+            ),
+            Nginx.site(
+                server_name=self.get_config_later("FLARE_DOMAIN"),
+                proxy="http://flare:5005",
+                auth=None if self.get_config("FLARE_AUTH_ENABLE") else False,
+                auth_bypass=(r"\.(css|js)$",),
+                auth_rule={"policy": "one_factor"} if self.get_config("FLARE_AUTH_ENABLE") else None,
+            ),
         ]
 
-    def on_starting(self, context: "EventContext") -> None:
 
-        categories = {}
-        apps = []
-        bookmarks = []
 
-        for key, value in vars(ExposeMixin).items():
-            if isinstance(value, ExposeCategory):
-                categories.setdefault(value, list())
-
-        for container in sorted(self.manager.installed_state.get(), key=lambda o: o.order):
-            for expose in container.exposes:
-                if isinstance(expose, ExposeLink) and expose.is_valid:
-                    categories[expose.category].append(expose)
-                    if expose.category is self.expose_public:
-                        apps.append(expose)
-                    bookmarks.append(expose)
-
-        data = {"links": []}
-        for app in apps:
-            data["links"].append({
-                "name": app.name,
-                "desc": app.desc,
-                "icon": app.icon,
-                "link": app.url,
-            })
-        utils.write_file(
-            self.get_app_path("app", "apps.yml", create_parent=True),
-            yaml.dump(data),
+    def _iter_links(self) -> "Iterator[Flare]":
+        manager = self.manager
+        snapshot = manager.integration_snapshot
+        producers = sorted(
+            (name for name, declarations in snapshot.items() if declarations),
+            key=lambda name: manager.containers[name].order,
         )
+        for name in producers:
+            declarations = snapshot[name]
+            for declaration in declarations:
+                if declaration.consumer != "nginx":
+                    continue
+                link = manager.containers["nginx"].sites[(name, declaration.local_id)].link
+                if link is not None:
+                    yield link
+            for declaration in declarations:
+                if declaration.consumer == "flare":
+                    yield declaration
 
-        data = {"categories": [], "links": []}
-        for category, links in categories.items():
-            if category.name == "public":
+
+    def on_starting(self, context: "OperationContext") -> None:
+        import shutil
+        import tempfile
+        app = self.get_app_path("runtime-app")
+        if not app.exists():
+            self.get_app_path().mkdir(parents=True, exist_ok=True)
+            temporary = Path(tempfile.mkdtemp(prefix=".flare-app-", dir=str(self.get_app_path())))
+            try:
+                legacy = self.get_app_path("app")
+                if legacy.is_dir():
+                    for source in legacy.iterdir():
+                        if source.name in ("apps.yml", "bookmarks.yml"):
+                            continue
+                        destination = temporary / source.name
+                        if source.is_symlink():
+                            destination.symlink_to(os.readlink(str(source)))
+                        elif source.is_dir():
+                            shutil.copytree(str(source), str(destination), symlinks=True)
+                        else:
+                            shutil.copy2(str(source), str(destination))
+                self.runtime.chown(temporary, self.user, recursive=True)
+                self.runtime.chmod(temporary, 0o750)
+                os.rename(str(temporary), str(app))
+            except BaseException:
+                shutil.rmtree(str(temporary))
+                raise
+        context.write_files(self, self._navigation_files(), mode=0o640,
+                            group=self.get_config("DOCKER_GID", type=int))
+
+    def on_check(self, context: "OperationContext") -> None:
+        for name in ("apps.yml", "bookmarks.yml"):
+            yaml.safe_load(context.file_path(self, name).read_text(encoding="utf-8"))
+
+    def _navigation_files(self) -> "dict[str, str]":
+
+        categories = OrderedDict()
+        apps = {"links": []}
+
+        for link in self._iter_links():
+            if not isinstance(link, Flare):
                 continue
-            if not links:
+            url = link.url
+            if not url:
                 continue
-            data["categories"].append({
-                "id": category.name,
-                "title": category.desc,
-            })
-            for link in links:
-                data["links"].append({
-                    "category": category.name,
-                    "name": link.name,
-                    "icon": link.icon,
-                    "link": link.url,
-                })
-        utils.write_file(
-            self.get_app_path("app", "bookmarks.yml", create_parent=True),
-            yaml.dump(data),
-        )
+            category = link.display_category
+            existing = categories.get(category.name)
+            if existing is None:
+                existing = (category, [])
+                categories[category.name] = existing
+            else:
+                for field, label in (("desc", "description"), ("apps", "output area"), ("order", "order")):
+                    if getattr(existing[0], field) != getattr(category, field):
+                        raise ContainerError(
+                            f"Conflicting {label} for Flare category {category.name!r}")
+            value = {"name": link.name, "icon": link.icon, "link": url}
+            if category.apps:
+                apps["links"].append(dict(value, desc=link.desc))
+            else:
+                existing[1].append(dict(value, category=category.name))
 
-        self.write_nginx_conf(
-            domain=self.get_config("FLARE_DOMAIN"),
-            proxy_url="http://flare:5005",
-            auth_enable=self.get_config("FLARE_AUTH_ENABLE"),
-            auth_extra={
-                "acl_bypass": ["\\.(css|js)$"],
-                "acl_rule": {
-                    "policy": "one_factor",
-                }
-            }
-        )
+        bookmarks = {"categories": [], "links": []}
+        for category, links in sorted(categories.values(), key=lambda entry: entry[0].order):
+            if category.apps:
+                continue
+            bookmarks["categories"].append({"id": category.name, "title": category.desc})
+            bookmarks["links"].extend(links)
+        return {
+            "apps.yml": yaml.safe_dump(apps, allow_unicode=True),
+            "bookmarks.yml": yaml.safe_dump(bookmarks, allow_unicode=True),
+        }

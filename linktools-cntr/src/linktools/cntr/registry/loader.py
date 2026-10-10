@@ -43,7 +43,8 @@ class ContainerLoadError:
 @dataclass(frozen=True)
 class ContainerLoadResult:
     """``ContainerLoader.load_all()``'s return value: the containers that
-    loaded successfully, plus every load failure as a structured
+    loaded successfully, plus every
+    load failure as a structured
     ``ContainerLoadError`` instead of a log-only warning that leaves
     callers unable to tell "not installed" apart from "failed to load"."""
     containers: "list[BaseContainer]"
@@ -78,7 +79,7 @@ class ContainerLoader:
 
         # Builtin container fields form the manager's base schema. Register
         # them before loading any third-party repository so repo providers
-        # (for example get_nginx_domain()) can resolve shared builtin fields
+        # (for example Nginx.domain()) can resolve shared builtin fields
         # such as NGINX_ROOT_DOMAIN.
         for container in containers:
             container.register_configs()
@@ -120,10 +121,8 @@ class ContainerLoader:
 
     def _walk(
             self, path: "PathType", max_level: int, repository: "RepositoryConfigContext",
-            errors: "list[ContainerLoadError] | None" = None,
+            errors: "list[ContainerLoadError]",
     ) -> "Iterator[BaseContainer]":
-        if errors is None:
-            errors = []
         if not os.path.isdir(path):
             return
         yield from self._load_one(path, repository, errors)
@@ -134,10 +133,8 @@ class ContainerLoader:
 
     def _load_one(
             self, path: "PathType", repository: "RepositoryConfigContext",
-            errors: "list[ContainerLoadError] | None" = None,
+            errors: "list[ContainerLoadError]",
     ) -> "Iterator[BaseContainer]":
-        if errors is None:
-            errors = []
         manager = self.manager
         container_path = os.path.join(path, manager.docker_container_name)
         if os.path.exists(container_path):

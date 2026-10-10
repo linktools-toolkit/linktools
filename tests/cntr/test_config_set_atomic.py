@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`config set` validates every key against every relevant schema before
-writing anything (review P1-05), and owner-label disambiguation for two
-same-named repositories is shared identically across
-list/get/explain/validate (review P2-05) instead of only being complete in
-`list`.
-"""
+"""Shared config writes validate the whole batch before atomic persistence."""
 import json
 import os
 
 import pytest
 
 import _harness
-from linktools.cntr.commands.config import ConfigCommand, build_display_owner_labels
+from linktools.cntr.commands.config import ConfigCommand
 import linktools.cntr.commands._shared as cntr_shared
 
 
@@ -30,8 +25,6 @@ def _fresh_standalone_manager(tmp_path):
 
     return ContainerManager(Environ(), name="aio")
 
-
-# -- P1-05: atomic validate-then-persist ------------------------------------
 
 def _repo_with_int_field(tmp_path, name):
     repo_dir = tmp_path / name
@@ -55,7 +48,9 @@ def test_set_rolls_back_whole_batch_when_one_key_invalid(tmp_path, monkeypatch):
     manager.installed_state.add("repo")
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
-    with pytest.raises(Exception):
+    from linktools.errors import ConfigCastError
+
+    with pytest.raises(ConfigCastError):
         ConfigCommand().on_command_set(configs={
             "HOST": "example.com",
             "PORT_FIELD": "not-a-number",
@@ -74,14 +69,22 @@ def test_set_persists_everything_when_all_keys_valid(tmp_path, monkeypatch):
     manager.installed_state.add("repo")
     monkeypatch.setattr(cntr_shared, "manager", manager)
 
+    writes = []
+    persist_many = manager.env_config.persist_many
+
+    def record_write(values):
+        writes.append(dict(values))
+        persist_many(values)
+
+    monkeypatch.setattr(manager.env_config, "persist_many", record_write)
     ConfigCommand().on_command_set(configs={"HOST": "example.com", "PORT_FIELD": "8080"})
+
+    assert writes == [{"HOST": "example.com", "PORT_FIELD": "8080"}]
 
     assert manager.env_config.get("HOST") == "example.com"
     container = manager.containers["repo"]
     assert container.env_config.get("PORT_FIELD") == 8080
 
-
-# -- P2-05: consistent owner-label disambiguation ----------------------------
 
 def _two_repos_sharing_a_name(tmp_path, shared_basename):
     # The two repos' own root directories share a basename (drives
@@ -132,18 +135,3 @@ def test_get_shows_one_shared_value_for_two_repos_sharing_a_name(tmp_path, monke
 
     assert out.count("SHARED_FIELD=") == 1
     assert "SHARED_FIELD=builtin-default" in out
-
-
-def test_build_display_owner_labels_disambiguates_only_when_needed():
-    from collections import namedtuple
-    T = namedtuple("T", ["owner_id", "owner_label"])
-
-    # Two distinct owners, same label -> both get a hash suffix.
-    labels = build_display_owner_labels([T("id-a", "common"), T("id-b", "common")])
-    assert labels["id-a"] != "common"
-    assert labels["id-b"] != "common"
-    assert labels["id-a"] != labels["id-b"]
-
-    # Two distinct owners, distinct labels -> plain labels, no suffix.
-    labels = build_display_owner_labels([T("id-a", "repo-a"), T("id-b", "repo-b")])
-    assert labels == {"id-a": "repo-a", "id-b": "repo-b"}

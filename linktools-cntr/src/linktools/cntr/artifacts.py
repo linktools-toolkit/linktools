@@ -8,7 +8,8 @@ shares.
 
 The index never records config values, secrets, or full template context --
 only a relative path, kind, owning container, sha256 and (best-effort)
-source path. It never deletes stale entries/files itself; it only records.
+source path. It never scans or deletes stale files; explicit rollback may
+remove entries for applied snapshots that were undone.
 """
 import hashlib
 import json
@@ -18,13 +19,16 @@ from typing import TYPE_CHECKING
 
 from linktools import utils
 
-from .container import ContainerError
+from .errors import ContainerError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from typing import Any
+    from typing import Any, Callable
+    from pathlib import Path
     from linktools.types import PathType
     from .container import BaseContainer
+    from .context import OperationContext
+    from typing import Mapping
     from .manager import ContainerManager
 
 INDEX_SCHEMA_VERSION = 1
@@ -40,25 +44,28 @@ class ArtifactIndexError(ContainerError):
     newly "added"."""
 
 
-def atomic_write_text_if_changed(path: "PathType", content: str, encoding: str = "utf-8") -> bool:
-    """Write ``content`` to ``path`` atomically. Return True iff it changed.
+def atomic_write_text_if_changed(path: "PathType", content: str, encoding: str = "utf-8", *,
+                                 mode: "int | None" = None) -> bool:
+    """Write atomically; return whether content changed, not permissions.
 
-    ``linktools.utils.atomic_write`` replaces the target with a freshly
-    created temp file (``tempfile.mkstemp``, mode 0600), which would
-    otherwise silently narrow an existing file's permissions on every
-    regeneration; the previous mode is restored here for an existing target.
+    Without ``mode``, preserve existing permissions. An explicit mode also
+    applies when content is unchanged. The replacement starts private so
+    sensitive output never inherits a previously permissive mode.
     """
     path = str(path)
     original_mode = None
     if os.path.exists(path):
+        original_mode = stat.S_IMODE(os.stat(path).st_mode)
         with open(path, "r", encoding=encoding) as f:
             existing = f.read()
         if existing == content:
+            if mode is not None and original_mode != mode:
+                os.chmod(path, mode)
             return False
-        original_mode = stat.S_IMODE(os.stat(path).st_mode)
     utils.atomic_write(path, content, encoding=encoding)
-    if original_mode is not None:
-        os.chmod(path, original_mode)
+    target_mode = original_mode if mode is None else mode
+    if target_mode is not None:
+        os.chmod(path, target_mode)
     return True
 
 
@@ -66,28 +73,44 @@ def sha256_of(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def collect_candidates(manager: "ContainerManager", containers: "Iterable[BaseContainer]") -> "dict[str, tuple[str, str, str]]":
-    """Render each container's compose/Dockerfile candidate content
-    in-memory -- never touching the real generated file on disk. Returns
-    ``{absolute_destination_path: (kind, container_name, content)}``.
+def docker_file_destination(container: "BaseContainer") -> "Path":
+    """Return the generated Dockerfile path without rendering or writing it."""
+    return utils.join_path(container.manager.data_path, "dockerfile", f"{container.name}.Dockerfile")
 
-    Shared by ExecutionPlanner (dry-run artifact hashing) and the real
-    up/restart write path, so the two can never compute a candidate's
-    destination or content differently.
-    """
+
+def compose_candidate(container: "BaseContainer") -> "tuple[Path, str] | None":
+    """Serialize the Compose model without creating its destination."""
     import yaml
 
+    compose = container.docker_compose
+    if not compose:
+        return None
+    destination = utils.join_path(container.manager.data_path, "compose", f"{container.name}.yml")
+    return destination, yaml.safe_dump(compose, sort_keys=True, allow_unicode=False)
+
+
+def docker_file_candidate(container: "BaseContainer") -> "tuple[Path, str] | None":
+    """Return a rendered Dockerfile and destination without writing either."""
+    content = container.docker_file
+    if not content:
+        return None
+    return docker_file_destination(container), content
+
+
+def collect_candidates(manager: "ContainerManager", containers: "Iterable[BaseContainer]") -> "dict[str, tuple[str, str, str]]":
+    """Collect pure Compose/Dockerfile serializations shared with file writers.
+
+    Returns ``{absolute_destination_path: (kind, container_name, content)}``.
+    The manager argument is retained for callers; each container owns its
+    destination through its manager, just as it does during execution.
+    """
     candidates: "dict[str, tuple[str, str, str]]" = {}
     for container in containers:
-        compose = container.docker_compose
-        if compose:
-            content = yaml.safe_dump(compose, sort_keys=True, allow_unicode=False)
-            dest = str(utils.join_path(manager.data_path, "compose", f"{container.name}.yml"))
-            candidates[dest] = ("compose", container.name, content)
-        docker_file = container.docker_file
-        if docker_file:
-            dest = str(utils.join_path(manager.data_path, "dockerfile", f"{container.name}.Dockerfile"))
-            candidates[dest] = ("dockerfile", container.name, docker_file)
+        for kind, candidate in (("compose", compose_candidate(container)),
+                                ("dockerfile", docker_file_candidate(container))):
+            if candidate is not None:
+                destination, content = candidate
+                candidates[str(destination)] = (kind, container.name, content)
     return candidates
 
 
@@ -168,9 +191,10 @@ class ArtifactIndex:
             return []
         return sorted(rel_path for rel_path, meta in artifacts.items() if "repository_url" in meta)
 
-    def record(self, entries: "dict[str, dict[str, Any]]") -> bool:
-        """Merge ``entries`` (artifact relative path -> metadata) into the
-        index and write it atomically (canonical JSON, sorted, trailing
+    def record(self, entries: "dict[str, dict[str, Any]]", *,
+               remove: "Iterable[str]" = ()) -> bool:
+        """Merge ``entries`` and explicitly remove paths undone by rollback.
+        The index is written atomically (canonical JSON, sorted, trailing
         newline). Unrelated existing entries are preserved. Returns True iff
         the on-disk index content changed.
 
@@ -185,6 +209,8 @@ class ArtifactIndex:
         with self.manager.environ.locks.process_lock("cntr:artifact-index"):
             artifacts = self.load()
             artifacts.update(entries)
+            for rel_path in remove:
+                artifacts.pop(rel_path, None)
             payload = dict(
                 schema_version=INDEX_SCHEMA_VERSION,
                 project=self.manager.project_name,
@@ -194,3 +220,353 @@ class ArtifactIndex:
             path = self.path
             os.makedirs(os.path.dirname(path), exist_ok=True)
             return atomic_write_text_if_changed(path, content)
+
+
+def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
+                mode: int = 0o600, group: "int | None" = None) -> "Path":
+    """Materialize immutable inputs; no current pointer or service is changed."""
+    import shutil
+    import tempfile
+    from pathlib import Path, PurePosixPath
+
+    for name in files:
+        path = PurePosixPath(name)
+        if not name or path.is_absolute() or ".." in path.parts or "\\" in name:
+            raise ContainerError("Prepared file must stay within its tree: " + name)
+    payload = json.dumps([mode, group, sorted(files.items())], ensure_ascii=True,
+                         separators=(",", ":"))
+    root = container.get_app_path("generated")
+    destination = root / sha256_of(payload)
+    if destination.exists():
+        actual = {path.relative_to(destination).as_posix() for path in destination.rglob("*")
+                  if path.is_file()}
+        if actual != set(files) or any(
+                (destination / name).is_symlink() or
+                (destination / name).read_text(encoding="utf-8") != content or
+                stat.S_IMODE((destination / name).stat().st_mode) != mode or
+                (group is not None and (destination / name).stat().st_gid != group)
+                for name, content in files.items()):
+            raise ContainerError("Prepared file tree was modified: " + str(destination))
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".prepare-", dir=str(root)))
+        try:
+            container.runtime.chmod(temporary, 0o755)
+            for name, content in files.items():
+                path = temporary / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                utils.atomic_write(path, content, encoding="utf-8")
+                if group is not None and path.stat().st_gid != group:
+                    container.runtime.create_process(
+                        "chgrp", str(group), str(path), privilege=True).check_call()
+                container.runtime.chmod(path, mode)
+            os.rename(str(temporary), str(destination))
+        except BaseException:
+            shutil.rmtree(str(temporary))
+            raise
+    producers = sorted({
+        name for name, declarations in getattr(container.manager, "integration_snapshot", {}).items()
+        for declaration in declarations
+        if declaration.consumer == container.name or
+        getattr(getattr(declaration, "link", None), "consumer", None) == container.name
+    })
+    container.manager.artifact_index.record({
+        os.path.relpath(str(destination / name), str(container.manager.data_path)): {
+            "kind": "generated-config", "container": container.name,
+            "sha256": sha256_of(content), "producers": producers,
+        } for name, content in files.items()
+    })
+    return destination
+
+
+def bind_prepared_files(context: "OperationContext", model: dict,
+                        previous: "Mapping[str, str]") -> dict:
+    """Bind immutable inputs, reusing unchanged single-file mounts per consumer."""
+    import yaml
+    from pathlib import Path
+
+    roots = [(container.get_app_path("generated"), context.prepared_dirs[container.name])
+             for container in context.project_containers if container.name in context.prepared_dirs]
+    services = dict(model["services"])
+    for service, spec in model["services"].items():
+        if context.target_services is not None and service not in context.target_services:
+            continue
+        old = yaml.safe_load(previous[service])["services"][service] if service in previous else {}
+        old_mounts = {item["target"]: item for item in old.get("volumes", ())
+                      if isinstance(item, dict) and item.get("type") == "bind"}
+        volumes = []
+        changed = False
+        for item in spec.get("volumes", ()):
+            replacement = item
+            if isinstance(item, dict) and item.get("type") == "bind":
+                source = Path(item["source"])
+                for root, candidate in roots:
+                    try:
+                        relative = source.relative_to(root / "current")
+                    except ValueError:
+                        continue
+                    prepared = candidate / relative
+                    if not prepared.exists():
+                        raise ContainerError("Missing prepared input for {}: {}".format(service, relative))
+                    prior = old_mounts.get(item["target"])
+                    if prior is not None and prepared.is_file():
+                        old_source = Path(prior["source"])
+                        try:
+                            old_relative = old_source.relative_to(root)
+                        except ValueError:
+                            old_relative = None
+                        if (old_relative is not None and old_relative.parts
+                                and old_relative.parts[0] != "current" and old_source.is_file()
+                                and old_source.stat().st_mode == prepared.stat().st_mode
+                                and old_source.stat().st_gid == prepared.stat().st_gid
+                                and old_source.read_bytes() == prepared.read_bytes()):
+                            prepared = old_source
+                    replacement = dict(item, source=str(prepared))
+                    changed = True
+                    break
+            volumes.append(replacement)
+        if changed:
+            services[service] = dict(spec, volumes=volumes)
+    return dict(model, services=services)
+
+
+def _unapplied_running_services(context: "OperationContext", services: "Iterable[str]") -> "set[str]":
+    unapplied = set(context.initial_runtime_state.running_services) - set(services)
+    if context.is_full_project:
+        declared = {service for container in context.project_containers for service in container.services}
+        unapplied.intersection_update(declared)
+    return unapplied
+
+
+def publish_prepared_files(context: "OperationContext", services: "Iterable[str]") -> None:
+    """Expose confirmed inputs for later read-only Compose rendering.
+
+    AppliedServiceModels identifies each running service's immutable inputs.
+    Legacy or unknown running inputs must keep their current pointer untouched.
+    """
+    import uuid
+    import yaml
+    from pathlib import Path
+
+    services = tuple(services)
+    unapplied = _unapplied_running_services(context, services)
+    if unapplied.intersection(context.service_models.untracked_services):
+        # Without a saved model, any generated tree may still be mounted.
+        return
+    legacy_sources = [Path(item["source"]) for service in unapplied
+                      if service in context.service_models.previous
+                      for item in yaml.safe_load(context.service_models.previous[service])["services"][service].get("volumes", ())
+                      if isinstance(item, dict) and item.get("type") == "bind"]
+    sources = [Path(item["source"]) for service in services
+               for item in context.compose_model["services"][service].get("volumes", ())
+               if isinstance(item, dict) and item.get("type") == "bind"]
+    for candidate in context.prepared_dirs.values():
+        used = False
+        for source in sources:
+            try:
+                source.relative_to(candidate)
+            except ValueError:
+                continue
+            used = True
+            break
+        if not used:
+            continue
+        current = candidate.parent / "current"
+        # An unselected legacy service may still dereference generated/current.
+        # Its existing input must not change as a side effect of this deployment.
+        if any(source == candidate.parent or source == current or
+               current in source.parents for source in legacy_sources):
+            continue
+        if current.is_symlink() and os.readlink(str(current)) == candidate.name:
+            continue
+        if os.path.lexists(str(current)) and not current.is_symlink():
+            raise ContainerError("Generated current must be a symbolic link")
+        temporary = candidate.parent / (".current-" + uuid.uuid4().hex)
+        temporary.symlink_to(candidate.name)
+        try:
+            os.replace(str(temporary), str(current))
+        finally:
+            if temporary.is_symlink():
+                temporary.unlink()
+
+
+def prune_prepared_files(context: "OperationContext", models: "AppliedServiceModels") -> None:
+    """Retain every applied input and the preceding rollback inputs."""
+    import shutil
+    import yaml
+    from pathlib import Path
+
+    unapplied = _unapplied_running_services(context, context.target_services or ())
+    if models.untracked_services.intersection(unapplied):
+        return
+    references = []
+    for collection in (models.current, models.previous):
+        for service, text in collection.items():
+            spec = yaml.safe_load(text)["services"][service]
+            references.extend(Path(item["source"]) for item in spec.get("volumes", ())
+                              if isinstance(item, dict) and item.get("type") == "bind")
+    for candidate in context.prepared_dirs.values():
+        root = candidate.parent
+        if any(source == root or source == root / "current" or
+               root / "current" in source.parents for source in references):
+            # A legacy directory model does not identify its concrete file tree.
+            # Keep those inputs until subsequent applied models use immutable paths.
+            continue
+        keep = {candidate.name}
+        current = root / "current"
+        if current.is_symlink():
+            keep.add(os.readlink(str(current)))
+        for source in references:
+            try:
+                relative = source.relative_to(root)
+            except ValueError:
+                continue
+            if relative.parts:
+                keep.add(relative.parts[0])
+        for path in root.iterdir():
+            if (path.name in keep or len(path.name) not in (32, 64)
+                    or any(char not in "0123456789abcdef" for char in path.name)
+                    or path.is_symlink() or not path.is_dir()):
+                continue
+            index = models.manager.artifact_index
+            prefix = os.path.relpath(str(path), str(models.manager.data_path)) + os.sep
+            index.record({}, remove=tuple(key for key in index.load() if key.startswith(prefix)))
+            shutil.rmtree(str(path))
+class AppliedServiceModels:
+    """Track each service's applied model, retaining project support for rollback."""
+
+    def __init__(self, manager: "ContainerManager", model: dict, *,
+                 retained_services: "Iterable[str]" = ()) -> None:
+        from types import MappingProxyType
+        import yaml
+
+        self.manager = manager
+        self.root = os.path.join(str(manager.data_path), "compose", "applied", "services")
+        if not isinstance(model, dict) or not isinstance(model.get("services"), dict):
+            raise ContainerError("Resolved Compose model must contain a services mapping")
+        previous = {}
+        for service, spec in model["services"].items():
+            if not isinstance(service, str) or not service or not isinstance(spec, dict):
+                raise ContainerError("Resolved Compose services must have names and mapping definitions")
+        retained_services = tuple(retained_services)
+        for service in dict.fromkeys(tuple(model["services"]) + retained_services):
+            if not isinstance(service, str) or not service:
+                raise ContainerError("Retained Compose services must have names")
+            path = self._path(service)
+            try:
+                with open(path, encoding="utf-8") as stream:
+                    saved = yaml.safe_load(stream)
+            except FileNotFoundError:
+                if os.path.lexists(path):
+                    raise ContainerError("Cannot read applied Compose model for service {}".format(service)) from None
+                continue
+            except (OSError, UnicodeError, yaml.YAMLError):
+                raise ContainerError("Cannot read applied Compose model for service {}".format(service)) from None
+            if (not isinstance(saved, dict) or not isinstance(saved.get("services"), dict)
+                    or service not in saved["services"]
+                    or any(not isinstance(name, str) or not name or not isinstance(definition, dict)
+                           for name, definition in saved["services"].items())):
+                raise ContainerError("Invalid applied Compose model for service {}".format(service))
+            previous[service] = self._normalize(saved)
+        self.previous = MappingProxyType(previous)
+        self.set_model(model)
+        self.untracked_services = frozenset(service for service in retained_services if service not in previous)
+
+    def retain_previous(self, models: "Mapping[str, str]") -> None:
+        """Capture resolved legacy inputs without replacing per-service snapshots."""
+        from types import MappingProxyType
+        previous = dict(models)
+        previous.update(self.previous)
+        self.previous = MappingProxyType(previous)
+        self.untracked_services = self.untracked_services.difference(previous)
+
+    def previous_model(self, service: str) -> "dict | None":
+        """Decode a separate working copy without exposing mutable snapshot state."""
+        import yaml
+        text = self.previous.get(service)
+        return yaml.safe_load(text) if text is not None else None
+
+    @classmethod
+    def _projection(cls, model: dict, service: str) -> str:
+        spec = {key: value for key, value in model["services"][service].items() if key != "build"}
+        shared = {key: value for key, value in model.items()
+                  if key not in ("services", "networks", "volumes", "secrets", "configs")}
+        for category in ("networks", "volumes", "secrets", "configs"):
+            definitions = model.get(category, {})
+            if category == "networks":
+                if spec.get("network_mode") or spec.get("networks") == []:
+                    names = ()
+                else:
+                    names = spec.get("networks") or ("default",)
+            elif category == "volumes":
+                names = (item.get("source") for item in spec.get("volumes", ())
+                         if isinstance(item, dict) and item.get("type") == "volume")
+            else:
+                names = (item if isinstance(item, str) else item.get("source")
+                         for item in spec.get(category, ()))
+            shared[category] = {name: definitions[name] for name in names if name in definitions}
+        return cls._normalize(dict(shared, services={service: spec}))
+
+    @classmethod
+    def _normalize(cls, model: dict) -> str:
+        import yaml
+        try:
+            # Compose's resolved model is JSON-compatible. Round-tripping also
+            # removes YAML aliases whose spelling depends on object identity.
+            value = json.loads(json.dumps(model, sort_keys=True, allow_nan=False))
+            return yaml.safe_dump(value, sort_keys=True, allow_unicode=False)
+        except (TypeError, ValueError, yaml.YAMLError):
+            raise ContainerError("Applied Compose model is not a valid resolved model") from None
+
+    def _path(self, service: str) -> str:
+        return os.path.join(self.root, service.encode("utf-8").hex() + ".yml")
+
+    def record(self, services: "Iterable[str]") -> None:
+        selected = tuple(dict.fromkeys(services))
+        if any(service not in self.current for service in selected):
+            raise ContainerError("Cannot record services absent from the resolved Compose model")
+        if not selected:
+            return
+        os.makedirs(self.root, mode=0o700, exist_ok=True)
+        os.chmod(os.path.dirname(self.root), 0o700)
+        os.chmod(self.root, 0o700)
+        entries = {}
+        for service in selected:
+            content = self.current[service]
+            path = self._path(service)
+            # Resolved environments may contain secrets; the atomic writer's
+            # fresh 0600 file must not inherit a permissive existing mode.
+            utils.atomic_write(path, content, encoding="utf-8")
+            entries[os.path.relpath(path, str(self.manager.data_path))] = dict(
+                kind="compose-applied-service", container=service, sha256=sha256_of(content))
+        self.manager.artifact_index.record(entries)
+
+    def restore(self, services: "Iterable[str]") -> None:
+        """Restore snapshot identities after their runtime rollback succeeds."""
+        entries = {}
+        removed = []
+        for service in dict.fromkeys(services):
+            path = self._path(service)
+            previous = self.previous.get(service)
+            if previous is None:
+                if os.path.exists(path):
+                    os.unlink(path)
+                removed.append(os.path.relpath(path, str(self.manager.data_path)))
+                continue
+            utils.atomic_write(path, previous, encoding="utf-8")
+            entries[os.path.relpath(path, str(self.manager.data_path))] = dict(
+                kind="compose-applied-service", container=service, sha256=sha256_of(previous))
+        if entries or removed:
+            self.manager.artifact_index.record(entries, remove=removed)
+
+
+    def set_model(self, model: dict) -> None:
+        """Compare prepared mount identities with the same captured old models."""
+        from types import MappingProxyType
+        normalized = self._normalize(model)
+        # Compose validates dependencies even with --no-deps, so each service
+        # snapshot retains the full project's support declarations.
+        self.current = MappingProxyType({name: normalized for name in model["services"]})
+        self.changed_services = frozenset(
+            name for name in model["services"] if name not in self.previous or
+            self._projection(self.previous_model(name), name) != self._projection(model, name))

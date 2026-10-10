@@ -3,26 +3,61 @@
 """Nginx reverse-proxy container definition."""
 import json
 import os
-import shutil
+import re
+import shlex
+import hashlib
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+from jinja2 import Environment, FileSystemLoader, PrefixLoader, StrictUndefined, TemplateError
 
 from linktools import utils
 from linktools.cntr import BaseContainer, ContainerError
-from linktools.core import (
-    ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider,
-)
+from linktools.cntr.container import ContainerTemplateError
+from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvider, ConfirmProvider
 from linktools.decorator import cached_property
 from linktools.errors import ConfigNotFoundError
 from linktools.rich import choose
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
-    from typing import Any
-    from linktools.cntr import EventContext
+    from types import SimpleNamespace
+    from linktools.cntr.ext import ResolvedSite
+    from collections.abc import Iterable, Sequence
+    from typing import AbstractSet, Any, Mapping
+    from linktools.cntr import OperationContext
     from linktools.types import PathType
 
 
 class Container(BaseContainer):
+
+    def quote(self, value: object) -> str:
+        data = str(value)
+        if any(ch in data for ch in ("\r", "\n", "\x00")):
+            raise ContainerError("Nginx header value contains a control character")
+        data = data.replace("\\", "\\\\").replace('"', '\\"')
+        return '"' + data.replace("$", "$" + "{literal_dollar}") + '"'
+
+    @staticmethod
+    def validated_auth_headers(headers: "Mapping[str, str]") -> "dict[str, str]":
+        result = {}
+        seen = set()
+        forbidden = {
+            "host", "forwarded", "x-real-ip", "x-original-url",
+            "x-original-method", "x-forwarded-for", "x-forwarded-host",
+            "x-forwarded-method", "x-forwarded-proto", "x-forwarded-uri",
+            "x-forwarded-port", "x-auth-user", "x-auth-groups",
+            "x-auth-name", "x-auth-email",
+        }
+        for key, value in headers.items():
+            if not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_\x60|~0-9A-Za-z-]+", key):
+                raise ContainerError("Invalid nginx auth header name")
+            normalized = key.lower()
+            if normalized in seen or normalized in forbidden or normalized.startswith("x-proxy-original-"):
+                raise ContainerError(f"Duplicate or reserved nginx auth header: {key}")
+            seen.add(normalized)
+            result[key] = value
+        return result
 
     @cached_property
     def dnsapi(self) -> "dict[str, Any]":
@@ -66,6 +101,8 @@ class Container(BaseContainer):
                 AliasProvider("AUTH_ENABLE"), LazyProvider(lambda r: self.containers["authelia"].enable),
                 cast=bool,
             ),
+            ACME_SERVER="letsencrypt",
+            ACME_ACCOUNT_EMAIL="",
             ACME_DNS_API=ConfigField.chain(
                 LazyProvider(lambda r: self._prompt_acme_dns_api(r), cached=True),
                 cast=str, default="",
@@ -93,38 +130,60 @@ class Container(BaseContainer):
             env_vars = self.dnsapi.get(dns_api).get("env", {})
             for env_var, meta in env_vars.items():
                 configs[env_var] = ConfigField.chain(
-                    PromptProvider(cached=True, allow_empty=meta.get("required", True)),
-                    name=env_var,
+                    PromptProvider(cached=True, allow_empty=not meta.get("required", True)),
+                    name=env_var, secret=True,
+                    default=MISSING if meta.get("required", True) else "",
                 )
         return configs
 
     @cached_property
-    def _acme_ssl_domains(self):
-        result = list()
+    def acme_ssl_domains(self) -> "list[str]":
+        result = []
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if domain:
             result.extend([domain, f"*.{domain}"])
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            for site in self.sites.values():
+                if not site.enabled or not site.https:
+                    continue
+                for value in site.cert_domains:
+                    if value and value not in result:
+                        result.append(value)
         return result
 
     @cached_property
+    def cert_image_revision(self) -> str:
+        """Identify build code and TLS inputs without including DNS credentials."""
+        parts = [self.get_config("NGINX_TAG"),
+                 str(self.get_config("NGINX_HTTPS_ENABLE", type=bool)),
+                 self.get_source_path("Dockerfile").read_text(encoding="utf-8")]
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            parts.extend((self.get_config("ACME_SERVER"), self.get_config("ACME_DNS_API"),
+                          self.get_config("ACME_ACCOUNT_EMAIL")))
+            parts.extend(self.acme_ssl_domains)
+            parts.extend(self.get_source_path(name).read_text(encoding="utf-8")
+                         for name in ("nginx-certificates", "nginx-acme", "dnsapi.json"))
+        return hashlib.sha256("\n".join(map(str, parts)).encode("utf-8")).hexdigest()[:16]
+    def get_build_revision(self, service: str) -> "str | None":
+        return self.cert_image_revision if service == "nginx" else None
+
+    @cached_property
     def acme_ssl_domains_args(self) -> str:
-        return " ".join([f"--domain {domain}" for domain in self._acme_ssl_domains if domain])
+        return " ".join("--domain " + shlex.quote(domain) for domain in self.acme_ssl_domains if domain)
 
     @cached_property
     def acme_ssl_certificate_args(self) -> str:
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if domain:
             return " ".join([
-                "--cert-file", f"/etc/certs/{domain}_cert.pem",
-                "--key-file", f"/etc/certs/{domain}_key.pem",
-                "--fullchain-file", f"/etc/certs/{domain}_fullchain.pem",
+                "--cert-file", shlex.quote(f"/etc/certs/{domain}_cert.pem"),
+                "--key-file", shlex.quote(f"/etc/certs/{domain}_key.pem"),
+                "--fullchain-file", shlex.quote(f"/etc/certs/{domain}_fullchain.pem"),
             ])
         return ""
 
-    def append_ssl_domains(self, *domians: str) -> None:
-        for domain in domians:
-            if domain and domain not in self._acme_ssl_domains:
-                self._acme_ssl_domains.append(domain)
+    def shell_quote(self, value: object) -> str:
+        return shlex.quote(str(value))
 
     def _get_default_index_url(self):
         return utils.make_url(
@@ -135,208 +194,271 @@ class Container(BaseContainer):
             self.get_config("NGINX_DEFAULT_PORT")
         )
 
-    def on_init(self) -> None:
-        self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
-
-    def on_check(self, context: "EventContext") -> None:
+    def on_check(self, context: "OperationContext") -> None:
+        import shutil
+        import tempfile
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
             raise ContainerError("NGINX_WAF_ENABLE is true but safeline container is not enabled.")
         if self.get_config("NGINX_AUTH_ENABLE") and not self.containers["authelia"].enable:
             raise ContainerError("NGINX_AUTH_ENABLE is true but authelia container is not enabled.")
-
-    def _update_files(self):
-        utils.clear_directory(self.get_app_path("conf.d"))
-
-        # 初始化snippets
-        snippets_path = self.get_app_path("conf.d", "snippets")
-        snippets_path.mkdir(parents=True, exist_ok=True)
-
-        waf_enable = self.get_config("NGINX_WAF_ENABLE")
-        auth_enable = self.get_config("NGINX_AUTH_ENABLE")
-        self.render_template(
-            self.get_source_path("templates", "header.conf"),
-            self.get_app_path("conf.d", "snippets", "header.conf"),
-            X_HEADER_ENABLE=not waf_enable
-        )
-        self.render_template(
-            self.get_source_path("templates", "header_all.conf"),
-            self.get_app_path("conf.d", "snippets", "header_all.conf"),
-        )
-        self.render_template(
-            self.get_source_path("templates", "params.conf"),
-            self.get_app_path("conf.d", "snippets", "params.conf")
-        )
-        if waf_enable:
-            self.render_template(
-                self.get_source_path("templates", "waf.conf"),
-                self.get_app_path("conf.d", "snippets", "waf.conf"),
-            )
-        if auth_enable:
-            self.render_template(
-                self.get_source_path("templates", "auth.conf"),
-                self.get_app_path("conf.d", "snippets", "auth.conf"),
-            )
-
-        # 初始化conf.d
-        for container in self.manager.installed_state.get():
-            path = self.get_app_path("temporary", container.name)
-            if os.path.isdir(path):
-                shutil.copytree(
-                    path,
-                    self.get_app_path("conf.d", create_parent=True),
-                    dirs_exist_ok=True,
-                )
-        if not self.get_app_path("conf.d", "_.conf").exists():
-            self.write_conf(
-                self, "_",
-                proxy_name="default",
-                proxy_conf=self.get_source_path("templates", "index.conf"),
-                flush=True,
-            )
-
-    def on_started(self, context: "EventContext") -> None:
-        # 更新证书（如果启用HTTPS）
-        if self.get_config("NGINX_HTTPS_ENABLE"):
-            self.logger.info("Renew nginx certificates if necessary.")
-            self.runtime.create_docker_process(
-                "exec", "-it", self.get_service_name("nginx"),
-                "sh", "-c", f"acme.sh --renew --issue "
-                            f"{self.acme_ssl_domains_args} "
-                            f"--dns {self.get_config('ACME_DNS_API')} "
-                            f"1>/dev/null"
-            ).call()
-            self.runtime.create_docker_process(
-                "exec", "-it", self.get_service_name("nginx"),
-                "sh", "-c", f"acme.sh --install-cert "
-                            f"{self.acme_ssl_domains_args} "
-                            f"{self.acme_ssl_certificate_args} "
-                            f"1>/dev/null"
-            ).call()
-
-        # 重启nginx
-        self.runtime.create_docker_process(
-            "exec", "-it", self.get_service_name("nginx"),
-            "sh", "-c", "killall nginx 1>/dev/null 2>&1"
-        ).call()
-
-    def on_stopped(self, context: "EventContext") -> None:
-        if context.is_full_containers:
-            self.on_removed(context)
-            return
-        for container in context.target_containers:
-            path = self.get_app_path("temporary", container.name)
-            if path.exists():
-                utils.remove_file(path)
-
-    def on_removed(self, context: "EventContext") -> None:
-        utils.clear_directory(self.get_app_path("temporary"))
-        utils.clear_directory(self.get_app_path("conf.d"))
-
-    def write_conf(
-        self, container: "BaseContainer", domain: str, *,
-        proxy_name: str = MISSING, proxy_domain_name: str = MISSING,
-        proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
-        https_enable: bool = MISSING, waf_enable: bool = MISSING,
-        auth_enable: bool = False, auth_extra: "dict[str, Any]" = MISSING,
-        flush: bool = False,
-    ) -> None:
-
-        proxy_name = proxy_name or container.name
-        proxy_domain_name = proxy_domain_name or domain
-        if flush:
-            conf_path = self.get_app_path("conf.d", f"{proxy_domain_name}.conf")
-            sub_conf_path = self.get_app_path("conf.d", f"{proxy_domain_name}_confs", f"{proxy_name}.conf")
+        runner = self.manager.compose_runner
+        command = ("nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/managed/nginx.conf", "-t")
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            with tempfile.TemporaryDirectory(prefix="cntr-nginx-check-") as directory:
+                source = self.get_app_path("certs", self.cert_image_revision, "live").resolve()
+                previous = Path(directory) / self.cert_image_revision / "previous"
+                previous.mkdir(parents=True, mode=0o700)
+                domain = self.get_config("NGINX_ROOT_DOMAIN")
+                for suffix in ("cert", "key", "fullchain"):
+                    path = source / (domain + "_" + suffix + ".pem")
+                    if path.is_file():
+                        shutil.copy2(str(path), str(previous / path.name))
+                result = runner.validate_service(context, "nginx", (
+                    "/bin/sh", "-c", "/usr/local/bin/nginx-certificates check && "
+                    "exec nginx -p /etc/nginx/ -c /etc/nginx/managed/nginx.conf -t"),
+                    mount_overrides={"/etc/certs": directory}, check=False)
         else:
-            conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}.conf")
-            sub_conf_path = self.get_app_path("temporary", container.name, f"{proxy_domain_name}_confs", f"{proxy_name}.conf")
+            result = runner.validate_service(context, "nginx", command, check=False)
+        if not result.succeeded or "conflicting server name" in (result.stdout + result.stderr).lower():
+            match = re.search(r" in ([/A-Za-z0-9_.-]+):(\d+)", result.stderr)
+            location = " at {}:{}".format(*match.groups()) if match else ""
+            raise ContainerError("Native validation failed for nginx{} (exit {})".format(
+                location, result.returncode))
+    @cached_property
+    def sites(self) -> "Mapping[tuple[str, str], ResolvedSite]":
+        from linktools.cntr.ext import ResolvedSite
+        return ResolvedSite.collect(self.manager)
 
+    def complex_value(self, value: str) -> str:
+        """Quote one native nginx complex value without interpreting its variables."""
+        if not isinstance(value, str) or any(ch in value for ch in ("\r", "\n", "\x00")):
+            raise ContainerError("Invalid nginx complex value")
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    def header_items(self, site: "ResolvedSite | SimpleNamespace", overrides: "Mapping[str, str | None] | None" = None,
+                     authentication: bool = False) -> "tuple[tuple[str, str], ...]":
+        """Build a complete case-insensitive header set for one proxy location."""
+        headers = {
+            "Host": "$original_host", "Upgrade": "$http_upgrade",
+            "Connection": "$connection_upgrade", "X-Real-IP": "$original_client_ip",
+            "X-Original-URL": "$original_scheme://$original_host$original_uri",
+            "X-Original-Method": "$original_method", "X-Forwarded-Proto": "$original_scheme",
+            "X-Forwarded-Host": "$original_host", "X-Forwarded-URI": "$original_uri",
+            "X-Forwarded-Method": "$original_method", "X-Forwarded-For": "$original_client_ip",
+            "X-Forwarded-Port": "$original_port", "Forwarded": "",
+        }
+        for name in ("Scheme", "Host", "URI", "Method", "Client-IP"):
+            headers["X-Proxy-Original-" + name] = ""
+        for name in ("User", "Groups", "Name", "Email"):
+            headers["X-Auth-" + name] = (
+                "$identity_" + site.var_name + "_" + name.lower()
+                if site.auth and not authentication else "")
+        auth_headers = self.validated_auth_headers(site.auth_headers) if site.auth else {}
+        if not authentication:
+            for index, key in enumerate(auth_headers):
+                headers[key] = "$credential_" + site.var_name + "_" + str(index)
+        seen = set()
+        protected = {key.lower() for key in auth_headers}
+        for key, value in (overrides or {}).items():
+            if not isinstance(key, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key):
+                raise ContainerError("Invalid nginx header override name")
+            normalized = key.lower()
+            if (normalized in seen or normalized.startswith("x-proxy-original-") or
+                    normalized in {"x-auth-user", "x-auth-groups", "x-auth-name", "x-auth-email"} or
+                    (not authentication and normalized in protected)):
+                raise ContainerError("Duplicate or reserved nginx header override: " + key)
+            seen.add(normalized)
+            value = "" if value is None else value
+            self.complex_value(value)
+            for original in tuple(headers):
+                if original.lower() == normalized:
+                    del headers[original]
+            headers[key] = value
+        if authentication:
+            headers.update({"Content-Length": "", "Connection": "", "Upgrade": ""})
+        return tuple((key, self.complex_value(value)) for key, value in headers.items())
+
+    def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
+        manager = self.manager
+        sites = self.sites
+        needs_nginx = self.name in required or any(
+            producer in required and site.enabled for (producer, _), site in sites.items())
+        if not needs_nginx:
+            return {}
+        result = {self.name: tuple(self.services)}
+        for site in sites.values():
+            if not site.enabled:
+                continue
+            for capability, provider in (("auth", "authelia"), ("waf", "safeline")):
+                if getattr(site, capability):
+                    result[provider] = (("authelia",) if provider == "authelia"
+                                        else tuple(manager.containers[provider].services))
+        return result
+
+    def _render_site_template(self, container: "BaseContainer", source: "PathType",
+                        site: "ResolvedSite | SimpleNamespace", business: "str | None" = None,
+                        sites: "Sequence[ResolvedSite] | None" = None,
+                        route_auth: bool = False) -> str:
+        """Render one location template with unambiguous local/nginx namespaces."""
+        nginx = self
+        source = Path(source).absolute()
+        nginx_root = Path(nginx.get_source_path("templates")).absolute()
+        environment = Environment(
+            loader=PrefixLoader({
+                "local": FileSystemLoader(str(source.parent)),
+                "nginx": FileSystemLoader(str(nginx_root)),
+            }),
+            undefined=StrictUndefined,
+            autoescape=False,
+            trim_blocks=nginx_root in source.parents,
+            lstrip_blocks=nginx_root in source.parents,
+        )
+        environment.tests["http_header"] = re.compile(r"[A-Za-z0-9_-]+").fullmatch
         try:
-            if not domain:
-                raise ContainerError("not found domain")
-            if not proxy_conf:
-                if not proxy_url:
-                    raise ContainerError("not found url")
-                proxy_conf = self.get_source_path("templates", "default.conf")
-
-            self.logger.debug(f"Write nginx conf for {container} {domain}")
-
-            https_enable = True if https_enable is MISSING else https_enable
-            https_enable = https_enable and self.get_config("NGINX_HTTPS_ENABLE")
-
-            waf_enable = True if waf_enable is MISSING else waf_enable
-            waf_enable = waf_enable and self.get_config("NGINX_WAF_ENABLE")
-
-            if auth_enable:
-                if not self.get_config("NGINX_AUTH_ENABLE", type=bool):
-                    self.logger.warning(f"NGINX_AUTH_ENABLE is false, disable auth in {container}")
-                    auth_enable = False
-
-            context = dict(
-                DOMAIN=domain,
-                DOMAIN_NAME=proxy_domain_name,
-                HTTPS_ENABLE=https_enable,
-                WAF_ENABLE=waf_enable,
-                AUTH_ENABLE=auth_enable,
-                AUTH_HEADERS=auth_extra.get("auth_headers", None) if auth_extra else None,
-                AUTH_BYPASS=auth_extra.get("acl_bypass", None) if auth_extra else None,
+            template_name = "nginx/" + source.relative_to(nginx_root).as_posix()
+        except ValueError:
+            template_name = "local/" + source.name
+        extra = {} if business is None else {"business": business}
+        if sites is not None:
+            extra["sites"] = sites
+        if route_auth:
+            extra["route_auth"] = True
+        try:
+            return environment.get_template(template_name).render(
+                site=site,
+                container=container,
+                nginx=nginx,
+                config=container.env_config,
+                template_vars=site.template_vars,
+                **extra,
             )
+        except TemplateError as exc:
+            raise ContainerTemplateError(
+                f"Invalid nginx template {source} for {container.name}/{getattr(site, 'local_id', '?')}: {exc}"
+            ) from exc
 
-            conf_path.parent.mkdir(parents=True, exist_ok=True)
-            sub_conf_path.parent.mkdir(parents=True, exist_ok=True)
-            container.render_template(
-                self.get_source_path("templates", "server.conf"),
-                conf_path,
-                **context,
-            )
-            if proxy_conf is not MISSING or proxy_url is not MISSING:
-                container.render_template(
-                    proxy_conf,
-                    sub_conf_path,
-                    PROXY_URL=proxy_url,
-                    **context,
+    @cached_property
+    def _rendered_site_files(self) -> "tuple[dict[str, str], bool]":
+        """Evaluate business templates once for this declaration snapshot."""
+        from types import SimpleNamespace
+        result = {}
+        active = []
+        for site in self.sites.values():
+            if site.enabled:
+                active.append(site.resolve())
+        defaults = {}
+        for site in active:
+            if not site.default_server:
+                continue
+            ports = [site.producer.get_config("NGINX_HTTP_PORT")]
+            if site.https:
+                ports.append(site.producer.get_config("NGINX_HTTPS_PORT"))
+            if site.waf:
+                ports.append(site.producer.get_config("NGINX_WAF_PORT"))
+            for port in ports:
+                if port in defaults:
+                    raise ContainerError("Multiple default nginx sites on port {}: {}/{} and {}/{}".format(
+                        port, defaults[port].producer.name, defaults[port].local_id,
+                        site.producer.name, site.local_id))
+                defaults[port] = site
+        if not any(site.default_server for site in active):
+            active.append(SimpleNamespace(
+                producer=self, local_id="default", file_id="default", var_name="default",
+                server_name='""', default_server=True, https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
+                waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, template_vars={},
+                template=self.get_source_path("templates", "index.conf"), proxy=None,
+            ))
+        from collections import OrderedDict
+        groups = OrderedDict()
+        for site in active:
+            domain = site.server_name
+            host_pattern = r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
+            if re.fullmatch(host_pattern, domain) or re.fullmatch(r"\*\." + host_pattern, domain):
+                domain = domain.lower()
+            key = (site.producer.get_config("NGINX_HTTP_PORT"), domain)
+            groups.setdefault(key, []).append(site)
+        for (port, domain), sites in groups.items():
+            leader = sites[0]
+            def routing_policy(site):
+                return (
+                    site.https, site.waf, site.waf_bypass,
+                    site.producer.get_config("NGINX_HTTPS_PORT") if site.https else None,
+                    site.producer.get_config("NGINX_WAF_PORT") if site.waf else None,
                 )
-            if auth_enable:
-                authelia = self.containers["authelia"]
-                authelia.write_nginx_conf(
-                    domain=domain,
-                    proxy_name="auth_location",
-                    proxy_domain_name=proxy_domain_name,
-                    proxy_conf=self.get_source_path("templates", "auth_location.conf"),
-                    waf_enable=waf_enable,
-                )
-                if auth_extra:
-                    uris = auth_extra.get("oidc_redirect_uris", None)
-                    if uris:
-                        oidc_redirect_uris = authelia.oidc_clients[0].get("RedirectURLs")
-                        for uri in uris:
-                            if not uri:
-                                self.logger.info(f"{container} invalid oidc redirect uri: None, skip.")
-                                continue
-                            scheme = self.get_config("NGINX_DEFAULT_SCHEME")
-                            port = self.get_config("NGINX_DEFAULT_PORT")
-                            base_url = utils.make_url(scheme, domain, port)
-                            redirect_uri = uri.format(scheme=scheme, domain=domain, port=port, base_url=base_url)
-                            if not redirect_uri:
-                                self.logger.info(f"{container} invalid oidc redirect uri: {uri}, skip.")
-                                continue
-                            oidc_redirect_uris.add(redirect_uri)
+            policy = routing_policy(leader)
+            for site in sites[1:]:
+                if routing_policy(site) != policy:
+                    raise ContainerError(
+                        "Incompatible nginx routing policies on {}:{} for {}/{} and {}/{}".format(
+                            domain, port, leader.producer.name, leader.local_id,
+                            site.producer.name, site.local_id))
+            route_auth = len(sites) > 1 and any(
+                (member.auth, member.auth_bypass) != (leader.auth, leader.auth_bypass)
+                for member in sites[1:])
+            leader = next((site for site in sites if site.default_server), leader)
+            routes = []
+            for site in sites:
+                source = site.template or self.get_source_path("templates", "default.conf")
+                business = self._render_site_template(
+                    site.producer, source, site, route_auth=route_auth)
+                if len(sites) > 1:
+                    business = "# site {}/{}\n{}".format(site.producer.name, site.local_id, business)
+                routes.append(business)
+            result["sites/" + leader.file_id + ".conf"] = self._render_site_template(
+                leader.producer, self.get_source_path("templates", "server.conf"),
+                leader, business="\n".join(routes), sites=sites, route_auth=route_auth)
+        return result, any(site.waf for site in active)
 
-                    acl_rule = auth_extra.get("acl_rule", None)
-                    if acl_rule:
-                        target_acl_rule = authelia.acl_rules.setdefault(domain, {})
-                        target_acl_rule["Subject"] = acl_rule.get("subject", None)
-                        target_acl_rule["Policy"] = acl_rule.get("policy", None)
+    def on_starting(self, context: "OperationContext") -> None:
+        import tarfile
+        import tempfile
+        from filelock import FileLock
+        from types import SimpleNamespace
+        from linktools.cntr.artifacts import atomic_write_text_if_changed
 
-        except ContainerError as e:
-            self.logger.debug(f"{container} write nginx conf: {e}, skip.")
-
-            utils.remove_file(sub_conf_path)
-            if sub_conf_path.parent.exists():
-                try:
-                    if not any(f.endswith(".conf") for f in os.listdir(sub_conf_path.parent)):
-                        utils.remove_file(sub_conf_path.parent)
-                        utils.remove_file(conf_path)
-                except:
-                    pass
+        if self.get_config("NGINX_HTTPS_ENABLE", type=bool):
+            for name in ("certs", "acme", "acme-secrets"):
+                self.get_app_path(name).mkdir(parents=True, exist_ok=True)
+            self.runtime.chmod(self.get_app_path("acme-secrets"), 0o700)
+            values = []
+            for key, field in self.extend_configs.items():
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    raise ContainerError("Invalid DNS environment variable name: " + key)
+                value = str(self.get_config(field))
+                if "\n" in value or "\r" in value:
+                    raise ContainerError("DNS credentials must be single-line values")
+                values.append("export {}={}\n".format(key, shlex.quote(value)))
+            atomic_write_text_if_changed(self.get_app_path("acme-secrets", "dns.env"),
+                                         "".join(values), mode=0o600)
+            lock_path = self.get_app_path("certs", ".acme.lock")
+            with FileLock(str(lock_path)):
+                self.runtime.chmod(lock_path, 0o600)
+                previous_revision = next((item.labels.get("io.linktools.nginx.certificate-revision")
+                                          for item in context.initial_runtime_state.services
+                                          if item.service == "nginx"), None)
+                account = self.get_app_path("certs", self.cert_image_revision, "live", "acme")
+                if not account.is_dir() and previous_revision is not None:
+                    if not re.fullmatch(r"[0-9a-f]{16}", previous_revision):
+                        raise ContainerError("Invalid running nginx certificate revision")
+                    account = self.get_app_path("certs", previous_revision, "live", "acme")
+                if not account.is_dir():
+                    account = self.get_app_path("acme")
+                archive = self.get_app_path("acme-build-account.tar")
+                with tempfile.NamedTemporaryFile(dir=str(archive.parent), delete=False) as stream:
+                    temporary = stream.name
+                    try:
+                        with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as output:
+                            for entry in account.iterdir():
+                                output.add(str(entry), arcname=entry.name)
+                    except BaseException:
+                        os.unlink(temporary)
+                        raise
+                os.replace(temporary, str(archive))
+        files, waf = self._rendered_site_files
+        result = dict(files)
+        root_site = SimpleNamespace(template_vars={"waf": waf, "site_files": tuple(files)})
+        result["nginx.conf"] = self._render_site_template(
+            self, self.get_source_path("templates", "nginx.conf"), root_site)
+        context.write_files(self, result)

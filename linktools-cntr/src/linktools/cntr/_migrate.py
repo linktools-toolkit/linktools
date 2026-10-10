@@ -5,7 +5,7 @@ import json
 import os
 from typing import TYPE_CHECKING
 
-from linktools.core import backup_legacy_path
+from linktools.core import Config, backup_legacy_path
 
 if TYPE_CHECKING:
     from linktools.core import ConfigStore
@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 
 
 def migrate_legacy_settings(manager: "ContainerManager", new_store: "ConfigStore") -> "ConfigStore":
+    if Config.is_read_only_resolution():
+        return new_store
 
     # One-time migration from v0.9.0: INSTALLED_CONTAINERS/INSTALLED_REPOS
     # used to live in a shelve database at

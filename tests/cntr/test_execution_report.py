@@ -10,18 +10,21 @@ from linktools.cntr.runtime.images import ImagePlan
 
 
 def _record(manager, monkeypatch, build=False):
+    from _harness import stub_generated_runtime
+    stub_generated_runtime(manager, monkeypatch)
     def fake(containers, *args, privilege=None, **kwargs):
         class _Proc:
             def check_call(self):
                 return 0
         return _Proc()
 
-    def fake_plan(model, services=(), force_pull=False):
+    def fake_plan(model, services=(), force_pull=False, refresh_services=()):
         targets = tuple(services)
         return ImagePlan(build=targets if build else (), pull=(), targets=targets)
 
-    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
-    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {}})
+    monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
+    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
+        name: {"image": name + ":current"} for container in context.project_containers for name in container.services}})
     monkeypatch.setattr(manager.image_preparer, "plan", fake_plan)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
@@ -57,7 +60,9 @@ def test_up_records_build_and_up_phases(fresh_manager, monkeypatch):
 
     records = get_records(context_holder[0])
     phases = [r.phase for r in records]
-    assert phases == ["build", "up"]
+    assert phases[0] == "build"
+    assert "up" in phases
+    assert phases.index("build") < phases.index("check") < phases.index("up")
     assert all(isinstance(r, ExecutionRecord) and r.success for r in records)
 
 
@@ -71,7 +76,9 @@ def test_down_records_failure_with_message(fresh_manager, monkeypatch):
                 raise RuntimeError("compose down failed")
         return _Proc()
 
-    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fail)
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fail)
+    monkeypatch.setattr(fresh_manager.compose_runner, "final_model",
+                        lambda context: {"services": {"portainer": {"image": "portainer:local"}}})
 
     context_holder = []
     real_make_context = fresh_manager.compose_operations._make_context
@@ -105,7 +112,9 @@ def test_failure_diagnostic_is_logged_regardless_of_report_flag(fresh_manager, m
                 raise RuntimeError("compose down failed")
         return _Proc()
 
-    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fail)
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fail)
+    monkeypatch.setattr(fresh_manager.compose_runner, "final_model",
+                        lambda context: {"services": {"portainer": {"image": "portainer:local"}}})
 
     errors = []
     monkeypatch.setattr(fresh_manager.logger, "error", lambda msg: errors.append(msg))
@@ -121,14 +130,17 @@ def test_failure_diagnostic_is_logged_regardless_of_report_flag(fresh_manager, m
 
 
 def test_build_command_proxy_secrets_are_redacted(fresh_manager, monkeypatch):
+    from _harness import stub_generated_runtime
+    stub_generated_runtime(fresh_manager, monkeypatch)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
     monkeypatch.setenv("http_proxy", "http://user:super-secret@proxy:8080")
-    monkeypatch.setattr(fresh_manager.compose_runner, "final_model", lambda context: {"services": {}})
+    monkeypatch.setattr(fresh_manager.compose_runner, "final_model", lambda context: {"services": {
+        name: {"image": name + ":current"} for container in context.project_containers for name in container.services}})
     monkeypatch.setattr(
         fresh_manager.image_preparer,
         "plan",
-        lambda model, services=(), force_pull=False: ImagePlan(
+        lambda model, services=(), force_pull=False, refresh_services=(): ImagePlan(
             build=tuple(services), pull=(), targets=tuple(services)
         ),
     )
@@ -136,12 +148,12 @@ def test_build_command_proxy_secrets_are_redacted(fresh_manager, monkeypatch):
     def fail_build(containers, *args, privilege=None, **kwargs):
         class _Proc:
             def check_call(self):
-                if args and args[0] == "build":
+                if "build" in args:
                     raise RuntimeError("build failed")
                 return 0
         return _Proc()
 
-    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fail_build)
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fail_build)
 
     context_holder = []
     real_make_context = fresh_manager.compose_operations._make_context
@@ -175,4 +187,5 @@ def test_report_flag_does_not_change_running_state_writes(fresh_manager, monkeyp
     cntr_main.command.on_command_up(names=["portainer"], pull=False, report=False)
     without_report = set(fresh_manager.running_state.get_persisted())
 
-    assert with_report == without_report == {"portainer"}
+    assert with_report == without_report
+    assert {"portainer", "nginx", "lldap", "authelia", "safeline"} <= with_report

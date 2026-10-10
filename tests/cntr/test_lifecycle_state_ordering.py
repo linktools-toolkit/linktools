@@ -10,17 +10,30 @@ from linktools.types import MISSING
 
 
 def _neutralize_runtime(manager, monkeypatch):
-    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {}})
+    manager.env_config.set("NGINX_ROOT_DOMAIN", "example.test")
+    from linktools.cntr.runtime.inspect import ProjectRuntimeState
+    monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
+                        ProjectRuntimeState(manager.project_name, (), "docker"))
+    monkeypatch.setattr(manager.compose_operations, "start_selection",
+                        lambda selection, **kwargs: selection)
+    monkeypatch.setattr(manager.compose_runner, "apply_service",
+                        lambda context, service, recreate=False: None)
+    monkeypatch.setattr(manager.compose_runner, "wait_service_ready",
+                        lambda context, service, **kwargs: True)
+    monkeypatch.setattr(manager.image_preparer, "image_id",
+                        lambda image: "sha256:fixture-image")
+
+    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
+        name: {"image": name + ":local"} for container in context.project_containers for name in container.services}})
     monkeypatch.setattr(
         manager.image_preparer,
         "plan",
-        lambda model, services=(), force_pull=False: ImagePlan(
+        lambda model, services=(), force_pull=False, **kwargs: ImagePlan(
             build=(), pull=(), targets=tuple(services)
         ),
     )
     monkeypatch.setattr(manager.compose_runner, "build", lambda context, options: None)
     monkeypatch.setattr(manager.compose_runner, "pull", lambda context, services: None)
-    monkeypatch.setattr(manager.compose_runner, "up", lambda context, options: None)
     monkeypatch.setattr(manager.compose_runner, "stop", lambda context, services: None)
     monkeypatch.setattr(manager.compose_runner, "down", lambda context, services: None)
 
@@ -48,7 +61,7 @@ def test_up_marks_started_before_on_started_hook_failure(fresh_manager, monkeypa
     _neutralize_runtime(fresh_manager, monkeypatch)
     _fail_lifecycle_callback(monkeypatch, "on_started")
 
-    with pytest.raises(RuntimeError, match="on_started boom"):
+    with pytest.raises(Exception, match="after-start callback failed: on_started boom"):
         fresh_manager.compose_operations.up(names=["portainer"])
 
     assert "portainer" in fresh_manager.running_state.get_persisted()
@@ -58,7 +71,7 @@ def test_up_marks_started_before_after_start_hook_failure(fresh_manager, monkeyp
     _neutralize_runtime(fresh_manager, monkeypatch)
     _fail_hook_phase(monkeypatch, HookPhase.AFTER_START)
 
-    with pytest.raises(RuntimeError, match="after-start boom"):
+    with pytest.raises(Exception, match="after-start callback failed: after-start boom"):
         fresh_manager.compose_operations.up(names=["portainer"])
 
     assert "portainer" in fresh_manager.running_state.get_persisted()
@@ -86,13 +99,13 @@ def test_down_marks_stopped_before_after_stop_hook_failure(fresh_manager, monkey
     assert "portainer" not in fresh_manager.running_state.get_persisted()
 
 
-def test_restart_stop_success_build_failure_still_marks_stopped(fresh_manager, monkeypatch):
+def test_restart_build_failure_keeps_running_targets(fresh_manager, monkeypatch):
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer"})
     monkeypatch.setattr(
         fresh_manager.image_preparer,
         "plan",
-        lambda model, services=(), force_pull=False: ImagePlan(
+        lambda model, services=(), force_pull=False, **kwargs: ImagePlan(
             build=tuple(services), pull=(), targets=tuple(services)
         ),
     )
@@ -105,17 +118,17 @@ def test_restart_stop_success_build_failure_still_marks_stopped(fresh_manager, m
     with pytest.raises(RuntimeError, match="build boom"):
         fresh_manager.compose_operations.restart(names=["portainer"])
 
-    assert "portainer" not in fresh_manager.running_state.get_persisted()
+    assert "portainer" in fresh_manager.running_state.get_persisted()
 
 
 def test_restart_stop_success_up_failure_still_marks_stopped(fresh_manager, monkeypatch):
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer"})
 
-    def broken_up(context, options):
+    def broken_up(context, service, recreate=False):
         raise RuntimeError("up boom")
 
-    monkeypatch.setattr(fresh_manager.compose_runner, "up", broken_up)
+    monkeypatch.setattr(fresh_manager.compose_runner, "apply_service", broken_up)
 
     with pytest.raises(RuntimeError, match="up boom"):
         fresh_manager.compose_operations.restart(names=["portainer"])
@@ -137,7 +150,7 @@ def test_exec_up_marks_started_before_on_started_hook_failure(fresh_manager, mon
     _fail_lifecycle_callback(monkeypatch, "on_started")
     container = fresh_manager.containers["portainer"]
 
-    with pytest.raises(RuntimeError, match="on_started boom"):
+    with pytest.raises(Exception, match="after-start callback failed: on_started boom"):
         container.on_exec_up()
 
     assert "portainer" in fresh_manager.running_state.get_persisted()
@@ -159,6 +172,7 @@ def test_partial_up_reconciles_a_container_removed_from_installed_set(fresh_mana
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer", "safeline"})
     fresh_manager.installed_state.remove("safeline")
+    fresh_manager.env_config.set("NGINX_WAF_ENABLE", False)
 
     fresh_manager.compose_operations.up(names=["portainer"])
 
@@ -170,6 +184,7 @@ def test_on_removed_hook_fires_exactly_once_per_removed_container(fresh_manager,
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer", "safeline"})
     fresh_manager.installed_state.remove("safeline")
+    fresh_manager.env_config.set("NGINX_WAF_ENABLE", False)
 
     calls = []
     original = LifecycleDispatcher._invoke_callback

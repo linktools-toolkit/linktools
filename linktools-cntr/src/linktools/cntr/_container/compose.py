@@ -32,7 +32,7 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
         if data is None:
             data = {}
         if not isinstance(data, dict):
-            from ..container import ContainerError
+            from ..errors import ContainerError
             raise ContainerError(f"Compose root must be a mapping: {path}")
         if "services" in data and isinstance(data["services"], dict):
             for name, service in data["services"].items():
@@ -75,7 +75,7 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
                     # model and is never replaced.
                     service["image"] = container.get_service_name(name)
                 if "image" in service and service["image"] == "":
-                    from ..container import ContainerError
+                    from ..errors import ContainerError
                     raise ContainerError(f"Service `{name}` has an empty image")
                 if "env_file" not in service:
                     path = container.get_source_path(".env")
@@ -156,38 +156,36 @@ def _git_revision(manager: "ContainerManager", repo_path) -> "str | None":
 
 
 def write_docker_compose_file(container: "BaseContainer") -> "Path | None":
-    destination = None
-    if container.docker_compose:
-        from ..artifacts import atomic_write_text_if_changed
-        destination = utils.join_path(container.manager.data_path, "compose", f"{container.name}.yml")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        # safe_dump (not dump) so non-serializable values raise instead of
-        # leaking a Python object tag into the written YAML.
-        content = yaml.safe_dump(container.docker_compose, sort_keys=True, allow_unicode=False)
-        atomic_write_text_if_changed(destination, content)
-        _record_artifact(container, destination, "compose", content, container.manager.docker_compose_names)
-        # The compose model's `build.dockerfile` field (see
-        # load_docker_compose) may reference docker_file_destination()
-        # without that file having been written yet -- real execution
-        # needs it to actually exist on disk, so write it alongside the
-        # compose file itself. A no-op when this container has no
-        # Dockerfile template.
-        write_docker_file(container)
+    from ..artifacts import atomic_write_text_if_changed, compose_candidate
+
+    candidate = compose_candidate(container)
+    if candidate is None:
+        return None
+    destination, content = candidate
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text_if_changed(destination, content, mode=0o600)
+    _record_artifact(container, destination, "compose", content, container.manager.docker_compose_names)
+    # The model may reference a generated Dockerfile; execution needs that
+    # file to exist alongside the Compose file.
+    write_docker_file(container)
     return destination
 
 
 def docker_file_destination(container: "BaseContainer") -> "Path":
     """Pure path computation, no write -- see
     ``BaseContainer.get_docker_file_destination``."""
-    return utils.join_path(container.manager.data_path, "dockerfile", f"{container.name}.Dockerfile")
+    from ..artifacts import docker_file_destination as destination
+    return destination(container)
 
 
 def write_docker_file(container: "BaseContainer") -> "Path | None":
-    destination = None
-    if container.docker_file:
-        from ..artifacts import atomic_write_text_if_changed
-        destination = docker_file_destination(container)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text_if_changed(destination, container.docker_file)
-        _record_artifact(container, destination, "dockerfile", container.docker_file, ("Dockerfile",))
+    from ..artifacts import atomic_write_text_if_changed, docker_file_candidate
+
+    candidate = docker_file_candidate(container)
+    if candidate is None:
+        return None
+    destination, content = candidate
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text_if_changed(destination, content, mode=0o600)
+    _record_artifact(container, destination, "dockerfile", content, ("Dockerfile",))
     return destination

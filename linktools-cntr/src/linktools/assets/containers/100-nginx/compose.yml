@@ -1,19 +1,52 @@
 services:
   nginx:
+    image: '{{ container.get_service_name("nginx") }}:{{ container.cert_image_revision }}'
+    build:
+      context: '{{ container.get_docker_context_path() }}'
+      dockerfile: '{{ container.get_docker_file_destination() }}'
+#   {% if NGINX_HTTPS_ENABLE %}
+      secrets:
+        - cntr_acme_account
+        - cntr_acme_dns
+#   {% endif %}
     volumes:
-      - '{{ (APP_PATH/"conf.d") | mkdir | chown }}:/etc/nginx/conf.d'
+      - '{{ container.get_app_path("generated", "current") }}:/etc/nginx/managed:ro'
+      - '{{ (APP_PATH/"certs") | mkdir | chown }}:/etc/certs'
+      - '{{ (APP_PATH/"acme") | mkdir | chown }}:/root/.acme.sh'
+#   {% if NGINX_HTTPS_ENABLE %}
+      - '{{ container.get_app_path("acme-secrets") }}:/run/acme-secrets:ro'
+#   {% endif %}
+    command: ["nginx", "-p", "/etc/nginx/", "-c", "/etc/nginx/managed/nginx.conf", "-g", "daemon off;"]
+#   {% if NGINX_HTTPS_ENABLE %}
+    environment:
+      NGINX_HTTPS_PORT: '{{ NGINX_HTTPS_PORT }}'
+#   {% endif %}
     ports:
       - '{{ NGINX_HTTP_PORT }}:{{ NGINX_HTTP_PORT }}'
 #     {% if NGINX_HTTPS_ENABLE %}
       - '{{ NGINX_HTTPS_PORT }}:{{ NGINX_HTTPS_PORT }}'
 #     {% endif %}
     healthcheck:
-      test: [ "CMD", "curl", "http://localhost:{{ NGINX_HTTP_PORT }}/" ]
+      test: ["CMD", "curl", "--fail", "--silent", "--unix-socket", "/run/nginx-health.sock", "http://localhost/health"]
       interval: 5s
       start_period: 1s
       start_interval: 1s
     networks:
-      - nginx
+      nginx:
+#     {% if containers["safeline"] in manager.installed_state.get(resolve=True) %}
+      safeline-ce:
+        ipv4_address: '{{ SAFELINE_SUBNET_PREFIX }}.253'
+        aliases:
+          - nginx-origin
+#     {% endif %}
 
 networks:
   nginx:
+
+# {% if NGINX_HTTPS_ENABLE %}
+secrets:
+  cntr_acme_account:
+    file: '{{ container.get_app_path("acme-build-account.tar") }}'
+  cntr_acme_dns:
+    file: '{{ container.get_app_path("acme-secrets", "dns.env") }}'
+# {% endif %}

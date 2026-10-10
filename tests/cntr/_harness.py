@@ -16,14 +16,23 @@ Test-only. It does three things, none of which touch production code:
    unchanged; ``cast="path"`` fields now resolve correctly in core).
 """
 import getpass
+import importlib.util
 import json
 import os
+from functools import lru_cache
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 
 from linktools.errors import CliError
 from linktools.types import MISSING
 import linktools.rich as _rich
+
+if TYPE_CHECKING:
+    from types import ModuleType
+    from typing import Type
+    from linktools.cntr.container import BaseContainer
 
 _INTERACTIVE_PATCHED = False
 
@@ -77,6 +86,22 @@ def install_deterministic_interaction() -> None:
     _INTERACTIVE_PATCHED = True
 
 
+@lru_cache(maxsize=None)
+def builtin_module(name: str) -> "ModuleType":
+    """Load a trusted builtin asset with deterministic interaction."""
+    install_deterministic_interaction()
+    assets = Path(__file__).resolve().parents[2] / "linktools-cntr/src/linktools/assets/containers"
+    spec = importlib.util.spec_from_file_location("test_generated_" + name.replace("-", "_"),
+                                                 str(assets / name / "container.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def builtin_container_type(name: str) -> "Type[BaseContainer]":
+    return builtin_module(name).Container
+
+
 def _reset_global_config() -> None:
     """Force ``global_config`` to re-read ``LINKTOOLS_*`` on next access.
 
@@ -119,6 +144,14 @@ def make_manager(data_path, temp_path, name: str = "aio"):
     manager = ContainerManager(environ, name=name)
     manager.installed_state.add(*manager.containers.keys())
     manager.prepare_installed_containers()
+    # Read-only plans require configured inputs; preparation does not render
+    # Dockerfiles or freeze integration snapshots just to populate defaults.
+    for key in ("DOCKER_USER", "DOCKER_TYPE", "DOCKER_APP_PATH", "DOCKER_USER_DATA_PATH",
+                "NGINX_ROOT_DOMAIN", "NGINX_HTTP_PORT", "NGINX_HTTPS_ENABLE", "ACME_DNS_API",
+                "LLDAP_ADMIN_PASSWORD"):
+        manager.env_config.get(key)
+    for field in manager.containers["nginx"].extend_configs.values():
+        manager.containers["nginx"].get_config(field)
     return manager
 
 
@@ -161,3 +194,18 @@ def normalize_compose(data, manager) -> str:
     for value, token in _scrub_pairs(manager):
         text = text.replace(value, token)
     return text
+
+
+def stub_generated_runtime(manager, monkeypatch):
+    """Make command-routing tests independent of a native Docker daemon."""
+    from types import SimpleNamespace
+    from linktools.cntr.runtime.inspect import ProjectRuntimeState
+
+    monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
+                        ProjectRuntimeState(manager.project_name, (), "docker"))
+    monkeypatch.setattr(manager.compose_runner, "wait_service_ready",
+                        lambda context, service, **kwargs: True)
+    monkeypatch.setattr(manager.compose_runner, "validate_service", lambda *args, **kwargs:
+                        SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0))
+    monkeypatch.setattr(manager.image_preparer, "image_id", lambda image: "sha256:local-" + image)
+    monkeypatch.setattr(manager.image_preparer, "verify_builds", lambda model, services: None)

@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 
 def render_template(container: "BaseContainer", source: "PathType", destination: "PathType | None" = None, **kwargs: "Any") -> str:
+    from .. import ext
+
     config = container.env_config
 
     def mkdir(path: "PathType") -> str:
@@ -62,6 +64,7 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
         docker_user=container.get_config_later("DOCKER_USER"),
 
         utils=utils,
+        urls=ext,
         mkdir=mkdir,
         chown=chown,
         chmod=chmod,
@@ -91,5 +94,5 @@ def render_template(container: "BaseContainer", source: "PathType", destination:
         return result
 
     except TemplateError as e:
-        from ..container import ContainerTemplateError
+        from ..errors import ContainerTemplateError
         raise ContainerTemplateError(e)

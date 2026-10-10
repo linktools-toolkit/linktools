@@ -343,3 +343,78 @@ def test_doctor_check_raises_when_warn_finding_present(fresh_manager, monkeypatc
     import pytest as _pytest
     with _pytest.raises(ContainerError):
         cntr_main.command.on_command_doctor(check=True)
+
+
+def test_doctor_uses_repository_facts_and_continues_after_bad_roots(fresh_manager, tmp_path, monkeypatch):
+    import json
+    from linktools.cntr.repo.service import RepoService
+
+    local = tmp_path / "local"
+    local.mkdir()
+    (local / "container.py").write_text("raise AssertionError('must not execute')")
+    (local / ".linktools.json").write_text(json.dumps({"requires": "not-an-object"}))
+    missing = tmp_path / "missing"
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(missing)
+    repos = {
+        "missing": dict(type="git", repo_path=str(missing)),
+        "dangling": dict(type="local", repo_path=str(dangling)),
+        "bad-type": dict(type="unknown", repo_path=str(local)),
+        "local": dict(type="local", repo_path=str(local)),
+    }
+    monkeypatch.setattr(fresh_manager.repos, "get_all", lambda: repos)
+    calls = []
+
+    def describe(url, meta):
+        calls.append(url)
+        return RepoService.describe(fresh_manager.repos, url, meta)
+
+    def unexpected_git(*args):
+        raise AssertionError("local or unusable repositories must not use Git")
+
+    monkeypatch.setattr(fresh_manager.repos, "describe", describe)
+    monkeypatch.setattr(fresh_manager.repos.git, "inspect", unexpected_git)
+    findings = Doctor(fresh_manager).check_repos()
+    assert calls == list(repos)
+    assert {(f.component, f.code) for f in findings if f.severity == WARN} == {
+        ("missing", "repo.config_invalid"),
+        ("dangling", "repo.config_invalid"),
+        ("bad-type", "repo.config_invalid"),
+        ("local", "repo.incompatible"),
+    }
+    assert any(f.component == "local" and "local repository" in f.message for f in findings)
+
+
+def test_doctor_inspects_git_symlink_by_stored_type(fresh_manager, tmp_path, monkeypatch):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(checkout, target_is_directory=True)
+    monkeypatch.setattr(fresh_manager.repos, "get_all", lambda: {
+        "git": dict(type="git", repo_path=str(link)),
+    })
+    inspected = []
+
+    def inspect(path):
+        inspected.append(path)
+        return dict(dirty=True)
+
+    monkeypatch.setattr(fresh_manager.repos.git, "inspect", inspect)
+    findings = Doctor(fresh_manager).check_repos()
+    assert inspected == [str(link)]
+    assert any(f.code == "repo.dirty" for f in findings)
+
+
+def test_doctor_repository_inspection_failure_is_isolated(fresh_manager, monkeypatch):
+    monkeypatch.setattr(fresh_manager.repos, "get_all", lambda: {"bad": {}, "good": {}})
+
+    def describe(url, meta):
+        if url == "bad":
+            raise OSError("cannot inspect")
+        return dict(compatibility_issues=[], available=True, repo_type="git", git=dict(dirty=True))
+
+    monkeypatch.setattr(fresh_manager.repos, "describe", describe)
+    findings = Doctor(fresh_manager).check_repos()
+    assert [(f.component, f.code) for f in findings] == [
+        ("bad", "repo.config_invalid"), ("good", "repo.dirty"),
+    ]

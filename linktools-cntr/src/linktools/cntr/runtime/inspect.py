@@ -12,7 +12,7 @@ Compose-project container id list plus a batch ``docker inspect``, since
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ..container import ContainerError
@@ -61,6 +61,8 @@ class ServiceRuntimeState:
     image: "str | None"
     exit_code: "int | None"
     labels: "dict[str, str]"
+    image_id: "str | None" = None
+    namespace_bindings: "dict[str, str | list[str]] | None" = None
 
 
 _RUNNING_STATES = ("running", "restarting")
@@ -72,6 +74,24 @@ class ProjectRuntimeState:
     services: "tuple[ServiceRuntimeState, ...]"
     backend: str
     source: str = "docker-inspect"
+
+    @property
+    def existing_services(self) -> "frozenset[str]":
+        return frozenset(item.service for item in self.services if item.service)
+
+    @property
+    def running_services(self) -> "frozenset[str]":
+        return frozenset(item.service for item in self.services
+                         if item.service and item.state in _RUNNING_STATES)
+
+    @property
+    def image_ids(self) -> "dict[str, str]":
+        return {item.service: item.image_id for item in self.services if item.service and item.image_id}
+
+    @property
+    def running_images(self) -> "dict[str, str]":
+        return {item.service: item.image_id for item in self.services
+                if item.service and item.image_id and item.state in _RUNNING_STATES}
 
     @property
     def running_container_names(self) -> "list[str]":
@@ -204,6 +224,7 @@ def _map_inspect_item(
         image=config.get("Image"),
         exit_code=_normalize_exit_code(state_data.get("ExitCode")),
         labels={str(k): str(v) for k, v in labels.items()},
+        image_id=item.get("Image"),
     )
 
 
@@ -344,11 +365,39 @@ class DockerInspector:
                 raise RuntimeInspectionOutputError(
                     "`docker inspect` returned no results for known container ids")
 
-        services = []
+        mapped_items = []
+        identities = {}
         for item in items:
             mapped = _map_inspect_item(item, service_owners, self.manager.project_name)
             if mapped is not None:
-                services.append(mapped)
+                mapped_items.append((item, mapped))
+                if mapped.service:
+                    for identity in (item.get("Id"), mapped.runtime_name):
+                        if identity:
+                            identities[identity] = mapped.service
+        services = []
+        for item, mapped in mapped_items:
+            host = item.get("HostConfig")
+            if isinstance(host, dict):
+                bindings = {}
+                for key, field in (("NetworkMode", "network_mode"), ("IpcMode", "ipc"), ("PidMode", "pid")):
+                    if key not in host:
+                        continue
+                    mode = host.get(key) or ""
+                    if isinstance(mode, str) and mode.startswith("container:"):
+                        service = identities.get(mode[len("container:"):].lstrip("/"))
+                        bindings[field] = "service:" + service if service else mode
+                    elif isinstance(mode, str):
+                        bindings[field] = mode
+                if "VolumesFrom" in host:
+                    bindings["volumes_from"] = []
+                for volume in host.get("VolumesFrom") or ():
+                    reference, separator, mode = str(volume).partition(":")
+                    service = identities.get(reference.lstrip("/"))
+                    binding = service + (":" + mode if separator else "") if service else "container:" + str(volume)
+                    bindings.setdefault("volumes_from", []).append(binding)
+                mapped = replace(mapped, namespace_bindings=bindings)
+            services.append(mapped)
 
         return ProjectRuntimeState(
             project=self.manager.project_name,

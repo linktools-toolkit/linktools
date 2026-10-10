@@ -10,7 +10,8 @@ import pytest
 
 import linktools.cntr.__main__ as cntr_main
 import linktools.cntr.commands._shared as cntr_shared
-from linktools.cntr.context import EventContext
+from linktools.cntr.context import OperationContext
+from linktools.cntr.errors import ContainerError
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
 from linktools.cntr.runtime.images import ImagePlan
@@ -21,6 +22,8 @@ _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
 
 
 def _record(manager, monkeypatch, fail=False):
+    from _harness import stub_generated_runtime
+    stub_generated_runtime(manager, monkeypatch)
     def fake(containers, *args, privilege=None, **kwargs):
         class _Proc:
             def check_call(self):
@@ -29,12 +32,13 @@ def _record(manager, monkeypatch, fail=False):
                 return 0
         return _Proc()
 
-    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
-    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {}})
+    monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
+    monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
+        name: {"image": name + ":current"} for container in context.project_containers for name in container.services}})
     monkeypatch.setattr(
         manager.image_preparer,
         "plan",
-        lambda model, services=(), force_pull=False: ImagePlan(
+        lambda model, services=(), force_pull=False, refresh_services=(): ImagePlan(
             build=(), pull=(), targets=tuple(services)
         ),
     )
@@ -43,11 +47,11 @@ def _record(manager, monkeypatch, fail=False):
 
 
 def _partial_ctx(manager, name):
-    ctx = EventContext()
-    ctx.commands = ["up"]
-    ctx.containers = manager.installed_state.get(resolve=True)
-    ctx.target_containers = [c for c in ctx.containers if c.name == name]
-    ctx.is_full_containers = False
+    ctx = OperationContext()
+    ctx.actions = ["up"]
+    ctx.project_containers = manager.installed_state.get(resolve=True)
+    ctx.target_containers = [c for c in ctx.project_containers if c.name == name]
+    ctx.is_full_project = False
     return ctx
 
 
@@ -108,37 +112,36 @@ def test_mark_stopped_partial_removes_targets(fresh_manager):
 
 def test_mark_started_full_writes_target_set(fresh_manager):
     fresh_manager.running_state._set(["stale"])
-    ctx = EventContext()
-    ctx.commands = ["up"]
-    ctx.containers = fresh_manager.installed_state.get(resolve=False)
-    ctx.target_containers = ctx.containers
-    ctx.is_full_containers = True
+    ctx = OperationContext()
+    ctx.actions = ["up"]
+    ctx.project_containers = fresh_manager.installed_state.get(resolve=False)
+    ctx.target_containers = ctx.project_containers
+    ctx.is_full_project = True
     fresh_manager.running_state.mark_started(ctx)
     persisted = set(fresh_manager.running_state.get_persisted())
-    assert persisted == {c.name for c in ctx.containers}
+    assert persisted == {c.name for c in ctx.project_containers}
     assert "stale" not in persisted
 
 
 def test_mark_stopped_full_clears(fresh_manager):
     fresh_manager.running_state._set(["nginx", "portainer"])
-    ctx = EventContext()
-    ctx.commands = ["down"]
-    ctx.containers = fresh_manager.installed_state.get(resolve=False)
-    ctx.target_containers = ctx.containers
-    ctx.is_full_containers = True
+    ctx = OperationContext()
+    ctx.actions = ["down"]
+    ctx.project_containers = fresh_manager.installed_state.get(resolve=False)
+    ctx.target_containers = ctx.project_containers
+    ctx.is_full_project = True
     fresh_manager.running_state.mark_stopped(ctx)
     assert fresh_manager.running_state.get_persisted() == []
 
 
-def test_cli_partial_up_marks_only_target(monkeypatch, fresh_manager):
+def test_cli_partial_up_includes_required_dependencies(monkeypatch, fresh_manager):
     for key in _PROXY_KEYS:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     _record(fresh_manager, monkeypatch)
     cntr_main.command.on_command_up(names=["portainer"], pull=False)
     running = set(fresh_manager.running_state.get_persisted())
-    assert "portainer" in running
-    assert "nginx" not in running
+    assert {"portainer", "nginx"} <= running
 
 
 def test_cli_partial_down_marks_target_stopped(monkeypatch, fresh_manager):
@@ -163,7 +166,8 @@ def test_cli_failed_up_does_not_mark_running(monkeypatch, fresh_manager):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     fresh_manager.running_state._set([])
     _record(fresh_manager, monkeypatch, fail=True)
-    with pytest.raises(RuntimeError):
+    # A failed cold start followed by a failed cleanup reports both errors.
+    with pytest.raises(ContainerError, match="Operation failed.*recovery failed"):
         cntr_main.command.on_command_up(names=["portainer"], pull=False)
     assert fresh_manager.running_state.get_persisted() == []
 
@@ -189,14 +193,13 @@ def test_manager_get_running_containers_and_load_dump_wrappers_are_gone(fresh_ma
 def test_dispatcher_reconciles_removed_container_out_of_running_state(fresh_manager, monkeypatch):
     fresh_manager.running_state._set(["nginx", "flare"])
 
-    ctx = EventContext()
-    ctx.commands = ["up"]
-    ctx.containers = [c for c in fresh_manager.containers.values() if c.name != "flare"]
-    ctx.target_containers = ctx.containers
-    ctx.is_full_containers = True
+    ctx = OperationContext()
+    ctx.actions = ["up"]
+    ctx.project_containers = [c for c in fresh_manager.containers.values() if c.name != "flare"]
+    ctx.target_containers = ctx.project_containers
+    ctx.is_full_project = True
 
-    with fresh_manager.lifecycle.notify_remove(ctx):
-        pass
+    fresh_manager.lifecycle.reconcile_removed(ctx)
 
     assert "flare" not in fresh_manager.running_state.get_persisted()
     assert "nginx" in fresh_manager.running_state.get_persisted()

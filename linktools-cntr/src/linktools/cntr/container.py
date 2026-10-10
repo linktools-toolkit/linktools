@@ -10,47 +10,30 @@ from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import BooleanOptionalAction
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
-from linktools.errors import Error
 from linktools.rich import choose
 from linktools.runtime import lazy_load
 from linktools.types import MISSING
 from linktools.utils import get_md5
+from .errors import ContainerError, ContainerTemplateError, NoContainerInstalledError
 from ._container import actions as _actions
 from ._container import compose as _compose
 from ._container import template as _template
-from ._container.expose import ExposeCategory, ExposeLink, ExposeMixin, NginxMixin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
-    from typing import Any
+    from typing import AbstractSet, Any, Mapping
     from linktools.core import Config, ConfigNamespace, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
+    from .ext import Integrations
     from .manager import ContainerManager
-    from .context import EventContext
+    from .context import OperationContext
     from .repo.context import RepositoryConfigContext
-    from .lifecycle.hooks import HookListView, HookRegistry
+    from .lifecycle.hooks import HookRegistry
     from .runtime.compose import ComposeRunner
     from .runtime.process import RuntimeProcessFactory
     from .lifecycle.dispatcher import LifecycleDispatcher
     from .state.running import RunningStateStore
-
-
-class ContainerError(Error):
-    pass
-
-
-class ContainerTemplateError(ContainerError):
-    pass
-
-
-class NoContainerInstalledError(ContainerError):
-    """No container is installed -- raised only by the full-prepare path
-    (``prepare_installed_containers``), never by the metadata-only path
-    (``load_installed_config_metadata``), so a metadata-only caller (config
-    commands, Root ``list``, Plan, Doctor) can still run against a fresh,
-    nothing-installed project instead of hard-failing."""
-    pass
 
 
 class AbstractMetaClass(type):
@@ -61,7 +44,7 @@ class AbstractMetaClass(type):
         return super().__new__(mcs, name, bases, namespace)
 
 
-class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
+class BaseContainer(metaclass=AbstractMetaClass):
     __abstract__ = True
 
     def __init__(self, manager: "ContainerManager", root_path: "PathType", name: str = None):
@@ -115,7 +98,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return {}
 
     @property
-    def exposes(self) -> "Iterable[ExposeLink]":
+    def integrations(self) -> "Integrations":
         return []
 
     @cached_property
@@ -130,6 +113,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         """
         namespace_key = "cntr:app:" + self.name
         new_ns = self.manager.settings.namespace(namespace_key)
+        from linktools.core import Config
+        if Config.is_read_only_resolution():
+            return new_ns
 
         # One-time migration: this namespace used to live in the cache store
         # (regenerable/age-swept by design); anything a pre-existing
@@ -219,16 +205,6 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         from .lifecycle.hooks import HookRegistry
         return HookRegistry(owner=self, scope="container")
 
-    @cached_property
-    def start_hooks(self) -> "HookListView":
-        from .lifecycle.hooks import HookPhase
-        return self.hooks.legacy_view(HookPhase.BEFORE_START)
-
-    @cached_property
-    def stop_hooks(self) -> "HookListView":
-        from .lifecycle.hooks import HookPhase
-        return self.hooks.legacy_view(HookPhase.AFTER_STOP)
-
     def add_start_hook(self, key: "tuple", hook: "Callable[[], Any]", **kwargs: "Any") -> None:
         """Register a BEFORE_START hook once per key (idempotent re-render)."""
         from .lifecycle.hooks import HookPhase
@@ -242,25 +218,31 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def on_init(self) -> None:
         pass
 
-    def on_prepare(self) -> None:
+
+    def get_build_revision(self, service: str) -> "str | None":
+        """Optional local build identity; never refresh remote inputs."""
+        return None
+
+    def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
+        """Declare native providers needed by the selected project services."""
+        return {}
+
+    def on_check(self, context: "OperationContext") -> None:
         pass
 
-    def on_check(self, context: "EventContext") -> None:
+    def on_starting(self, context: "OperationContext") -> None:
         pass
 
-    def on_starting(self, context: "EventContext") -> None:
+    def on_started(self, context: "OperationContext") -> None:
         pass
 
-    def on_started(self, context: "EventContext") -> None:
+    def on_stopping(self, context: "OperationContext") -> None:
         pass
 
-    def on_stopping(self, context: "EventContext") -> None:
+    def on_stopped(self, context: "OperationContext") -> None:
         pass
 
-    def on_stopped(self, context: "EventContext") -> None:
-        pass
-
-    def on_removed(self, context: "EventContext") -> None:
+    def on_removed(self, context: "OperationContext") -> None:
         pass
 
     @subcommand("up", help="deploy this container")
@@ -355,18 +337,18 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def get_config_later(self, key: "ConfigKeyType", type: "ConfigType | None" = None, default: "Any" = MISSING) -> "T":
         return lazy_load(self.env_config.get, self._resolve_config_key(key), type=type, default=default)
 
-    def make_exec_context(self, commands: "str | Iterable[str]") -> "EventContext":
-        from .context import EventContext
+    def make_exec_context(self, commands: "str | Iterable[str]") -> "OperationContext":
+        from .context import OperationContext
 
         containers = self.manager.installed_state.get(resolve=True)
         if self not in containers:
             raise ContainerError(f"{self} is not installed")
 
-        context = EventContext()
-        context.commands = [commands] if isinstance(commands, str) else list(filter(None, commands))
-        context.containers = containers
+        context = OperationContext()
+        context.actions = [commands] if isinstance(commands, str) else list(filter(None, commands))
+        context.project_containers = containers
         context.target_containers = [self]
-        context.is_full_containers = False
+        context.is_full_project = False
         return context
 
     def get_source_path(self, *paths: str) -> "Path":
@@ -459,12 +441,18 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def render_template(self, source: "PathType", destination: "PathType | None" = None, **kwargs: "Any") -> str:
         return _template.render_template(self, source, destination=destination, **kwargs)
 
+
     def __repr__(self):
         return f"Container<{self.name}>"
 
 
 class SourceContainer(BaseContainer):
     __abstract__ = True
+
+    def __init__(self, manager: "ContainerManager", root_path: "PathType", name: str = None):
+        super().__init__(manager, root_path, name=name)
+        self.add_start_hook(("init_source_code", self.name), self._prepare_source,
+                            name="init_source_code", order=50, source="builtin")
 
     @property
     def _source_url(self):
@@ -475,42 +463,148 @@ class SourceContainer(BaseContainer):
         raise NotImplementedError()
 
     def _handle_source_file(self, source: "PathType", destination: "PathType"):
-        # Archive extraction rejects traversal, absolute paths and unsafe links.
         from linktools.utils import safe_extract
         safe_extract(source, destination)
 
-    @cached_property
-    def _context_path(self):
-        name = get_md5(self._source_url)
-        source_path = self.get_app_path("source", f"{name}.in")
-        dest_path = self.get_app_path("source", f"{name}.out")
-
-        def init_source_code() -> None:
-            if not os.path.isdir(dest_path):
-                file = self.manager.environ.get_url_file(self._source_url)
-                file.save(source_path.parent, source_path.name)
-                os.makedirs(dest_path, exist_ok=True)
-                try:
-                    self._handle_source_file(source_path, dest_path)
-                except BaseException:
-                    utils.remove_file(source_path)
-                    utils.remove_file(dest_path)
-                    raise
-
-        self.add_start_hook(
-            ("init_source_code", self.name), init_source_code,
-            name="init_source_code", order=50, source="builtin",
-        )
-        return os.path.join(dest_path, self._source_path)
+    @property
+    def _source_root(self) -> "Path":
+        return self.get_app_path("source", get_md5(self._source_url))
 
     def get_docker_context_path(self) -> "Path":
-        return self._context_path
+        from pathlib import Path
+        return self._source_root / "current" / Path(self._source_path)
 
-    def on_starting(self, context: "EventContext") -> None:
-        if "pull" in context.commands:
-            utils.remove_file(self.get_app_path("source"))
+    def _source_digest(self) -> "str | None":
+        from pathlib import Path
+        link = self._source_root / "current"
+        if not link.is_symlink():
+            return None
+        value = Path(os.readlink(str(link)))
+        if value.parent != Path("versions") or not re.fullmatch("[0-9a-f]{64}", value.name):
+            raise ContainerError("Invalid source snapshot pointer: " + str(link))
+        return value.name
 
-    def on_removed(self, context: "EventContext") -> None:
+    def get_build_revision(self, service: str) -> "str | None":
+        import hashlib
+        import json
+        digest = self._source_digest()
+        if digest is None:
+            return None
+        identity = json.dumps([str(self._source_url), str(self._source_path), digest],
+                              ensure_ascii=True, separators=(",", ":"))
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    def _prepare_source(self, context: "OperationContext") -> None:
+        root = self._source_root
+        refresh = bool(set(self.services).intersection(context.refresh_services))
+        if self._source_digest() is not None and not refresh:
+            return
+        # Reuse an existing installation's validated downloaded archive.
+        name = get_md5(self._source_url)
+        legacy_archive = self.get_app_path("source", name + ".in")
+        legacy_tree = self.get_app_path("source", name + ".out")
+        if not refresh and legacy_archive.is_file() and legacy_tree.is_dir():
+            import hashlib
+            import shutil
+            root.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256(legacy_archive.read_bytes()).hexdigest()
+            versions, archives = root / "versions", root / "archives"
+            versions.mkdir(exist_ok=True)
+            archives.mkdir(exist_ok=True)
+            destination = versions / digest
+            if not destination.exists():
+                shutil.copytree(str(legacy_tree), str(destination))
+            if not (archives / (digest + ".in")).exists():
+                shutil.copy2(str(legacy_archive), str(archives / (digest + ".in")))
+            self._publish_source(digest)
+            return
+        if not refresh:
+            buildable = [spec for spec in self.services.values() if spec.get("build") is not None]
+            if buildable and all(spec.get("image") and
+                                 self.manager.image_preparer.image_exists(spec["image"])
+                                 for spec in buildable):
+                # Source bytes are only needed to build, never to reuse a local image.
+                return
+        self._fetch_source()
+
+    def _publish_source(self, digest: str) -> None:
+        import uuid
+        root = self._source_root
+        link = root / "current"
+        temporary = root / (".current-" + uuid.uuid4().hex)
+        try:
+            temporary.symlink_to("versions/" + digest)
+            os.replace(str(temporary), str(link))
+        finally:
+            if temporary.is_symlink():
+                temporary.unlink()
+
+    def _fetch_source(self, expected: "str | None" = None) -> None:
+        import hashlib
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        root = self._source_root
+        root.mkdir(parents=True, exist_ok=True)
+        versions, archives = root / "versions", root / "archives"
+        versions.mkdir(exist_ok=True)
+        archives.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".source-", dir=str(root)) as directory:
+            archive = Path(self.manager.environ.get_url_file(self._source_url).save(
+                directory, "source.in"))
+            with open(archive, "rb") as stream:
+                checksum = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    checksum.update(chunk)
+                digest = checksum.hexdigest()
+            if expected is not None and digest != expected:
+                raise ContainerError("Source changed unexpectedly; use --pull to refresh " + self.name)
+            destination = versions / digest
+            if not destination.exists():
+                temporary = Path(tempfile.mkdtemp(prefix=".extract-", dir=str(root)))
+                try:
+                    self._handle_source_file(str(archive), str(temporary))
+                    source_path = Path(self._source_path)
+                    if (source_path.is_absolute() or ".." in source_path.parts or
+                            not (temporary / source_path).is_dir()):
+                        raise ContainerError("Missing source build directory for " + self.name)
+                    os.rename(str(temporary), str(destination))
+                except BaseException:
+                    shutil.rmtree(str(temporary))
+                    raise
+            retained = archives / (digest + ".in")
+            if not retained.exists():
+                shutil.copy2(str(archive), str(retained))
+        self._publish_source(digest)
+
+    def prepare_build_context(self) -> None:
+        import shutil
+        import tempfile
+        from pathlib import Path
+        digest = self._source_digest()
+        if digest is None:
+            raise ContainerError("Source snapshot was not prepared for " + self.name)
+        root = self._source_root
+        destination = root / "versions" / digest
+        if destination.is_dir():
+            return
+        archive = root / "archives" / (digest + ".in")
+        if not archive.is_file():
+            # Recover only the known input, never silently advance a branch URL.
+            self._fetch_source(expected=digest)
+            return
+        temporary = Path(tempfile.mkdtemp(prefix=".restore-", dir=str(root)))
+        try:
+            self._handle_source_file(str(archive), str(temporary))
+            if not (temporary / self._source_path).is_dir():
+                raise ContainerError("Missing cached source build directory for " + self.name)
+            os.rename(str(temporary), str(destination))
+        except BaseException:
+            shutil.rmtree(str(temporary))
+            raise
+
+    def on_removed(self, context: "OperationContext") -> None:
         utils.remove_file(self.get_app_path("source"))
 
 

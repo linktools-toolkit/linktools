@@ -8,7 +8,7 @@ explicit build, pull, up, stop/down, and config commands it is asked to run.
 import pytest
 
 from linktools.cntr.container import ContainerError
-from linktools.cntr.context import EventContext
+from linktools.cntr.context import OperationContext
 from linktools.cntr.runtime.compose import ComposeOptions, ComposeRunner
 
 _PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -22,15 +22,15 @@ def _no_proxy_env(monkeypatch):
 
 
 def _ctx(manager, target_names=None, is_full=False):
-    ctx = EventContext()
-    ctx.commands = ["up"]
-    ctx.containers = manager.installed_state.get(resolve=True)
+    ctx = OperationContext()
+    ctx.actions = ["up"]
+    ctx.project_containers = manager.installed_state.get(resolve=True)
     if is_full:
-        ctx.target_containers = ctx.containers
-        ctx.is_full_containers = True
+        ctx.target_containers = ctx.project_containers
+        ctx.is_full_project = True
     else:
-        ctx.target_containers = [c for c in ctx.containers if c.name in (target_names or [])]
-        ctx.is_full_containers = False
+        ctx.target_containers = [c for c in ctx.project_containers if c.name in (target_names or [])]
+        ctx.is_full_project = False
     return ctx
 
 
@@ -46,11 +46,11 @@ def test_collect_services_partial_collects_target_services(fresh_manager):
 
 def test_collect_services_no_services_raises(fresh_manager):
     runner = fresh_manager.compose_runner
-    ctx = EventContext()
-    ctx.commands = ["up"]
-    ctx.containers = []
+    ctx = OperationContext()
+    ctx.actions = ["up"]
+    ctx.project_containers = []
     ctx.target_containers = []
-    ctx.is_full_containers = False
+    ctx.is_full_project = False
     with pytest.raises(ContainerError):
         runner.collect_services(ctx)
 
@@ -112,25 +112,25 @@ def test_build_args_can_omit_proxy_build_args(fresh_manager, monkeypatch):
     assert runner.build_args(opts) == ["build", "portainer"]
 
 
-def test_build_and_up_route_args_through_process(fresh_manager, monkeypatch):
+def test_build_and_apply_route_args_through_process(fresh_manager, monkeypatch):
     recorded = []
 
-    def fake_create(containers, *args, privilege=None, **kwargs):
-        recorded.append(args)
+    class _Proc:
+        def check_call(self):
+            return 0
 
-        class _Proc:
-            def check_call(self):
-                return 0
-
+    def fake_docker(*args, privilege=None, **kwargs):
+        recorded.append(args[args.index("build") if "build" in args else args.index("up"):])
         return _Proc()
 
-    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fake_create)
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fake_docker)
     runner = fresh_manager.compose_runner
     ctx = _ctx(fresh_manager, ["portainer"])
+    ctx.compose_model = {"services": {"portainer": {"image": "portainer:local"}}}
     opts = ComposeOptions(services=["portainer"])
     runner.build(ctx, opts)
-    runner.up(ctx, opts)
+    runner.apply_service(ctx, "portainer")
     assert recorded[0] == ("build", "portainer")
     assert recorded[1] == (
-        "up", "--detach", "--no-build", "--pull", "never", "portainer",
+        "up", "--detach", "--no-build", "--pull", "never", "--no-deps", "portainer",
     )
