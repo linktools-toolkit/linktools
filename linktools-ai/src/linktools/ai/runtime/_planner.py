@@ -1316,7 +1316,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self.load_admission(admission)
         self.validate_recovery(state)
-        candidates: list[tuple[TaskNode, TaskNodeView, ExecutionRecord]] = []
+        # Hold validated contracts locally across IO; terminal cleanup retires graph caches.
+        bindings: list[tuple[TaskNode, TaskNodeView, AgentBindingContract]] = []
         for node, node_state in zip(state.nodes, state.node_states, strict=True):
             if node_state.status in {
                 TaskStatus.SUCCEEDED, TaskStatus.FAILED,
@@ -1340,11 +1341,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 continue
             if self._execution_state is None or self._recovery_backend is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            execution_id = node_state.execution_id
-            execution_header = await self._execution_state.get_header(
-                execution_id, tenant_id=tenant_id,
-            )
-            execution = await self._execution_state.get(execution_id, tenant_id=tenant_id)
             declaration = self._validate_task_declaration(
                 task_id, task_revision, graph_id=graph_id, node_id=node.node_id,
             )
@@ -1358,6 +1354,17 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     expected_binding, output_mode=output.mode,
                     output_schema=output.schema_definition,
                 )
+            bindings.append((node, node_state, expected_binding))
+
+        candidates: list[tuple[TaskNode, TaskNodeView, ExecutionRecord]] = []
+        for node, node_state, expected_binding in bindings:
+            assert self._execution_state is not None
+            execution_id = node_state.execution_id
+            assert execution_id is not None
+            execution_header = await self._execution_state.get_header(
+                execution_id, tenant_id=tenant_id,
+            )
+            execution = await self._execution_state.get(execution_id, tenant_id=tenant_id)
             if (
                 execution_header is None
                 or execution_header.kind is not ResourceKind.EXECUTION
