@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from ...core import (
     ExecutionEventType,
@@ -24,7 +25,7 @@ from ._contracts import (
     ExecutionEventAppend,
     ExecutionRecord,
     ToolOperationRecord,
-    validate_tool_operation_failure,
+    decode_tool_operation_failure,
 )
 from ._durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._repositories import (
@@ -35,10 +36,12 @@ from ._repositories import (
 )
 from ._repository_common import (
     append_operation as _append_operation,
+    operation_identity_matches as _same_operation_identity,
     projected_record as _projected_record,
     replace_checked as _replace_checked,
+    validate_recovery_operation,
 )
-from ._store import StateGroupTransaction, StateStore, StoredFact, stream_digest
+from ._store import StateGroupTransaction, StateStore, StateTransaction, StoredFact, stream_digest
 
 
 class RuntimeRecoveryCommands:
@@ -68,6 +71,7 @@ class RuntimeRecoveryCommands:
         error_code: str,
         safe_error_details: Mapping[str, JsonValue],
         audit_events: Sequence[ExecutionEventAppend] = (),
+        producer_generation: int | None = None,
     ) -> ExecutionRecord:
         if execution.status not in {
             ExecutionStatus.STARTED,
@@ -85,19 +89,113 @@ class RuntimeRecoveryCommands:
             next_error_code=error_code,
             next_safe_error_details=safe_error_details,
             audit_events=audit_events,
+            producer_generation=producer_generation,
         )
 
-    async def commit_resumed(self, execution: ExecutionRecord) -> ExecutionRecord:
-        if execution.status is not ExecutionStatus.RECOVERY_REQUIRED:
+    async def commit_resumed(
+        self,
+        execution: ExecutionRecord,
+        *,
+        recovery_operation: OperationLedgerInput | None = None,
+    ) -> ExecutionRecord:
+        if recovery_operation is None and execution.status not in {
+            ExecutionStatus.RECOVERY_REQUIRED, ExecutionStatus.STARTED,
+        }:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return await self._commit_execution_transition(
             execution,
             next_status=ExecutionStatus.STARTED,
             event_type=ExecutionEventType.EXECUTION_RESUMED,
-            event_payload={},
+            event_payload={
+                "producer_claim_id": (
+                    recovery_operation.result_ref
+                    if recovery_operation is not None else uuid4().hex
+                ),
+            },
             next_error_code=None,
             next_safe_error_details={},
+            recovery_operation=recovery_operation,
         )
+
+    async def admit_recovery_without_producer(
+        self,
+        execution: ExecutionRecord,
+        operation: OperationLedgerInput,
+    ) -> OperationLedgerRecord:
+        """Guard a recovery control step that terminates without a producer."""
+        stores = _dedupe_stores((
+            self._execution.state_store,
+            self._execution_operations.state_store,
+        ))
+        if any(store.storage_group is not stores[0].storage_group for store in stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        key = self._execution._key("execution", execution.execution_id)
+
+        async def durable_operation() -> OperationLedgerRecord:
+            async def mutate(group: StateGroupTransaction) -> OperationLedgerRecord:
+                execution_tx = group.transaction(self._execution.state_store)
+                operation_tx = group.transaction(self._execution_operations.state_store)
+                existing = await self._execution_operations.get_in_transaction(
+                    operation_tx, operation.operation_id,
+                    tenant_id=self._execution.tenant_id,
+                )
+                if existing is not None:
+                    if (
+                        existing.execution_id != execution.execution_id
+                        or not _same_operation_identity(existing, operation)
+                    ):
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    return existing
+                validate_recovery_operation(
+                    operation, execution_id=execution.execution_id,
+                    tenant_id=self._execution.tenant_id, producer=False,
+                )
+                stored = await execution_tx.get_record(key)
+                if stored is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                current = await self._execution._decode(stored, ExecutionRecord)
+                if (
+                    current.revision != execution.revision
+                    or current.event_seq != execution.event_seq
+                    or current.status is not execution.status
+                    or current.status not in {
+                        ExecutionStatus.PENDING_START,
+                        ExecutionStatus.STARTED,
+                        ExecutionStatus.RECOVERY_REQUIRED,
+                        ExecutionStatus.CANCELLING,
+                    }
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                guarded = await execution_tx.guard_record(
+                    key, expected_storage_version=stored.storage_version,
+                )
+                if guarded is None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                return await self._execution_operations.append_in_transaction(
+                    operation_tx, operation,
+                )
+
+            return await stores[0].storage_group.mutate(stores, mutate)
+
+        async def readback() -> CommitObservation[OperationLedgerRecord]:
+            existing = await self._execution_operations.get(
+                operation.operation_id, tenant_id=self._execution.tenant_id,
+            )
+            if existing is not None:
+                if (
+                    existing.execution_id != execution.execution_id
+                    or not _same_operation_identity(existing, operation)
+                ):
+                    return CommitObservation(
+                        DurableCommitState.NOT_COMMITTED,
+                        error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
+                    )
+                return CommitObservation(DurableCommitState.COMMITTED, value=existing)
+            return CommitObservation(DurableCommitState.NOT_COMMITTED)
+
+        return _require_committed(await run_durable_commit(
+            durable_operation, readback, background_tasks=self._background_tasks,
+        ))
 
     async def commit_cancel_claim(self, execution: ExecutionRecord) -> ExecutionRecord:
         if execution.status is not ExecutionStatus.RECOVERY_REQUIRED:
@@ -310,6 +408,8 @@ class RuntimeRecoveryCommands:
         next_error_code: str | None,
         next_safe_error_details: Mapping[str, JsonValue],
         audit_events: Sequence[ExecutionEventAppend] = (),
+        producer_generation: int | None = None,
+        recovery_operation: OperationLedgerInput | None = None,
     ) -> ExecutionRecord:
         ordered_audit = tuple(audit_events)
         events = (*ordered_audit, ExecutionEventAppend(event_type, event_payload))
@@ -326,8 +426,23 @@ class RuntimeRecoveryCommands:
             execution.execution_id,
         )
 
+        stores = _dedupe_stores((store, self._execution_operations.state_store))
+        if recovery_operation is not None and any(
+            item.storage_group is not stores[0].storage_group for item in stores
+        ):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
         async def operation() -> ExecutionRecord:
-            async def mutate(transaction):
+            async def mutate(transaction: StateTransaction) -> ExecutionRecord:
+                if recovery_operation is not None and execution.status not in {
+                    ExecutionStatus.RECOVERY_REQUIRED, ExecutionStatus.STARTED,
+                }:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if producer_generation is not None:
+                    await self._execution.require_open_history_head_in_transaction(
+                        transaction, execution.execution_id,
+                        expected_producer_generation=producer_generation,
+                    )
                 stored = await transaction.get_record(key)
                 if stored is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -354,6 +469,11 @@ class RuntimeRecoveryCommands:
                     _projected_record(self._execution, stored, updated),
                     stored.storage_version,
                 )
+                if event_type is ExecutionEventType.EXECUTION_RESUMED:
+                    await self._execution.admit_history_producer_in_transaction(
+                        transaction, updated,
+                        producer_claim_id=event_payload["producer_claim_id"],
+                    )
                 await transaction.insert_facts(
                     tuple(
                         StoredFact(
@@ -370,10 +490,65 @@ class RuntimeRecoveryCommands:
                 )
                 return updated
 
-            return await store.mutate(mutate)
+            if recovery_operation is None:
+                return await store.mutate(mutate)
+
+            async def keyed_mutate(group: StateGroupTransaction) -> ExecutionRecord:
+                operation_tx = group.transaction(self._execution_operations.state_store)
+                execution_tx = group.transaction(store)
+                existing = await self._execution_operations.get_in_transaction(
+                    operation_tx, recovery_operation.operation_id,
+                    tenant_id=self._execution.tenant_id,
+                )
+                if existing is not None:
+                    if (
+                        existing.execution_id != execution.execution_id
+                        or not _same_operation_identity(existing, recovery_operation)
+                    ):
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    current = await self._execution.get_in_transaction(
+                        execution_tx, execution.execution_id,
+                        tenant_id=self._execution.tenant_id,
+                    )
+                    if current is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    return current
+                validate_recovery_operation(
+                    recovery_operation, execution_id=execution.execution_id,
+                    tenant_id=self._execution.tenant_id, producer=True,
+                )
+                updated = await mutate(execution_tx)
+                await self._execution_operations.append_in_transaction(
+                    operation_tx, recovery_operation,
+                )
+                return updated
+
+            return await stores[0].storage_group.mutate(stores, keyed_mutate)
 
         async def readback() -> CommitObservation[ExecutionRecord]:
             try:
+                if recovery_operation is not None:
+                    existing = await self._execution_operations.get(
+                        recovery_operation.operation_id,
+                        tenant_id=self._execution.tenant_id,
+                    )
+                    if existing is not None:
+                        if (
+                            existing.execution_id != execution.execution_id
+                            or not _same_operation_identity(existing, recovery_operation)
+                        ):
+                            return CommitObservation(
+                                DurableCommitState.NOT_COMMITTED,
+                                error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
+                            )
+                        current = await self._execution.get(
+                            execution.execution_id, tenant_id=self._execution.tenant_id,
+                        )
+                        if current is None:
+                            return _partial()
+                        return CommitObservation(DurableCommitState.COMMITTED, value=current)
+                    # A producer transition cannot commit without its receipt.
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 current = await self._execution.get(
                     execution.execution_id,
                     tenant_id=self._execution.tenant_id,
@@ -409,6 +584,18 @@ class RuntimeRecoveryCommands:
                     and current.error_diagnostics is None
                     and prefix_matches
                 )
+                if target_matches and event_type is ExecutionEventType.EXECUTION_RESUMED:
+                    # Unrelated record updates preserve this admission, but a
+                    # later producer cannot be adopted by this caller.
+                    head = await self._execution.get_history_head(
+                        execution.execution_id, tenant_id=self._execution.tenant_id,
+                    )
+                    target_matches = head.producer_generation == target_revision
+                if target_matches and producer_generation is not None:
+                    head = await self._execution.get_history_head(
+                        execution.execution_id, tenant_id=self._execution.tenant_id,
+                    )
+                    target_matches = head is not None and head.producer_generation == producer_generation
                 if target_matches:
                     return CommitObservation(DurableCommitState.COMMITTED, value=current)
                 predecessor = current == execution and not page.items
@@ -463,7 +650,7 @@ class RuntimeRecoveryCommands:
         elif target_status is ToolOperationStatus.FAILED:
             if result_payload is not None or error_code is None:
                 raise ValueError("failed resolution requires an error")
-            validate_tool_operation_failure(error_code, error_payload)
+            decode_tool_operation_failure(error_code, error_payload)
         else:
             raise ValueError("unsupported tool effect resolution target")
 
@@ -591,21 +778,6 @@ class RuntimeRecoveryCommands:
             background_tasks=self._background_tasks,
         )
         return _require_committed(outcome)
-
-
-def _same_operation_identity(
-    current: OperationLedgerRecord,
-    candidate: OperationLedgerInput,
-) -> bool:
-    return (
-        current.operation_id == candidate.operation_id
-        and current.resource_kind is candidate.resource_kind
-        and current.resource_id == candidate.resource_id
-        and current.execution_id == candidate.execution_id
-        and current.operation_kind is candidate.operation_kind
-        and current.request_digest == candidate.request_digest
-        and current.compactable == candidate.compactable
-    )
 
 
 def _same_resolution_operation(

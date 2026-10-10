@@ -234,15 +234,28 @@ class _MemoryTransaction:
         guarded = await self.guard_record(key, expected_storage_version=expected)
         if guarded is None:
             return False
+        self._delete_record_owners(frozenset((key,)))
+        return True
+
+    async def delete_records(self, keys: Sequence[bytes]) -> None:
+        records = await self.get_records(tuple(dict.fromkeys(keys)))
+        for key, record in records.items():
+            if await self.guard_record(key, expected_storage_version=record.storage_version) is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._delete_record_owners(frozenset(records))
+
+    def _delete_record_owners(self, keys: frozenset[bytes]) -> None:
+        if not keys:
+            return
         for alias, record_key in tuple(self.aliases.items()):
-            if record_key == key:
+            if record_key in keys:
                 del self.aliases[alias]
         for fact_key, fact in tuple(self.facts.items()):
-            if fact.owner_key_digest == key:
+            if fact.owner_key_digest in keys:
                 del self.facts[fact_key]
-        del self.records[key]
-        self.guarded_record_keys.discard(key)
-        return True
+        for key in keys:
+            del self.records[key]
+            self.guarded_record_keys.discard(key)
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
         values = [
@@ -401,6 +414,19 @@ class _MemoryTransaction:
             await self.insert_fact(fact)
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
+        if (
+            query.limit is not None and query.subject_digest is None
+            and not query.latest and not query.latest_per_subject
+        ):
+            start = 1 if query.after_sequence is None else query.after_sequence + 1
+            consecutive: list[StoredFact] = []
+            for sequence in range(start, start + query.limit):
+                fact = self.facts.get((query.stream_digest, sequence))
+                if fact is None:
+                    break
+                consecutive.append(fact)
+            if len(consecutive) == query.limit:
+                return tuple(consecutive)
         values = [
             fact
             for fact in self.facts.values()
@@ -483,6 +509,7 @@ class _MemoryTransaction:
                 or operation.stream_digest == query.stream_digest
             )
             and (query.states is None or operation.state in query.states)
+            and (query.after_sequence is None or operation.sequence > query.after_sequence)
             and (
                 query.through_sequence is None
                 or operation.sequence <= query.through_sequence

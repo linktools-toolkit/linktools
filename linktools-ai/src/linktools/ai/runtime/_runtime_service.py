@@ -24,6 +24,7 @@ from ..agent import (
 )
 from ..capability import CapabilityGroup, CapabilityGroupCapture
 from ..core import (
+    AuthorizationPolicy,
     RunBudget,
     CorrelationData,
     ExecutionMode,
@@ -80,7 +81,7 @@ from ..task import (
 )
 from ._agent import Agent, Execution, Session
 from ._agent_binding_resolver import _AgentBindingResolver
-from ._task import TaskGraphRun
+from ._task import TaskGraphRun, _CancelSettlement
 from ._observation import _ObservationSession
 from ._tasks import RuntimeTasks, TaskEngine
 from ._domains import RuntimeAgents, RuntimeExecutions, RuntimeMetrics, RuntimeSessions
@@ -365,6 +366,7 @@ class Runtime(Generic[AppT]):
         self._closed = False
         self._closing = False
         self._observation_sessions: set[_ObservationSession] = set()
+        self._cancel_settlements: set[_CancelSettlement] = set()
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
         if evaluation is not None:
@@ -390,6 +392,7 @@ class Runtime(Generic[AppT]):
         capabilities: "Sequence[CapabilityGroup[None] | CapabilityGroupCapture[None]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
+        authorization: "AuthorizationPolicy | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
@@ -404,6 +407,7 @@ class Runtime(Generic[AppT]):
         capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
+        authorization: "AuthorizationPolicy | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
@@ -417,6 +421,7 @@ class Runtime(Generic[AppT]):
         capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
+        authorization: "AuthorizationPolicy | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         resolved_namespace = validate_persistence_namespace(namespace)
         root_context = RuntimeContext(None) if context is None else context
@@ -431,6 +436,7 @@ class Runtime(Generic[AppT]):
             capabilities=capabilities,
             metrics=metrics,
             limits=selected_limits,
+            authorization=authorization,
         )
 
     @property
@@ -1391,6 +1397,8 @@ class Runtime(Generic[AppT]):
         )
         for session in sessions:
             await session.close(deadline=deadline)
+        for settlement in tuple(self._cancel_settlements):
+            await settlement.close()
         if self._close_callback is not None:
             await self._close_callback()
         async with self._close_lock:
@@ -1437,6 +1445,7 @@ async def _open_runtime(
     capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupCapture[object]]",
     metrics: "Metrics | None",
     limits: PromptLimits,
+    authorization: "AuthorizationPolicy | None",
 ):
     from ._factory import compose_runtime_components
 
@@ -1449,6 +1458,7 @@ async def _open_runtime(
         capabilities=capabilities,
         metrics=metrics,
         limits=limits,
+        authorization=authorization,
     )
     try:
         if components.metric_control is not None:

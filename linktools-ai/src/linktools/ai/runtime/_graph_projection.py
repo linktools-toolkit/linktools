@@ -149,5 +149,10 @@ class _GraphModelProjection:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        for subscription in self.subscriptions.values():
-            await subscription.close()
+        results = await asyncio.gather(
+            *(subscription.close() for subscription in self.subscriptions.values()),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result

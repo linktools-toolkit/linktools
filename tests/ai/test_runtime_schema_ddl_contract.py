@@ -140,3 +140,16 @@ def test_runtime_storage_migration_contains_no_known_duplicate_indexes() -> None
         "KEY ix_store_digest_key_digest ",
     ):
         assert fragment not in migration
+
+
+def test_runtime_fact_ddl_comments_match_canonical_metadata() -> None:
+    metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+    facts = metadata.tables["ai_state_facts"]
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "linktools-ai"
+        / "migrations"
+        / "init_schema.sql"
+    ).read_text(encoding="utf-8")
+    assert f"COMMENT='{facts.comment}'" in migration
+    assert f"COMMENT '{facts.c.state.comment}'" in migration

@@ -34,7 +34,7 @@ def _requirements(modules: dict, *names: str, editable: bool = True) -> list:
 
 @pytest.mark.parametrize("package,expected", (
     ("linktools", [("linktools", "")]),
-    ("linktools-ai", [("linktools-ai", ""), ("linktools", "")]),
+    ("linktools-ai", [("linktools-ai", "[web]"), ("linktools", "")]),
     ("linktools-cntr", [("linktools-cntr", ""), ("linktools", "[cli,git]")]),
     ("linktools-common", [("linktools-common", ""), ("linktools", "[cli]")]),
     ("linktools-mobile", [("linktools-mobile", ""), ("linktools", "[cli]")]),

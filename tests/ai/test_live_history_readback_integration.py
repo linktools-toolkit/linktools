@@ -15,7 +15,7 @@ from linktools.ai.capability import AgentContext, CapabilityGroup
 from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue, Page
 from linktools.ai.runtime import ExecutionHistoryItem, ExecutionTreeEvent, Runtime, RuntimeHistory, RuntimeStorage
 
-from ._runtime_test_helpers import _UsageFunctionModel
+from ._runtime_test_helpers import _UsageFunctionModel, _wait_for_committed
 
 
 class _Models:
@@ -53,6 +53,10 @@ async def _assert_request_part_coordinates(
     read: Callable[..., Awaitable[Page[ExecutionHistoryItem]]],
 ) -> None:
     selectors = {"agent_run_seq": 1, "message_seq": 1}
+    await _wait_for_committed(
+        lambda: read(**selectors, include_content=True),
+        lambda page: any(item.item_kind == "user" for item in page.items),
+    )
     for include_content in (False, True):
         items = []
         cursor = None
@@ -91,6 +95,7 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
     live_items: tuple[ExecutionHistoryItem, ...] = ()
     frozen_first = None
     frozen_partial = None
+    partial_response_expected = None
     frozen_request = None
 
     async def quick(_ctx: AgentContext[None], value: str) -> None:
@@ -128,38 +133,44 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
         principal = runtime.default_principal
 
         async def observe(tree_event: ExecutionTreeEvent) -> None:
-            nonlocal live_items, frozen_first, frozen_partial, frozen_request
+            nonlocal live_items, frozen_first, frozen_partial, partial_response_expected, frozen_request
             event = tree_event.event
             payload = event.payload
             assert not any(secret in json.dumps(payload) for secret in (
                 "quick-argument", "slow-argument", "before tools", "all finished",
             ))
             if event.event_type == ExecutionEventType.ASSISTANT_PART_COMPLETED:
-                page = await runtime.executions.history(
-                    tree_event.execution_id, principal=principal, include_content=True,
-                    agent_run_seq=payload["agent_run_seq"],
-                    message_seq=payload["message_seq"], part_index=payload["part_index"],
+                page = await _wait_for_committed(
+                    lambda: runtime.executions.history(
+                        tree_event.execution_id, principal=principal, include_content=True,
+                        agent_run_seq=payload["agent_run_seq"],
+                        message_seq=payload["message_seq"], part_index=payload["part_index"],
+                    ), lambda page: bool(page.items),
                 )
                 assert len(page.items) == 1
                 assert page.items[0].item_kind == "assistant"
                 assistant_reads.append(page.items[0].content)
                 if frozen_partial is None:
-                    assert page.items[0].model_request_seq is None
+                    partial_response_expected = page.items[0]
                     frozen_partial = await execution.history(include_content=True, limit=1)
             if payload.get("call_id") != "quick-call":
                 return
             selector = {"agent_run_seq": payload["agent_run_seq"], "tool_call_id": payload["call_id"]}
             if event.event_type == ExecutionEventType.TOOL_CALL_STARTED:
-                page = await runtime.executions.history(
-                    tree_event.execution_id, principal=principal, include_content=True, **selector,
+                page = await _wait_for_committed(
+                    lambda: runtime.executions.history(
+                        tree_event.execution_id, principal=principal, include_content=True, **selector,
+                    ), lambda page: bool(page.items),
                 )
                 assert _contents(page.items) == [("tool_call", "quick-call", {"value": "quick-argument"}, True)]
                 assert "arguments" not in payload and "content" not in payload
                 start_read.set()
             elif event.event_type == ExecutionEventType.TOOL_CALL_FINISHED:
                 assert slow_entered.is_set() and not release_slow.is_set(), payload
-                exact = await runtime.executions.history(
-                    tree_event.execution_id, principal=principal, include_content=True, **selector,
+                exact = await _wait_for_committed(
+                    lambda: runtime.executions.history(
+                        tree_event.execution_id, principal=principal, include_content=True, **selector,
+                    ), lambda page: any(item.item_kind == "tool_result" for item in page.items),
                 )
                 assert _contents(exact.items) == [
                     ("tool_call", "quick-call", {"value": "quick-argument"}, True),
@@ -239,8 +250,9 @@ async def test_parallel_tool_events_read_live_parts_and_preserve_cursor_after_ar
         partial_response = [item for item in partial_tail.items if item.item_kind == "assistant"]
         assert len(partial_response) == 1
         assert partial_response[0].content == "before tools"
-        assert partial_response[0].model_request_seq is None
-        assert partial_response[0].step_index is None
+        assert partial_response_expected is not None
+        assert partial_response[0].model_request_seq == partial_response_expected.model_request_seq
+        assert partial_response[0].step_index == partial_response_expected.step_index
         assert frozen_request is not None
         frozen_filtered = list(frozen_request.items)
         cursor = frozen_request.next_cursor
@@ -300,8 +312,10 @@ async def test_child_event_locator_does_not_mix_same_call_id_in_parent_history()
                 "agent_run_seq": event.payload["agent_run_seq"],
                 "tool_call_id": event.payload["call_id"],
             }
-            child = await runtime.executions.history(
-                tree_event.execution_id, principal=principal, include_content=True, **selector,
+            child = await _wait_for_committed(
+                lambda: runtime.executions.history(
+                    tree_event.execution_id, principal=principal, include_content=True, **selector,
+                ), lambda page: any(item.item_kind == "tool_result" for item in page.items),
             )
             assert _contents(child.items) == [
                 ("tool_call", "same-call", {"value": "child-value"}, True),

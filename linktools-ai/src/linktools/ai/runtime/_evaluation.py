@@ -285,6 +285,25 @@ class RuntimeEvaluations:
     async def start(
         self, request: StartEvaluationRequest, *, engine: "TaskEngine[AppT]",
     ) -> "EvaluationRun":
+        record = await self._reserve_start(request, engine=engine)
+        self._watch(record.experiment_id, engine, request.principal)
+        return EvaluationRun(self, record.experiment_id, request.principal)
+
+    async def cancel_admission(
+        self, request: StartEvaluationRequest, *, engine: "TaskEngine[AppT]",
+    ) -> "EvaluationRun":
+        """Cancel an admitted run or reserve its start request with a closed gate."""
+        self._ensure_open()
+        await self._authorize(request.principal, AuthorizationAction.EVALUATION_CANCEL,
+                              idempotency_key_digest(request.idempotency_key))
+        record = await self._reserve_start(request, engine=engine, cancelled=True)
+        await self._cancel(record.experiment_id, request.principal, request.idempotency_key)
+        return EvaluationRun(self, record.experiment_id, request.principal)
+
+    async def _reserve_start(
+        self, request: StartEvaluationRequest, *, engine: "TaskEngine[AppT]",
+        cancelled: bool = False,
+    ) -> EvaluationRecord:
         self._ensure_open()
         bound = self._engine(engine)
         spec, principal = request.spec, request.principal
@@ -292,6 +311,7 @@ class RuntimeEvaluations:
         await self._authorize(principal, AuthorizationAction.EVALUATION_RUN, identity)
         previous = await self._storage.evaluation.idempotency.get(
             "evaluation.run", identity, tenant_id=principal.tenant_id)
+        existing = None
         if previous is not None:
             existing = await self._record(previous.resource_id, principal)
             require_evaluation_content(existing, now=_now())
@@ -314,6 +334,9 @@ class RuntimeEvaluations:
             "repetition": repetition}), case.ref, candidate.slot_id, repetition)
             for case in cases for candidate in candidates for repetition in range(1, spec.repetitions + 1))
         experiment_id = uuid.uuid4().hex if previous is None else previous.resource_id
+        if cancelled:
+            await self._authorize(principal, AuthorizationAction.EVALUATION_CANCEL, experiment_id,
+                owner=principal.principal_id if existing is None else existing.manifest.principal.principal_id)
         owned_captures = []
         for candidate in candidates:
             for case in cases:
@@ -329,12 +352,12 @@ class RuntimeEvaluations:
         if spec.policy.content_retention_seconds is not None:
             deadlines.append(now + timedelta(seconds=spec.policy.content_retention_seconds))
         record = await self._state.reserve_experiment(EvaluationRecord(
-            manifest, manifest.digest, digest, identity, "open", 0, now, now,
+            manifest, manifest.digest, digest, identity,
+            "closed_cancel" if cancelled else "open", 0, now, now,
             content_expires_at=min(deadlines) if deadlines else None,
             metadata_expires_at=None if spec.policy.metadata_retention_seconds is None else now + timedelta(seconds=spec.policy.metadata_retention_seconds),
             owned_input_captures=tuple(dict.fromkeys(owned_captures))))
-        self._watch(record.experiment_id, bound, principal)
-        return EvaluationRun(self, record.experiment_id, principal)
+        return record
 
     async def get(self, experiment_id: str, *, principal: Principal) -> "EvaluationRun":
         await self._record(experiment_id, principal)
@@ -1136,11 +1159,11 @@ class RuntimeEvaluations:
     async def _collect_score(
         self, record: EvaluationRecord, intent: EvaluationLaunchIntent, state: TaskGraphState,
     ) -> None:
-        record = await self._record(record.experiment_id, record.manifest.principal, allow_expired=True)
-        if any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in record.scores):
-            return
         node = next(item for item in state.node_states if item.node_id == "score")
         if node.status not in _TERMINAL:
+            return
+        record = await self._record(record.experiment_id, record.manifest.principal, allow_expired=True)
+        if any(item.trial == intent.trial and item.scorer_slot_id == intent.scorer_slot_id for item in record.scores):
             return
         try:
             await self._require_content(record, record.manifest.principal)
@@ -1581,6 +1604,10 @@ class EvaluationRun:
         self, *, filters: ScoreFilter | None = None, cursor: str | None = None, limit: int = 100,
     ) -> Page[ScoreAttemptView]:
         return await self._evaluations._page(self.experiment_id, self._principal, filters or ScoreFilter(), cursor, limit)
+
+    async def preview_report(self) -> EvaluationReport:
+        """Return the current report without publishing a durable report artifact."""
+        return (await self._evaluations._build_snapshot(self.experiment_id, self._principal))[1]
 
     async def create_report(self) -> EvaluationReport:
         return (await self._evaluations._snapshot(self.experiment_id, self._principal))[1]

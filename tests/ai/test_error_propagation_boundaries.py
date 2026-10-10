@@ -238,7 +238,10 @@ async def test_recovery_reconcile_defers_unavailable_definition_per_execution() 
             super().__init__(Port(), None)  # type: ignore[arg-type]
             self.seen: list[str] = []
 
-        async def reconcile_checkpoint(self, checkpoint: object) -> None:
+        async def reconcile_checkpoint(
+            self, checkpoint: object, *, allow_active_recovery: bool = True,
+        ) -> None:
+            assert allow_active_recovery is True
             execution_id = checkpoint.execution_id  # type: ignore[attr-defined]
             self.seen.append(execution_id)
             if execution_id == "unavailable":
@@ -266,7 +269,10 @@ async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
         def __init__(self) -> None:
             super().__init__(Port(), None)  # type: ignore[arg-type]
 
-        async def reconcile_checkpoint(self, checkpoint: object) -> None:
+        async def reconcile_checkpoint(
+            self, checkpoint: object, *, allow_active_recovery: bool = True,
+        ) -> None:
+            assert allow_active_recovery is True
             del checkpoint
             raise AIError(
                 ErrorCode.AGENT_BINDING_UNAVAILABLE,
@@ -327,8 +333,10 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
             self,
             checkpoint: object,
             value: object,
+            *,
+            recovery_operation: object = None,
         ) -> bool:
-            del checkpoint
+            del checkpoint, recovery_operation
             assert value is execution
             return True
 

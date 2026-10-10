@@ -156,11 +156,11 @@ def _validate_tool_arguments_payload(
         raise ValueError("tool arguments payload does not match its digest")
 
 
-def validate_tool_operation_failure(
+def decode_tool_operation_failure(
     error_code: str | None,
     error_payload: StoredPayload | None,
-) -> None:
-    """Require the only durable payload contract allowed for tool failure."""
+) -> str:
+    """Decode the message from the durable tool-failure contract."""
     if (
         error_code
         not in {
@@ -205,6 +205,8 @@ def validate_tool_operation_failure(
         or len(message) > 2048
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    return message
 
 
 def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonValue]:
@@ -428,12 +430,21 @@ class TranscriptHeadRecord:
     message_count: int
     chunk_count: int
     quality: HistoryQuality
+    pending: RuntimePayloadRef | None = field(default=None, metadata={"wire_optional": True})
+    pending_part_count: int = field(default=0, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
         if self.message_count < 0 or self.chunk_count < 0:
             raise ValueError("transcript head counts cannot be negative")
         if not self.owner_id:
             raise ValueError("transcript head owner cannot be empty")
+        if (
+            isinstance(self.pending_part_count, bool)
+            or not isinstance(self.pending_part_count, int)
+            or self.pending_part_count < 0
+            or (self.pending is None) != (self.pending_part_count == 0)
+        ):
+            raise ValueError("transcript pending parts are invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,7 +547,7 @@ class ContextProjection:
 
 @dataclass(frozen=True, slots=True)
 class ModelInteractionRecord:
-    """Durable observation of one terminal logical model request."""
+    """Canonical lifecycle of one admitted logical model request."""
 
     agent_run_id: str
     step_index: int
@@ -544,15 +555,15 @@ class ModelInteractionRecord:
     purpose: str
     output_retry_index: int | None
     model: Mapping[str, str]
-    request_context: ContextProjection
-    request_envelope: RuntimePayloadRef
+    request_context: ContextProjection | None
+    request_envelope: RuntimePayloadRef | None
     response_context: ContextProjection | None
     status: str
     error_code: str | None
-    duration_ns: int
+    duration_ns: int | None
     usage: UsageMetrics | None
     started_at: datetime
-    finished_at: datetime
+    finished_at: datetime | None
     attachments: tuple[Mapping[str, JsonValue], ...] = ()
 
     def __post_init__(self) -> None:
@@ -561,20 +572,41 @@ class ModelInteractionRecord:
             or self.step_index < 0
             or self.model_request_seq < 1
             or self.purpose not in {"agent", "compaction"}
-            or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
-            or self.duration_ns < 0
+            or self.status not in {"RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"}
+            or self.duration_ns is not None and self.duration_ns < 0
             or not isinstance(self.started_at, datetime)
             or self.started_at.tzinfo is None
-            or not isinstance(self.finished_at, datetime)
-            or self.finished_at.tzinfo is None
-            or not isinstance(self.request_context, ContextProjection)
-            or not isinstance(self.request_envelope, RuntimePayloadRef)
+            or self.finished_at is not None and (
+                not isinstance(self.finished_at, datetime)
+                or self.finished_at.tzinfo is None
+            )
+            or self.request_context is not None
+            and not isinstance(self.request_context, ContextProjection)
+            or self.request_envelope is not None
+            and not isinstance(self.request_envelope, RuntimePayloadRef)
+            or (self.request_context is None) != (self.request_envelope is None)
+            or self.response_context is not None
+            and not isinstance(self.response_context, ContextProjection)
         ):
             raise ValueError("model interaction record is invalid")
-        if self.status == "SUCCEEDED" and self.response_context is None:
-            raise ValueError("successful model interaction needs a response context")
-        if self.status != "SUCCEEDED" and self.response_context is not None:
-            raise ValueError("failed model interaction cannot have a response context")
+        if self.status in {"RUNNING", "INTERRUPTED"} and (
+            self.response_context is not None
+            or self.error_code is not None
+            or self.duration_ns is not None
+            or self.usage is not None
+            or self.finished_at is not None
+        ):
+            raise ValueError("unfinished model interaction cannot have terminal data")
+        if self.status not in {"RUNNING", "INTERRUPTED"} and (
+            self.duration_ns is None or self.finished_at is None
+        ):
+            raise ValueError("terminal model interaction needs completion data")
+        if self.status == "SUCCEEDED" and (
+            self.request_context is None or self.response_context is None
+        ):
+            raise ValueError("successful model interaction needs request and response context")
+        if self.response_context is not None and self.request_context is None:
+            raise ValueError("model response context needs prepared request context")
         if self.status == "FAILED" and not self.error_code:
             raise ValueError("failed model interaction needs an error code")
         object.__setattr__(self, "model", dict(self.model))
@@ -584,6 +616,40 @@ class ModelInteractionRecord:
             tuple(_normalize_model_attachment_fact(value) for value in self.attachments),
         )
 
+    def validate_successor(self, successor: "ModelInteractionRecord") -> None:
+        """Reject identity drift, request rewrites, and changes after completion."""
+        if self == successor:
+            return
+        if self.status != "RUNNING" or (
+            self.agent_run_id,
+            self.step_index,
+            self.model_request_seq,
+            self.purpose,
+            self.output_retry_index,
+            self.started_at,
+        ) != (
+            successor.agent_run_id,
+            successor.step_index,
+            successor.model_request_seq,
+            successor.purpose,
+            successor.output_retry_index,
+            successor.started_at,
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self.request_context is not None:
+            if (
+                self.model,
+                self.request_context,
+                self.request_envelope,
+                self.attachments,
+            ) != (
+                successor.model,
+                successor.request_context,
+                successor.request_envelope,
+                successor.attachments,
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
 
 @dataclass(frozen=True, slots=True)
 class StoredAgentRunCheckpoint:
@@ -592,10 +658,19 @@ class StoredAgentRunCheckpoint:
     timestamp: datetime
     state: str
     projection_digest: str
+    # Older checkpoints use the owner's authoritative transcript head rather
+    # than an explicit per-checkpoint boundary.
+    transcript_message_count: int | None = field(default=None, metadata={"wire_optional": True})
     has_context_projection: bool = False
     pending_request_index: int | None = None
 
     def __post_init__(self) -> None:
+        if self.transcript_message_count is not None and (
+            isinstance(self.transcript_message_count, bool)
+            or not isinstance(self.transcript_message_count, int)
+            or self.transcript_message_count < 0
+        ):
+            raise ValueError("stored checkpoint transcript boundary is invalid")
         if self.pending_request_index is not None and (
             isinstance(self.pending_request_index, bool)
             or not isinstance(self.pending_request_index, int)
@@ -731,7 +806,7 @@ class ExecutionRecord:
     requires_task_invocation_capture: bool = False
     retention_closed: bool = False
     started_at: datetime | None = None
-    budget_scope_id: str | None = None
+    budget_scope_id: str | None = field(default=None, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
         if self.budget_scope_id is not None and (
@@ -945,8 +1020,22 @@ class ExecutionHistoryHeadRecord:
     state: ExecutionHistoryState
     revision: int
     seal_digest: str | None
+    producer_generation: int = field(default=0, metadata={"wire_optional": True})
+    producer_claim_id: str | None = field(default=None, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.producer_generation, bool)
+            or not isinstance(self.producer_generation, int)
+            or self.producer_generation < 0
+        ):
+            raise ValueError("execution history producer generation is invalid")
+        if self.producer_claim_id is not None and (
+            not isinstance(self.producer_claim_id, str)
+            or not self.producer_claim_id
+            or self.producer_generation < 1
+        ):
+            raise ValueError("execution history producer claim is invalid")
         if self.revision < 0:
             raise ValueError("execution history head revision cannot be negative")
         if not self.execution_id:
@@ -1100,7 +1189,7 @@ class ToolOperationRecord:
             if self.result_payload is not None:
                 raise ValueError("failed tool operation cannot carry a result payload")
             try:
-                validate_tool_operation_failure(
+                decode_tool_operation_failure(
                     self.error_code,
                     self.error_payload,
                 )
@@ -1150,8 +1239,15 @@ class ExecutionTerminalCommit:
     terminal_event_payload: Mapping[str, JsonValue]
     idempotency: IdempotencyTerminalUpdate | None = None
     operation: OperationTerminalUpdate | None = None
+    producer_generation: int | None = field(default=None, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
+        if self.producer_generation is not None and (
+            isinstance(self.producer_generation, bool)
+            or not isinstance(self.producer_generation, int)
+            or self.producer_generation < 1
+        ):
+            raise ValueError("terminal producer generation is invalid")
         status = self.execution.status
         if status not in {
             ExecutionStatus.SUCCEEDED,
@@ -1274,6 +1370,25 @@ class ExternalCallRecord:
             )
         except (TypeError, ValueError) as error:
             raise ValueError("external resolution metadata is invalid") from error
+
+
+def deferred_resource_id(
+    contract: str,
+    tenant_id: str,
+    execution_id: str,
+    source_agent_run_id: str,
+    tool_call_id: str,
+) -> str:
+    """Return the durable identity of an approval or external deferred call."""
+    return canonical_sha256(
+        {
+            "contract": contract,
+            "tenant_id": tenant_id,
+            "execution_id": execution_id,
+            "source_agent_run_id": source_agent_run_id,
+            "tool_call_id": tool_call_id,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1877,7 +1992,16 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         execution_id: str,
         *,
         expected_revision: int | None = None,
+        expected_producer_generation: int | None = None,
+        allow_cancelling: bool = True,
     ) -> tuple[ExecutionHistoryHeadRecord, StoredRecord]: ...
+    async def admit_history_producer_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution: ExecutionRecord,
+        *,
+        producer_claim_id: str | None = None,
+    ) -> int: ...
     async def replace_history_head_in_transaction(
         self,
         transaction: StateTransaction,
@@ -1976,8 +2100,15 @@ class ToolOperationAdmission:
     owner: str
     lease_seconds: int
     arguments_payload: StoredPayload | None = None
+    producer_generation: int | None = field(default=None, metadata={"wire_optional": True})
 
     def __post_init__(self) -> None:
+        if self.producer_generation is not None and (
+            isinstance(self.producer_generation, bool)
+            or not isinstance(self.producer_generation, int)
+            or self.producer_generation < 1
+        ):
+            raise ValueError("tool producer generation is invalid")
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
         try:
             validate_resource_id(self.execution_id)
@@ -2172,6 +2303,7 @@ class OperationLedgerRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         limit: int,
         states: frozenset[OperationStatus] | None = None,
+        after_sequence: int | None = None,
     ) -> tuple[OperationLedgerRecord, ...]: ...
     async def compact_terminal(
         self,
@@ -2524,7 +2656,8 @@ __all__ = [
     "TaskRepository",
     "TaskRepositories",
     "ToolOperationAdmission",
-    "validate_tool_operation_failure",
+    "decode_tool_operation_failure",
+    "deferred_resource_id",
     "TranscriptChunk",
     "TranscriptHeadRecord",
     "TranscriptOrigin",

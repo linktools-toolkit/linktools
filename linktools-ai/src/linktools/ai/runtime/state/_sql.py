@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 _MAINTENANCE_PAGE_SIZE = 128
+_RECORD_DELETE_BATCH_SIZE = 256
 
 
 class _SqlGroupTransaction:
@@ -799,6 +800,60 @@ class _SqlTransaction:
                 )
         return result.rowcount == 1
 
+    async def delete_records(self, keys: Sequence[bytes]) -> None:
+        unique_keys = tuple(dict.fromkeys(keys))
+        if not unique_keys:
+            return
+        from sqlalchemy import delete, tuple_
+
+        table = self._table("ai_state_records")
+        aliases = self._table("ai_state_aliases")
+        facts = self._table("ai_state_facts")
+        deleted_keys: set[bytes] = set()
+        statement_count = 0
+        for offset in range(0, len(unique_keys), _RECORD_DELETE_BATCH_SIZE):
+            current = await self.get_records(
+                unique_keys[offset : offset + _RECORD_DELETE_BATCH_SIZE]
+            )
+            if not current:
+                continue
+            versions = tuple(
+                (_hex(key), record.storage_version)
+                for key, record in sorted(current.items())
+            )
+            key_hexes = tuple(key for key, _version in versions)
+            # Deleting the version-matched owners fences concurrent alias/fact writers.
+            result = await self._execute(
+                delete(table).where(
+                    table.c.store_digest == self._store_hex,
+                    table.c.key_digest.in_(key_hexes),
+                    tuple_(table.c.key_digest, table.c.storage_version).in_(versions),
+                )
+            )
+            if result.rowcount != len(current):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await self._execute(
+                delete(aliases).where(
+                    aliases.c.store_digest == self._store_hex,
+                    aliases.c.record_key_digest.in_(key_hexes),
+                )
+            )
+            await self._execute(
+                delete(facts).where(
+                    facts.c.store_digest == self._store_hex,
+                    facts.c.owner_key_digest.in_(key_hexes),
+                )
+            )
+            deleted_keys.update(current)
+            statement_count += 3
+        for key in deleted_keys:
+            self._guarded_record_keys.discard(key)
+            self._record_cache[key] = None
+        for alias, record_key in tuple(self._alias_cache.items()):
+            if record_key in deleted_keys:
+                self._alias_cache[alias] = None
+        self._log_batch("delete_records", len(deleted_keys), statement_count)
+
     async def delete_record(
         self, key: bytes, *, expected_storage_version: int | None = None
     ) -> bool:
@@ -1403,6 +1458,8 @@ class _SqlTransaction:
             conditions.append(table.c.stream_digest == _hex(query.stream_digest))
         if query.states is not None:
             conditions.append(table.c.state.in_(tuple(query.states)))
+        if query.after_sequence is not None:
+            conditions.append(table.c.sequence > query.after_sequence)
         if query.through_sequence is not None:
             conditions.append(table.c.sequence <= query.through_sequence)
         if query.compactable is not None:

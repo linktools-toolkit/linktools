@@ -211,10 +211,10 @@ def _decode_message(value: object) -> ModelMessage:
     if not isinstance(value, Mapping):
         raise ValueError("model message must be an object")
     version = value.get("version")
-    if version != _MESSAGE_VERSION:
-        if isinstance(version, int) and not isinstance(version, bool):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    if isinstance(version, bool) or not isinstance(version, int):
         raise ValueError("model message version is invalid")
+    if version != _MESSAGE_VERSION:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     kind = value.get("kind")
     if kind == "request":
         _require_keys(

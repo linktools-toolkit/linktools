@@ -50,6 +50,7 @@ from ..core import (
     normalize_json_value,
     overlay_correlation,
     principal_identity_payload,
+    validate_idempotency_key,
 )
 from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
@@ -275,7 +276,8 @@ class ExecutionBackend(Protocol):
         request: "ResolveToolEffectRequest",
     ) -> "ToolEffectResolutionResult": ...
     async def recover_execution(
-        self, execution_id: str, *, tenant_id: str
+        self, execution_id: str, *, tenant_id: str, expected_revision: int,
+        recovery_operation: OperationLedgerInput | None = None,
     ) -> ExecutionRecord: ...
     async def persist_cancel_intent(
         self,
@@ -632,6 +634,13 @@ class DefaultExecutionService:
         if owner:
             await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
+    async def resume_terminal_handoff(
+        self, execution_id: str, *, tenant_id: str,
+    ) -> None:
+        state = await self._handoff.claim_requested_release((tenant_id, execution_id))
+        if state is not None:
+            await self._run_handoff_cleanup(execution_id, tenant_id, state)
+
     async def _request_handoff_if_terminal(
         self, execution_id: str, tenant_id: str
     ) -> None:
@@ -650,6 +659,12 @@ class DefaultExecutionService:
         state: HandoffState[None],
     ) -> None:
         key = tenant_id, execution_id
+        waiter = self._local_waiter
+        if waiter is not None and waiter.owns_execution(execution_id, tenant_id=tenant_id):
+            await self._handoff.finish_release(key, state, succeeded=False)
+            if not waiter.owns_execution(execution_id, tenant_id=tenant_id):
+                await self.resume_terminal_handoff(execution_id, tenant_id=tenant_id)
+            return
         try:
             released = await self._release_terminal(
                 execution_id,
@@ -2568,6 +2583,10 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if launch_record.budget_scope_id is not None:
             await self._state.budgets.read(launch_record.budget_scope_id)
+        if launch_record.agent_run_seq > 0:
+            # A replay observes the admitted producer. Only explicit recovery
+            # may obtain a new generation for an already claimed attempt.
+            return
         prepared_local_stream = False
         try:
             if (
@@ -3501,18 +3520,54 @@ class DefaultExecutionService:
         execution_id: str,
         *,
         principal: Principal,
+        idempotency_key: str | None = None,
     ) -> ExecutionHandle:
         execution = await self._load_authorized(
             execution_id,
             principal,
             AuthorizationAction.EXECUTION_RECOVER,
         )
-        if execution.status is not ExecutionStatus.RECOVERY_REQUIRED:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await self.runtime_backend().recover_execution(
-            execution_id,
-            tenant_id=principal.tenant_id,
-        )
+        if idempotency_key is None:
+            if execution.status not in {
+                ExecutionStatus.RECOVERY_REQUIRED,
+                ExecutionStatus.PENDING_START,
+                ExecutionStatus.STARTED,
+                ExecutionStatus.CANCELLING,
+            }:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await self.runtime_backend().recover_execution(
+                execution_id,
+                tenant_id=principal.tenant_id,
+                expected_revision=execution.revision,
+            )
+        else:
+            now = datetime.now(timezone.utc)
+            operation = OperationLedgerInput(
+                operation_id=compute_idempotency_key_digest(validate_idempotency_key(idempotency_key)),
+                tenant_id=principal.tenant_id,
+                resource_kind=ResourceKind.EXECUTION,
+                resource_id=execution_id,
+                execution_id=execution_id,
+                operation_kind=OperationKind.EXECUTION_RECOVER,
+                status=OperationStatus.RUNNING,
+                request_digest=canonical_sha256({
+                    "action": "execution.recover",
+                    "principal": principal_identity_payload(principal),
+                    "execution_id": execution_id,
+                }),
+                result_ref=uuid.uuid4().hex,
+                result_digest=None,
+                error_code=None,
+                compactable=False,
+                created_at=now,
+                updated_at=now,
+            )
+            await self.runtime_backend().recover_execution(
+                execution_id,
+                tenant_id=principal.tenant_id,
+                expected_revision=execution.revision,
+                recovery_operation=operation,
+            )
         return ExecutionHandle(execution_id)
 
     async def _cancel_recovery_required(

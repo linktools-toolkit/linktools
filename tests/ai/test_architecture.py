@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from scripts.check.ai.architecture import ArchitecturePolicyChecker
 
 
@@ -106,6 +108,28 @@ def test_exports_must_be_declared_statically(tmp_path: Path) -> None:
     assert any("__all__ must be one static string sequence" in error for error in errors)
 
 
+@pytest.mark.parametrize("deferred", (False, True))
+def test_type_only_exports_require_a_runtime_resolver(tmp_path: Path, deferred: bool) -> None:
+    source = (
+        "from typing import TYPE_CHECKING\n"
+        "if TYPE_CHECKING:\n"
+        "    from .public import Public\n"
+        "__all__ = ['Public', 'Missing']\n"
+    )
+    if deferred:
+        source += (
+            "def __getattr__(name):\n"
+            "    if name == 'Public':\n"
+            "        from .public import Public\n"
+            "        return Public\n"
+            "    raise AttributeError(name)\n"
+        )
+    errors = _errors(tmp_path, {"a/__init__.py": source, "a/public.py": "Public = object()\n"})
+    missing = next(error for error in errors if "unbound names" in error)
+    assert "Missing" in missing
+    assert ("Public" in missing) is not deferred
+
+
 def test_external_production_consumers_use_the_same_public_boundary(tmp_path: Path) -> None:
     source_root = _source_tree(
         tmp_path,
@@ -163,3 +187,59 @@ for name in TARGETS:
     assert name not in sys.modules, name
 """
     subprocess.run([sys.executable, "-c", blocker], env=environment, check=True)
+
+
+@pytest.mark.parametrize("entry", ("sandbox_guardian", "sandbox_worker"))
+def test_sandbox_entry_imports_do_not_load_model_execution(entry: str) -> None:
+    environment = dict(os.environ)
+    source_root = Path(__file__).parents[2]
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(source_root / "linktools-ai/src"), str(source_root / "linktools/src"))
+    )
+    script = """
+import importlib
+import pickle
+import sys
+from linktools import ai
+
+assert set(ai.__all__) <= set(dir(ai))
+importlib.import_module('linktools.ai.workspace.' + sys.argv[1])
+for name in ('linktools.ai.runtime', 'linktools.ai.capability', 'linktools.ai.model',
+             'pydantic_ai', 'fastmcp', 'openai'):
+    assert name not in sys.modules, name
+from linktools.ai.workspace import Workspace
+assert ai.Workspace is Workspace
+assert pickle.loads(pickle.dumps(ai.Workspace)) is Workspace
+try:
+    ai.missing_export
+except AttributeError:
+    pass
+else:
+    raise AssertionError('unknown export was accepted')
+"""
+    subprocess.run([sys.executable, "-c", script, entry], env=environment, check=True)
+
+
+def test_migration_exports_preserve_owner_identity() -> None:
+    import pickle
+    from linktools.ai import migrate
+    from linktools.ai.migrate import _database, _metrics
+
+    expected = {
+        "build_sql_schema_metadata": _database.build_sql_schema_metadata,
+        "provision_asset_database": _database.provision_asset_database,
+        "provision_database": _database.provision_database,
+        "provision_metrics_database": _metrics.provision_metrics_database,
+        "provision_metrics_sqlite": _metrics.provision_metrics_sqlite,
+        "provision_runtime_database": _database.provision_runtime_database,
+        "validate_metrics_database": _metrics.validate_metrics_database,
+        "validate_metrics_sqlite": _metrics.validate_metrics_sqlite,
+    }
+    assert list(expected) == migrate.__all__
+    assert set(expected) <= set(dir(migrate))
+    for name, value in expected.items():
+        assert getattr(migrate, name) is value
+        assert pickle.loads(pickle.dumps(value)) is value
+    imported: dict[str, object] = {}
+    exec("from linktools.ai.migrate import *", imported)
+    assert {name: imported[name] for name in migrate.__all__} == expected

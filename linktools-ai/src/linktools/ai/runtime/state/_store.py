@@ -485,8 +485,11 @@ class OperationQuery:
     through_sequence: int | None = None
     compactable: bool | None = None
     limit: int | None = None
+    after_sequence: int | None = None
 
     def __post_init__(self) -> None:
+        if self.after_sequence is not None:
+            _require_nonnegative_int(self.after_sequence, "after_sequence")
         if self.stream_digest is not None:
             _require_digest(self.stream_digest, "stream_digest")
         if self.through_sequence is not None:
@@ -521,6 +524,7 @@ class StateTransaction(Protocol):
         lease_expires_at: datetime | None,
     ) -> bool: ...
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool: ...
+    async def delete_records(self, keys: Sequence[bytes]) -> None: ...
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]: ...
     async def scan_records(self) -> tuple[StoredRecord, ...]: ...
     async def scan_records_page(
@@ -724,6 +728,10 @@ class _ReadOnlyStateTransaction(StateTransaction):
         del key, expected_storage_version
         self._reject("delete_record")
         return False
+
+    async def delete_records(self, keys: Sequence[bytes]) -> None:
+        del keys
+        self._reject("delete_records")
 
     async def insert_alias(self, alias: StoredAlias) -> None:
         del alias
@@ -946,6 +954,8 @@ def validate_record_identity(record: StoredRecord) -> None:
         if value is not None and (not isinstance(value, bytes) or len(value) != 32):
             raise ValueError(f"record {name} is invalid")
     encode_sort_key(record.sort_key)
+    if type(record.data) is ImmutableJsonMapping:
+        return
     try:
         canonical_json_bytes(dict(record.data))
     except (TypeError, ValueError) as error:

@@ -90,4 +90,8 @@ def test_transcript_head_uses_stored_record_as_its_only_revision_owner() -> None
         "message_count",
         "chunk_count",
         "quality",
+        "pending",
+        "pending_part_count",
     }
+    assert payload["fields"]["pending"] is None
+    assert payload["fields"]["pending_part_count"] == 0

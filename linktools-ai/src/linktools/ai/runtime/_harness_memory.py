@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import cast
 
+from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset, FilteredToolset, FunctionToolset
 from pydantic_ai_harness.memory import (
     Memory,
@@ -20,6 +21,7 @@ from pydantic_ai_harness.memory import (
 from ..capability import (
     TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY,
     TOOL_PLAN_SAFE_METADATA_KEY,
+    ToolCallRetry,
     tool_metadata,
 )
 
@@ -92,6 +94,27 @@ class HarnessMemoryStoreAdapter:
         return await self._store.list_paths(prefix, limit=limit)
 
 
+def _validate_memory_content(
+    ctx: RunContext[None],
+    content: str,
+    **_kwargs: object,
+) -> None:
+    """Reject unsupported model-authored memory text before accessing storage."""
+    del ctx
+    if "\x00" in content:
+        raise ToolCallRetry(
+            "Memory content cannot contain NUL characters. Remove them "
+            "from content and retry."
+        )
+    try:
+        content.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        raise ToolCallRetry(
+            "Memory content must be valid UTF-8 text. Replace invalid "
+            "Unicode characters in content and retry."
+        ) from None
+
+
 @dataclass
 class HarnessSelectedMemory(Memory[None]):
     """Harness Memory with Runtime-selected tool exposure."""
@@ -106,6 +129,9 @@ class HarnessSelectedMemory(Memory[None]):
         if toolset is None:
             return None
         for name in self.selected_tool_names:
+            tool = toolset.tools[name]
+            if name == "write_memory":
+                tool.args_validator = _validate_memory_content
             toolset.tools[name].metadata = tool_metadata(
                 base=toolset.tools[name].metadata,
                 **_memory_metadata_kwargs(name),

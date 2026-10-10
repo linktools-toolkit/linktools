@@ -6,7 +6,9 @@ from linktools.core import environ
 from pydantic_ai.capabilities import (
     AbstractCapability,
     CapabilityOrdering,
+    RawToolArgs,
     ValidatedToolArgs,
+    WrapToolValidateHandler,
 )
 from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import ToolCallPart
@@ -37,6 +39,23 @@ class PydanticToolControlCapability(AbstractCapability[AgentContext[object]]):
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="outermost")
+
+    async def wrap_tool_validate(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: RawToolArgs,
+        handler: WrapToolValidateHandler,
+    ) -> ValidatedToolArgs:
+        del ctx, call, tool_def
+        try:
+            return await handler(args)
+        except ToolCallRetry as error:
+            raise build_model_retry(error.message) from error
+        except ToolCallFailed as error:
+            raise build_tool_failed(error.message) from error
 
     async def on_tool_execute_error(
         self,

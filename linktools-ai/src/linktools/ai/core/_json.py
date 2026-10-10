@@ -139,8 +139,13 @@ def _default(value: "datetime | date | Enum") -> str:
     raise TypeError(f"unsupported JSON value: {type(value).__name__}")
 
 
-def canonical_json_bytes(value: JsonValue) -> bytes:
+def canonical_json_bytes(value: JsonValue | ImmutableJsonMapping) -> bytes:
     """Encode a JSON-compatible value deterministically."""
+    if type(value) is ImmutableJsonMapping:
+        payload = value._payload
+        if isinstance(payload, bytes):
+            return payload
+        value = payload
     return json.dumps(
         value,
         default=_default,

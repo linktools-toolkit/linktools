@@ -21,6 +21,7 @@ from ..capability import (
     SkillSourceRegistry,
 )
 from ..core import (
+    AuthorizationPolicy,
     HmacCursorSigner,
     PromptLimits,
     TenantAuthorizationPolicy,
@@ -70,9 +71,11 @@ from ._task_graph_binding_capture import TaskGraphBindingCaptureStore
 from ._runtime_identity import token_seed
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
+from ._transient_history import TransientExecutionHistoryStore
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeStorage
 from .state._contracts import BudgetRepository, TaskAdmissionRepository
+from .state._step_archive import StagingAgentRunStore
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -112,6 +115,7 @@ async def compose_runtime_components(
     capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupCapture[AppT]]" = (),
     metrics: "Metrics | None" = None,
     limits: "PromptLimits | None" = None,
+    authorization: "AuthorizationPolicy | None" = None,
 ) -> _RuntimeComponents:
     """Capture declarations and build Runtime-private services."""
     resolved_namespace = validate_persistence_namespace(namespace)
@@ -263,13 +267,16 @@ async def compose_runtime_components(
             resolved_namespace,
             selected_storage,
         )
-        authorization = TenantAuthorizationPolicy(effective_tenant_id)
+        selected_authorization = (
+            TenantAuthorizationPolicy(effective_tenant_id)
+            if authorization is None else authorization
+        )
         ownership_transferred = True
         components = await _build_local_components(
             storage=selected_storage,
             catalog=catalog,
             compiler=compiler,
-            authorization=authorization,
+            authorization=selected_authorization,
             tenant_id=effective_tenant_id,
             namespace=resolved_namespace,
             workspace=workspace,
@@ -400,13 +407,19 @@ def _execution_history_reader(
     storage: RuntimeStorage,
     runtime_token_seed: bytes,
 ) -> StepExecutionHistoryReader:
+    history_store = storage.run_store.read_store(RuntimeDomain.EXECUTION)
+    if storage.plan.route(RuntimeDomain.EXECUTION).retention is RuntimeRetentionMode.TRANSIENT:
+        if not isinstance(history_store, StagingAgentRunStore):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        history_store = TransientExecutionHistoryStore(history_store, storage.run_store)
     return StepExecutionHistoryReader(
         namespace=namespace,
         executions=storage.execution.executions,
-        store=storage.run_store.read_store(RuntimeDomain.EXECUTION),
+        store=history_store,
         cursor_signer=HmacCursorSigner("execution-history", runtime_token_seed),
         tool_operations=storage.recovery.tools,
-        staging_store=storage.run_store,
+        notifications=storage.run_store,
+        durable_history_available=storage.run_store.model_interaction_history_available,
     )
 
 
@@ -456,7 +469,7 @@ async def _build_local_components(
     storage: RuntimeStorage,
     catalog: AgentCatalog,
     compiler: AgentCompiler,
-    authorization: TenantAuthorizationPolicy,
+    authorization: AuthorizationPolicy,
     tenant_id: str,
     namespace: str,
     workspace: "Workspace | None",
@@ -485,14 +498,14 @@ async def _build_local_components(
         execution_id: str,
         *,
         tenant_id: str,
-    ) -> None:
+    ) -> bool:
         if backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         await backend.release_runtime_execution(
             execution_id,
             tenant_id=tenant_id,
         )
-        await storage.retention.release_execution_handoff(
+        return await storage.retention.release_execution_handoff(
             execution_id,
             tenant_id=tenant_id,
         )
@@ -587,6 +600,11 @@ async def _build_local_components(
     graph_service: DefaultTaskGraphService | None = None
     coordinator: _RuntimeCloseCoordinator | None = None
     close_actions: tuple[tuple[str, Callable[[], Awaitable[None]]], ...] | None = None
+
+    async def worker_completed(execution_id: str) -> None:
+        await execution.resume_terminal_handoff(execution_id, tenant_id=tenant_id)
+
+    exclusive_execution_writer = storage.plan.route(RuntimeDomain.EXECUTION).kind == "filesystem"
     try:
         backend = LocalExecutionBackend(
             storage.conversation,
@@ -629,6 +647,8 @@ async def _build_local_components(
             ),
             tool_operations=storage.recovery.tools,
             metric_recorder=metric_buffer,
+            worker_completed=worker_completed,
+            exclusive_execution_writer=exclusive_execution_writer,
         )
         runtime_bridge.bind(backend)
         session = DefaultSessionService(
@@ -657,6 +677,8 @@ async def _build_local_components(
             task_state=storage.task.tasks,
             input_captures=input_captures,
             task_admissions=storage.task.admissions,
+            execution_state=storage.execution.executions,
+            recovery_backend=backend,
             budgets=storage.execution.budgets,
             task_objects=storage.object_store(RuntimeDomain.TASK),
             artifact_state=storage.artifact,
@@ -697,6 +719,7 @@ async def _build_local_components(
             task_launcher,
             local_waiter=task_launcher,
             preflight=task_runner,
+            bound_execution_recovery=task_runner,
             metric_recorder=metric_buffer,
             metric_source_namespace=metric_source_namespace,
         )
@@ -762,7 +785,9 @@ async def _build_local_components(
             tuple(action for _, action in close_actions)
         )
         if RuntimeDomain.RECOVERY in storage.plan.durable_domains:
-            await backend.reconcile()
+            await backend.reconcile(
+                allow_active_recovery=exclusive_execution_writer,
+            )
     except BaseException:
         abort_actions = (
             close_actions

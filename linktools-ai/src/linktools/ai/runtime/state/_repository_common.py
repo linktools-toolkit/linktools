@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Generic, TypeVar
 from linktools.core import environ
-from ...core import OperationLedgerInput, OperationLedgerRecord, OperationStatus, ResourceKind, ResourceRef, canonical_json_bytes, operation_cas_immutable_matches, operation_replay_matches
+from ...core import OperationKind, OperationLedgerInput, OperationLedgerRecord, OperationStatus, ResourceKind, ResourceRef, canonical_json_bytes, operation_cas_immutable_matches, operation_replay_matches
 from ...errors import AIError, ErrorCode
 from ...evaluation import EvidenceBundle, EvaluationReport, ComparisonReport
 from ...task import TaskGraphView, TaskNodeView
@@ -335,6 +335,48 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         return tuple(values)
 
 
+def operation_identity_matches(
+    current: OperationLedgerRecord,
+    candidate: OperationLedgerInput,
+) -> bool:
+    """Match a receipt independently of its outcome or producer claim."""
+    return (
+        current.operation_id == candidate.operation_id
+        and current.tenant_id == candidate.tenant_id
+        and current.resource_kind is candidate.resource_kind
+        and current.resource_id == candidate.resource_id
+        and current.execution_id == candidate.execution_id
+        and current.operation_kind is candidate.operation_kind
+        and current.request_digest == candidate.request_digest
+        and current.compactable == candidate.compactable
+    )
+
+
+def validate_recovery_operation(
+    operation: OperationLedgerInput,
+    *,
+    execution_id: str,
+    tenant_id: str,
+    producer: bool,
+) -> None:
+    if (
+        operation.tenant_id != tenant_id
+        or operation.resource_kind is not ResourceKind.EXECUTION
+        or operation.resource_id != execution_id
+        or operation.execution_id != execution_id
+        or operation.operation_kind is not OperationKind.EXECUTION_RECOVER
+        or operation.status is not OperationStatus.RUNNING
+        or operation.compactable
+        or operation.result_digest is not None
+        or operation.error_code is not None
+        or (
+            not isinstance(operation.result_ref, str) or not operation.result_ref
+            if producer else operation.result_ref is not None
+        )
+    ):
+        raise ValueError("execution recovery operation is invalid")
+
+
 class OperationLedgerRepositoryImpl(_RepositoryBase):
     def _stream(self, value: OperationLedgerInput | OperationLedgerRecord) -> bytes:
         return stream_digest(
@@ -474,6 +516,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
         tenant_id: str,
         limit: int,
         states: frozenset[OperationStatus] | None = None,
+        after_sequence: int | None = None,
     ) -> tuple[OperationLedgerRecord, ...]:
         if tenant_id != self._tenant_id:
             return ()
@@ -494,6 +537,7 @@ class OperationLedgerRepositoryImpl(_RepositoryBase):
                         else frozenset(status.value for status in states)
                     ),
                     limit=limit,
+                    after_sequence=after_sequence,
                 )
             )
         )
@@ -1090,6 +1134,8 @@ __all__ = [
     "RepositoryBase",
     "ResourceRepository",
     "append_operation",
+    "operation_identity_matches",
+    "validate_recovery_operation",
     "decode_operation",
     "decode_record_cursor",
     "canonical_record_identity",

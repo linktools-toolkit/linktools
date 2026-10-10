@@ -32,7 +32,7 @@ from ..task import (
 )
 from ._graph_projection import _GraphModelProjection
 from ._observation import (
-    _wait, _validate_wait, _call_observer,
+    _wait, _validate_wait, _validate_timeout, _call_observer,
     _is_observation_cleanup, _drain_stream_tasks, _await_stream_cleanup,
     _report_observation_error,
 )
@@ -505,15 +505,25 @@ class TaskGraphRun(Generic[AppT]):
         *,
         idempotency_key: "str | None" = None,
         force: bool = False,
+        settle_timeout_seconds: float | None = None,
     ) -> TaskGraphResult:
+        """Submit cancellation, optionally awaiting terminal settlement in one budget."""
+        _validate_timeout(settle_timeout_seconds)
         request = CancelGraphRequest(
             self._principal,
             secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
             force,
         )
-        await self._activate_for_control()
-        await self._graph.cancel(self.graph_id, request)
-        return _state_result(await self._state())
+        if settle_timeout_seconds is None:
+            await self._activate_for_control()
+            await self._graph.cancel(self.graph_id, request)
+            return _state_result(await self._state())
+        settlement = _CancelSettlement(self, request, settle_timeout_seconds)
+        if settle_timeout_seconds == 0:
+            raise settlement.deadline_error()
+        self._runtime._ensure_open()
+        self._runtime._cancel_settlements.add(settlement)
+        return await settlement.wait()
 
     async def _activate_for_control(self) -> None:
         self._runtime._ensure_open()
@@ -973,7 +983,7 @@ class TaskGraphRun(Generic[AppT]):
             positions.setdefault(node_id, {})[execution_id] = cutoff
         unavailable_active = tuple(sorted(
             key for key, value in models.boundaries.items()
-            if not value.local_staging_available and captured[key][1].status not in {
+            if not (value.local_staging_available or value.durable_history_available) and captured[key][1].status not in {
                 ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
             }
         ))
@@ -1123,6 +1133,125 @@ class TaskGraphRun(Generic[AppT]):
                         execution_event_seqs=replay_execution_event_seqs,
                     ),
                 )
+
+
+class _CancelAdmissionExpired(Exception):
+    pass
+
+
+class _CancelSettlement:
+    """Retain accepted control and unfinished read cleanup after the caller leaves."""
+
+    def __init__(
+        self, run: TaskGraphRun, request: CancelGraphRequest, timeout: float,
+    ) -> None:
+        self.run = run
+        self.request = request
+        self.deadline = asyncio.get_running_loop().time() + timeout
+        self.phase = "activation"
+        self.state: TaskGraphState | None = None
+        self.task: asyncio.Task[TaskGraphResult | None] | None = None
+        self.detached = False
+        self.stopping = False
+
+    def remaining(self) -> float:
+        return max(0.0, self.deadline - asyncio.get_running_loop().time())
+
+    async def _run(self) -> TaskGraphResult | None:
+        if self.stopping or not self.remaining():
+            return None
+        await self.run._activate_for_control()
+        if self.stopping or not self.remaining():
+            return None
+        self.phase = "admission"
+        try:
+            await self.run._graph.cancel(
+                self.run.graph_id, self.request, admission_guard=self.admit,
+            )
+        except _CancelAdmissionExpired:
+            return None
+        self.phase = "readback"
+        while not self.stopping and self.remaining():
+            self.state = await self.run._state()
+            if not self.remaining():
+                return None
+            if self.state.status in {
+                TaskStatus.SUCCEEDED, TaskStatus.FAILED,
+                TaskStatus.CANCELLED, TaskStatus.BLOCKED,
+            }:
+                return _state_result(self.state)
+            await asyncio.sleep(min(0.05, self.remaining()))
+        return None
+
+    def admit(self) -> None:
+        if self.stopping or not self.remaining():
+            raise _CancelAdmissionExpired()
+        self.phase = "control"
+
+    async def wait(self) -> TaskGraphResult:
+        self.task = asyncio.create_task(self._run(), name=f"graph-cancel-settle-{self.run.graph_id}")
+        self.task.add_done_callback(self._done)
+        try:
+            await asyncio.wait({self.task}, timeout=self.remaining())
+            if self.task.done():
+                result = self.task.result()
+                if result is not None:
+                    return result
+            self.stop()
+            raise self.deadline_error()
+        except asyncio.CancelledError:
+            self.stop()
+            raise
+        finally:
+            if self.task.done():
+                self.run._runtime._cancel_settlements.discard(self)
+            else:
+                self.detached = True
+
+    def stop(self) -> None:
+        self.stopping = True
+        if self.task is not None and not self.task.done() and self.phase != "control":
+            self.task.cancel()
+
+    def deadline_error(self) -> AIError:
+        pending = self.task is not None and not self.task.done()
+        terminal = self.state is not None and self.state.status in {
+            TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED,
+        }
+        reason = (
+            "control_pending" if self.phase == "control" else
+            "cleanup_pending" if terminal and pending else
+            "deadline_nonterminal" if self.state is not None and not terminal else
+            "deadline_unknown"
+        )
+        details: dict[str, JsonValue] = {
+            "phase": "cancel_settlement", "graph_id": self.run.graph_id, "reason": reason,
+        }
+        if self.state is not None:
+            details["graph_status"] = self.state.status.value
+        if pending:
+            details["cleanup_pending"] = True
+        return AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED, safe_details=details)
+
+    def _done(self, task: asyncio.Task[TaskGraphResult | None]) -> None:
+        error = None if task.cancelled() else task.exception()
+        if self.detached:
+            if error is None:
+                self.run._runtime._cancel_settlements.discard(self)
+            else:
+                _logger.warning(
+                    "detached graph cancellation failed: graph=%s error=%s",
+                    self.run.graph_id, type(error).__name__,
+                )
+
+    async def close(self) -> None:
+        self.stop()
+        if self.task is not None:
+            if not self.task.done():
+                raise self.deadline_error()
+            if not self.task.cancelled():
+                self.task.result()
+        self.run._runtime._cancel_settlements.discard(self)
 
 
 def _task_stream_observation_error(

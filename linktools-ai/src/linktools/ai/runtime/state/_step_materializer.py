@@ -5,15 +5,12 @@
 from collections.abc import Mapping
 
 from ._contracts import ExecutionRepository
-from ._model_interaction_runtime import ModelInteractionRuntimeAgentRunStore
 from ._model_interaction_store import (
-    ModelInteractionInMemoryStepArchive,
-    ModelInteractionStagingAgentRunStore,
     ModelInteractionStateStepArchive,
 )
 from ._object_router import _RuntimeObjectRouter
 from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStoragePlan
-from ._step_archive import StateStepArchive
+from ._step_archive import StagingAgentRunStore, StateStepArchive
 from ._steps import RuntimeAgentRunStore
 
 _STEP_DOMAINS = (
@@ -41,34 +38,28 @@ def build_runtime_agent_run_store(
             and domain is not RuntimeDomain.CONVERSATION
         ):
             continue
-        if (
-            domain is RuntimeDomain.CONVERSATION
-            or route.retention is not RuntimeRetentionMode.TRANSIENT
-        ):
-            context_sources = None
-            conversation_archive = archives.get(RuntimeDomain.CONVERSATION)
-            if isinstance(conversation_archive, StateStepArchive):
-                context_sources = {
-                    RuntimeDomain.CONVERSATION: conversation_archive.transcript_repository,
-                }
-            archives[domain] = ModelInteractionStateStepArchive(
-                stores[domain],
-                object_store=objects.object_store(domain),
-                namespace=namespace,
-                tenant_id=tenant_id,
-                runtime_domain=domain,
-                context_sources=context_sources,
-                history_repository=(
-                    history_repository if domain is RuntimeDomain.CONVERSATION else None
-                ),
-                execution_repository=(
-                    execution_repository if domain is RuntimeDomain.EXECUTION else None
-                ),
-            )
-        else:
-            archives[domain] = ModelInteractionInMemoryStepArchive(domain)
-    return ModelInteractionRuntimeAgentRunStore(
-        ModelInteractionStagingAgentRunStore(),
+        context_sources = None
+        conversation_archive = archives.get(RuntimeDomain.CONVERSATION)
+        if isinstance(conversation_archive, StateStepArchive):
+            context_sources = {
+                RuntimeDomain.CONVERSATION: conversation_archive.transcript_repository,
+            }
+        archives[domain] = ModelInteractionStateStepArchive(
+            stores[domain],
+            object_store=objects.object_store(domain),
+            namespace=namespace,
+            tenant_id=tenant_id,
+            runtime_domain=domain,
+            context_sources=context_sources,
+            history_repository=(
+                history_repository if domain is RuntimeDomain.CONVERSATION else None
+            ),
+            execution_repository=(
+                execution_repository if domain is RuntimeDomain.EXECUTION else None
+            ),
+        )
+    return RuntimeAgentRunStore(
+        StagingAgentRunStore(),
         conversation_archive=archives[RuntimeDomain.CONVERSATION],
         execution_archive=archives.get(RuntimeDomain.EXECUTION),
         recovery_archive=archives.get(RuntimeDomain.RECOVERY),

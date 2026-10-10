@@ -3,7 +3,7 @@
 """Plural Runtime domain entry points."""
 
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 
 from ..core import BudgetUsage, Principal
 from ._wait import WaitResult
@@ -29,6 +29,7 @@ from .service_api import (
     ExecutionResult,
     ExecutionTraceItem,
     ExecutionTreeEvent,
+    ExecutionObservationEvent,
     ExecutionView,
     ExternalCallView,
     ExternalResolution,
@@ -113,16 +114,45 @@ class RuntimeExecutions(Generic[AppT]):
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         return await self._service.result(execution_id, principal=principal)
 
+    @overload
     async def wait(
         self, execution_id: str, *, principal: Principal,
         on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | None = None,
         cursor: str | None = None, include_event_content: bool = False,
         timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        include_model_interactions: Literal[False] = False,
+    ) -> WaitResult[ExecutionResult]: ...
+
+    @overload
+    async def wait(
+        self, execution_id: str, *, principal: Principal,
+        on_event: Callable[[ExecutionObservationEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_event_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        include_model_interactions: Literal[True],
+    ) -> WaitResult[ExecutionResult]: ...
+
+    @overload
+    async def wait(
+        self, execution_id: str, *, principal: Principal,
+        on_event: Callable[[ExecutionTreeEvent | ExecutionObservationEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_event_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        include_model_interactions: bool,
+    ) -> WaitResult[ExecutionResult]: ...
+
+    async def wait(
+        self, execution_id: str, *, principal: Principal,
+        on_event: Callable[[ExecutionTreeEvent], Awaitable[None]] | Callable[[ExecutionObservationEvent], Awaitable[None]] | None = None,
+        cursor: str | None = None, include_event_content: bool = False,
+        timeout_seconds: float | None = None, close_timeout_seconds: float = 5.0,
+        include_model_interactions: bool = False,
     ) -> WaitResult[ExecutionResult]:
         execution = await self.get(execution_id, principal=principal)
         return await execution.wait(
             on_event=on_event, cursor=cursor, include_event_content=include_event_content,
             timeout_seconds=timeout_seconds, close_timeout_seconds=close_timeout_seconds,
+            include_model_interactions=include_model_interactions,
         )
 
     async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
@@ -144,9 +174,22 @@ class RuntimeExecutions(Generic[AppT]):
         self._ensure_open()
         return await self._service.resolve_tool_effect(execution_id, request)
 
-    async def recover(self, execution_id: str, *, principal: Principal) -> ExecutionHandle:
+    async def recover(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        idempotency_key: str | None = None,
+    ) -> ExecutionHandle:
+        """Take over recoverable work after its previous executor stopped.
+
+        Reusing a key observes the same recovery attempt. Without a key each
+        invocation can supersede an earlier attempt.
+        """
         self._ensure_open()
-        return await self._service.recover(execution_id, principal=principal)
+        return await self._service.recover(
+            execution_id, principal=principal, idempotency_key=idempotency_key,
+        )
 
     async def trace(
         self,

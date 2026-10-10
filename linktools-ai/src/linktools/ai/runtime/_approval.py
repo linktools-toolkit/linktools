@@ -29,6 +29,7 @@ from .service_api import (
     ApprovalView,
 )
 from .state._contracts import (
+    deferred_resource_id,
     ApprovalRecord,
     ApprovalRepository,
     ExecutionRepository,
@@ -96,7 +97,8 @@ class DefaultApprovalService:
             return ()
         views: list[ApprovalView] = []
         for pending in checkpoint.pending_tools.approvals:
-            approval_id = approval_id_for_call(
+            approval_id = deferred_resource_id(
+                "approval-v1",
                 principal.tenant_id,
                 execution_id,
                 checkpoint.pending_tools.source_agent_run_id,
@@ -244,24 +246,6 @@ class DefaultApprovalService:
             ) from error
 
 
-def approval_id_for_call(
-    tenant_id: str,
-    execution_id: str,
-    source_agent_run_id: str,
-    tool_call_id: str,
-) -> str:
-    """Return the deterministic id for one approval-owned deferred call."""
-    return canonical_sha256(
-        {
-            "contract": "approval-v1",
-            "tenant_id": tenant_id,
-            "execution_id": execution_id,
-            "source_agent_run_id": source_agent_run_id,
-            "tool_call_id": tool_call_id,
-        }
-    )
-
-
 def _pending_approval(
     checkpoint: RecoveryCheckpoint | None,
     approval_id: str,
@@ -271,7 +255,8 @@ def _pending_approval(
     if checkpoint is None or checkpoint.pending_tools is None:
         return None
     for pending in checkpoint.pending_tools.approvals:
-        candidate = approval_id_for_call(
+        candidate = deferred_resource_id(
+            "approval-v1",
             tenant_id,
             checkpoint.execution_id,
             checkpoint.pending_tools.source_agent_run_id,

@@ -451,6 +451,7 @@ class RuntimeStorage:
 
         domains: dict[str, dict[str, list[object]]] = {}
         snapshot_records: dict[RuntimeDomain, tuple[StoredRecord, ...]] = {}
+        snapshot_facts: dict[RuntimeDomain, tuple[StoredFact, ...]] = {}
         objects: list[dict[str, object]] = []
         copied_objects: set[tuple[str, str, str, int]] = set()
         entry_count = 0
@@ -702,8 +703,9 @@ class RuntimeStorage:
 
             domains[domain.value] = raw_domain
             snapshot_records[domain] = tuple(domain_records)
+            snapshot_facts[domain] = tuple(domain_facts)
 
-        validate_snapshot_references(snapshot_records)
+        validate_snapshot_references(snapshot_records, snapshot_facts)
         manifest = {
             "kind": "runtime-storage-snapshot",
             "format_version": 1,
@@ -899,9 +901,10 @@ class RuntimeStorage:
                         )
                     )
 
-        validate_snapshot_references({
-            domain: values[0] for domain, values in decoded_domains.items()
-        })
+        validate_snapshot_references(
+            {domain: values[0] for domain, values in decoded_domains.items()},
+            {domain: values[2] for domain, values in decoded_domains.items()},
+        )
         actual_objects: set[tuple[str, str, str, int]] = set()
         decoded_objects: list[tuple[RuntimeDomain, ObjectRef, ObjectRef]] = []
         decoded_by_identity: dict[

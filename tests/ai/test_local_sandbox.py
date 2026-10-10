@@ -23,13 +23,16 @@ from linktools.ai.workspace import (
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.mark.parametrize("allow_stdio", (False, True))
 async def test_canonicalize_path_does_not_apply_read_authorization(
     tmp_path: Path,
+    allow_stdio: bool,
 ) -> None:
     (tmp_path / "allowed").mkdir()
     (tmp_path / "allowed" / "visible.py").write_text("ok", encoding="utf-8")
     session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("allowed/*.py",))
+        read_policy=ReadOnlySandboxPolicy(("allowed/*.py",)),
+        allow_host_stdio_with_read_policy=allow_stdio,
     ).open(root=tmp_path)
     try:
         assert await session.canonicalize_path("allowed") == "allowed"
@@ -38,10 +41,17 @@ async def test_canonicalize_path_does_not_apply_read_authorization(
         await session.close()
 
 
-async def test_file_info_does_not_authorize_a_file_as_a_directory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("allow_stdio", (False, True))
+async def test_file_info_does_not_authorize_a_file_as_a_directory(
+    tmp_path: Path,
+    allow_stdio: bool,
+) -> None:
     (tmp_path / "secret").write_text("private contents", encoding="utf-8")
     policy = ReadOnlySandboxPolicy(("secret/allowed.txt",))
-    session = await LocalSandbox(read_policy=policy).open(root=tmp_path)
+    session = await LocalSandbox(
+        read_policy=policy,
+        allow_host_stdio_with_read_policy=allow_stdio,
+    ).open(root=tmp_path)
     try:
         with pytest.raises(AIError) as error:
             await session.file_info("secret")
@@ -50,13 +60,16 @@ async def test_file_info_does_not_authorize_a_file_as_a_directory(tmp_path: Path
         await session.close()
 
 
+@pytest.mark.parametrize("allow_stdio", (False, True))
 async def test_read_only_policy_hides_unauthorized_resource_root(
     tmp_path: Path,
+    allow_stdio: bool,
 ) -> None:
     resource = tmp_path / "resource"
     resource.mkdir()
     session = await LocalSandbox(
-        read_policy=ReadOnlySandboxPolicy(("allowed.txt",))
+        read_policy=ReadOnlySandboxPolicy(("allowed.txt",)),
+        allow_host_stdio_with_read_policy=allow_stdio,
     ).open(
         root=tmp_path,
         resources=(SandboxResource("resource", resource),),
@@ -67,8 +80,10 @@ async def test_read_only_policy_hides_unauthorized_resource_root(
         await session.close()
 
 
+@pytest.mark.parametrize("allow_stdio", (False, True))
 async def test_read_only_policy_exposes_authorized_resource_root(
     tmp_path: Path,
+    allow_stdio: bool,
 ) -> None:
     resource = tmp_path / "resource"
     resource.mkdir()
@@ -76,7 +91,8 @@ async def test_read_only_policy_exposes_authorized_resource_root(
         read_policy=ReadOnlySandboxPolicy(
             ("allowed.txt",),
             {"resource": ("resource.txt",)},
-        )
+        ),
+        allow_host_stdio_with_read_policy=allow_stdio,
     ).open(
         root=tmp_path,
         resources=(SandboxResource("resource", resource),),
@@ -345,15 +361,20 @@ async def test_local_sandbox_listing_includes_regular_file_size(tmp_path: Path) 
     assert "sample.txt  (3 bytes)" in result
 
 
+@pytest.mark.parametrize("allow_stdio", (False, True))
 async def test_local_sandbox_read_policy_filters_descendants_and_writes(
     tmp_path: Path,
+    allow_stdio: bool,
 ) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()
     (allowed / "visible.py").write_text("print('ok')\n", encoding="utf-8")
     (allowed / "hidden.txt").write_text("secret\n", encoding="utf-8")
     policy = ReadOnlySandboxPolicy(("allowed/*.py",))
-    session = await LocalSandbox(read_policy=policy).open(root=tmp_path)
+    session = await LocalSandbox(
+        read_policy=policy,
+        allow_host_stdio_with_read_policy=allow_stdio,
+    ).open(root=tmp_path)
     try:
         assert "visible.py" in await session.list_directory("allowed")
         assert "hidden.txt" not in await session.list_directory("allowed")

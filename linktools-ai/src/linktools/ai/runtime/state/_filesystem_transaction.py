@@ -101,7 +101,7 @@ class _FilesystemTransaction:
         return await asyncio.to_thread(self._cache.get_record, key)
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
-        unique_keys = tuple(dict.fromkeys(keys))
+        unique_keys = dict.fromkeys(keys)
         if not unique_keys:
             return {}
         cached = await asyncio.to_thread(
@@ -253,6 +253,27 @@ class _FilesystemTransaction:
         self.guarded_record_keys.add(key)
         self._write(_record_path(updated), encode_record(updated))
         return True
+
+    async def delete_records(self, keys: Sequence[bytes]) -> None:
+        current = await self.get_records(keys)
+        if not current:
+            return
+        await self._delete_fact_streams(set(current))
+        aliases = dict(await asyncio.to_thread(self._cache.list_aliases))
+        aliases.update(self.aliases.changes())
+        for alias in self.aliases.deleted():
+            aliases.pop(alias, None)
+        for alias, record_key in aliases.items():
+            if record_key in current:
+                self.aliases[alias] = record_key
+                del self.aliases[alias]
+                self._delete(_alias_path(self._root, alias))
+        for key, record in current.items():
+            self.records[key] = record
+            del self.records[key]
+            self.guarded_record_keys.discard(key)
+            self._delete(_record_path(record))
+            self._sync_record_index(record, None)
 
     async def delete_record(
         self, key: bytes, *, expected_storage_version: int | None = None
@@ -550,13 +571,23 @@ class _FilesystemTransaction:
         await self.delete_sequences((key,))
 
     async def delete_sequences(self, keys: Sequence[bytes]) -> None:
-        for key in sorted(set(keys)):
+        paths = {key: _sequence_path(self._root, key) for key in keys}
+        existing = await asyncio.to_thread(
+            lambda: {key for key, relative in paths.items() if (self._root / relative).exists()}
+        )
+        for key in sorted(paths):
+            relative = paths[key]
+            if key not in existing and relative not in self.writes:
+                continue
             if key in self.sequences:
                 del self.sequences[key]
             else:
                 self.sequences[key] = 0
                 del self.sequences[key]
-            self._delete(_sequence_path(self._root, key))
+            if key in existing:
+                self._delete(relative)
+            else:
+                self.writes.pop(relative, None)
 
     async def insert_fact(self, fact: StoredFact) -> None:
         await self.insert_facts((fact,))
@@ -774,6 +805,9 @@ class _FilesystemTransaction:
         return tuple(result)
 
     async def delete_fact_streams(self, owner_key: bytes) -> None:
+        await self._delete_fact_streams({owner_key})
+
+    async def _delete_fact_streams(self, owner_keys: set[bytes]) -> None:
         sources = {
             info.stream_digest: info
             for info in await asyncio.to_thread(self._cache.list_fact_streams)
@@ -781,18 +815,17 @@ class _FilesystemTransaction:
         sources.update(self.fact_streams.changes())
         for stream in self.fact_streams.deleted():
             sources.pop(stream, None)
-        for stream, source in tuple(sources.items()):
-            if source.owner_key_digest != owner_key:
+        for stream, source in sources.items():
+            if source.owner_key_digest not in owner_keys:
                 continue
-            info = await self._own_fact_stream(stream)
-            if info is None:
-                continue
-            await self._load_fact_subjects(info)
-            for sequence in range(1, info.last_sequence + 1):
-                self._deleted_facts.add((info.stream_digest, sequence))
-                self._delete(_fact_item_path(self._root, info.stream_digest, sequence))
-            info.last_sequence = 0
-            self._sync_fact_stream(info)
+            await self._load_fact_subjects(source)
+            for sequence in range(1, source.last_sequence + 1):
+                self._deleted_facts.add((stream, sequence))
+                self._delete(_fact_item_path(self._root, stream, sequence))
+            self._delete(_fact_meta_path(self._root, stream))
+            for subject in source.subjects:
+                self._delete(_fact_subject_path(self._root, stream, subject))
+            self.fact_streams[stream] = source
             del self.fact_streams[stream]
 
     async def insert_operation(self, value: StoredOperation) -> None:
@@ -868,6 +901,7 @@ class _FilesystemTransaction:
                 query.stream_digest is None or item.stream_digest == query.stream_digest
             )
             and (query.states is None or item.state in query.states)
+            and (query.after_sequence is None or item.sequence > query.after_sequence)
             and (
                 query.through_sequence is None
                 or item.sequence <= query.through_sequence
@@ -1200,7 +1234,9 @@ class _FilesystemTransaction:
     def _delete(self, relative: str | Path) -> None:
         relative = _relative_path(self._root, relative)
         self.writes.pop(relative, None)
-        self.deletes.add(relative)
+        # A staged creation can be removed before its parent directories exist.
+        if (self._root / relative).exists():
+            self.deletes.add(relative)
 
 
 __all__: list[str] = []

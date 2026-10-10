@@ -90,6 +90,10 @@ if __name__ == "__main__":
 
 `completion == "complete"` means orchestration finished, not that quality passed.
 Read the report's failures and coverage, or configure a comparison gate.
+For live dashboards and polling, use `await run.preview_report()`. It uses the
+same authorized report calculation and cutoff as `create_report()` without
+persisting report rows or objects. Its report ID is ephemeral and cannot be
+retrieved with `get_report()`; use `create_report()` when a saved report is needed.
 `TrialView.execution_status` preserves the native execution outcome, while
 `graph_status` separately reports its target graph. A successful execution can
 still have a graph that requires recovery; the evaluation then needs attention.
@@ -102,10 +106,45 @@ and named Task definitions are immutable at a revision. Bump the appropriate
 revision when changing their meaning. Bind Python Tasks again after reopening;
 persistence does not serialize Python functions.
 
+If cancellation arrives before the application has saved the experiment ID, use
+`await runtime.evaluations.cancel_admission(request, engine=engine)` with the same
+frozen `StartEvaluationRequest` and idempotency key that `start()` would use.
+It returns the authoritative `EvaluationRun` and initiates cancellation itself.
+A missing admission is atomically reserved with its existing cancellation gate
+closed, before any target or scorer can launch. If `start()` won the race, the
+operation cancels that existing run; an already completed run remains complete.
+Later starts with the same request reuse the closed admission. Changed request
+semantics still raise `IDEMPOTENCY_CONFLICT`.
+
+This operation uses the same Task engine, definition validation, dataset/capture
+permissions, and run authorization as `start()`, plus cancellation authorization
+for the key digest and experiment owner. Frozen inputs must remain available for
+preflight. A failed or uncertain cancellation must not be reported as complete;
+retry the same operation rather than interpreting a missing local experiment ID
+as proof that no native admission exists.
+
 Evaluation actions require an authorized principal and enforce tenant/owner
 boundaries. The example explicitly uses a service principal; the default Runtime
 principal is not authorized for evaluation by default. Production applications
-should use their authorization policy and real caller identity.
+should pass their `AuthorizationPolicy` from `linktools.ai.core` to
+`Runtime.open(..., authorization=policy)` and use real caller identities. Omitting
+`authorization`, or passing `None`, retains `TenantAuthorizationPolicy` with the
+Runtime tenant. The supplied instance is shared by evaluation, input capture,
+TaskGraph, execution, session, artifact, and borrowed `runtime.history` services.
+
+A system publisher can own a shared `DatasetRef` while each operator owns their
+own experiments. Grant `EVALUATION_DATASET_READ` only for approved dataset IDs
+and publisher ownership; keep tenant checks and other owner checks intact.
+Agent cases also require `EXECUTION_CAPTURE_INPUT` for each approved published
+input capture. Captured graph templates require `TASK_CAPTURE_GRAPH`. A dataset
+read grant alone does not grant capture access or relax authorization for other
+resources.
+
+Policies are application configuration, not persisted execution data. Inject the
+policy on every reopened Runtime and worker. For a separately opened read-only
+history reader, pass it to `RuntimeHistory.open(..., authorization=policy)` too.
+Recovery permission belongs to the recovery actor; resumed execution retains the
+principal originally admitted with its graph.
 
 The remaining snippets are focused extensions: run asynchronous calls inside an
 open Runtime and reuse or replace the example's Tasks, principal, and dimension.

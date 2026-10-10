@@ -12,6 +12,7 @@ import yaml
 from linktools.ai.asset import AssetKey
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import MCPServerSpec, MCPServerSpecAdapter, MCPServerSpecCodec
+from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy
 
 
 def _decode_author(payload: dict[str, object], entry: str) -> MCPServerSpec:
@@ -282,16 +283,23 @@ def test_python_and_wire_never_expand_environment(monkeypatch: pytest.MonkeyPatc
     assert declaration.id == "${MCP_ID}"
 
 
-def test_resource_working_directory_is_durable_without_physical_paths() -> None:
+@pytest.mark.parametrize("read_policy_stdio", (False, True))
+def test_resource_working_directory_is_durable_without_physical_paths(
+    read_policy_stdio: bool,
+) -> None:
     from linktools.ai.runtime._mcp import _mcp_execution_policy
 
     server = MCPServerSpec(
         "server", "python", ("server.py",), AssetKey("mcp", "server"),
     )
     codec = MCPServerSpecCodec()
+    sandbox = LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
+        allow_host_stdio_with_read_policy=True,
+    ) if read_policy_stdio else None
     payload = codec.to_binding_payload(
         server, (), asset_source_id="assets",
-        execution_policy=_mcp_execution_policy(server, None),
+        execution_policy=_mcp_execution_policy(server, sandbox),
     )
     assert payload["execution_policy"] == {
         "version": 1, "boundary": "host-stdio", "cwd": "resource",
@@ -319,8 +327,10 @@ def test_execution_working_directory_policy_rejects_invalid_semantics(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("read_policy_stdio", (False, True))
 async def test_old_workspace_cwd_binding_cannot_silently_change_execution(
     tmp_path: Path,
+    read_policy_stdio: bool,
 ) -> None:
     from linktools.ai.runtime._mcp import (
         _MCPBinding, _MCPProjection, materialize_mcp_capabilities,
@@ -330,10 +340,14 @@ async def test_old_workspace_cwd_binding_cannot_silently_change_execution(
     server = MCPServerSpec(
         "server", "python", ("server.py",), AssetKey("mcp", "server"),
     )
+    sandbox = LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(("visible.txt",)),
+        allow_host_stdio_with_read_policy=True,
+    ) if read_policy_stdio else None
     with pytest.raises(AIError) as raised:
         await materialize_mcp_capabilities(
             (server,), (mcp_server_selector(server.id),),
-            sandbox=None, sandbox_session=None, host_cwd=str(tmp_path),
+            sandbox=sandbox, sandbox_session=None, host_cwd=str(tmp_path),
             bindings={server.id: _MCPBinding(
                 (), "assets", {"version": 1, "boundary": "host-stdio"},
             )},

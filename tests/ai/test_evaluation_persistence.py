@@ -9,13 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import IdempotencyStatus, ResourceKind, service_principal
+from linktools.ai.core import IdempotencyStatus, ResourceKind, TaskStatus, service_principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.evaluation import (
     CandidateContract, CaseContract, CaseRef, DatasetContract, DatasetRef,
     DimensionContract, EvaluationManifest, EvaluationPolicy, ScorerContract,
-    SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan,
+    ScoreAttemptView, SlotDispositionView, TargetTrialRef, TaskCaseInput, TrialPlan,
 )
+from linktools.ai.runtime._evaluation import RuntimeEvaluations
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.runtime.state._contracts import IdempotencyRecord
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
@@ -23,7 +24,7 @@ from linktools.ai.runtime.state._evaluation_records import (
     EvaluationCleanupRecord, EvaluationLaunchIntent, EvaluationRecord, EvaluationSlotDisposition,
     EvaluationTombstone,
 )
-from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphSubmission, TaskNode, TaskRef
+from linktools.ai.task import TaskGraph, TaskGraphAdmission, TaskGraphRequest, TaskGraphState, TaskGraphSubmission, TaskNode, TaskNodeView, TaskRef
 
 
 NOW = datetime(2026, 10, 3, tzinfo=timezone.utc)
@@ -61,6 +62,40 @@ def intent() -> EvaluationLaunchIntent:
     admission = TaskGraphAdmission.from_request(TaskGraphRequest(graph, PRINCIPAL, "trial-start"))
     return EvaluationLaunchIntent("target:trial", TargetTrialRef("experiment", "trial"), None,
                                   TaskGraphSubmission("evaluation", admission, graph), None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", (
+    TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.SUCCEEDED,
+    TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED,
+))
+async def test_score_collection_reads_fresh_record_only_for_terminal_node(
+    status: TaskStatus, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object.__new__(RuntimeEvaluations)
+    record = experiment()
+    graph = TaskGraph("score-graph", (TaskNode("score", task=TaskRef("score", 1)),))
+    admission = TaskGraphAdmission.from_request(TaskGraphRequest(graph, PRINCIPAL, "score-start"))
+    launch = EvaluationLaunchIntent("score:trial:score", TargetTrialRef("experiment", "trial"),
+        "score", TaskGraphSubmission("evaluation", admission, graph), None, confirmed=True)
+    state = TaskGraphState(graph.graph_id, status, graph.nodes, (
+        TaskNodeView(graph.graph_id, "score", (), status, None, 0, None, None, None, None),
+    ))
+    saved = ScoreAttemptView("experiment", "attempt", launch.trial, "score", TaskRef("score", 1), "error")
+    fresh = replace(record, scores=(saved,), revision=1)
+    reads: list[str] = []
+
+    async def read(experiment_id, principal, *, allow_expired):
+        assert principal is PRINCIPAL
+        assert allow_expired
+        reads.append(experiment_id)
+        return fresh
+
+    monkeypatch.setattr(service, "_record", read)
+    await service._collect_score(record, launch, state)
+    assert reads == ([] if status in {TaskStatus.PENDING, TaskStatus.RUNNING} else ["experiment"])
+    assert record.scores == ()
+    assert fresh.scores == (saved,)
 
 
 def test_evaluation_identity_round_trips_through_record_and_retention_wire() -> None:

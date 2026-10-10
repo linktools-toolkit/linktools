@@ -14,6 +14,7 @@ from ._output import (
     OutputMode,
     bind_output,
     canonicalize_output_schema_v1,
+    output_validation_error,
     restore_output,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "SubagentRef",
     "bind_output",
     "canonicalize_output_schema_v1",
+    "output_validation_error",
     "restore_output",
 ]

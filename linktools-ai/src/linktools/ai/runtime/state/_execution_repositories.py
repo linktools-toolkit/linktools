@@ -1411,12 +1411,41 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
 
+    async def admit_history_producer_in_transaction(
+        self,
+        transaction: StateTransaction,
+        execution: ExecutionRecord,
+        *,
+        producer_claim_id: str | None = None,
+    ) -> int:
+        """Fence previous producers using the revision of this admitted attempt."""
+        _require_tenant(execution, self._tenant_id)
+        if execution.status is not ExecutionStatus.STARTED or execution.agent_run_seq < 1:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        head, record = await self.require_open_history_head_in_transaction(
+            transaction, execution.execution_id,
+        )
+        generation = execution.revision
+        if generation <= head.producer_generation:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await self.replace_history_head_in_transaction(
+            transaction,
+            record,
+            replace(
+                head, revision=head.revision + 1, producer_generation=generation,
+                producer_claim_id=producer_claim_id,
+            ),
+        )
+        return generation
+
     async def require_open_history_head_in_transaction(
         self,
         transaction: StateTransaction,
         execution_id: str,
         *,
         expected_revision: "int | None" = None,
+        expected_producer_generation: "int | None" = None,
+        allow_cancelling: bool = True,
     ) -> tuple[ExecutionHistoryHeadRecord, StoredRecord]:
         """Read and guard the OPEN history head for one execution-domain mutation."""
         key = self._key("execution_history_head", execution_id)
@@ -1437,6 +1466,30 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if expected_revision is not None and head.revision != expected_revision:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if (
+            expected_producer_generation is not None
+            and head.producer_generation != expected_producer_generation
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if expected_producer_generation is not None:
+            execution_key = self._key("execution", execution_id)
+            execution_record = await transaction.get_record(execution_key)
+            if execution_record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            execution = await self._decode(execution_record, ExecutionRecord)
+            if execution.status is ExecutionStatus.CANCELLING and not allow_cancelling:
+                raise AIError(ErrorCode.EXECUTION_CANCELLED)
+            if execution.status not in {
+                ExecutionStatus.STARTED,
+                ExecutionStatus.CANCELLING,
+                ExecutionStatus.FINALIZING,
+            }:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if await transaction.guard_record(
+                execution_key,
+                expected_storage_version=execution_record.storage_version,
+            ) is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         guarded = await transaction.guard_record(
             key,
             expected_storage_version=record.storage_version,
