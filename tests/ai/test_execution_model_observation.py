@@ -378,6 +378,13 @@ async def test_standalone_final_drain_and_close_budgets_retain_noncooperative_ca
 
     monkeypatch.setattr(_observation, "_FINAL_DRAIN_TIMEOUT", 0.01)
     bundle = _bundle()
+    register = bundle.runtime._register_observation
+
+    def register_short_cleanup(session: _observation._ObservationSession) -> None:
+        session.close_timeout = 0.1
+        register(session)
+
+    monkeypatch.setattr(bundle.runtime, "_register_observation", register_short_cleanup)
     original = bundle.runtime.history.capture_model_interaction_cutoffs
     release = asyncio.Event()
     entered = asyncio.Event()

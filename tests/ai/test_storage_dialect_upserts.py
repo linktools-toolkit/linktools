@@ -274,7 +274,7 @@ async def test_postgresql_conflict_execution_preserves_existing_and_new_rows(
 ) -> None:
     _, command = _server
     url = URL.create(
-        "postgresql+asyncpg", username=getpass.getuser(), database="postgres",
+        "postgresql+asyncpg", username=getpass.getuser(), database=command[-1],
         query={"host": command[command.index("-h") + 1]},
     )
     engine = create_async_engine(url)

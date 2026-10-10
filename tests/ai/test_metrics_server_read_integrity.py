@@ -57,13 +57,13 @@ async def server_metrics(_server: tuple[str, list[str]]) -> AsyncIterator[_Serve
     name, command = _server
     if name == "postgresql":
         url = URL.create(
-            "postgresql+asyncpg", username=getpass.getuser(), database="postgres",
+            "postgresql+asyncpg", username=getpass.getuser(), database=command[-1],
             query={"host": command[command.index("-h") + 1]},
         )
     else:
         socket = next(value.split("=", 1)[1] for value in command if value.startswith("--socket="))
         url = URL.create(
-            "mysql+asyncmy", username="root", database="metrics_test",
+            "mysql+asyncmy", username="root", database=command[-1],
             query={"unix_socket": socket, "charset": "utf8mb4"},
         )
     engine = create_async_engine(url, isolation_level="READ COMMITTED", pool_size=1, max_overflow=0)
