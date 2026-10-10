@@ -213,6 +213,7 @@ def test_partial_cold_generated_start_failure_stops_all_new_siblings(tmp_path):
     operations = ComposeOperations(owner.manager)
     operations._publish_candidate(owner, candidate, context, ("test",))
     assert (tmp_path / "compose/applied/services" / "74657374.yml").exists()
+    assert not (tmp_path / "compose/applied/test.yml").exists()
     with pytest.raises(RuntimeError, match="sidecar failed"):
         operations._publish_candidate(owner, candidate, context, ("sidecar",))
     assert events == [

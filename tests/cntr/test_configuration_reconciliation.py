@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Partial operations apply requested services, dependencies and shared configuration consumers."""
 from contextlib import nullcontext
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
