@@ -45,10 +45,12 @@ Planning describes this scope without executing callbacks or writing output;
 it shares pure Compose/Dockerfile
 serializers and service-ordering semantics with execution.
 
-Complete candidate comparison allows a partial `up` or `restart` to apply
-pending changes to other running services; unrelated stopped services stay
-stopped unless required by runtime dependencies. Validated generated trees may
-still be published for stopped owners without starting their services.
+Partial `up` or `restart` applies the explicit service dependency closure
+and running shared generated-config consumers that actually changed. Pending
+Compose-only changes to unrelated running services remain unapplied; unrelated
+stopped services stay stopped unless required. Applied-state persistence uses
+per-service resolved snapshots, with old container-level files read only for
+legacy rollback inputs.
 
 This pass starts from the paired published trees at main `f1fdab242fbd1ab89e8693173fb68f949fa7790b`
 and homelab `d126d9bf6ea5ce6e374336588653619e10c71636`. Source-level compatibility

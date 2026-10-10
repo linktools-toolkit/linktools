@@ -276,23 +276,21 @@ An enabled nginx site also needs its installed nginx runtime provider when the
 producer is explicitly selected. Flare navigation is optional and never creates
 a startup dependency. Explicitly selecting Flare still starts it.
 
-Every `up` or `restart` resolves the full installed integration snapshot and
-Compose model, then stages and validates generated candidates for the selected
-services, their dependencies, and previously running services requiring
-synchronization. Generated owners unrelated to the operation and currently
-stopped are prepared when they are next selected or required. Resolved snapshots preserve environment values from `.env`,
-`env_file` and Compose interpolation for comparison and rollback. Shared top-level
-network/volume changes conservatively invalidate running service models.
-Explicit targets and their runtime dependencies are ensured running. Other
-services are updated only when their configuration changed and they are already
-running; stopped sibling services are not started by configuration reconciliation.
-A partial command can therefore apply pending changes to other running services.
+Every `up` or `restart` resolves the complete installed integration snapshot
+and Compose model. It applies explicit targets and their required dependencies,
+plus running consumers whose shared generated configuration changes. Pending
+Compose-only changes to unrelated running services are left for their own
+deployment. Stopped services stay stopped unless they are required dependencies.
+Resolved service snapshots preserve values from `.env`, `env_file` and Compose
+interpolation for comparison and rollback. Shared network/volume changes only
+trigger application within the selected dependency or generated-consumer scope.
 If an ordinary service first started by this operation fails to apply or become
 ready, that service is stopped and its newly written applied snapshot is
 reverted; any originally running sibling remains untouched. If cleanup itself
 fails, both the original and cleanup errors are reported.
-When no resolved snapshot exists yet, a running service is reconciled once to
-establish it; rollback uses the previous saved Compose file where available.
+A selected running service without a resolved applied-service snapshot is
+reconciled once to establish it; rollback may use the legacy saved Compose file
+where available. Only per-service applied models are written from now on.
 Historical external environment-file contents cannot be recovered retroactively.
 Rollback pins each restored service to the image ID observed before the operation;
 pulling or rebuilding a mutable tag must not change its restored image. A running
@@ -436,8 +434,8 @@ Startup follows one orchestration path:
 1. Run startup checks, `on_starting` and registered pre-start hooks for the
    preparation scope, which can include other running owners. Then resolve the
    authoritative Compose model so hook-prepared environment files are included
-2. Prepare images for the explicit deployment scope and changed Compose
-   services. Prepare and render candidate files for selected generated owners
+2. Prepare images for the selected deployment scope and required Compose
+   dependencies. Prepare and render candidate files for selected generated owners
    and running services which actually consume them. A stopped, unrelated
    generated service is not prepared merely because its sidecar is running
 3. Reconcile generation changes, prepare any newly required images, then

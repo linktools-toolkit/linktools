@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.cntr._container.compose import write_docker_compose_file, write_docker_file
-from linktools.cntr._operations import ComposeOperations
 from linktools.cntr.artifacts import AppliedServiceModels, ArtifactIndex, atomic_write_text_if_changed
 
 
@@ -58,28 +57,20 @@ def test_sensitive_output_restricts_existing_permissions(owner: SimpleNamespace,
 
 
 @pytest.mark.parametrize("changed", [False, True])
-def test_applied_compose_snapshot_remains_private_on_record_and_restore(owner: SimpleNamespace, changed: bool) -> None:
+def test_service_snapshot_remains_private_on_record_and_restore(owner: SimpleNamespace, changed: bool) -> None:
     manager = owner.manager
-    path = manager.data_path / "compose" / "app.yml"
-    previous = "services:\n  app:\n    image: old\n"
-    content = previous if not changed else "services:\n  app:\n    image: new\n"
-    context = SimpleNamespace(
-        service_models=AppliedServiceModels(manager, owner.docker_compose),
-        compose_files={str(path): content}, compose_owners={str(path): owner.name},
-        saved_compose={str(path): previous}, original_applied_compose={str(path): previous},
-        applied_compose={},
-    )
-    destination = manager.data_path / "compose" / "applied" / "app.yml"
-    destination.parent.mkdir(parents=True)
-    destination.write_text(previous)
+    previous = {"services": {"app": {"image": "old"}}}
+    model = {"services": {"app": {"image": "new" if changed else "old"}}}
+    AppliedServiceModels(manager, previous).record(("app",))
+    destination = manager.data_path / "compose" / "applied" / "services" / "617070.yml"
     destination.chmod(0o644)
-    operations = ComposeOperations(manager)
-    operations._record_applied_compose(owner, context, ("app",))
+    state = AppliedServiceModels(manager, model)
+    state.record(("app",))
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
     destination.chmod(0o644)
-    operations._restore_applied_compose(owner, context, {str(path): previous})
-    assert destination.read_text() == previous
+    state.restore(("app",))
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert "image: old" in destination.read_text()
 
 
 def test_sensitive_replacement_never_restores_a_permissive_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

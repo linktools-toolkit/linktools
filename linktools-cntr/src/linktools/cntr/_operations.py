@@ -168,6 +168,8 @@ class ComposeOperations:
         native_roots = set(explicit.target_containers)
         for container in explicit.project_containers:
             changed = container.name in changed_generations
+            if container not in explicit.target_containers and not changed:
+                continue
             pending = {name for name in container.services if name in context.initial_running_services and
                        (name in context.changed_compose_services or
                         (changed and name in container.generation_services))}
@@ -212,8 +214,6 @@ class ComposeOperations:
         runner = manager.compose_runner
         import os
         context.saved_compose = {}
-        context.original_applied_compose = {}
-        context.applied_compose = {}
         context.applied_generation_services = {}
         context.locally_restored_services = set()
         context.started_services = set()
@@ -232,8 +232,6 @@ class ComposeOperations:
                 with open(applied if was_applied else path, encoding="utf-8") as stream:
                     previous = stream.read()
                     context.saved_compose[path] = previous
-                    if was_applied:
-                        context.original_applied_compose[path] = previous
             except FileNotFoundError:
                 previous = None
         actual = manager.docker_inspector.get_project_state(selection.project_containers)
@@ -517,54 +515,6 @@ class ComposeOperations:
                         manager.logger.warning("Unable to prune generated configuration for %s: %s",
                                                owner.name, exc)
 
-    def _record_applied_compose(self, container, context, services) -> None:
-        import os
-        import yaml
-        from .artifacts import atomic_write_text_if_changed, sha256_of
-        context.service_models.record(services)
-        for path, content in context.compose_files.items():
-            if context.compose_owners[path] != container.name:
-                continue
-            # A synchronized owner may contain stopped sibling services. Keep
-            # their last-applied models until those services are actually used.
-            applied_content = context.applied_compose.get(path, context.saved_compose.get(path, ""))
-            previous = yaml.safe_load(applied_content) or {}
-            current = yaml.safe_load(content) or {}
-            applied_services = dict(previous.get("services", {}))
-            for service in services:
-                if service in current.get("services", {}):
-                    applied_services[service] = current["services"][service]
-            current["services"] = applied_services
-            content = yaml.safe_dump(current, sort_keys=False)
-            applied = os.path.join(str(self.manager.data_path), "compose", "applied", container.name + ".yml")
-            os.makedirs(os.path.dirname(applied), exist_ok=True)
-            atomic_write_text_if_changed(applied, content, mode=0o600)
-            context.applied_compose[path] = content
-            self.manager.artifact_index.record({os.path.relpath(applied, str(self.manager.data_path)): {
-                "kind": "compose-applied", "container": container.name, "sha256": sha256_of(content)}})
-
-    def _restore_applied_compose(self, container, context, previous) -> None:
-        import os
-        from .artifacts import atomic_write_text_if_changed, sha256_of
-        applied = context.applied_compose
-        original = getattr(context, "original_applied_compose", previous)
-        for path in tuple(applied):
-            if context.compose_owners[path] != container.name:
-                continue
-            destination = os.path.join(str(self.manager.data_path), "compose", "applied", container.name + ".yml")
-            if path not in original:
-                if os.path.exists(destination):
-                    os.unlink(destination)
-                self.manager.artifact_index.record({}, remove=(
-                    os.path.relpath(destination, str(self.manager.data_path)),))
-                del applied[path]
-                continue
-            content = original[path]
-            atomic_write_text_if_changed(destination, content, mode=0o600)
-            applied[path] = content
-            self.manager.artifact_index.record({os.path.relpath(destination, str(self.manager.data_path)): {
-                "kind": "compose-applied", "container": container.name, "sha256": sha256_of(content)}})
-
     def _apply_services_with_rollback(self, container, context, services) -> None:
         from copy import copy
         from .artifacts import atomic_write_text_if_changed
@@ -573,7 +523,7 @@ class ComposeOperations:
             runner.apply_services(context, services)
             for service in services:
                 container.on_service_started(context, service)
-            self._record_applied_compose(container, context, services)
+            context.service_models.record(services)
         except Exception as error:
             previous = {path: content for path, content in context.saved_compose.items()
                         if context.compose_owners[path] == container.name}
@@ -584,7 +534,6 @@ class ComposeOperations:
                 try:
                     runner.stop(context, started)
                     saved_models.restore(started)
-                    self._restore_applied_compose(container, context, previous)
                     remaining = (set(context.initial_running_services) |
                                  context.started_services) - set(started)
                     if not any(name in remaining for name in container.services):
@@ -608,7 +557,6 @@ class ComposeOperations:
                             runner.wait_service_running(context, service)
                         container.on_service_started(context, service)
                     context.service_models.restore(running)
-                    self._restore_applied_compose(container, context, previous)
                     restored_context = copy(context)
                     restored_context.target_containers = [container]
                     restored_context.is_full_containers = False
@@ -653,7 +601,7 @@ class ComposeOperations:
             for service in services:
                 container.on_service_started(context, service)
             if record_applied:
-                self._record_applied_compose(container, context, services)
+                context.service_models.record(services)
                 applied = context.applied_generation_services
                 applied.setdefault(container.name, []).extend(services)
         except Exception as error:
@@ -711,7 +659,6 @@ class ComposeOperations:
                 container.on_service_started(context, service)
 
             context.service_models.restore(affected)
-            self._restore_applied_compose(container, context, old_compose)
             if restore_services:
                 restored_context = copy(context)
                 restored_context.target_containers = [container]

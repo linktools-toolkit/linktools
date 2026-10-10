@@ -212,7 +212,7 @@ def test_partial_cold_generated_start_failure_stops_all_new_siblings(tmp_path):
     )
     operations = ComposeOperations(owner.manager)
     operations._publish_candidate(owner, candidate, context, ("test",))
-    assert (tmp_path / "compose/applied/test.yml").exists()
+    assert (tmp_path / "compose/applied/services" / "74657374.yml").exists()
     with pytest.raises(RuntimeError, match="sidecar failed"):
         operations._publish_candidate(owner, candidate, context, ("sidecar",))
     assert events == [
@@ -220,7 +220,6 @@ def test_partial_cold_generated_start_failure_stops_all_new_siblings(tmp_path):
         ("stop", ("test", "sidecar")), ("stopped",),
     ]
     assert GeneratedCandidate.current_id(str(owner.path)) is None
-    assert not (tmp_path / "compose/applied/test.yml").exists()
     assert not (tmp_path / "compose/applied/services" / "74657374.yml").exists()
 
 
@@ -573,7 +572,6 @@ def test_later_generated_sibling_failure_restores_earlier_sibling_snapshots(tmp_
     with pytest.raises(RuntimeError, match="sidecar failed"):
         operations._publish_candidate(owner, candidate, context, ("sidecar",))
     assert calls[-2:] == [(full.generation_id, ("test",)), (full.generation_id, ("sidecar",))]
-    assert yaml.safe_load((tmp_path / "compose/applied/test.yml").read_text()) == old_model
     assert not AppliedServiceModels(owner.manager, old_model).changed_services
 
 

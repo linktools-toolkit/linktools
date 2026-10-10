@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Partial operations compare all candidates but apply only eligible services."""
+"""Partial operations apply requested services, dependencies and shared configuration consumers."""
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -166,55 +166,38 @@ def test_unrelated_running_sidecar_does_not_prepare_owner_config(tmp_path, monke
     assert not any("running" in call[1] for call in calls)
 
 
-def test_changed_running_sidecar_updates_without_native_generation(tmp_path, monkeypatch):
+def test_unrelated_running_sidecar_does_not_auto_apply_pending_change(tmp_path, monkeypatch):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=("running",), sidecar=True)
     owner = manager.containers["other"]
     manager.generated_configs = {"other": owner}
-    owner.on_prepare_config = lambda context: pytest.fail("sidecar update must not prepare generated config")
-    owner.render_config = lambda version: pytest.fail("sidecar update must not render generated config")
+    owner.on_prepare_config = lambda context: pytest.fail("unrelated sidecar must not prepare native config")
+    owner.render_config = lambda version: pytest.fail("unrelated sidecar must not render native config")
     operations.up(["target"])
-    assert ("apply", ("target",)) in calls
-    assert ("apply", ("running",)) in calls
-    assert not any("stopped" in call[1] for call in calls)
-
+    assert calls == [("apply", ("target",))]
 
 @pytest.mark.parametrize("changed", [(), ("stopped",), ("running",), ("running", "stopped")])
-def test_partial_up_applies_pending_running_config_without_starting_stopped_sibling(tmp_path, monkeypatch, changed):
+def test_partial_up_preserves_unrelated_pending_service_snapshots(tmp_path, monkeypatch, changed):
+    from linktools.cntr.artifacts import AppliedServiceModels
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed)
     operations.up(["target"])
-    assert ("apply", ("target",)) in calls
-    assert (("apply", ("running",)) in calls) is ("running" in changed)
-    assert not any("stopped" in call[1] for call in calls)
-    applied = Path(manager.data_path) / "compose/applied/other.yml"
-    if "running" in changed:
-        snapshot = yaml.safe_load(applied.read_text())["services"]
-        assert snapshot["running"]["environment"]["VALUE"] == "new"
-        assert snapshot["stopped"]["environment"]["VALUE"] == "old"
-    else:
-        assert not applied.exists()
+    assert calls == [("apply", ("target",))]
+    models = AppliedServiceModels(manager, manager.compose_runner.final_model(None))
+    for service in ("running", "stopped"):
+        assert yaml.safe_load(models.previous[service])["services"][service]["environment"]["VALUE"] == "old"
 
-
-def test_failed_pending_update_restores_only_previously_running_services(tmp_path, monkeypatch):
+def test_unrelated_pending_failure_does_not_interrupt_explicit_start(tmp_path, monkeypatch):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch)
     previous = paths["other"].read_text()
 
     def apply(context, services):
         calls.append(("apply", tuple(services)))
         if "running" in services:
-            paths["other"].write_text(context.compose_files[str(paths["other"])])
-            raise RuntimeError("pending configuration failed")
+            raise RuntimeError("unrelated pending configuration failed")
 
     manager.compose_runner.apply_services = apply
-    with pytest.raises(RuntimeError, match="pending configuration failed"):
-        operations.up(["target"])
-    restored = [call for call in calls if call[0] == "restore"]
-    assert len(restored) == 1
-    assert restored[0][1] == ("running",)
+    operations.up(["target"])
+    assert calls == [("apply", ("target",))]
     assert paths["other"].read_text() == previous
-    restored_model = yaml.safe_load(next(iter(restored[0][2].values())))
-    assert restored_model["services"]["running"]["environment"]["VALUE"] == "old"
-    assert not (Path(manager.data_path) / "compose/applied/other.yml").exists()
-
 
 def test_unchanged_generated_owner_does_not_apply_while_changed_owner_does(tmp_path, monkeypatch):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
@@ -224,23 +207,23 @@ def test_unchanged_generated_owner_does_not_apply_while_changed_owner_does(tmp_p
     assert operations._reconcile_selection(explicit, context, {"other"}).services == ("target", "running")
 
 
-def test_pending_service_starts_only_its_actual_stopped_dependency(tmp_path, monkeypatch):
+def test_selected_pending_service_starts_its_stopped_dependency_first(tmp_path, monkeypatch):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
-    manager.containers["other"].services["running"]["depends_on"] = {
+    other = manager.containers["other"]
+    other.services["running"]["depends_on"] = {
         "stopped": {"condition": "service_healthy"}}
-    operations.up(["target"])
+    operations.select = lambda *args, **kwargs: ComposeSelection(
+        tuple(manager.containers.values()), (other,), ("running",), False)
+    operations.up(["other"])
     assert ("apply", ("stopped",)) in calls
     assert calls.index(("apply", ("stopped",))) < calls.index(("apply", ("running",)))
 
-
-def test_shared_effective_network_change_reconciles_running_service(tmp_path, monkeypatch):
+def test_global_network_change_does_not_auto_reconcile_unrelated_running_service(tmp_path, monkeypatch):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
     original = manager.compose_runner.final_model
     manager.compose_runner.final_model = lambda context: dict(original(context), networks={"shared": {"name": "new-network"}})
     operations.up(["target"])
-    assert ("apply", ("running",)) in calls
-    assert not any("stopped" in call[1] for call in calls)
-
+    assert calls == [("apply", ("target",))]
 
 def test_resolved_environment_change_reconciles_and_rolls_back_old_value(tmp_path, monkeypatch):
     operations, manager, calls, paths = reconciliation(tmp_path, monkeypatch, changed=())
@@ -258,8 +241,11 @@ def test_resolved_environment_change_reconciles_and_rolls_back_old_value(tmp_pat
 
     manager.compose_runner.final_model = model
     manager.compose_runner.apply_services = apply
+    other = manager.containers["other"]
+    operations.select = lambda *args, **kwargs: ComposeSelection(
+        tuple(manager.containers.values()), (other,), ("running",), False)
     with pytest.raises(RuntimeError, match="bad env file"):
-        operations.up(["target"])
+        operations.up(["other"])
     restored = next(call for call in calls if call[0] == "restore")
     restored_model = yaml.safe_load(next(iter(restored[2].values())))
     assert restored_model["services"]["running"]["environment"]["VALUE"] == "old"
@@ -338,8 +324,8 @@ def test_running_owner_prepares_inputs_but_after_start_only_visits_applied_targe
         container.on_starting = lambda context, name=container.name: events.append(("prepare", name))
         container.on_started = lambda context, name=container.name: events.append(("started", name))
     operations.up(["target"])
-    assert ("check", "other") in events
-    assert ("prepare", "other") in events
+    assert ("check", "other") not in events
+    assert ("prepare", "other") not in events
     assert ("started", "other") not in events
     assert ("started", "target") in events
     assert calls == [("apply", ("target",))]
