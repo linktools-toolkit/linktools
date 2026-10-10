@@ -155,6 +155,20 @@ class ComposeOperations:
         manager = self.manager
         runner = manager.compose_runner
         explicit = self.select(names, for_start=True)
+        compose_files, compose_owners, saved_compose = {}, {}, {}
+        for path, (kind, owner, content) in collect_candidates(manager, explicit.project_containers).items():
+            if kind != "compose":
+                continue
+            compose_files[path] = content
+            compose_owners[path] = owner
+            legacy = os.path.join(str(manager.data_path), "compose", "applied", owner + ".yml")
+            source = legacy if os.path.exists(legacy) else path
+            try:
+                with open(source, encoding="utf-8") as stream:
+                    saved_compose[path] = stream.read()
+            except FileNotFoundError:
+                pass
+        # Runtime inspection renders Compose files, so retain migration inputs first.
         actual = manager.docker_inspector.get_project_state(explicit.project_containers)
         initial = {item.service for item in actual.services if item.state in ("running", "restarting")}
         selection = self.start_selection(explicit, running_services=initial)
@@ -166,21 +180,9 @@ class ComposeOperations:
         context.native_running_images = {item.service: item.image_id for item in actual.services
                                          if item.service in initial and item.image_id}
         context.initial_running_services = frozenset(initial)
-        context.compose_files = {}
-        context.compose_owners = {}
-        context.saved_compose = {}
-        for path, (kind, owner, content) in collect_candidates(manager, selection.project_containers).items():
-            if kind != "compose":
-                continue
-            context.compose_files[path] = content
-            context.compose_owners[path] = owner
-            legacy = os.path.join(str(manager.data_path), "compose", "applied", owner + ".yml")
-            source = legacy if os.path.exists(legacy) else path
-            try:
-                with open(source, encoding="utf-8") as stream:
-                    context.saved_compose[path] = stream.read()
-            except FileNotFoundError:
-                pass
+        context.compose_files = compose_files
+        context.compose_owners = compose_owners
+        context.saved_compose = saved_compose
 
         with manager.lifecycle.notify_start(context):
             if (tuple(context.target_containers) != selection.target_containers or
@@ -319,6 +321,9 @@ class ComposeOperations:
                             model_store.restore(stopped_new)
                             running.difference_update(cleanup)
                     if restore:
+                        # Restoring creates new container IDs, including along restart edges.
+                        restore.update(service for service, _ in self._dependent_actions(
+                            context, restore, initial, set(restore), set(restore), recreate_restarts=True))
                         saved = runner.saved_service_models(context, tuple(
                             service for service in context.compose_model["services"] if service in restore))
                         for service, text in saved.items():
@@ -349,9 +354,11 @@ class ComposeOperations:
         if report:
             render_report(manager.logger, get_records(context))
 
-    def _dependent_actions(self, context, selected, running, updated, recreated):
+    def _dependent_actions(self, context, selected, running, updated, recreated,
+                           recreate_restarts=False):
         """Propagate only declared Compose restart edges and stale namespace binds."""
         import yaml
+        running = set(running).intersection(context.compose_model["services"])
         definitions = {}
         for name in running:
             saved = context.service_models.previous.get(name)
@@ -373,9 +380,9 @@ class ComposeOperations:
                 restart = any(options.get("restart") and parent in updated
                               for parent, options in service_dependencies(spec).items())
                 if rebuild or restart:
-                    yield name, rebuild
+                    yield name, rebuild or recreate_restarts
                     updated.add(name)
-                    if rebuild:
+                    if rebuild or recreate_restarts:
                         recreated.add(name)
                 waiting.remove(name)
 

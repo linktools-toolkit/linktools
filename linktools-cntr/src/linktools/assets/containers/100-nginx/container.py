@@ -523,6 +523,13 @@ class Container(BaseContainer):
             if previous.exists():
                 shutil.copytree(str(previous), str(temporary / "conf.d"), symlinks=True)
             os.rename(str(temporary), str(backup))
+        if (self.manager.system in ("darwin", "linux") and self.manager.uid != 0
+                and self.manager.container_type == "docker"):
+            # sudo docker cp preserves private modes but makes copied files root-owned.
+            self.runtime.create_process(
+                "chown", "-R", "-h", "{}:{}".format(self.manager.uid, self.manager.gid),
+                str(backup), privilege=True,
+            ).check_call()
         for name in ("certs", "acme"):
             source = backup / name
             if not source.is_dir():

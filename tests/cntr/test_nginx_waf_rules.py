@@ -40,6 +40,20 @@ def test_disabled_waf_has_no_bypass_or_internal_origin(fresh_manager):
     assert "@waf" not in rendered
 
 
+def test_waf_hop_keeps_common_proxy_limits_and_timeouts(fresh_manager):
+    nginx = fresh_manager.containers["nginx"]
+    rendered = _render_site(nginx, True, ())
+    waf_location = rendered.split("location @waf {", 1)[1].split("}", 1)[0]
+    parameters = nginx.get_source_path("templates", "params.conf").read_text().splitlines()
+    for directive in parameters:
+        if directive.strip():
+            assert waf_location.count(directive.strip()) == 1
+    assert "proxy_http_version 1.1;" in waf_location
+    assert "proxy_set_header Upgrade $http_upgrade;" in waf_location
+    assert "proxy_set_header Connection $connection_upgrade;" in waf_location
+    assert "proxy_set_header X-Proxy-Original-Client-IP $original_client_ip;" in waf_location
+
+
 def test_nginx_literal_preserves_data_not_template_expression(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
     value = nginx._nginx_literal('Bearer "path\\$host"')
