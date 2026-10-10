@@ -181,6 +181,13 @@ class Container(BaseContainer):
     generates_config = True
     generation_services = ("authelia", "authelia-admin")
 
+    def generation_label(self, service: str, generation_id: str) -> "str | None":
+        if service == "authelia-admin":
+            from linktools.cntr.artifacts import sha256_of
+            path = self.get_app_path("generated", generation_id, "configuration.yml")
+            return sha256_of(path.read_text(encoding="utf-8"))
+        return super().generation_label(service, generation_id)
+
     def on_prepare_config(self, context: "EventContext") -> None:
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
@@ -231,7 +238,8 @@ class Container(BaseContainer):
             runner.wait_service_healthy(context, "authelia")
         if "authelia-admin" in services:
             base_changed = "configuration.yml" in candidate.changed_files
-            runner.apply_service(context, "authelia-admin", recreate=base_changed)
+            recreate = base_changed or not runner.is_generation_current(context, "authelia-admin", candidate)
+            runner.apply_service(context, "authelia-admin", recreate=recreate)
 
     @classmethod
     def _create_secret_file(cls, path: "PathType", length: int = 48) -> None:

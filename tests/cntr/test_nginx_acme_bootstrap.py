@@ -136,7 +136,8 @@ def test_acme_is_issued_during_build_and_rebuilt_for_new_domains(certificate_cas
     assert dockerfile.count("FROM nginx:") == 1
     assert "AS acme-build" not in dockerfile
     assert "--issue --force" in dockerfile
-    assert "COPY nginx-certificates nginx-reload nginx-acme" in dockerfile
+    assert "COPY nginx-certificates nginx-acme" in dockerfile
+    assert "nginx-reload" not in dockerfile
     assert "--mount=type=secret,id=cntr_acme_account" in dockerfile
     assert "--mount=type=secret,id=cntr_acme_dns,target=/run/acme-secrets/dns.env,required=true" in dockerfile
     assert "ENV CF_Token" not in dockerfile
@@ -202,7 +203,8 @@ if "--issue" in args:
         account.write_text("build-account")
     home.joinpath("domains").write_text(",".join(
         args[index + 1] for index, value in enumerate(args[:-1]) if value == "--domain"))
-    home.joinpath("account.conf").write_text("SAVED_CF_Token='fake-token'\\n")
+    home.joinpath("account.conf").write_text(
+        "SAVED_CF_Token='fake-token'\\nSAVED_LE_Domain='preserve'\\n")
     home.joinpath("domain.conf").write_text("CF_Token='fake-token'\\nLe_Domain='example.test'\\n")
 elif "--install-cert" in args:
     if not home.joinpath("account.key").exists():
@@ -222,6 +224,7 @@ else:
     assert (build / "seed/certs/example.test_fullchain.pem").read_text() == "preissued"
     assert (build / "acme/domains").read_text().startswith("example.test,*.example.test")
     assert "fake-token" not in (build / "seed/acme/account.conf").read_text()
+    assert "SAVED_LE_Domain='preserve'" in (build / "seed/acme/account.conf").read_text()
     assert (build / "seed/acme/domain.conf").read_text() == "Le_Domain='example.test'\n"
 
 

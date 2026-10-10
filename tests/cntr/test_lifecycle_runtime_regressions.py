@@ -327,7 +327,7 @@ def test_acme_install_and_runtime_share_config_home():
     assert "ln -s /opt/acme/acme.sh /usr/bin/acme.sh" in text
     assert "--config-home /root/.acme.sh --nocron" in text
     assert "nginx-certificates renew" in text
-    assert "AS acme-build" in text and "--issue" in text
+    assert text.count("FROM nginx:") == 1 and "--issue" in text
     assert "> /etc/crontabs/root" in text
 
 

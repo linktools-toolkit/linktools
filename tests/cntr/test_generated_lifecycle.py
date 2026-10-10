@@ -345,7 +345,8 @@ def test_confirmed_generation_requires_actual_target_image():
     runner = ComposeRunner(manager)
     runner.final_model = lambda context: {"services": {"authelia": {"image": "authelia:latest"}}}
     context = SimpleNamespace(containers=())
-    candidate = SimpleNamespace(generation_id="id")
+    candidate = SimpleNamespace(generation_id="id", container=SimpleNamespace(
+        is_generation_current=lambda context, service, candidate: True))
     assert not runner.is_generation_current(context, "authelia", candidate)
     manager.structured_runner.execute = lambda *args, **kwargs: SimpleNamespace(stdout="sha256:old")
     assert runner.is_generation_current(context, "authelia", candidate)
@@ -395,6 +396,18 @@ def test_compose_only_apply_failure_restores_previous_service_model(tmp_path):
     assert len(started) == 1
     assert started[0].target_containers == [owner]
     assert started[0].is_full_containers is False
+
+
+def test_runner_uses_owner_generation_confirmation_before_image_probe():
+    called = []
+    owner = SimpleNamespace(is_generation_current=lambda context, service, candidate:
+                            called.append(service) or False)
+    context = SimpleNamespace(generated_candidates={"producer": SimpleNamespace(
+        container=owner, generation_id="version")})
+    runner = ComposeRunner(SimpleNamespace())
+    assert not runner.is_generation_current(context, "service",
+                                            context.generated_candidates["producer"])
+    assert called == ["service"]
 
 
 def test_changed_compose_environment_prevents_generation_reuse():
@@ -646,8 +659,10 @@ def test_generation_image_check_reuses_command_snapshot_or_resolves_fresh(has_sn
     context = SimpleNamespace(containers=())
     if has_snapshot:
         context.compose_model = model
+    candidate = SimpleNamespace(generation_id="id", container=SimpleNamespace(
+        is_generation_current=lambda context, service, candidate: True))
     for _ in range(2):
-        assert runner.is_generation_current(context, "app", SimpleNamespace(generation_id="id"))
+        assert runner.is_generation_current(context, "app", candidate)
     assert len(resolved) == (0 if has_snapshot else 2)
     assert all(command[-1] == "app:prepared" for command in commands)
 

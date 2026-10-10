@@ -257,7 +257,7 @@ class BaseContainer(metaclass=AbstractMetaClass):
 
     def generation_label(self, service: str, generation_id: str) -> "str | None":
         """Return the Compose generation marker for this native service."""
-        return generation_id if self.generates_config and service == self.name else None
+        return generation_id if self.generates_config and service in self.generation_services else None
 
     def is_generation_current(self, context: "EventContext", service: str,
                               candidate: "GeneratedCandidate") -> bool:

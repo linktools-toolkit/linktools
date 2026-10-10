@@ -520,10 +520,10 @@ certificates fail validation; deployment does not request replacement certificat
 from a CA. Build a fresh image and deliberately reconcile persisted state when
 changing certificate domains. Legacy container files are backed up before mount
 migration. The ACME client lives in `/opt/acme`, outside the persisted config mount.
-An explicit daily cron uses the persisted config and a reload script that validates
-the active generated configuration before reloading; legacy reload commands are
-updated without changing their account or certificate keys. HTTPS-disabled images
-skip ACME installation, issuance, DNS environment variables and cron.
+An explicit daily cron uses the persisted ACME configuration; certificate reload
+and verification remain in nginx-certificates. Existing accounts and private keys
+are preserved. HTTPS-disabled images skip ACME installation, issuance, DNS
+environment variables and cron.
 
 Deployment migration must be coordinated with all external repository callers:
 
@@ -549,3 +549,8 @@ navigation files. Rollback restores matched code/mounts/generated config and the
 previous SafeLine origin; it must not overwrite newer business data or rotate
 credentials. No version bump identifies this development protocol: both
 repositories must be paired explicitly.
+
+Authelia's main service tracks the full generated configuration version. Its
+admin sidecar tracks only the content hash of `configuration.yml`, so ACL-only
+changes do not recreate the admin service; it is recreated when its own
+configuration marker or runtime image is stale.

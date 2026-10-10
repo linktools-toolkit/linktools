@@ -7,9 +7,9 @@ credentials=/run/acme-secrets/dns.env
 
 strip_credentials() {
     test -d "$state" || return 0
-    find "$state" -type f -name '*.conf' -exec sed -i '/^SAVED_[A-Za-z0-9_]*=/d' {} +
     for key in $(sed -n 's/^export \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$credentials"); do
-        find "$state" -type f -name '*.conf' -exec sed -i "/^$key=/d" {} +
+        find "$state" -type f -name '*.conf' -exec sed -i \
+            -e "/^$key=/d" -e "/^SAVED_$key=/d" {} +
     done
 }
 

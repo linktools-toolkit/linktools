@@ -5,8 +5,8 @@ FROM nginx:{{ NGINX_TAG }}
 RUN apk --no-cache add openssl socat coreutils util-linux
 RUN curl https://get.acme.sh | sh -s -- --home /opt/acme --config-home /root/.acme.sh --nocron
 
-COPY nginx-certificates nginx-reload nginx-acme /usr/local/bin/
-RUN chmod +x /usr/local/bin/nginx-certificates /usr/local/bin/nginx-reload /usr/local/bin/nginx-acme && \
+COPY nginx-certificates nginx-acme /usr/local/bin/
+RUN chmod +x /usr/local/bin/nginx-certificates /usr/local/bin/nginx-acme && \
     ln -s /opt/acme/acme.sh /usr/bin/acme.sh
 
 RUN --mount=type=secret,id=cntr_acme_account \

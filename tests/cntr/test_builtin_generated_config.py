@@ -133,12 +133,63 @@ def test_authelia_admin_checks_own_compose_changes_without_acl_forced_restart():
     runner = SimpleNamespace(
         apply_service=lambda ctx, name, recreate=False: actions.append((name, recreate)),
         wait_service_healthy=lambda *args: None,
+        is_generation_current=lambda *args: True,
     )
     container = instance(module, compose_runner=runner)
     candidate = SimpleNamespace(changed=True, changed_files=("configuration.acl.yml",))
     container.apply_config(SimpleNamespace(), candidate, ("authelia", "authelia-admin"))
     assert ("authelia", True) in actions
     assert ("authelia-admin", False) in actions
+
+
+@pytest.mark.parametrize("current,changed,expect_recreate", [
+    (True, (), False),
+    (True, ("configuration.acl.yml",), False),
+    (True, ("configuration.yml",), True),
+    (False, (), True),
+])
+def test_authelia_admin_recreates_only_for_its_own_config_or_stale_marker(
+        current, changed, expect_recreate):
+    container = instance(builtin("102-authelia"), compose_runner=SimpleNamespace(
+        is_generation_current=lambda *args: current,
+        apply_service=lambda context, service, recreate=False: actions.append((service, recreate)),
+    ))
+    actions = []
+    container.apply_config(SimpleNamespace(), SimpleNamespace(
+        changed=bool(changed), changed_files=changed), ("authelia-admin",))
+    assert actions == [("authelia-admin", expect_recreate)]
+
+
+def test_authelia_admin_label_uses_only_configuration_yaml(tmp_path):
+    from linktools.cntr.artifacts import sha256_of
+
+    container = instance(builtin("102-authelia"))
+    container._name = "authelia"
+    container.__dict__["services"] = {"authelia": {}, "authelia-admin": {}, "authelia-redis": {}}
+    container.get_app_path = lambda *parts: tmp_path.joinpath(*parts)
+    for version, acl in (("previous", "deny"), ("current", "allow")):
+        root = tmp_path / "generated" / version
+        root.mkdir(parents=True)
+        (root / "configuration.yml").write_text("server: https\n", encoding="utf-8")
+        (root / "configuration.acl.yml").write_text(acl, encoding="utf-8")
+    assert container.generation_label("authelia", "current") == "current"
+    assert container.generation_label("authelia-redis", "current") is None
+    marker = sha256_of("server: https\n")
+    assert container.generation_label("authelia-admin", "previous") == marker
+    assert container.generation_label("authelia-admin", "current") == marker
+
+    runtime = [SimpleNamespace(service="authelia-admin", state="running",
+                               labels={"io.linktools.cntr.generation": marker})]
+    container.manager.docker_inspector = SimpleNamespace(
+        get_project_state=lambda containers: SimpleNamespace(services=runtime))
+    candidate = SimpleNamespace(generation_id="current")
+    assert container.is_generation_current(SimpleNamespace(containers=(container,)),
+                                           "authelia-admin", candidate)
+    runtime[0].labels.clear()
+    assert not container.is_generation_current(SimpleNamespace(containers=(container,)),
+                                               "authelia-admin", candidate)
+    (tmp_path / "generated/current/configuration.yml").write_text("server: http\n", encoding="utf-8")
+    assert container.generation_label("authelia-admin", "current") != marker
 
 
 def test_authelia_oidc_identity_and_redirects_are_acyclic_readonly(monkeypatch):

@@ -363,7 +363,7 @@ class ComposeRunner:
         import tempfile
         import yaml
         candidates = getattr(context, "generated_candidates", {})
-        candidate = next((c for c in candidates.values() if service == c.container.name), None)
+        candidate = next((c for c in candidates.values() if service in c.container.generation_services), None)
         label = candidate.container.generation_label(service, candidate.generation_id) if candidate else None
         if label is None:
             return self.manager.runtime.create_docker_compose_process(context.containers, *args).check_call()
@@ -380,12 +380,10 @@ class ComposeRunner:
         if (service in getattr(context, "changed_image_services", ()) or
                 service in getattr(context, "changed_compose_services", ())):
             return False
+        if not candidate.container.is_generation_current(context, service, candidate):
+            return False
         state = self.manager.docker_inspector.get_project_state(context.containers)
         matches = [item for item in state.services if item.service == service]
-        if not matches or not all(item.state == "running" and
-                item.labels.get("io.linktools.cntr.generation") == candidate.generation_id
-                for item in matches):
-            return False
         model = getattr(context, "compose_model", None)
         if model is None:
             model = self.final_model(context)
@@ -660,9 +658,9 @@ class ComposeRunner:
                 raise ContainerError("No original image ID for service " + service)
             overlay[service] = {"image": image}
         candidates = getattr(context, "generated_candidates", {})
-        for candidate in candidates.values():
-            service = candidate.container.name
-            if service in overlay:
+        for service in services:
+            candidate = next((c for c in candidates.values() if service in c.container.generation_services), None)
+            if candidate is not None:
                 label = candidate.container.generation_label(service, candidate.generation_id)
                 if label is not None:
                     overlay[service]["labels"] = {"io.linktools.cntr.generation": label}
