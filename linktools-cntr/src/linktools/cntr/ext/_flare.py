@@ -58,6 +58,12 @@ class Flare(Integration):
         return cls._public(name, icon, desc, url)
 
     @classmethod
+    def container(cls, name: str, icon: str, url: "str | None" = MISSING, *,
+                  desc: "Optional[str]" = None) -> "Flare":
+        """Declare a bookmark in the standard container group."""
+        return cls.bookmark(name, icon, url, category="container", desc=desc)
+
+    @classmethod
     def category(cls, name: str, desc: "Optional[str]" = None, *,
                  apps: bool = False, order: "Optional[int]" = None) -> _FlareCategory:
         """Select a standard bookmark group or declare a custom display group."""
@@ -69,7 +75,7 @@ class Flare(Integration):
 
     @classmethod
     def bookmark(cls, name: str, icon: str, url: "str | None" = MISSING, *,
-                 category: "str | _FlareCategory" = "other") -> "Flare":
+                 category: "str | _FlareCategory" = "other", desc: "Optional[str]" = None) -> "Flare":
         """Declare a bookmark using a category ID or explicit display group."""
         if isinstance(category, str):
             category = cls.category(category)
@@ -77,4 +83,4 @@ class Flare(Integration):
             raise TypeError("bookmark category must be a string or _FlareCategory")
         if category.apps:
             raise ValueError("bookmark category must use the bookmarks output area")
-        return Flare(category, name, icon, name, url)
+        return Flare(category, name, icon, desc or name, url)

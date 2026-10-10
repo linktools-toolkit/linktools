@@ -62,9 +62,8 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return [
-            Flare.bookmark(
+            Flare.container(
                 "Flare", "bookmark", load_port_url(self, "FLARE_PORT", https=False),
-                category="container",
             ),
             Nginx.site(
                 server_name=self.get_config_later("FLARE_DOMAIN"),

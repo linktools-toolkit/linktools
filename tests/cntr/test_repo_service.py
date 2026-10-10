@@ -55,10 +55,11 @@ def test_local_repo_describe_does_not_inspect_git(fresh_manager, monkeypatch, lo
     assert info["git"]["supported"] is True
 
 
-def test_local_repo_status_produces_no_git_warning(fresh_manager, local_repo):
+def test_local_repo_status_produces_no_git_warning(fresh_manager, local_repo, monkeypatch):
     fresh_manager.repos.add(local_repo, replace=True)
     warnings = []
-    fresh_manager.repos.git.logger.warning = lambda msg: warnings.append(msg)
+    monkeypatch.setattr(fresh_manager.repos.git.logger, "warning",
+                        lambda msg, *args: warnings.append(msg % args if args else msg))
 
     url, meta = next(iter(fresh_manager.repos.get_all().items()))
     fresh_manager.repos.describe(url, meta)

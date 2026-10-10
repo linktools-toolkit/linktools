@@ -264,6 +264,7 @@ def test_regenerating_unchanged_compose_does_not_touch_file_mtime(fresh_manager)
     nginx = fresh_manager.containers["nginx"]
     compose_path = nginx.get_docker_compose_file()
     before = os.stat(compose_path).st_mtime_ns
+    content = compose_path.read_text()
 
     # Re-render from a fresh container instance over the same data dir --
     # deterministic config means byte-identical output.
@@ -272,7 +273,25 @@ def test_regenerating_unchanged_compose_does_not_touch_file_mtime(fresh_manager)
     nginx_again.get_docker_compose_file()
 
     after = os.stat(compose_path).st_mtime_ns
+    assert compose_path.read_text() == content
     assert after == before
+
+
+def test_nginx_network_attachment_resolves_dependencies_without_prepared_enable_flags(fresh_manager, monkeypatch):
+    fresh_manager.installed_state.remove(*fresh_manager.containers)
+    fresh_manager.installed_state.add("portainer")
+    monkeypatch.setattr(type(fresh_manager.containers["portainer"]), "dependencies",
+                        property(lambda self: ["safeline"]))
+    for container in fresh_manager.containers.values():
+        container.enable = False
+    nginx = fresh_manager.containers["nginx"]
+    nginx.__dict__.pop("docker_compose", None)
+
+    networks = nginx.docker_compose["services"]["nginx"]["networks"]
+
+    assert fresh_manager.installed_state.load_names() == ["portainer"]
+    assert "safeline-ce" in networks
+    assert not any(container.enable for container in fresh_manager.containers.values())
 
 
 @pytest.mark.parametrize("compose,docker_file", [

@@ -41,10 +41,10 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return [
-            Flare.bookmark("LDAP", "account", load_port_url(
+            Flare.container("LDAP", "account", load_port_url(
                 self, "LLDAP_WEB_PORT",
                 https=False,
-            ), category="container"),
+            )),
         ]
 
     def on_check(self, context: "OperationContext") -> None:

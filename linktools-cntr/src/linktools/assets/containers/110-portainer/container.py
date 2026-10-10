@@ -28,10 +28,10 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return [
-            Flare.bookmark("Portainer", "docker", load_port_url(
+            Flare.container("Portainer", "docker", load_port_url(
                 self, "PORTAINER_PORT",
                 https=False
-            ), category="container"),
+            )),
             Nginx.site(
                 server_name=self.get_config_later("PORTAINER_DOMAIN"),
                 expose=Flare.public("Portainer", "docker", "Docker管理工具"),

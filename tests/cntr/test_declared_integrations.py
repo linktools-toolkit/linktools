@@ -324,7 +324,7 @@ def test_navigation_standard_categories_precede_first_seen_custom_categories():
     team = Flare.category("team", "Team")
     tools = Flare.category("tools", "Custom tools")
     manager, _ = _site_navigation_manager({}, [
-        Flare.bookmark("Internal one", "web", "https://internal-one.test", category="container"),
+        Flare.container("Internal one", "web", "https://internal-one.test"),
         team("Team one", "web", "", "https://team-one.test"),
         Flare.bookmark("Other", "web", "https://other.test", category="other"),
         Flare.public("App one", "web", "", "https://app-one.test"),
@@ -415,6 +415,78 @@ def test_flare_bookmarks_accept_custom_category_ids_and_inherit_site_urls() -> N
             {"category": "tool", "name": "Standalone", "icon": "book", "link": "https://docs.test"},
         ],
     }
+
+
+def test_flare_container_factory_preserves_lazy_urls() -> None:
+    from linktools.cntr import Flare
+    from linktools.runtime import lazy_load
+
+    reads = []
+    def load_url():
+        reads.append("url")
+        return "https://internal.test"
+
+    link = Flare.container("Internal", "web", lazy_load(load_url))
+    assert isinstance(link, Flare)
+    assert link.display_category is Flare.category("container")
+    assert link.desc == "Internal"
+    assert link.with_default_url("https://fallback.test") is link
+    manager, _ = _site_navigation_manager({}, [link])
+    assert reads == []
+    result = _render_navigation(manager)
+    assert result["apps.yml"]["links"] == []
+    assert result["bookmarks.yml"] == {
+        "categories": [{"id": "container", "title": "Internal"}],
+        "links": [{"category": "container", "name": "Internal", "icon": "web",
+                   "link": "https://internal.test"}],
+    }
+    assert reads == ["url"]
+
+
+def test_flare_container_factory_inherits_only_omitted_site_urls() -> None:
+    from linktools.cntr import Flare
+
+    omitted = Flare.container("Inherited", "web")
+    empty = Flare.container("Empty", "web", "")
+    disabled = Flare.container("Disabled", "web", None)
+    assert empty.with_default_url("https://fallback.test") is empty
+    assert disabled.with_default_url("https://fallback.test") is disabled
+    manager, reads = _site_navigation_manager({
+        "inherited": Nginx.site("app.test", expose=omitted),
+        "empty": Nginx.site("empty.test", expose=empty),
+        "disabled": Nginx.site("disabled.test", expose=disabled),
+    }, [Flare.container("Unbound", "web")])
+    assert reads == []
+    result = _render_navigation(manager)
+    assert result["bookmarks.yml"]["links"] == [
+        {"category": "container", "name": "Inherited", "icon": "web",
+         "link": "https://app.test:9443"},
+    ]
+    assert reads == ["NGINX_HTTPS_ENABLE", "NGINX_HTTPS_PORT"]
+    assert omitted.url is None
+
+
+def test_flare_bookmark_factories_preserve_category_description_and_url_contract() -> None:
+    from linktools.cntr import Flare
+    from linktools.runtime import lazy_load
+    from linktools.types import MISSING
+
+    def fail():
+        raise AssertionError("bookmark URL must stay lazy")
+
+    custom = Flare.category("team", "Team", order=5)
+    for category in ("container", "other", custom):
+        group = Flare.category(category) if isinstance(category, str) else category
+        for desc in (None, "", "Detailed description"):
+            for url in (MISSING, None, "", "https://app.test", lazy_load(fail)):
+                original = group("App", "web", desc, url)
+                links = [Flare.bookmark("App", "web", url, category=category, desc=desc)]
+                if category == "container":
+                    links.append(Flare.container("App", "web", url, desc=desc))
+                for link in links:
+                    assert link.display_category is original.display_category
+                    assert (link.name, link.icon, link.desc) == (original.name, original.icon, original.desc)
+                    assert link._url is original._url
 
 
 def test_flare_bookmarks_accept_category_titles_and_orders() -> None:

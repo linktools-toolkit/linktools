@@ -265,7 +265,8 @@ return [
 ]
 ```
 
-`Flare.public` 创建带描述的应用；`Flare.bookmark` 支持自定义分区。
+`Flare.public` 创建带描述的应用；`Flare.container(name, icon, url)` 创建容器分区书签；
+`Flare.bookmark` 支持自定义分区。
 使用 `Flare.category("tool", "工具", order=5)` 可进一步设置分区标题和顺序。
 域名配置使用 `ConfigField(provider=Nginx.domain(self))`。
 共享声明位于 `integration/` 包中；容器在已有准备、检查回调中处理自己的输入，

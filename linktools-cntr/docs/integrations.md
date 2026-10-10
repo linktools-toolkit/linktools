@@ -24,16 +24,16 @@ def integrations(self) -> "Integrations":
             waf_bypass=(),
             expose=Flare.public("App", "apps", "Application"),
         ),
-        Flare.bookmark(
+        Flare.container(
             "App direct", "apps",
             load_port_url(self, "APP_PORT", https=False),
-            category="container",
         ),
     ]
 ```
 
 `Nginx` and `Flare` provide the declaration factories. `Nginx.site(...)` returns
-a `Nginx`; `Flare.public(...)` and `Flare.bookmark(...)` return a `Flare`.
+a `Nginx`; `Flare.public(...)`, `Flare.container(...)`, and `Flare.bookmark(...)`
+return a `Flare`.
 The `ext/` package owns these factories and public declaration types, also
 re-exported from `linktools.cntr`. `Integration` declares public `consumer` and
 `local_id` metadata. A declaration with `requires_local_id=True` must supply a
@@ -76,6 +76,12 @@ descriptions are included in `apps.yml`. Use
 need an application description. A custom string category creates a bookmark
 group with that ID and title. The standard IDs `private`, `container`, and
 `other` use their predefined titles and orders; omitting `category` uses `other`.
+`Flare.container(name, icon, url, *, desc=None)` is shorthand for
+`Flare.bookmark(name, icon, url, category="container", desc=desc)`, using the standard
+`Internal` bookmark group. Its optional URL follows the same inheritance and
+explicit `None`/empty behavior as other Flare declarations.
+Both factories retain an optional `desc` on the declaration, defaulting to the
+name when omitted or empty; bookmark output does not include descriptions.
 
 Pass the internal category value created by
 `Flare.category(name, desc=None, *, apps=False, order=None)` instead of a string

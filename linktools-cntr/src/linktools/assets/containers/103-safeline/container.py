@@ -39,10 +39,10 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return [
-            Flare.bookmark("Safeline", "alienOutline", load_port_url(
+            Flare.container("Safeline", "alienOutline", load_port_url(
                 self, "SAFELINE_PORT",
                 https=True
-            ), category="container"),
+            )),
             Nginx.site(
                 self.get_config_later("SAFELINE_DOMAIN"),
                 proxy="https://safeline-mgt:1443",
