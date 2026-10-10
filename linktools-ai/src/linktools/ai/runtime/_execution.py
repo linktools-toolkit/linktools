@@ -1099,7 +1099,7 @@ class DefaultExecutionService:
                 },
             )
         except AIError as error:
-            if error.code is not ErrorCode.EXECUTION_RESULT_CONFLICT:
+            if error.code not in {ErrorCode.EXECUTION_RESULT_CONFLICT, ErrorCode.STORAGE_CONFLICT}:
                 raise
             latest = await self.inspect(execution_id, principal=principal)
             if latest.status is not ExecutionStatus.SUCCEEDED:
