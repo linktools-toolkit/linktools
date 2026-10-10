@@ -25,48 +25,6 @@ class Owner:
         return {}
 
 
-def test_implicit_native_consumer_expands_providers_when_generation_changed():
-    lldap = Owner("lldap", ("lldap",))
-    nginx = Owner("nginx", ("nginx",))
-    nginx.application_priority = 100
-    nginx.get_runtime_requirements = lambda required: (
-        {"authelia": ("authelia",)} if "nginx" in required else {})
-    authelia = Owner("authelia", ("authelia", "authelia-redis"), ("authelia",))
-    authelia.dependencies = ("lldap",)
-    project = (nginx, lldap, authelia)
-    explicit = ComposeSelection(project, (lldap,), ("lldap",), False)
-    model = {"services": {service: spec
-                          for owner in project for service, spec in owner.services.items()}}
-    context = SimpleNamespace(initial_running_services={"nginx"},
-                              changed_compose_services={"nginx"}, compose_model=model)
-    ops = ComposeOperations(SimpleNamespace())
-    preliminary = ops._reconcile_selection(explicit, context)
-    assert "nginx" in preliminary.services and "authelia" not in preliminary.services
-
-    final = ops._reconcile_selection(explicit, context, {"nginx"})
-    assert {"lldap", "authelia", "nginx"} <= set(final.services)
-    assert "authelia-redis" not in final.services
-    assert {"nginx", "authelia"} <= set(final.native_roots)
-    applied = order_services(project, final.services, model, {"nginx"},
-                             dependency_roots=final.native_roots)
-    assert applied.index("lldap") < applied.index("authelia") < applied.index("nginx")
-
-
-def test_redis_sidecar_remains_independent_of_owner_native_dependencies():
-    target = Owner("lldap", ("lldap",))
-    nginx = Owner("nginx", ("nginx",))
-    authelia = Owner("authelia", ("authelia", "authelia-redis"), ("authelia",))
-    authelia.dependencies = ("nginx",)
-    project = (nginx, target, authelia)
-    explicit = ComposeSelection(project, (target,), ("lldap",), False)
-    context = SimpleNamespace(initial_running_services={"authelia-redis"},
-                              changed_compose_services={"authelia-redis"})
-    selection = ComposeOperations(SimpleNamespace())._reconcile_selection(
-        explicit, context, {"authelia"})
-    assert set(selection.services) == {"lldap", "authelia-redis"}
-    assert "authelia" not in selection.native_roots
-
-
 def test_optional_compose_provider_not_added_to_start_or_build_scope():
     app = Owner("app", ("app",))
     metrics = Owner("metrics", ("metrics",))
@@ -77,7 +35,7 @@ def test_optional_compose_provider_not_added_to_start_or_build_scope():
     selected = ComposeOperations(SimpleNamespace()).start_selection(
         ComposeSelection(project, (app,), ("app",), False), model)
     assert selected.services == ("app",)
-    assert order_services(project, ("app",), model, dependency_roots={"app"}) == ("app",)
+    assert order_services(project, ("app",), model) == ("app",)
     manager = SimpleNamespace()
     planner = ImagePreparer(manager)
     planner.image_exists = lambda image: True
@@ -153,28 +111,15 @@ def test_selected_optional_dependency_still_orders_before_consumer():
     assert order_services((app, metrics), ("app", "metrics")) == ("metrics", "app")
 
 
-def test_native_provider_callbacks_follow_provider_service_order():
+def test_native_provider_co_selection_does_not_create_runtime_edges():
     consumer = Owner("consumer", ("consumer",))
     provider = Owner("provider", ("provider",))
     consumer.get_runtime_requirements = lambda required: (
         {"provider": ("provider",)} if "consumer" in required else {})
     selection = ComposeOperations(SimpleNamespace()).start_selection(
         ComposeSelection((consumer, provider), (consumer,), ("consumer",), False))
-    assert selection.services == ("provider", "consumer")
-    assert tuple(owner.name for owner in selection.target_containers) == ("provider", "consumer")
-
-
-def test_sidecar_callback_order_does_not_expand_owning_container_dependencies():
-    explicit = Owner("explicit", ("explicit",))
-    native = Owner("owner", ("native", "sidecar"), ("native",))
-    native.dependencies = ("unrelated",)
-    unrelated = Owner("unrelated", ("unrelated",))
-    project = (native, explicit, unrelated)
-    selection = ComposeOperations(SimpleNamespace()).start_selection(
-        ComposeSelection(project, (native, explicit), ("sidecar", "explicit"), False),
-        dependency_roots=(explicit,))
-    assert set(selection.services) == {"sidecar", "explicit"}
-    assert "unrelated" not in {owner.name for owner in selection.target_containers}
+    assert set(selection.services) == {"provider", "consumer"}
+    assert set(owner.name for owner in selection.target_containers) == {"provider", "consumer"}
 
 
 @pytest.mark.parametrize("selected,condition,state,health,exit_code", [
