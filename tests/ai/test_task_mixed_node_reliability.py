@@ -3822,6 +3822,7 @@ async def test_projected_agent_file_is_reused_from_prepared_input_on_recovery(
     workspace = Workspace.load(workspace_root)
     storage_root = tmp_path / "projected-file-state"
     monkeypatch.setattr(task_local, "_LEASE_SECONDS", 1)
+    monkeypatch.setattr(task_local, "_HEARTBEAT_SECONDS", 0.1)
     application = CapabilityGroup[None]("application")
     application.agent(
         "default",
