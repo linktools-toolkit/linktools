@@ -247,23 +247,23 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
                 (group is not None and (destination / name).stat().st_gid != group)
                 for name, content in files.items()):
             raise ContainerError("Prepared file tree was modified: " + str(destination))
-        return destination
-    root.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=".prepare-", dir=str(root)))
-    try:
-        container.runtime.chmod(temporary, 0o755)
-        for name, content in files.items():
-            path = temporary / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            utils.atomic_write(path, content, encoding="utf-8")
-            if group is not None and path.stat().st_gid != group:
-                container.runtime.create_process(
-                    "chgrp", str(group), str(path), privilege=True).check_call()
-            container.runtime.chmod(path, mode)
-        os.rename(str(temporary), str(destination))
-    except BaseException:
-        shutil.rmtree(str(temporary))
-        raise
+    else:
+        root.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=".prepare-", dir=str(root)))
+        try:
+            container.runtime.chmod(temporary, 0o755)
+            for name, content in files.items():
+                path = temporary / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                utils.atomic_write(path, content, encoding="utf-8")
+                if group is not None and path.stat().st_gid != group:
+                    container.runtime.create_process(
+                        "chgrp", str(group), str(path), privilege=True).check_call()
+                container.runtime.chmod(path, mode)
+            os.rename(str(temporary), str(destination))
+        except BaseException:
+            shutil.rmtree(str(temporary))
+            raise
     producers = sorted({
         name for name, declarations in getattr(container.manager, "integration_snapshot", {}).items()
         for declaration in declarations

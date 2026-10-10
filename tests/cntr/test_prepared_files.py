@@ -62,6 +62,20 @@ def test_stage_records_sources_in_existing_artifact_index(owner):
     assert next(iter(entries.values()))["producers"] == ["app", "other"]
 
 
+def test_reusing_prepared_tree_refreshes_source_provenance(owner):
+    owner.manager.integration_snapshot = {
+        "first": (SimpleNamespace(consumer="auth", expose=None),),
+    }
+    first = stage_files(owner, {"configuration.yml": "unchanged"})
+    assert next(iter(owner.manager.artifact_index.load().values()))["producers"] == ["first"]
+    owner.manager.integration_snapshot = {
+        "second": (SimpleNamespace(consumer="auth", expose=None),),
+    }
+    reused = stage_files(owner, {"configuration.yml": "unchanged"})
+    assert reused == first
+    assert next(iter(owner.manager.artifact_index.load().values()))["producers"] == ["second"]
+
+
 def test_stage_is_immutable_private_and_does_not_publish(owner):
     first = stage_files(owner, {"nested/config.yml": "secret"})
     assert (first / "nested/config.yml").stat().st_mode & 0o777 == 0o600
