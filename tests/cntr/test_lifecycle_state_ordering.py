@@ -14,18 +14,21 @@ def _neutralize_runtime(manager, monkeypatch):
     from linktools.cntr.runtime.inspect import ProjectRuntimeState
     monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
                         ProjectRuntimeState(manager.project_name, (), "docker"))
-    monkeypatch.setattr(manager, "generated_configs", {})
     monkeypatch.setattr(manager.compose_operations, "start_selection",
-                        lambda selection, model=None, dependency_roots=None: selection)
-    monkeypatch.setattr(manager.compose_runner, "apply_services", lambda context, services:
-                        manager.compose_runner.up(context, None))
+                        lambda selection, **kwargs: selection)
+    monkeypatch.setattr(manager.compose_runner, "apply_service",
+                        lambda context, service, recreate=False: None)
+    monkeypatch.setattr(manager.compose_runner, "wait_service_ready",
+                        lambda context, service, **kwargs: True)
+    monkeypatch.setattr(manager.image_preparer, "image_id",
+                        lambda image: "sha256:fixture-image")
 
     monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
-        name: {} for container in context.containers for name in container.services}})
+        name: {"image": name + ":local"} for container in context.containers for name in container.services}})
     monkeypatch.setattr(
         manager.image_preparer,
         "plan",
-        lambda model, services=(), force_pull=False: ImagePlan(
+        lambda model, services=(), force_pull=False, **kwargs: ImagePlan(
             build=(), pull=(), targets=tuple(services)
         ),
     )
@@ -59,7 +62,7 @@ def test_up_marks_started_before_on_started_hook_failure(fresh_manager, monkeypa
     _neutralize_runtime(fresh_manager, monkeypatch)
     _fail_lifecycle_callback(monkeypatch, "on_started")
 
-    with pytest.raises(RuntimeError, match="on_started boom"):
+    with pytest.raises(Exception, match="after-start callback failed: on_started boom"):
         fresh_manager.compose_operations.up(names=["portainer"])
 
     assert "portainer" in fresh_manager.running_state.get_persisted()
@@ -69,7 +72,7 @@ def test_up_marks_started_before_after_start_hook_failure(fresh_manager, monkeyp
     _neutralize_runtime(fresh_manager, monkeypatch)
     _fail_hook_phase(monkeypatch, HookPhase.AFTER_START)
 
-    with pytest.raises(RuntimeError, match="after-start boom"):
+    with pytest.raises(Exception, match="after-start callback failed: after-start boom"):
         fresh_manager.compose_operations.up(names=["portainer"])
 
     assert "portainer" in fresh_manager.running_state.get_persisted()
@@ -103,7 +106,7 @@ def test_restart_build_failure_keeps_running_targets(fresh_manager, monkeypatch)
     monkeypatch.setattr(
         fresh_manager.image_preparer,
         "plan",
-        lambda model, services=(), force_pull=False: ImagePlan(
+        lambda model, services=(), force_pull=False, **kwargs: ImagePlan(
             build=tuple(services), pull=(), targets=tuple(services)
         ),
     )
@@ -123,10 +126,10 @@ def test_restart_stop_success_up_failure_still_marks_stopped(fresh_manager, monk
     _neutralize_runtime(fresh_manager, monkeypatch)
     fresh_manager.running_state._mutate(lambda current: {"portainer"})
 
-    def broken_up(context, options):
+    def broken_up(context, service, recreate=False):
         raise RuntimeError("up boom")
 
-    monkeypatch.setattr(fresh_manager.compose_runner, "up", broken_up)
+    monkeypatch.setattr(fresh_manager.compose_runner, "apply_service", broken_up)
 
     with pytest.raises(RuntimeError, match="up boom"):
         fresh_manager.compose_operations.restart(names=["portainer"])
@@ -148,7 +151,7 @@ def test_exec_up_marks_started_before_on_started_hook_failure(fresh_manager, mon
     _fail_lifecycle_callback(monkeypatch, "on_started")
     container = fresh_manager.containers["portainer"]
 
-    with pytest.raises(RuntimeError, match="on_started boom"):
+    with pytest.raises(Exception, match="after-start callback failed: on_started boom"):
         container.on_exec_up()
 
     assert "portainer" in fresh_manager.running_state.get_persisted()
