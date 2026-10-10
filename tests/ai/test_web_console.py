@@ -27,6 +27,51 @@ def client(app: object) -> httpx.AsyncClient:
 
 
 @pytest.mark.asyncio
+async def test_failed_history_debug_reports_stage_without_payload_or_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from linktools.ai.errors import AIError, ErrorCode
+    from linktools.ai.web import _app
+
+    environment = SimpleNamespace(debug=False)
+    monkeypatch.setattr(_app, "environ", environment)
+    logged: list[str] = []
+    monkeypatch.setattr(_app._logger, "debug", lambda message, *args: logged.append(message % args))
+    details = {"wire_type": "execution", "missing_fields": ["budget_scope_id"]}
+
+    class History:
+        tenant_id = "default"
+
+        async def inspect_session(self, identity: str, *, principal: object) -> dict[str, object]:
+            return {"session_id": identity, "status": "OPEN"}
+
+        async def session_timeline(self, identity: str, **kwargs: object) -> None:
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR, "private exception prompt",
+                operation_id="safe-operation", safe_details=details,
+                diagnostics=ErrorDiagnostics.from_exception(ValueError("api_key=private-credential")),
+            )
+
+    async with client(create_app(history=History())) as http:
+        quiet_failure = await http.get("/api/session?session_id=private-query&limit=50")
+        assert quiet_failure.status_code == 503 and not logged
+        environment.debug = True
+        metadata = await http.get("/api/session?session_id=private-query&include_timeline=false")
+        assert metadata.status_code == 200 and not logged
+        failure = await http.get("/api/session?session_id=private-query&limit=50")
+        assert failure.status_code == 503
+        assert failure.json()["safe_details"] == details
+        assert failure.json()["operation_id"] == "safe-operation"
+        assert len(logged) == 1
+        assert "path=/api/session phase=session.timeline code=STORAGE_INTEGRITY_ERROR" in logged[0]
+        assert "operation_id=safe-operation" in logged[0]
+        assert "wire_type=execution missing_fields=['budget_scope_id']" in logged[0]
+        assert "private-" not in logged[0] and "private-" not in failure.text
+
+
+@pytest.mark.asyncio
 async def test_local_origin_boundary_blocks_browser_cross_origin_and_rebinding() -> None:
     app = create_app()
     async with client(app) as http:
