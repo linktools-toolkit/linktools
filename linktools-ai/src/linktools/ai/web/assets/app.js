@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 const state = {config:null, view:'sessions', list:[], listCursor:null, session:null, turns:[], turnCursor:null, hasEarlierTurns:false, timelineError:'',
   execution:null, executionGeneration:0, tab:'overview', details:[], detailCursor:null, models:new Map(), events:new Map(),
   generation:0, listGeneration:0, detailGeneration:0, metricsGeneration:0, stream:null, cursor:null,
-  liveText:'', liveThinking:'', pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, selectedSession:null, selectedExecution:null};
+  liveText:'', liveThinking:'', pending:new Map(), actionsPending:new Set(), pendingForks:new Map(), recoveryReadbackId:null, endReadbackId:null, selectedSession:null, selectedExecution:null};
 const json = value => JSON.stringify(value, null, 2);
 const text = value => typeof value === 'string' ? value : json(value);
 const short = value => value ? String(value).slice(0, 12) : '—';
@@ -64,12 +64,15 @@ function setDisabled() {
   ['new-session','welcome-new'].forEach(id => $(id).disabled=readonly);
   ['send','planning','thinking','memory','files','prompt'].forEach(id => $(id).disabled=readonly || state.session?.status === 'CLOSED' || !state.selectedSession);
   ['rename-session','fork-session','close-session'].forEach(id => $(id).disabled=readonly || !state.session);
-  ['retry','fork-run','recover'].forEach(id => $(id).disabled=readonly || !state.execution);
-  $('recover').disabled=readonly || !['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status) || state.recoveryReadbackId===state.selectedExecution || state.actionsPending.has(`${state.selectedExecution}:recover`);
+  const ending=state.actionsPending.has(`${state.selectedExecution}:end-stopped`);
+  ['retry','fork-run','end-stopped'].forEach(id => $(id).disabled=readonly || !state.execution || ending);
+  $('end-stopped').disabled ||= !['RECOVERY_REQUIRED','PENDING_START','STARTED','CANCELLING'].includes(state.execution?.status) && state.endReadbackId!==state.selectedExecution;
+  if($('resume-run'))$('resume-run').disabled=readonly || !state.execution || terminal(state.execution.status) || ending || state.recoveryReadbackId===state.selectedExecution || state.actionsPending.has(`${state.selectedExecution}:recover`);
   $('export').disabled=!state.execution || !terminal(state.execution.status);
   const stoppable=!readonly && state.execution && !terminal(state.execution.status);
   $('stop-run').hidden=!stoppable;
   $('cancel').hidden=!stoppable || state.session?.active_execution_id!==state.selectedExecution;
+  $('stop-run').disabled=ending;$('cancel').disabled=ending;
   $('fork-session').disabled=readonly || !state.session || state.actionsPending.has(`session:${state.selectedSession}:fork`);
 }
 function setView(view, refreshSelection=true) {
@@ -297,6 +300,10 @@ function renderOverview() {
 }
 function renderDetails() {
   clear('inspector-content');
+  if(state.tab==='recovery' && !state.config.read_only) {
+    const resume=button('Resume stopped execution',()=>executionAction('recover'));resume.id='resume-run';
+    $('inspector-content').append(element('p','empty','Resume continues the original work and may call models or tools. To end it instead, use End stopped execution.'),resume);setDisabled();
+  }
   if(!state.details.length) $('inspector-content').append(element('p','empty',terminal(state.execution?.status)?'No records for this selection.':'No durable detail is available yet. Live progress can precede committed history; refresh to check again.'));
   state.details.forEach(item=>{
     const card=element('div','detail-card');
@@ -447,10 +454,10 @@ async function executionAction(action) {
   const id=state.selectedExecution,generation=state.generation,executionGeneration=state.executionGeneration;
   if(!id || !state.execution)return;
   const key=`${id}:${action}`;
-  if(state.actionsPending.has(key))return;
+  if(state.actionsPending.has(key) || state.actionsPending.has(`${id}:end-stopped`))return;
   const payload={};
   if(['retry','fork'].includes(action)){const value=prompt(`${action==='retry'?'Retry':'Fork'} with this prompt`,$('prompt').value);if(!value?.trim())return;payload.prompt=value;}
-  if(action==='recover' && !confirm('Recover this execution only after confirming its previous executor has stopped. Unresolved external effects must be resolved first. Proceed?'))return;
+  if(action==='recover' && !confirm('Resume this execution only after confirming its previous executor has stopped. This may call models or tools. Unresolved external effects must be resolved first. Proceed?'))return;
   state.actionsPending.add(key);setDisabled();
   try {
     const result=await mutate(`/api/executions/${enc(id)}/${action}`,payload);
@@ -478,6 +485,46 @@ async function executionAction(action) {
       catch(readbackError){error.message+=`; outcome unresolved (${readbackError.message}). Refresh before another recovery action.`;}
     }
     throw error;
+  } finally {state.actionsPending.delete(key);setDisabled();}
+}
+
+async function endStoppedExecution() {
+  const id=state.selectedExecution,generation=state.generation,executionGeneration=state.executionGeneration;
+  if(!id || !state.execution || [...state.actionsPending].some(key=>key.startsWith(`${id}:`)))return;
+  if(!confirm('Confirm the previous executor has stopped. End this execution and release its session? This will not resume its model or tool work.'))return;
+  const key=`${id}:end-stopped`,path=`/api/executions/${enc(id)}`;
+  const selected=()=>generation===state.generation && executionGeneration===state.executionGeneration && id===state.selectedExecution;
+  state.endReadbackId=id;state.actionsPending.add(key);setDisabled();notice('Ending stopped execution…');
+  try {
+    let info=await api(path);
+    if(!selected())return;
+    if(!terminal(info.status) && info.status!=='CANCELLING') {
+      await mutate(`${path}/cancel`,{});
+      if(!selected())return;
+      info=await api(path);
+      if(!selected())return;
+    }
+    // Recovery may resume work unless cancellation is already durable.
+    if(info.status==='CANCELLING') {
+      await mutate(`${path}/recover`,{});
+      if(!selected())return;
+      info=await api(path);
+      if(!selected())return;
+    }
+    if(!terminal(info.status))throw new Error(`Execution is still ${info.status}; ending is not confirmed. Check Recovery for unresolved external effects.`);
+    const session=info.session_id ? (await api(sessionURL(info.session_id,'',{include_timeline:'false'}))).session : null;
+    if(!selected())return;
+    if(session?.active_execution_id===id)throw new Error('Execution is terminal, but its session release is not confirmed.');
+    state.endReadbackId=null;state.execution=info;renderExecution();
+    if(session && state.selectedSession===info.session_id){state.session=session;renderSessionHeader();}
+    const completed=session?.active_execution_id ? 'Execution ended; another execution now owns the session.' : session ? 'Execution ended and session released.' : 'Execution ended.';
+    notice(completed);
+    try {await refreshSelected();}
+    catch(error){if(selected()){error.message=`${completed} Display refresh failed: ${error.message}`;showError(error);}}
+  } catch(error) {
+    if(!selected())return;
+    error.message+='; choose End stopped execution again to check current state before continuing. No action was automatically resent.';
+    showError(error);
   } finally {state.actionsPending.delete(key);setDisabled();}
 }
 
@@ -527,7 +574,7 @@ $('detail-more').onclick=()=>loadDetail(true,state.detailSelectors).catch(showEr
 $('refresh').onclick=()=>{notice('');(async()=>{if(state.view==='metrics'){await loadMetrics();return;}await refreshSelected();if(state.execution && !terminal(state.execution.status) && !state.stream && !state.config.read_only){state.cursor=null;watchExecution(state.selectedExecution,state.generation).catch(showError);}})().catch(showError);};
 $('settings').onclick=showSettings;$('export').onclick=()=>exportResult().catch(showError);
 $('rename-session').onclick=()=>sessionAction('update').catch(showError);$('fork-session').onclick=()=>sessionAction('fork').catch(showError);$('close-session').onclick=()=>sessionAction('close').catch(showError);
-$('cancel').onclick=()=>executionAction('cancel').catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>executionAction('retry').catch(showError);$('fork-run').onclick=()=>executionAction('fork').catch(showError);$('recover').onclick=()=>executionAction('recover').catch(showError);
+$('cancel').onclick=()=>executionAction('cancel').catch(showError);$('stop-run').onclick=()=>executionAction('cancel').catch(showError);$('retry').onclick=()=>executionAction('retry').catch(showError);$('fork-run').onclick=()=>executionAction('fork').catch(showError);$('end-stopped').onclick=endStoppedExecution;
 $('metrics-form').onsubmit=event=>loadMetrics(event).catch(showError);
 document.querySelectorAll('[data-view]').forEach(node=>node.onclick=()=>setView(node.dataset.view));
 document.querySelectorAll('[data-tab]').forEach(node=>node.onclick=()=>{state.tab=node.dataset.tab;loadDetail().catch(showError);});

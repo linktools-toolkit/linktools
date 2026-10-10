@@ -48,11 +48,19 @@ can run concurrently; a second execution in the same session is rejected with
 
 SQL startup does not infer that an unfinished execution is abandoned. A stopped
 process can leave `PENDING_START`, `STARTED`, or `CANCELLING` visible. Refresh and
-observation never take ownership. Use **Recover stopped executor** only after
-confirming the previous executor has stopped; the confirmation applies equally
-to these statuses and `RECOVERY_REQUIRED`. Resolve unknown external effects
-explicitly before recovery. A cancellation request may remain `CANCELLING` until
-the owner finishes or explicit recovery completes an orphaned cancellation.
+observation never take ownership. After confirming the previous executor has
+stopped, use **End stopped execution** to cancel the old work and release its
+session in one action. The console reads the durable cancellation state before
+finishing it through Runtime recovery, then verifies a terminal execution and
+released session owner. It does not resume model or tool work. Unknown outcomes
+are not reported as complete; another explicit attempt reads the current state
+before continuing. Resolve unknown external effects in **Recovery** if needed.
+
+To continue the original work instead, **Recovery → Resume stopped execution**
+retains the explicit stopped-executor confirmation and may call models or tools.
+**Stop execution** remains available for a running executor. A cancellation
+request may remain `CANCELLING` until the owner finishes or the stopped-execution
+action completes its cancellation.
 
 Runtime owns producer fencing, terminal handoff, and local staging release.
 The console does not introduce a private lock, heartbeat, background result

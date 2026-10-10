@@ -48,13 +48,14 @@ const executions=new Map([['a-run',info('a-run')],['b-run',info('b-run')]]);
 const timeline=id=>timelineOverrides.get(id) || ({items:[{execution_id:`${id}-run`,status:'SUCCEEDED',created_at:'2026-01-01T00:00:00Z',user_input:`${id} question`,conversation_committed:true,items:[{item_kind:'assistant',content:`${id} answer`}]}],next_cursor:null});
 function response(value,status=200){return new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});}
 function deferred(path){let release,reject;const promise=new Promise((resolve,fail)=>{release=resolve;reject=fail;});delays.set(path,promise);const resolve=(value,status=200)=>{delays.delete(path);release(response(value,status));};resolve.reject=error=>{delays.delete(path);reject(error);};return resolve;}
-let forkAttempts=0,cancelAttempts=0;
+let forkAttempts=0,cancelAttempts=0,endMode=null;
 globalThis.fetch=async(path,options={})=>{
   const url=new URL(path,'http://127.0.0.1:8765'),key=url.pathname==='/api/session'?'/api/sessions/'+url.searchParams.get('session_id'):url.pathname.startsWith('/api/session/')?'/api/sessions/'+url.searchParams.get('session_id')+url.pathname.slice('/api/session'.length):url.pathname,method=options.method || 'GET',body=options.body?JSON.parse(options.body):null;
   calls.push({key,method,body,query:Object.fromEntries(url.searchParams)});
   if(delays.has(method+' '+key))return delays.get(method+' '+key);
   if(key==='/api/config')return response({asset_root:'/workspace/.linktools',read_only:false,memory_scope:'default',capabilities:[{kind:'agent',id:'default',revision:1}],metric_names:[]});
   if(key==='/api/sessions'&&method==='GET')return response({items:[...sessions.values()],next_cursor:null});
+  if(key==='/api/executions' && endMode?.listError)throw new Error('list unavailable');
   if(key==='/api/executions')return response({items:[...executions.values()],next_cursor:null,recent_scan:url.searchParams.get('recent')==='true'});
   if(detailResponses.has(key))return response(detailResponses.get(key));
   if(key==='/api/metrics')return response({items:[]});
@@ -64,7 +65,21 @@ globalThis.fetch=async(path,options={})=>{
   if(key.endsWith('/events') && streamBlocks.has(key.split('/')[3]))return new Response(new ReadableStream({start(controller){streamBlocks.get(key.split('/')[3]).controller=controller;},cancel(){}}));
   if(key.endsWith('/events'))return new Response('event: snapshot\ndata: '+JSON.stringify(executions.get(key.split('/')[3]))+'\n\n');
   if(key.endsWith('/history'))return response({items:[{execution_id:key.split('/')[3],message_seq:1,item_kind:'assistant',content:'History marker'}],next_cursor:null});
-  if(key.endsWith('/models')||key.endsWith('/trace')||key.endsWith('/transcript'))return response({items:[],next_cursor:null});
+  if(key.endsWith('/models')||key.endsWith('/trace')||key.endsWith('/transcript')||key.endsWith('/recovery'))return response({items:[],next_cursor:null});
+  if(endMode && key==='/api/executions/orphan/cancel'){
+    if(endMode.cancelError){const error=endMode.cancelError;endMode.cancelError=null;if(endMode.commitCancel)executions.get('orphan').status='CANCELLING';throw new Error(error);}
+    if(!endMode.blockCancel)executions.get('orphan').status=endMode.directTerminal?'CANCELLED':'CANCELLING';
+    if(endMode.directTerminal)sessions.get('a').active_execution_id=null;
+    return response({execution_id:'orphan',cancelled:Boolean(endMode.directTerminal)});
+  }
+  if(endMode && key==='/api/executions/orphan/recover'){
+    assert.equal(executions.get('orphan').status,'CANCELLING','must prove durable cancellation before recovery');
+    if(endMode.recoverError){const error=endMode.recoverError;endMode.recoverError=null;throw new Error(error);}
+    if(endMode.effectError)return response({code:'TOOL_EFFECT_OUTCOME_UNKNOWN',safe_details:{operation_id:'effect'}},409);
+    if(!endMode.keepCancelling)executions.get('orphan').status='CANCELLED';
+    if(!endMode.keepOwner)sessions.get('a').active_execution_id=endMode.nextOwner || null;
+    return response({execution_id:'orphan'},202);
+  }
   if(key==='/api/executions/orphan/cancel'){
     cancelAttempts++;
     if(cancelAttempts===1)return response({code:'STORAGE_CONFLICT'},409);
@@ -214,24 +229,104 @@ assert.equal(node('metric-name').tagName,'INPUT');
 executions.set('orphan',{...info('orphan',null),status:'RECOVERY_REQUIRED'});location.hash='#execution=orphan';await settle();
 assert.equal(node('composer').hidden,true);assert.equal(node('stop-run').hidden,false);assert.ok(node('live'));
 
-// Orphan status alone never initiates recovery; a stopped executor must be confirmed.
+// Status alone never initiates cleanup; one stopped-executor confirmation gates it.
 const recoveries=()=>calls.filter(call=>call.key==='/api/executions/orphan/recover');
+const cancellations=()=>calls.filter(call=>call.key==='/api/executions/orphan/cancel');
 for(const status of ['PENDING_START','STARTED','CANCELLING','RECOVERY_REQUIRED']){
   executions.set('orphan',{...info('orphan',null),status});node('refresh').click();await settle();
-  assert.equal(node('recover').disabled,false);
-  assert.equal(recoveries().length,0);
+  assert.equal(node('end-stopped').disabled,false);
+  assert.equal(recoveries().length,0);assert.equal(cancellations().length,0);
 }
 let recoveryConfirmation='';
 globalThis.confirm=message=>{recoveryConfirmation=message;return false;};
-node('recover').click();await settle();
-assert.match(recoveryConfirmation,/previous executor has stopped/);assert.equal(recoveries().length,0);
+node('end-stopped').click();await settle();
+assert.match(recoveryConfirmation,/previous executor has stopped/);assert.equal(recoveries().length,0);assert.equal(cancellations().length,0);
 globalThis.confirm=()=>true;
-const releaseRecovery=deferred('POST /api/executions/orphan/recover');
-node('recover').click();node('recover').click();await tick();
-assert.equal(recoveries().length,1);assert.equal(node('recover').disabled,true);
-executions.set('orphan',{...info('orphan',null),status:'SUCCEEDED'});
-releaseRecovery({execution_id:'orphan'});await settle();
-assert.equal(node('recover').disabled,true);assert.equal(recoveries().length,1);
+const resetEnd=async(mode={},status='STARTED')=>{
+  endMode=mode;sessions.get('a').active_execution_id='orphan';
+  executions.set('orphan',{...info('orphan','a'),status});location.hash='#execution=orphan';await settle();
+};
+await resetEnd();
+const releaseEndCancel=deferred('POST /api/executions/orphan/cancel');
+node('end-stopped').click();node('end-stopped').click();await tick();
+assert.equal(cancellations().length,1);assert.equal(node('end-stopped').disabled,true);
+for(const id of ['stop-run','retry','fork-run'])assert.equal(node(id).disabled,true);
+executions.get('orphan').status='CANCELLING';releaseEndCancel({execution_id:'orphan',cancelled:false});await settle();
+assert.equal(recoveries().length,1);assert.equal(executions.get('orphan').status,'CANCELLED');
+assert.equal(sessions.get('a').active_execution_id,null);assert.match(node('notice').textContent,/ended and session released/);
+assert.equal(calls.filter(call=>call.key==='/api/sessions/a' && call.query.include_timeline==='false').length>0,true);
+
+// Unknown cancellation stays on the same key; a committed cancellation skips resend.
+for(const commitCancel of [false,true]){
+  await resetEnd({cancelError:'network outcome unknown',commitCancel});
+  const start=cancellations().length,recoverStart=recoveries().length;
+  await node('end-stopped').click();await settle();
+  assert.equal(recoveries().length,recoverStart);assert.match(node('notice').textContent,/network outcome unknown/);
+  await node('end-stopped').click();await settle();
+  const sent=cancellations().slice(start);assert.equal(sent.length,commitCancel?1:2);
+  if(!commitCancel)assert.equal(sent[0].body.request_id,sent[1].body.request_id);
+  assert.match(node('notice').textContent,/ended and session released/);
+}
+// Interruption after durable cancel is safe: a fresh attempt reads CANCELLING first.
+await resetEnd({},'CANCELLING');const beforeResumeCancel=cancellations().length;
+await node('end-stopped').click();await settle();assert.equal(cancellations().length,beforeResumeCancel);
+assert.match(node('notice').textContent,/ended and session released/);
+
+await resetEnd({recoverError:'recovery reply lost'});const beforeUnknownRecovery=recoveries().length;
+await node('end-stopped').click();await settle();assert.equal(recoveries().length,beforeUnknownRecovery+1);
+assert.match(node('notice').textContent,/recovery reply lost/);
+// If that request completed, the next explicit attempt must not recover again.
+executions.get('orphan').status='CANCELLED';sessions.get('a').active_execution_id=null;
+node('refresh').click();await settle();assert.equal(node('end-stopped').disabled,false);
+await node('end-stopped').click();await settle();assert.equal(recoveries().length,beforeUnknownRecovery+1);
+assert.match(node('notice').textContent,/ended and session released/);
+
+for(const [mode,status,message] of [
+  [{blockCancel:true},'RECOVERY_REQUIRED',/still RECOVERY_REQUIRED/],
+  [{keepCancelling:true},'STARTED',/still CANCELLING/],
+  [{keepOwner:true},'STARTED',/session release is not confirmed/],
+  [{effectError:true},'STARTED',/TOOL_EFFECT_OUTCOME_UNKNOWN/],
+]){
+  await resetEnd(mode,status);const before=recoveries().length;
+  await node('end-stopped').click();await settle();assert.match(node('notice').textContent,message);
+  assert.doesNotMatch(node('notice').textContent,/ended and session released/);
+  if(mode.blockCancel)assert.equal(recoveries().length,before);
+}
+await resetEnd({directTerminal:true},'PENDING_START');const beforeDirect=recoveries().length;
+await node('end-stopped').click();await settle();assert.equal(recoveries().length,beforeDirect);
+assert.match(node('notice').textContent,/ended and session released/);
+await resetEnd({nextOwner:'a-new'});await node('end-stopped').click();await settle();
+assert.match(node('notice').textContent,/another execution now owns/);
+
+// Failed owner readback remains retryable after a terminal refresh, without controls.
+await resetEnd();const failedOwnerRead=deferred('GET /api/sessions/a');
+node('end-stopped').click();await tick();failedOwnerRead.reject(new Error('owner read unavailable'));await settle();
+assert.match(node('notice').textContent,/owner read unavailable/);
+node('refresh').click();await settle();assert.equal(node('end-stopped').disabled,false);
+const beforeOwnerRetry=recoveries().length;await node('end-stopped').click();await settle();
+assert.equal(recoveries().length,beforeOwnerRetry);assert.match(node('notice').textContent,/ended and session released/);
+
+// Auxiliary rendering failures do not overturn confirmed terminal/owner facts.
+await resetEnd();endMode.listError=true;await node('end-stopped').click();await settle();
+assert.match(node('notice').textContent,/ended and session released.*Display refresh failed: list unavailable/);
+assert.doesNotMatch(node('notice').textContent,/No action was automatically resent/);
+
+// Navigation interrupts later control writes and discards stale action errors.
+await resetEnd();const staleEnd=deferred('POST /api/executions/orphan/cancel'),beforeStale=recoveries().length;
+node('end-stopped').click();await tick();location.hash='#session=b';await settle();const betaNotice=node('notice').textContent;
+executions.get('orphan').status='CANCELLING';staleEnd({execution_id:'orphan',cancelled:false});await settle();
+assert.equal(recoveries().length,beforeStale);assert.equal(node('notice').textContent,betaNotice);
+
+// Original resume capability remains a secondary action in the Recovery tab.
+await resetEnd({},'STARTED');endMode=null;tab('recovery').click();await settle();
+assert.match(node('inspector-content').textContent,/Resume stopped execution/);
+globalThis.confirm=message=>{recoveryConfirmation=message;return false;};
+node('resume-run').click();await settle();assert.match(recoveryConfirmation,/may call models or tools/);
+globalThis.confirm=()=>true;
+const releaseRecovery=deferred('POST /api/executions/orphan/recover');const beforeLegacy=recoveries().length;
+node('resume-run').click();node('resume-run').click();await tick();assert.equal(recoveries().length,beforeLegacy+1);
+executions.set('orphan',{...info('orphan',null),status:'SUCCEEDED'});releaseRecovery({execution_id:'orphan'});await settle();
+assert.equal(node('resume-run').disabled,true);tab('overview').click();await settle();
 
 // A cancellation conflict reads state without resending; a new click reuses its key.
 executions.set('orphan',{...info('orphan',null),status:'STARTED'});node('refresh').click();await settle();
@@ -240,7 +335,7 @@ assert.equal(cancelAttempts,1);assert.match(node('notice').textContent,/Runtime 
 assert.match(node('notice').textContent,/If still needed, choose Stop execution again/);
 await node('stop-run').click();await settle();
 assert.equal(cancelAttempts,2);
-const cancels=calls.filter(call=>call.key==='/api/executions/orphan/cancel');
+const cancels=cancellations().slice(-2);
 assert.equal(cancels[0].body.request_id,cancels[1].body.request_id);
 assert.match(node('notice').textContent,/terminal outcome is not yet confirmed/);
 
