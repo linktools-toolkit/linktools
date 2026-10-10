@@ -39,12 +39,6 @@ class Flare(Integration):
             return None
         return str(self._url)
 
-    def with_default_url(self, url: str) -> "Flare":
-        """Bind only an omitted URL, preserving explicit empty/None values."""
-        if self._url is not MISSING:
-            return self
-        return Flare(self.display_category, self.name, self.icon, self.desc, url)
-
     _public = _FlareCategory("public", "Public", apps=True)
     _bookmarks = {
         "private": _FlareCategory("private", "Private", order=10),

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import subcommand
 from linktools.cntr import BaseContainer
-from linktools.cntr.ext import Flare, Nginx, load_port_url
+from linktools.cntr.ext import Flare, Nginx, load_nginx_url, load_port_url
 from linktools.core import ConfigField
 from linktools.decorator import cached_property
 
@@ -39,18 +39,18 @@ class Container(BaseContainer):
     @cached_property
     def integrations(self) -> "Integrations":
         return [
-            Flare.container("Safeline", "alienOutline", load_port_url(
-                self, "SAFELINE_PORT",
-                https=True
-            )),
-            Nginx.site(
+            {"web": Nginx.site(
                 self.get_config_later("SAFELINE_DOMAIN"),
                 proxy="https://safeline-mgt:1443",
                 auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,
                 auth_bypass=(r"\.(css|js)$",),
                 auth_headers={"X-SLCE-API-TOKEN": self.get_config_later("SAFELINE_API_TOKEN")},
-                link=Flare.public("Safeline", "alienOutline", "雷池WAF"),
-            ),
+            )},
+            Flare.public("Safeline", "alienOutline", "雷池WAF", load_nginx_url(self, "web")),
+            Flare.container("Safeline", "alienOutline", load_port_url(
+                self, "SAFELINE_PORT",
+                https=True
+            )),
         ]
 
     @subcommand("reset-admin", help="reset safeline admin password")

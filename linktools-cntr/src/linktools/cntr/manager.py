@@ -307,7 +307,7 @@ class ContainerManager:
         return RepoService(self)
 
     @cached_property
-    def integration_snapshot(self) -> "Mapping[str, Tuple[Integration, ...]]":
+    def integration_snapshot(self) -> "Mapping[str, Tuple[Tuple[Optional[str], Integration], ...]]":
         """Freeze declaration structure once without resolving its lazy values."""
         from collections import OrderedDict
         from collections.abc import Mapping
@@ -316,19 +316,28 @@ class ContainerManager:
         result = OrderedDict()
         for producer in self.installed_state.get(resolve=True):
             integrations = producer.integrations
-            if isinstance(integrations, (Mapping, str, bytes)):
+            if isinstance(integrations, Mapping):
+                integrations = (integrations,)
+            if isinstance(integrations, (str, bytes)):
                 raise ContainerError("Invalid integrations in " + producer.name)
             try:
-                declarations = tuple(integrations)
+                entries = tuple(integrations)
             except TypeError:
                 raise ContainerError("Invalid integrations in " + producer.name)
-            for declaration in declarations:
-                if not isinstance(declaration, Integration):
-                    raise ContainerError("Invalid integration in %s: expected Integration" % producer.name)
-                name = declaration.consumer
-                if not isinstance(name, str) or name not in self.containers:
-                    raise ContainerError("Unknown integration consumer %r in %s" % (name, producer.name))
-            result[producer.name] = declarations
+            declarations = []
+            for entry in entries:
+                named = isinstance(entry, Mapping)
+                items = entry.items() if named else ((None, entry),)
+                for key, declaration in items:
+                    if named and (not isinstance(key, str) or not key):
+                        raise ContainerError("Invalid integration key in " + producer.name)
+                    if not isinstance(declaration, Integration):
+                        raise ContainerError("Invalid integration in %s: expected Integration" % producer.name)
+                    name = declaration.consumer
+                    if not isinstance(name, str) or name not in self.containers:
+                        raise ContainerError("Unknown integration consumer %r in %s" % (name, producer.name))
+                    declarations.append((key, declaration))
+            result[producer.name] = tuple(declarations)
         return MappingProxyType(result)
 
     def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, Integration]]":
@@ -339,7 +348,7 @@ class ContainerManager:
         if consumer_name not in snapshot:
             return
         for producer_name, declarations in snapshot.items():
-            for declaration in declarations:
+            for _, declaration in declarations:
                 if declaration.consumer == consumer_name:
                     yield self.containers[producer_name], declaration
 

@@ -336,7 +336,7 @@ class Container(BaseContainer):
             )
         except TemplateError as exc:
             raise ContainerTemplateError(
-                f"Invalid nginx template {source} for {container.name}/{getattr(site, 'local_id', '?')}: {exc}"
+                f"Invalid nginx template {source} for {container.name}/{getattr(site, 'key', '?')}: {exc}"
             ) from exc
 
     @cached_property
@@ -360,12 +360,12 @@ class Container(BaseContainer):
             for port in ports:
                 if port in defaults:
                     raise ContainerError("Multiple default nginx sites on port {}: {}/{} and {}/{}".format(
-                        port, defaults[port].producer.name, defaults[port].local_id,
-                        site.producer.name, site.local_id))
+                        port, defaults[port].producer.name, defaults[port].key,
+                        site.producer.name, site.key))
                 defaults[port] = site
         if not any(site.default_server for site in active):
             active.append(SimpleNamespace(
-                producer=self, local_id="default", file_id="default", var_name="default",
+                producer=self, key="default", file_id="default", var_name="default",
                 server_name='""', default_server=True, https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
                 waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, template_vars={},
                 template=self.get_source_path("templates", "index.conf"), proxy=None,
@@ -392,8 +392,8 @@ class Container(BaseContainer):
                 if routing_policy(site) != policy:
                     raise ContainerError(
                         "Incompatible nginx routing policies on {}:{} for {}/{} and {}/{}".format(
-                            domain, port, leader.producer.name, leader.local_id,
-                            site.producer.name, site.local_id))
+                            domain, port, leader.producer.name, leader.key,
+                            site.producer.name, site.key))
             route_auth = len(sites) > 1 and any(
                 (member.auth, member.auth_bypass) != (leader.auth, leader.auth_bypass)
                 for member in sites[1:])
@@ -404,7 +404,7 @@ class Container(BaseContainer):
                 business = self._render_site_template(
                     site.producer, source, site, route_auth=route_auth)
                 if len(sites) > 1:
-                    business = "# site {}/{}\n{}".format(site.producer.name, site.local_id, business)
+                    business = "# site {}/{}\n{}".format(site.producer.name, site.key, business)
                 routes.append(business)
             result["sites/" + leader.file_id + ".conf"] = self._render_site_template(
                 leader.producer, self.get_source_path("templates", "server.conf"),

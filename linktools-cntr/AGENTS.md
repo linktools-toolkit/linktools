@@ -17,9 +17,12 @@ Package instructions for `linktools-cntr`. Repository-wide rules in [../AGENTS.m
 
 Project-profile values layer user `~/.linktools/linktools.json` and local `<root>/.linktools.json` through the core resolver.
 
-- Integration declarations are command-local, lazy and side-effect free. Read
-  resolved nginx sites through the shared snapshot; navigation never registers
-  proxy configuration or mutates ACL/OIDC state.
+- Integration declarations are command-local, lazy and side-effect free. Named
+  mapping keys are the only nginx site identifiers; Flare and Authelia declarations
+  can remain anonymous. Read resolved nginx sites through the shared snapshot and
+  reference their keys explicitly in lazy URLs. Navigation never registers proxy
+  configuration or mutates ACL/OIDC state. Keep `endpoint` a pure composition of
+  existing declarations; advanced options remain available through `ext`.
 - Keep native nginx business templates single-pass with explicit namespaces and
   context. Preserve application routing, capture and authentication behavior.
 - Generated configuration must be validated before publication or explicit

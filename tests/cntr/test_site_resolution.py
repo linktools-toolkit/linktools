@@ -96,9 +96,10 @@ def test_nonliteral_domain_requires_explicit_url(domain):
 
 def test_placeholder_domain_skips_navigation_without_oidc_coupling():
     producer = Producer(Nginx.site(
-        "_", proxy="http://app", link=Flare.public("App", "app", "Application"),
+        "_", proxy="http://app",
     ))
-    assert producer.site.link.url is None
+    link = Flare.public("App", "app", "Application", load_nginx_url(producer, "web"))
+    assert link.url is None
     assert str(load_nginx_url(producer, "web")) == ""
     assert producer.site.resolve() is producer.site
 
@@ -153,7 +154,7 @@ def test_snapshot_is_once_and_optional_consumer_is_not_consumed():
         @property
         def integrations(self):
             self.calls += 1
-            return [Nginx.site(lazy_load(fail))]
+            return {"web": Nginx.site(lazy_load(fail))}
     app = Counted()
     manager = manager_with({"app": app, "nginx": SimpleNamespace(name="nginx")}, ["app"])
     app.manager = manager
@@ -184,7 +185,7 @@ def test_snapshot_freezes_mixed_declarations_once_without_url_resolution() -> No
     inputs = [
         CustomIntegration("second"),
         Flare.bookmark("Tool", "web", lazy_load(fail), category="tool"),
-        Nginx.site(lazy_load(fail), local_id="web"),
+        {"web": Nginx.site(lazy_load(fail))},
         CustomIntegration("first"),
         CustomIntegration(),
     ]
@@ -210,12 +211,14 @@ def test_snapshot_freezes_mixed_declarations_once_without_url_resolution() -> No
                        for name in ("custom", "flare", "nginx")})
     manager = manager_with(containers, list(containers))
     snapshot = manager.integration_snapshot
-    assert snapshot["app"] == tuple(inputs)
+    assert snapshot["app"] == tuple(
+        ("web", item["web"]) if isinstance(item, dict) else (None, item) for item in inputs)
     assert iterations == inputs
     inputs.clear()
     assert [item.label for _, item in manager.iter_integrations("custom")] == ["second", "first", None]
-    assert list(manager.iter_integrations("flare")) == [(app, snapshot["app"][1])]
-    assert [item.local_id for _, item in manager.iter_integrations("nginx")] == ["web"]
+    assert list(manager.iter_integrations("flare")) == [(app, snapshot["app"][1][1])]
+    assert list(manager.iter_integrations("nginx")) == [(app, snapshot["app"][2][1])]
+    assert tuple(manager.containers["nginx"].sites) == (("app", "web"),)
     assert manager.integration_snapshot is snapshot
     assert app.calls == 1
     assert len(iterations) == 5
@@ -225,7 +228,7 @@ def test_snapshot_freezes_mixed_declarations_once_without_url_resolution() -> No
         snapshot["app"][0] = None
 
 
-@pytest.mark.parametrize("values", [[], (), iter(())])
+@pytest.mark.parametrize("values", [[], (), iter(()), {}])
 def test_empty_integration_sequences_are_valid(values: object) -> None:
     app = SimpleNamespace(name="app", integrations=values)
     manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=[])}, ["app"])
@@ -233,7 +236,10 @@ def test_empty_integration_sequences_are_valid(values: object) -> None:
     assert not manager.containers["nginx"].sites
 
 
-@pytest.mark.parametrize("declarations", ["text", b"text", 42, None, [object()], {}, {"nginx": []}])
+@pytest.mark.parametrize("declarations", [
+    "text", b"text", 42, None, [object()], {"nginx": []},
+    [[Nginx.site("app.test")]], [("web", Nginx.site("app.test"))],
+])
 def test_snapshot_rejects_invalid_declaration_shapes_or_non_markers(declarations: object) -> None:
     app = SimpleNamespace(name="app", integrations=declarations)
     manager = manager_with({"app": app, "custom": SimpleNamespace(integrations=[])}, ["app"])
@@ -241,12 +247,12 @@ def test_snapshot_rejects_invalid_declaration_shapes_or_non_markers(declarations
         manager.integration_snapshot
 
 
-@pytest.mark.parametrize("local_id", ["", 0, None])
-def test_nginx_rejects_invalid_ids_before_resolving_fields(local_id: "str | int | None") -> None:
-    app = SimpleNamespace(name="app", integrations=[Nginx.site(lazy_load(fail), local_id=local_id)])
+@pytest.mark.parametrize("key", ["", 0, None, False, ("web",)])
+def test_snapshot_rejects_invalid_keys_before_resolving_fields(key: object) -> None:
+    app = SimpleNamespace(name="app", integrations={key: Nginx.site(lazy_load(fail))})
     manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=[])}, ["app"])
-    with pytest.raises(ContainerError, match="integration ID"):
-        manager.containers["nginx"].sites
+    with pytest.raises(ContainerError, match="Invalid integration key in app"):
+        manager.integration_snapshot
 
 
 def test_generic_integrations_have_no_identity_contract() -> None:
@@ -262,7 +268,7 @@ def test_generic_integrations_have_no_identity_contract() -> None:
     containers = {"app": app, "custom": custom}
     containers.update({name: SimpleNamespace(name=name, integrations=()) for name in ("flare", "authelia")})
     manager = manager_with(containers, list(containers))
-    assert manager.integration_snapshot["app"] == tuple(declarations)
+    assert manager.integration_snapshot["app"] == tuple((None, value) for value in declarations)
     assert list(manager.iter_integrations("custom")) == [(app, item) for item in declarations[:2]]
     assert list(manager.iter_integrations("flare")) == [(app, flare)]
     assert list(manager.iter_integrations("authelia")) == [(app, authelia)]
@@ -275,32 +281,35 @@ def test_generic_integrations_have_no_identity_contract() -> None:
 def test_site_factory_and_resolved_view_use_explicit_field_names() -> None:
     declaration = Nginx.site(
         "~^app", proxy="http://app", public_url="https://public.example.test",
-        template_vars={"title": "Application"}, link=Flare.public("App", "web", "Application"),
+        template_vars={"title": "Application"},
         default_server=True,
     )
     site = Producer(declaration).site
     assert site.public_url == declaration.public_url == "https://public.example.test"
     assert dict(site.template_vars) == declaration.template_vars == {"title": "Application"}
-    assert site.link.url == site.public_url
     assert site.default_server is declaration.default_server is True
-    assert declaration.local_id == "web"
-    for old in ("url", "vars", "expose", "default"):
+    assert site.key == "web"
+    assert not hasattr(declaration, "key")
+    for old in ("url", "vars", "expose", "default", "local_id", "link"):
         assert not hasattr(declaration, old)
         assert not hasattr(site, old)
         with pytest.raises(TypeError, match="unexpected keyword argument"):
             Nginx.site("app.test", **{old: None})
 
 
-def test_nginx_rejects_duplicate_ids_before_resolving_fields() -> None:
-    app = SimpleNamespace(name="app", integrations=[Nginx.site(lazy_load(fail)), Nginx.site(lazy_load(fail))])
+def test_nginx_rejects_duplicate_keys_before_resolving_fields() -> None:
+    app = SimpleNamespace(name="app", integrations=[
+        {"web": Nginx.site(lazy_load(fail))}, {"web": Nginx.site(lazy_load(fail))},
+    ])
     manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=[])}, ["app"])
-    with pytest.raises(ContainerError, match="Duplicate nginx integration ID 'web' in app"):
+    assert len(manager.integration_snapshot["app"]) == 2
+    with pytest.raises(ContainerError, match="Duplicate nginx site key 'web' in app"):
         manager.containers["nginx"].sites
 
 
-def test_site_ids_are_scoped_to_their_producer() -> None:
-    app = SimpleNamespace(name="app", integrations=[Nginx.site("a.test"), Nginx.site("api.test", local_id="api")])
-    other = SimpleNamespace(name="other", integrations=[Nginx.site("b.test")])
+def test_site_keys_are_scoped_to_their_producer() -> None:
+    app = SimpleNamespace(name="app", integrations={"web": Nginx.site("a.test"), "api": Nginx.site("api.test")})
+    other = SimpleNamespace(name="other", integrations={"web": Nginx.site("b.test")})
     manager = manager_with({"app": app, "other": other, "nginx": SimpleNamespace(integrations=[])},
                            ["app", "other"])
     assert tuple(manager.containers["nginx"].sites) == (("app", "web"), ("app", "api"), ("other", "web"))
@@ -341,3 +350,49 @@ def test_disabled_default_is_lazy() -> None:
     producer = Producer(Nginx.site("", default_server=lazy_load(fail)))
     assert producer.site.default_server is False
     assert producer.site.resolve() is producer.site
+
+
+@pytest.mark.parametrize("wrapper", [lambda value: value, lambda value: [value], lambda value: iter([value])])
+def test_named_mapping_shapes_freeze_keys_without_mutating_declarations(wrapper) -> None:
+    site = Nginx.site(lazy_load(fail))
+    link = Flare.bookmark("Docs", "web", lazy_load(fail))
+    mapping = {"web": site, "docs": link}
+    app = SimpleNamespace(name="app", integrations=wrapper(mapping))
+    manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=()),
+                            "flare": SimpleNamespace(name="flare", integrations=())}, ["app", "nginx", "flare"])
+    snapshot = manager.integration_snapshot
+    mapping.clear()
+    assert snapshot["app"] == (("web", site), ("docs", link))
+    assert tuple(manager.containers["nginx"].sites) == (("app", "web"),)
+    assert list(manager.iter_integrations("flare")) == [(app, link)]
+    assert not hasattr(site, "key")
+    assert not hasattr(site, "local_id")
+    assert not hasattr(link, "key")
+
+
+def test_keys_are_local_to_consumer_and_generic_consumers_may_ignore_duplicates() -> None:
+    site = Nginx.site(lazy_load(fail))
+    first = Flare.bookmark("First", "web", lazy_load(fail))
+    second = Flare.bookmark("Second", "web", lazy_load(fail))
+    app = SimpleNamespace(name="app", integrations=[{"web": site}, {"web": first}, {"web": second}])
+    manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=()),
+                            "flare": SimpleNamespace(name="flare", integrations=())}, ["app", "nginx", "flare"])
+    assert manager.integration_snapshot["app"] == (("web", site), ("web", first), ("web", second))
+    assert tuple(manager.containers["nginx"].sites) == (("app", "web"),)
+    assert list(manager.iter_integrations("flare")) == [(app, first), (app, second)]
+
+
+def test_nginx_requires_named_entry_without_resolving_anonymous_site_fields() -> None:
+    app = SimpleNamespace(name="app", integrations=[Nginx.site(lazy_load(fail))])
+    manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=())}, ["app"])
+    assert manager.integration_snapshot["app"][0][0] is None
+    with pytest.raises(ContainerError, match="Invalid nginx site key in app"):
+        manager.containers["nginx"].sites
+
+
+@pytest.mark.parametrize("key", ["", 0, None, False])
+def test_named_non_nginx_integrations_validate_key_shape(key: object) -> None:
+    app = SimpleNamespace(name="app", integrations=[{key: Flare.bookmark("Docs", "web", lazy_load(fail))}])
+    manager = manager_with({"app": app, "flare": SimpleNamespace(name="flare", integrations=())}, ["app"])
+    with pytest.raises(ContainerError, match="Invalid integration key in app"):
+        manager.integration_snapshot

@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from typing import Any, Optional
     from ..container import BaseContainer
     from ..manager import ContainerManager
-    from ._flare import Flare
     from ._nginx import Nginx
 
 
@@ -33,31 +32,30 @@ class ResolvedSite:
         # Preserve declared identities even when the optional nginx consumer is absent.
         for producer_name, declarations in manager.integration_snapshot.items():
             producer = manager.containers[producer_name]
-            for declaration in declarations:
+            for key, declaration in declarations:
                 if declaration.consumer != "nginx":
                     continue
                 if not isinstance(declaration, Nginx):
                     raise ContainerError("Invalid nginx site in %s: expected Nginx" % producer_name)
-                local_id = declaration.local_id
-                if not isinstance(local_id, str) or not local_id:
-                    raise ContainerError("Invalid nginx integration ID in %s" % producer_name)
-                identity = (producer_name, local_id)
+                if not isinstance(key, str) or not key:
+                    raise ContainerError("Invalid nginx site key in %s" % producer_name)
+                identity = (producer_name, key)
                 if identity in result:
-                    raise ContainerError("Duplicate nginx integration ID %r in %s" % (local_id, producer_name))
-                result[identity] = cls(producer, local_id, declaration)
+                    raise ContainerError("Duplicate nginx site key %r in %s" % (key, producer_name))
+                result[identity] = cls(producer, key, declaration)
         return MappingProxyType(result)
 
-    def __init__(self, producer: "BaseContainer", local_id: str, declaration: "Nginx") -> None:
+    def __init__(self, producer: "BaseContainer", key: str, declaration: "Nginx") -> None:
         self.producer = producer
-        self.local_id = local_id
-        self.identity = (producer.name, local_id)
-        self.file_id = "s_" + producer.name.encode("utf-8").hex() + "_" + local_id.encode("utf-8").hex()
+        self.key = key
+        self.identity = (producer.name, key)
+        self.file_id = "s_" + producer.name.encode("utf-8").hex() + "_" + key.encode("utf-8").hex()
         self.var_name = self.file_id
         self._declaration = declaration
 
     def _error(self, message: str) -> None:
         from ..errors import ContainerError
-        raise ContainerError("Nginx site %s/%s: %s" % (self.producer.name, self.local_id, message))
+        raise ContainerError("Nginx site %s/%s: %s" % (self.producer.name, self.key, message))
 
     def _text(self, value: "Any", field: str, optional: bool = False) -> "Optional[str]":
         if value is None and optional:
@@ -65,18 +63,6 @@ class ResolvedSite:
         if value is MISSING or not isinstance(value, str):
             self._error(field + " must be a string")
         return str(value)
-
-    @cached_property
-    def link(self) -> "Optional[Flare]":
-        from ._flare import Flare
-        from linktools.runtime import lazy_load
-
-        value = self._declaration.link
-        if value is None:
-            return None
-        if not isinstance(value, Flare):
-            self._error("link must be a Flare or None")
-        return value.with_default_url(lazy_load(lambda: self.get_url(default="")))
 
     @cached_property
     def server_name(self) -> str:

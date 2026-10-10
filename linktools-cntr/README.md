@@ -254,24 +254,47 @@ ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意�
 
 ## 声明式集成与配置发布
 
-`integrations` 返回扁平的 `Integration` 数组，通过 `Nginx` 和 `Flare` 工厂统一声明：
+`integrations` 返回命名映射与匿名声明混合的序列。字典 key 是站点唯一标识，
+导航和 OIDC 回调独立声明，通过 key 引用站点：
 
 ```python
-from linktools.cntr.ext import Flare, Nginx
+from linktools.cntr.ext import Flare, Nginx, load_nginx_url
 
 return [
-    Nginx.site("app.example.com", link=Flare.public("应用", "web", "应用描述")),
+    {"web": Nginx.site("app.example.com", proxy="http://app:8080")},
+    Flare.public("应用", "web", "应用描述", load_nginx_url(self, "web")),
     Flare.bookmark("工具", "web", "https://tool.example.com", category="tool"),
 ]
 ```
+
+常见的 HTTP 服务可以用纯函数 `endpoint` 组合已有声明：
+
+```python
+from linktools.cntr.ext import endpoint
+
+return endpoint(
+    self, "web", name="应用", icon="web", desc="应用描述",
+    domain=self.get_config_later("APP_DOMAIN"), proxy="http://app:8080",
+    direct_port="APP_PORT",
+)
+```
+
+该函数返回普通声明元组，不注册代理或读取配置；可选的 `direct_port` 生成 HTTP
+直连书签，`oidc_paths` 生成独立回调声明。复杂模板、通配域名及其他高级选项仍直接
+使用 `ext`，也可以与展开的 `endpoint(...)` 结果混用。
+
+每个 Nginx 站点都必须显式提供 key（默认站点通常使用 `"web"`），同一容器内的
+站点 key 不可重复；不同容器可以复用。`Nginx` 不再含 `local_id` / `link`。
+迁移原附属导航时，为原来省略的 URL 显式传入 `load_nginx_url(self, key)`，保留
+已有 URL、`None` 和空字符串；先放原附属导航，再放原独立导航，以保留显示顺序。
 
 `Flare.public` 创建带描述的应用；`Flare.container(name, icon, url)` 创建容器分区书签；
 `Flare.bookmark` 支持自定义分区。
 使用 `Flare.category("tool", "工具", order=5)` 可进一步设置分区标题和顺序。
 域名配置使用 `ConfigField(provider=Nginx.domain(self))`。
-共享声明位于 `integration/` 包中；容器在已有准备、检查回调中处理自己的输入，
+扩展声明与 URL 工厂位于 `ext/` 包中；容器在已有准备、检查回调中处理自己的输入，
 服务应用、文件变更判断和恢复统一由框架负责。
-导航 URL 不再负责注册代理。
+导航 URL 不负责注册代理，也不会从相邻站点隐式继承。
 `auth_bypass` 与 `waf_bypass` 分别控制认证和 WAF 路径旁路；自定义模板保留 nginx 原生路由语义。
 外部容器仓库需要同时迁移 Python 声明、模板和 OIDC 读取接口。
 详见 [集成协议与迁移说明](docs/integrations.md)。

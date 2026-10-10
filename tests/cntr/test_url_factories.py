@@ -65,10 +65,10 @@ def test_http_port_factory_retains_literal_template_path():
     assert str(load_port_url(container, "PORT", "{{path}}", https=False)) == "http://host.test/{{path}}"
 
 
-@pytest.mark.parametrize("local_id", [None, "", 0, False, ("web",)])
-def test_nginx_local_id_is_validated_before_manager_access(local_id):
+@pytest.mark.parametrize("key", [None, "", 0, False, ("web",)])
+def test_nginx_key_is_validated_before_manager_access(key):
     with pytest.raises(ContainerError, match="nonempty string"):
-        load_nginx_url(object(), local_id)
+        load_nginx_url(object(), key)
 
 
 def test_nginx_tuple_lookup_is_deferred_and_uses_producer_identity():

@@ -93,7 +93,7 @@ def test_generated_consumer_warning_does_not_include_configuration_values(tmp_pa
         ("app", {"app": {"image": "app:new"}}),
         ("proxy", {"proxy": {"image": "proxy:new", "environment": {"TOKEN": "private-value"}}}),
     ], running=("proxy",))
-    manager.integration_snapshot["app"] = (SimpleNamespace(consumer="proxy"),)
+    manager.integration_snapshot["app"] = (("web", SimpleNamespace(consumer="proxy")),)
     capture_warnings(manager)
     manager.compose_operations.up(["app"])
     messages = warnings(manager)
@@ -142,7 +142,7 @@ def test_repeated_rebind_during_recovery_does_not_duplicate_warning(tmp_path):
     old["services"]["db"]["volumes"] = mount(tmp_path / "old")
     old["services"]["fail"]["volumes"] = mount(tmp_path / "old")
     AppliedServiceModels(manager, old).record(("db", "net", "fail"))
-    manager.integration_snapshot["db"] = (SimpleNamespace(consumer="net"),)
+    manager.integration_snapshot["db"] = (("network", SimpleNamespace(consumer="net")),)
     manager.compose_runner.fail = "fail"
     capture_warnings(manager)
     with pytest.raises(ContainerError, match="apply failed fail"):

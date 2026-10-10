@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Shared declaration metadata."""
-from typing import Iterable
+from typing import Iterable, Mapping, Union
 
 
 class Integration:
@@ -10,4 +10,4 @@ class Integration:
     consumer: str = ""
 
 
-Integrations = Iterable[Integration]
+Integrations = Union[Mapping[str, Integration], Iterable[Union[Mapping[str, Integration], Integration]]]

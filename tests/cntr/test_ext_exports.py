@@ -14,14 +14,14 @@ def test_extension_exports_preserve_generic_contract_identity() -> None:
         assert getattr(cntr, name) is getattr(ext, name)
     assert set(ext.__all__) == {
         "Integration", "Integrations", "Nginx", "ResolvedSite", "Flare", "Authelia",
-        "load_config_url", "load_nginx_url", "load_port_url",
+        "load_config_url", "load_nginx_url", "load_port_url", "endpoint",
     }
     assert all(getattr(ext, name).__module__.startswith("linktools.cntr.ext.") for name in ext.__all__ if name != "Integrations")
 
 
 @pytest.mark.parametrize("name", (
     "Nginx", "ResolvedSite", "Flare", "Authelia",
-    "load_config_url", "load_nginx_url", "load_port_url",
+    "load_config_url", "load_nginx_url", "load_port_url", "endpoint",
 ))
 def test_consumer_specific_apis_are_only_exported_from_ext(name: str) -> None:
     assert getattr(ext, name) is not None

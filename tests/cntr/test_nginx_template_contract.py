@@ -25,7 +25,7 @@ def make_site(**kwargs):
                   proxy="http://app:8080", auth_headers={"Authorization": 'Bearer "$host"'})
     values.update(kwargs)
     site = Nginx.site(**values)
-    site.local_id = "web"
+    site.key = "web"
     site.file_id = site.var_name = "s_test"
     return site
 
@@ -171,7 +171,7 @@ def test_default_listeners_are_explicit_and_independent_of_server_name(
     assert "ssl_certificate " in rendered
 
 
-def generation_site(nginx: "BaseContainer", local_id: str = "web",
+def generation_site(nginx: "BaseContainer", key: str = "web",
                     ports: "Optional[Mapping[str, int]]" = None, **kwargs: "Any") -> "ResolvedSite":
     from types import SimpleNamespace
     from linktools.cntr.ext import ResolvedSite
@@ -179,12 +179,12 @@ def generation_site(nginx: "BaseContainer", local_id: str = "web",
     def get_config(key: str, **options: "Any") -> "Any":
         return ports[key] if ports and key in ports else nginx.get_config(key, **options)
 
-    producer = SimpleNamespace(name=local_id, manager=nginx.manager,
+    producer = SimpleNamespace(name=key, manager=nginx.manager,
                                get_config=get_config, env_config=SimpleNamespace(get=get_config))
     values = dict(server_name="app.example.test", proxy="http://app:8080",
                   https=False, waf=False, auth=False)
     values.update(kwargs)
-    return ResolvedSite(producer, local_id, Nginx.site(**values))
+    return ResolvedSite(producer, key, Nginx.site(**values))
 
 
 @pytest.mark.parametrize("default", [False, True])
@@ -265,7 +265,7 @@ def test_shared_hostname_routes_merge_with_independent_auth_maps(fresh_manager, 
     assert "location /api { return 204; }" in server
     assert "location /web { return 204; }" in server
     for site in (api, web):
-        assert "# site {}/{}".format(site.producer.name, site.local_id) in server
+        assert "# site {}/{}".format(site.producer.name, site.key) in server
         assert "$auth_verified_" + site.var_name in server
         assert "auth_request_set $auth_status_" + site.var_name in server
 

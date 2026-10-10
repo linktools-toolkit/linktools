@@ -1,28 +1,30 @@
 # Container integrations
 
-`integrations` returns a flat list of `Integration` declarations. Each declaration
-identifies its consumer. `Nginx` identifies a site by
-`(producer.name, local_id)`; the local ID is a nonempty string. Consumers
-read the complete installed declaration snapshot, even for partial operations.
-Unknown consumer names are errors. Known optional consumers that are not
-installed do not consume declarations.
+`integrations` returns a finite sequence of named mappings and anonymous
+`Integration` declarations. A named mapping binds a nonempty string key to a
+declaration, for example `{"web": Nginx.site(...)}`. The mapping key is the only
+site identifier: nginx looks up `(producer.name, key)`. Each declaration
+identifies its own consumer. Consumers read the complete installed declaration
+snapshot, even for partial operations. Unknown consumer names are errors. Known
+optional consumers that are not installed do not consume declarations.
 
 ```python
 from linktools.cntr import Integrations
-from linktools.cntr.ext import Flare, Nginx, load_port_url
+from linktools.cntr.ext import Flare, Nginx, load_nginx_url, load_port_url
+from linktools.decorator import cached_property
 
 
 @cached_property
 def integrations(self) -> "Integrations":
     return [
-        Nginx.site(
+        {"web": Nginx.site(
             self.get_config_later("APP_DOMAIN"),
             proxy="http://app:8080",
             auth=None,
             auth_bypass=(r"^/public/",),
             waf_bypass=(),
-            link=Flare.public("App", "apps", "Application"),
-        ),
+        )},
+        Flare.public("App", "apps", "Application", load_nginx_url(self, "web")),
         Flare.container(
             "App direct", "apps",
             load_port_url(self, "APP_PORT", https=False),
@@ -30,47 +32,53 @@ def integrations(self) -> "Integrations":
     ]
 ```
 
-`Nginx` and `Flare` provide the declaration factories. `Nginx.site(...)` returns
-a `Nginx`; `Flare.public(...)`, `Flare.container(...)`, and `Flare.bookmark(...)`
-return a `Flare`.
-Import consumer-specific declarations and URL factories only from
+`Nginx`, `Flare`, and `Authelia` provide the declaration factories.
+`Nginx.site(...)` returns a `Nginx`; `Flare.public(...)`, `Flare.container(...)`,
+and `Flare.bookmark(...)` return a `Flare`.
+Import consumer-specific declarations, URL factories, and `endpoint` only from
 `linktools.cntr.ext`; they are not re-exported from `linktools.cntr`.
-The generic `Integration` and `Integrations` contracts are also available from
-`linktools.cntr`. `Integration` declares only the public
-`consumer` name. `Nginx.consumer` is `"nginx"`; `Flare.consumer` is `"flare"`.
-New consumer-specific subclasses set their own `consumer` name. `Integrations`
-is the Python 3.6-compatible alias
-`Iterable[Integration]`: return a finite list, tuple, or iterator of declarations.
-The former consumer-keyed mappings and nested named mappings are not accepted.
+The generic `Integration` and `Integrations` contracts are available from
+`linktools.cntr`. `Integration` declares only the public `consumer` name.
+`Nginx.consumer` is `"nginx"`; `Flare.consumer` is `"flare"`.
+New consumer-specific subclasses set their own `consumer` name.
 
-`Nginx.local_id` defaults to `"web"`, so omit it for a single/default site.
-Give additional sites explicit IDs, for example `Nginx.site("api.example.com", local_id="api")`. IDs must be nonempty
-strings and unique within their producer. Different producers can reuse the
-same ID. Other integrations have no framework-level local ID and do not need
-invented names.
+`Integrations` accepts a named mapping directly or a finite iterable mixing
+named mappings with anonymous declarations. Return a list, tuple, or fresh
+iterator; mapping values must be declarations, not lists or nested mappings.
+Consumer-keyed groups such as `{"nginx": [...]}` are not accepted: the consumer
+comes from the declaration, never its mapping key.
+
+Every nginx site needs an explicit mapping key, including `"web"` for a
+single/default site. Add another site as `{"api": Nginx.site("api.example.com")}`.
+Nginx keys must be nonempty strings and unique within their producer. Different
+producers can reuse a key. `Flare` and `Authelia.oidc` can remain anonymous and
+do not need invented names. `Nginx` has no `local_id` or `link` field; a resolved
+site exposes its mapping key as `site.key`.
 
 The manager freezes each installed producer's declaration structure once per
-command into a read-only producer mapping of declaration tuples, including
-consuming a generator once. Mixed declaration order is preserved in the snapshot.
-Iterables must be finite. If `integrations` is cached and its snapshot can be
-rebuilt, return a reusable list/tuple or provide a fresh iterator for the rebuild;
-do not reuse an exhausted generator.
-It checks consumer names and the `Integration` type without resolving lazy
-fields or URLs. Consumers validate their own declaration content. The nginx
-container owns the command-local site snapshot in its public `sites` property.
-`ResolvedSite.collect(manager)` in `ext` checks site types and nonempty, unique
-local IDs before resolving any site fields. URL helpers, navigation and
+command into a read-only producer mapping of `(key, declaration)` tuples,
+using `None` as the key for anonymous declarations. It consumes a generator
+once, preserves mixed declaration order, and does not resolve lazy fields or
+URLs. Iterables must be finite. If `integrations` is cached and its snapshot can
+be rebuilt, return a reusable list/tuple or provide a fresh iterator for the
+rebuild; do not reuse an exhausted generator.
+It checks mapping keys, consumer names, and the `Integration` type. Consumers
+validate their own declaration content. The nginx container owns the
+command-local site snapshot in its public `sites` property.
+`ResolvedSite.collect(manager)` in `ext` checks site types and required, unique
+keys before resolving any site fields. URL helpers, navigation and
 authentication share `containers["nginx"].sites`; the manager has no nginx index.
 The generic `iter_integrations` filters by the declaration's consumer and yields
 `(producer, declaration)`. It returns only explicit declarations for an
 installed consumer.
 
-`Nginx.link` optionally attaches a `Flare` for navigation. Omitting
-its URL lazily inherits the resolved site's URL. Explicit `None` or `""` disables
-the link; an explicit URL stays unchanged. An omitted URL on a standalone link
-has no site to inherit from and is skipped. The link's category is presentation
-metadata, not an authentication policy; there is no `public` site boolean.
-Sites without `link` create no navigation.
+Navigation is an independent `Flare` declaration. Pass
+`load_nginx_url(self, "web")` explicitly to use a named site's lazy URL.
+An explicit URL stays unchanged; `None`, `""`, or an omitted URL skips the
+navigation entry. No URL is inherited from a neighboring nginx declaration.
+The link's category is presentation metadata, not an authentication policy;
+there is no `public` site boolean. A site without a `Flare` declaration creates
+no navigation.
 
 Standalone `Flare` values in the list supply independent navigation entries.
 Use `Flare.public(name, icon, desc, url)` for application entries; their
@@ -81,8 +89,8 @@ group with that ID and title. The standard IDs `private`, `container`, and
 `other` use their predefined titles and orders; omitting `category` uses `other`.
 `Flare.container(name, icon, url, *, desc=None)` is shorthand for
 `Flare.bookmark(name, icon, url, category="container", desc=desc)`, using the standard
-`Internal` bookmark group. Its optional URL follows the same inheritance and
-explicit `None`/empty behavior as other Flare declarations.
+`Internal` bookmark group. Its optional URL follows the same explicit
+`None`/empty/omitted behavior as other Flare declarations.
 Both factories retain an optional `desc` on the declaration, defaulting to the
 name when omitted or empty; bookmark output does not include descriptions.
 
@@ -118,13 +126,11 @@ are not public exports. The former `exposes` property
 and `self.expose_*` helpers are removed without aliases or fallbacks.
 Links keep their category, name, icon, description and lazy URL; direct-port,
 external and non-HTTP links do not need an nginx site. Flare preserves container
-`order` (and snapshot order for ties). Within each producer, attached links follow
-nginx declaration order, then independent links follow their declaration order.
-App links keep traversal order across all app categories;
-Category `order` applies to bookmark categories. Links within each bookmark
-category keep traversal order.
-Flare merges these two inputs itself; the manager's `iter_integrations` returns
-only explicit declarations. It skips empty URLs and rejects conflicting
+`order` (and snapshot order for ties), then declaration order within each
+producer. App links keep traversal order across all app categories;
+category `order` applies to bookmark categories. Links within each bookmark
+category keep traversal order. Flare reads only explicit declarations through
+`iter_integrations("flare")`. It skips empty URLs and rejects conflicting
 descriptions, output areas, or orders for the same category ID. A site
 without navigation still generates a proxy. The former registration arguments,
 `write_nginx_conf`, `load_exist_nginx_url`, and `append_ssl_domains` are removed.
@@ -133,6 +139,64 @@ set `Nginx.site(..., auth=False)` explicitly to retain its no-auth behavior.
 `auth=None` now inherits `NGINX_AUTH_ENABLE`; HTTP-only and public
 sites must use `auth=False` when global authentication is enabled.
 Migrate callers and templates together; there is no compatibility wrapper.
+
+## Common endpoint recipe
+
+`endpoint` is a pure convenience function that composes the existing declarations
+for a common HTTP service. It returns an ordinary tuple containing a named nginx
+site and an anonymous public Flare link, followed by an optional direct-port
+Flare bookmark and optional Authelia callback declaration. It does not register
+sites, access configuration values, render files, or change authentication state.
+
+```python
+from linktools.cntr import Integrations
+from linktools.cntr.ext import endpoint
+from linktools.decorator import cached_property
+
+
+@cached_property
+def integrations(self) -> "Integrations":
+    return endpoint(
+        self, "web",
+        name="App", icon="apps", desc="Application",
+        domain=self.get_config_later("APP_DOMAIN"),
+        proxy="http://app:8080",
+        auth=None,
+        auth_bypass=(r"^/public/",),
+        path="ui",
+        direct_port="APP_PORT",
+        oidc_paths=("sso/callback",),
+        oidc_enabled=self.get_config_later("NGINX_AUTH_ENABLE"),
+    )
+```
+
+`path` is appended to the public navigation URL and, when present, the direct
+port URL. `direct_port` names a port configuration key; that optional bookmark
+uses HTTP. Each `oidc_paths` entry is joined independently to the named site's
+URL, not to `path`. `oidc_enabled` defaults to `True`; pass a lazy enable condition
+when the callbacks depend on an optional capability. The recipe forwards
+`auth`, `auth_bypass`, and `waf_bypass` without adding access rules. It does not
+change the semantics of `auth=None` or validate native provider configuration.
+
+For multiple services, expand the returned tuples into the same declaration
+sequence. For custom templates, wildcard routes, explicit public URLs, HTTPS
+direct ports, custom Flare categories, or other advanced options, construct the
+existing `ext` declarations directly. They can be mixed with recipe results;
+there is no second endpoint model or special runtime resolution path.
+
+## Migrating named sites and navigation
+
+Move each former nginx local ID into its enclosing mapping key; use `"web"`
+where the ID was previously omitted. Remove the site's `local_id` and `link`
+arguments. Move each attached Flare link into the declaration sequence. Only
+replace an omitted attached URL with `load_nginx_url(self, key)`; keep explicit
+URLs, `None`, and `""` unchanged. Put the former attached links in their original
+nginx declaration order before the producer's former standalone links to retain
+the previous navigation order. Update resolved-site reads to `site.key`.
+
+The consumer-keyed mapping form and implicit URL inheritance are not retained
+as compatibility paths. Moving a site to a mapping key leaves its domain,
+proxy, template, authentication, and WAF settings unchanged.
 
 ## Lazy URL references
 
@@ -158,9 +222,9 @@ load_nginx_url(self, "web", "ui")
 
 Each returns the existing lazy URL proxy. Config URLs and port URLs stay empty
 when disabled. Ports must satisfy `0 < port < 65535`; the host is not read until
-the port is valid. nginx local IDs are checked immediately, while the
-`(container.name, local_id)` lookup waits until the proxy is read. Unknown site
-IDs fail, and declared disabled sites or absent nginx resolve to an empty URL.
+the port is valid. nginx keys are checked immediately, while the
+`(container.name, key)` lookup waits until the proxy is read. Unknown site
+keys fail, and declared disabled sites or absent nginx resolve to an empty URL.
 Path joining, query encoding and literal template placeholders remain unchanged.
 These factories never register hooks or write configuration.
 
@@ -279,7 +343,7 @@ hostname, HTTP port and compatible HTTPS/WAF listener and WAF policy share one
 server and contribute their distinct, once-rendered business locations. Literal
 and wildcard hostnames are compared without case. Per-route authentication and
 bypass settings may differ, using the explicit location authorization macro
-above. Their producer/local IDs and per-declaration template variables remain
+above. Their producer/key identities and per-declaration template variables remain
 independent. Incompatible server policies are rejected; duplicate native
 locations are rejected by `nginx -t`, never silently overwritten.
 Read the root for shared request maps and the health listener; read a site file
@@ -362,4 +426,5 @@ its imports; the former package is not retained as a compatibility alias.
 Root imports of `Nginx`, `Flare`, and `Authelia` must also move to
 `linktools.cntr.ext`; no compatibility aliases are provided. Generic container
 and orchestration types, including `Integration` and `Integrations`, remain in
-`linktools.cntr`. The `integrations` declaration property keeps its name and behavior.
+`linktools.cntr`. The `integrations` declaration property keeps its name;
+its named-site and anonymous-declaration shape is specified above.

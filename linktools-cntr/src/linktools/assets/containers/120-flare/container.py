@@ -65,35 +65,24 @@ class Container(BaseContainer):
             Flare.container(
                 "Flare", "bookmark", load_port_url(self, "FLARE_PORT", https=False),
             ),
-            Nginx.site(
+            {"web": Nginx.site(
                 server_name=self.get_config_later("FLARE_DOMAIN"),
                 proxy="http://flare:5005",
                 auth=None if self.get_config("FLARE_AUTH_ENABLE") else False,
                 auth_bypass=(r"\.(css|js)$",),
                 auth_rule={"policy": "one_factor"} if self.get_config("FLARE_AUTH_ENABLE") else None,
-            ),
+            )},
         ]
 
 
 
     def _iter_links(self) -> "Iterator[Flare]":
-        manager = self.manager
-        snapshot = manager.integration_snapshot
-        producers = sorted(
-            (name for name, declarations in snapshot.items() if declarations),
-            key=lambda name: manager.containers[name].order,
+        declarations = sorted(
+            self.manager.iter_integrations("flare"),
+            key=lambda entry: entry[0].order,
         )
-        for name in producers:
-            declarations = snapshot[name]
-            for declaration in declarations:
-                if declaration.consumer != "nginx":
-                    continue
-                link = manager.containers["nginx"].sites[(name, declaration.local_id)].link
-                if link is not None:
-                    yield link
-            for declaration in declarations:
-                if declaration.consumer == "flare":
-                    yield declaration
+        for producer, declaration in declarations:
+            yield declaration
 
 
     def on_starting(self, context: "OperationContext") -> None:

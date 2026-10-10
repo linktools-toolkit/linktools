@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from linktools.cntr import OperationContext
+from linktools.cntr import ContainerManager, Integration, OperationContext
 from linktools.cntr.artifacts import (AppliedServiceModels, stage_files, bind_prepared_files,
                                      publish_prepared_files, prune_prepared_files)
 from linktools.cntr.errors import ContainerError
@@ -54,11 +54,28 @@ def context(owner, full=False):
     return ctx
 
 
-def test_stage_records_sources_in_existing_artifact_index(owner):
-    owner.manager.integration_snapshot = {
-        "app": (SimpleNamespace(consumer="nginx", link=SimpleNamespace(consumer="auth")),),
-        "other": (SimpleNamespace(consumer="auth", link=None),),
-    }
+def declaration(consumer: str) -> Integration:
+    value = Integration()
+    value.consumer = consumer
+    return value
+
+
+def set_sources(owner: SimpleNamespace, sources: dict) -> None:
+    manager = object.__new__(ContainerManager)
+    containers = {name: SimpleNamespace(name=name, integrations=values) for name, values in sources.items()}
+    containers.setdefault(owner.name, SimpleNamespace(name=owner.name, integrations=()))
+    containers.setdefault("nginx", SimpleNamespace(name="nginx", integrations=()))
+    manager.__dict__["containers"] = containers
+    manager.__dict__["installed_state"] = SimpleNamespace(get=lambda resolve: tuple(containers.values()))
+    owner.manager.integration_snapshot = manager.integration_snapshot
+
+
+def test_stage_records_named_and_anonymous_sources_in_existing_artifact_index(owner):
+    set_sources(owner, {
+        "app": [{"web": declaration("nginx")}, {"auth": declaration("auth")}],
+        "other": [declaration("auth")],
+        "unrelated": {"web": declaration("nginx")},
+    })
     stage_files(owner, {"configuration.yml": "content"})
     entries = owner.manager.artifact_index.load()
     assert len(entries) == 1
@@ -66,17 +83,16 @@ def test_stage_records_sources_in_existing_artifact_index(owner):
 
 
 def test_reusing_prepared_tree_refreshes_source_provenance(owner):
-    owner.manager.integration_snapshot = {
-        "first": (SimpleNamespace(consumer="auth", link=None),),
-    }
+    set_sources(owner, {"first": {"auth": declaration("auth")}})
     first = stage_files(owner, {"configuration.yml": "unchanged"})
     assert next(iter(owner.manager.artifact_index.load().values()))["producers"] == ["first"]
-    owner.manager.integration_snapshot = {
-        "second": (SimpleNamespace(consumer="auth", link=None),),
-    }
+    set_sources(owner, {"second": {"auth": declaration("auth")}})
     reused = stage_files(owner, {"configuration.yml": "unchanged"})
     assert reused == first
     assert next(iter(owner.manager.artifact_index.load().values()))["producers"] == ["second"]
+    set_sources(owner, {"second": {}})
+    assert stage_files(owner, {"configuration.yml": "unchanged"}) == first
+    assert next(iter(owner.manager.artifact_index.load().values()))["producers"] == []
 
 
 def test_stage_is_immutable_private_and_does_not_publish(owner):

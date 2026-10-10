@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from linktools.cntr import ContainerError
+from linktools.cntr import ContainerError, ContainerManager
 from linktools.cntr.ext import Flare
 from _harness import builtin_container_type
 from _harness import builtin_module as builtin
@@ -27,11 +27,15 @@ def instance(module, **manager):
 def flare_instance(module, entries):
     snapshot = {"flare": []}
     containers = {}
-    for producer, local_id, link in entries:
+    for producer, key, link in entries:
         containers[producer.name] = producer
-        snapshot.setdefault(producer.name, []).append(link)
-    return instance(module, integration_snapshot={name: tuple(values) for name, values in snapshot.items()},
-                    containers=containers)
+        snapshot.setdefault(producer.name, []).append((key, link))
+    manager = object.__new__(ContainerManager)
+    manager.containers = dict(containers, flare=SimpleNamespace(name="flare", order=0))
+    manager.integration_snapshot = {name: tuple(values) for name, values in snapshot.items()}
+    container = object.__new__(module.Container)
+    container.manager = manager
+    return container
 
 
 def test_flare_custom_categories_merge_by_name_without_title_deduplication():
@@ -89,6 +93,8 @@ def test_authelia_oidc_identity_and_redirects_are_acyclic_readonly(monkeypatch):
 
 
 def test_portainer_callback_declaration_is_lazy_and_auth_conditioned(monkeypatch):
+    from linktools.cntr.ext import Authelia
+
     module = builtin("110-portainer")
     container = instance(module)
     calls = []
@@ -97,7 +103,7 @@ def test_portainer_callback_declaration_is_lazy_and_auth_conditioned(monkeypatch
         return key == "PORTAINER_AUTH_ENABLE"
     monkeypatch.setattr(container, "get_config", config)
     monkeypatch.setattr(container, "get_config_later", lambda key: "portainer.test")
-    declaration = next(value for value in container.integrations if value.consumer == "authelia")
+    declaration = next(value for value in container.integrations if isinstance(value, Authelia))
     assert calls == ["PORTAINER_AUTH_ENABLE"]
     assert declaration.redirect_uris == ()
     assert calls == ["PORTAINER_AUTH_ENABLE", "PORTAINER_AUTH_ENABLE", "NGINX_AUTH_ENABLE"]

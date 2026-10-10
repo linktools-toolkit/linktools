@@ -40,16 +40,16 @@ def load_port_url(container: "BaseContainer", key: "ConfigKeyType",
     return lazy_load(make_url)
 
 
-def load_nginx_url(container: "BaseContainer", local_id: str, *path: str,
+def load_nginx_url(container: "BaseContainer", key: str, *path: str,
                    queries: "QueryType | None" = None) -> "Proxy":
     from ..errors import ContainerError
-    if not isinstance(local_id, str) or not local_id:
-        raise ContainerError("Nginx site ID must be a nonempty string")
+    if not isinstance(key, str) or not key:
+        raise ContainerError("Nginx site key must be a nonempty string")
 
     def make_url() -> str:
-        site = container.manager.containers["nginx"].sites.get((container.name, local_id))
+        site = container.manager.containers["nginx"].sites.get((container.name, key))
         if site is None:
-            raise ContainerError("Unknown nginx site %s/%s" % (container.name, local_id))
+            raise ContainerError("Unknown nginx site %s/%s" % (container.name, key))
         url = site.get_url(default="")
         return utils.join_url(url, *path, queries=queries) if url else ""
 

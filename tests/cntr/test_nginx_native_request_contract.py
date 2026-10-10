@@ -21,7 +21,7 @@ import pytest
 
 def _native_site(port):
     return SimpleNamespace(server_name="app.test", file_id="native", var_name="native",
-                           local_id="web", default_server=False, https=True, waf=True, auth=True,
+                           key="web", default_server=False, https=True, waf=True, auth=True,
                            waf_bypass=(r"^/waf-public", r"^/both"),
                            auth_bypass=(r"^/auth-public", r"^/both"),
                            auth_headers={"Authorization": "Bearer secret$host"}, template_vars={},
@@ -353,7 +353,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
 
         def site(name, auth_enabled):
             return SimpleNamespace(
-                producer=producer, local_id=name, file_id=name, var_name=name,
+                producer=producer, key=name, file_id=name, var_name=name,
                 server_name="app.test", default_server=False, https=True, waf=False,
                 auth=auth_enabled, auth_bypass=(r"^/admin/free",) if auth_enabled else (),
                 waf_bypass=(), auth_headers={"Authorization": "Bearer trusted"} if auth_enabled else {},
@@ -364,7 +364,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         admin = site("admin", True)
         business = []
         for member, location in ((public, "/public"), (admin, "/admin")):
-            path = tmp_path / (member.local_id + ".j2")
+            path = tmp_path / (member.key + ".j2")
             path.write_text(
                 '{% from "nginx/headers.j2" import proxy_headers, route_authorization with context %}'
                 'location ' + location + ' { {{ route_authorization() }} {{ proxy_headers() }} '

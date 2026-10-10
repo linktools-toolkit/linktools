@@ -10,14 +10,12 @@ if TYPE_CHECKING:
     from linktools.core import ConfigResolver, LazyProvider
     from linktools.types import PathType
     from ..container import BaseContainer
-    from ._flare import Flare
 
 
 class Nginx(Integration):
-    """One nginx site owned by a container and identified by its local ID."""
+    """One nginx site; its declaration mapping supplies the reference key."""
 
     consumer = "nginx"
-    local_id: str
 
     @classmethod
     def site(
@@ -33,14 +31,10 @@ class Nginx(Integration):
             public_url: "Optional[str]" = None,
             cert_domains: "Sequence[str]" = (),
             template_vars: "Optional[Mapping[str, Any]]" = None,
-            link: "Optional[Flare]" = None,
             *,
-            local_id: str = "web",
             default_server: bool = False,
     ) -> "Nginx":
         self = cls()
-        self.local_id = local_id
-        self.link = link
         self.server_name = server_name
         self.default_server = default_server
         self.proxy = proxy
