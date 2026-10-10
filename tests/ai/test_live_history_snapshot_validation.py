@@ -150,3 +150,107 @@ async def test_snapshot_checkpoint_cannot_exceed_observed_transcript(tmp_path: P
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", (None, "owner", "sequence", "state", "subject", "conflict", "gap"))
+async def test_snapshot_fact_backed_model_interactions_validate_identity_and_sequence(
+    tmp_path: Path, corruption: str | None,
+) -> None:
+    from linktools.ai.runtime.state._codec import _encode_step_envelope
+    from linktools.ai.runtime.state._repository_common import project_record
+    from linktools.ai.runtime.state._step_archive import _step_subject
+    from linktools.ai.runtime.state._store import StoredFact
+
+    from .test_model_interaction_lifecycle_paging import _interaction
+    from .test_step_archive_read_boundaries import _archive
+
+    async with _archive(tmp_path) as (_state, archive, run):
+        await archive.register_agent_run(run, execution_id="execution")
+        records = await archive.state_store.read(lambda tx: tx.scan_records())
+        first = _interaction("run", 1)
+        second = _interaction("run", 3 if corruption == "gap" else 2)
+        fact = StoredFact(
+            archive._stream("run", "interaction"), 1, archive._agent_run_key("run"),
+            "model_interaction", _step_subject(first), first.status, _encode_step_envelope(first),
+        )
+        if corruption == "owner":
+            fact = replace(fact, owner_key_digest=b"x" * 32)
+        elif corruption == "sequence":
+            fact = replace(fact, sequence=2)
+        elif corruption == "state":
+            fact = replace(fact, state="SUCCEEDED")
+        elif corruption == "subject":
+            fact = replace(fact, subject_digest=b"x" * 32)
+        if corruption == "conflict":
+            second = replace(first, duration_ns=first.duration_ns + 1)
+        record = project_record(
+            namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+            kind="model_interaction", identity=["run", second.model_request_seq], value=second,
+            parent=archive._agent_run_key("run"), state=second.status,
+            sort_key=f"m:{second.model_request_seq:020d}", storage_version=1,
+        )
+        records = (*records, record)
+
+        def validate() -> None:
+            aliases, sequences = canonical_snapshot_indexes(
+                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+                records=records, facts=(fact,), operations=(),
+            )
+            validate_snapshot_domain(
+                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+                records=records, aliases=aliases, facts=(fact,), operations=(), sequences=sequences,
+            )
+
+        if corruption is None:
+            validate()
+        else:
+            with pytest.raises(AIError) as raised:
+                validate()
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", (None, "missing-index", "ahead", "wrong-owner"))
+async def test_snapshot_coverage_requires_complete_authoritative_event_prefix(
+    tmp_path: Path, corruption: str | None,
+) -> None:
+    from linktools.ai.runtime.state._step_contracts import StepEvent
+
+    from .test_step_archive_read_boundaries import _archive
+
+    async with _archive(tmp_path) as (_state, archive, run):
+        await archive.register_agent_run(run, execution_id="execution")
+        await archive.append_event(
+            StepEvent("run", "MODEL_REQUEST_STARTED", 1,
+                      metadata={"linktools.ai.model_request_seq": "1"}),
+            execution_id="execution",
+        )
+        records = list(await archive.state_store.read(lambda tx: tx.scan_records()))
+        facts = await archive.state_store.read(lambda tx: tx.scan_facts())
+        marker = next(record for record in records if record.sort_key == "coverage:event")
+        if corruption == "missing-index":
+            missing = next(record for record in records
+                           if record.kind == "history_association" and record is not marker)
+            records.remove(missing)
+        elif corruption == "ahead":
+            records[records.index(marker)] = replace(marker, data={"sequence": 2})
+        elif corruption == "wrong-owner":
+            records[records.index(marker)] = replace(marker, parent_digest=b"x" * 32)
+        aliases, sequences = canonical_snapshot_indexes(
+            namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+            records=tuple(records), facts=facts, operations=(),
+        )
+
+        def validate() -> None:
+            validate_snapshot_domain(
+                namespace="archive-boundaries", tenant_id="tenant", domain=RuntimeDomain.EXECUTION,
+                records=tuple(records), aliases=aliases, facts=facts, operations=(), sequences=sequences,
+            )
+
+        if corruption is None:
+            validate()
+        else:
+            with pytest.raises(AIError) as raised:
+                validate()
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

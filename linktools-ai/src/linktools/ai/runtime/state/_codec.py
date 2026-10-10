@@ -9,7 +9,7 @@ import json
 import math
 import types
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from functools import lru_cache
@@ -1427,7 +1427,7 @@ def _decode_external(
         _require_required_keys(value, frozenset(declared))
         return target(**{
             name: _decode_domain(value[name], field_type, codec)
-            for name, (field_type, _init) in declared.items()
+            for name, (field_type, _init, _required) in declared.items()
         })
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
@@ -2046,11 +2046,16 @@ def _decode_enum(
 @lru_cache(maxsize=None)
 def _dataclass_fields(
     target: type[object],
-) -> Mapping[str, tuple[object, bool]]:
+) -> Mapping[str, tuple[object, bool, bool]]:
     # Registered wire classes have stable declarations; payloads remain uncached.
     hints = get_type_hints(target)
     return MappingProxyType({
-        field.name: (hints.get(field.name, Any), field.init)
+        field.name: (
+            hints.get(field.name, Any),
+            field.init,
+            not field.init or field.default is MISSING
+            or field.metadata.get("wire_optional") is not True,
+        )
         for field in fields(target)
     })
 
@@ -2103,10 +2108,17 @@ def _decode_dataclass(
         declared = _dataclass_fields(target)
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-    _require_required_keys(raw_fields, frozenset(declared))
+    # Constructor defaults do not make durable facts optional. Only explicit
+    # wire defaults may fill omissions; factories and computed fields remain
+    # required so recovery cannot invent timestamps or integrity evidence.
+    _require_required_keys(raw_fields, frozenset(
+        name for name, (_type, _init, required) in declared.items() if required
+    ))
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
-    for field_name, (field_type, field_init) in declared.items():
+    for field_name, (field_type, field_init, _required) in declared.items():
+        if field_name not in raw_fields:
+            continue
         try:
             decoded = _decode_domain(
                 raw_fields[field_name],

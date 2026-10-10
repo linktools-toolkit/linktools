@@ -10,7 +10,7 @@ Linktools 是一套面向移动安全研究、逆向分析、合规检测工具�
 | [linktools-common](linktools-common/) | 通用工具：`ct-env`、`ct-grep`、`ct-tools` | [README](linktools-common/README.md) |
 | [linktools-mobile](linktools-mobile/) | 移动设备：Android（`at-*`）和 iOS（`it-*`）工具 | [README](linktools-mobile/README.md) |
 | [linktools-cntr](linktools-cntr/) | 容器管理：Docker/Compose 部署工具（`ct-cntr`） | [README](linktools-cntr/README.md) |
-| [linktools-ai](linktools-ai/) | AI agent 运行时：session/execution/swarm，基于 pydantic-ai（纯库，无 CLI） | [README](linktools-ai/README.md) |
+| [linktools-ai](linktools-ai/) | AI agent 运行时，提供 ai-run、ai-acp 和统一 ai-web 控制台 | [README](linktools-ai/README.md) |
 
 ## 开发检查
 
