@@ -110,6 +110,55 @@ async def test_session_execution_history_trace_result_and_metrics_use_runtime() 
 
 
 @pytest.mark.asyncio
+async def test_rejected_message_needs_new_identity_after_session_owner_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.messages import ModelMessage, ModelResponse
+    from pydantic_ai.models.function import AgentInfo
+
+    from . import _runtime_test_helpers as helpers
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+    original = helpers._runtime_usage_model
+
+    async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return await original(messages, info)
+
+    monkeypatch.setattr(helpers, "_runtime_usage_model", model)
+    async with Runtime.open("web-busy", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory()) as runtime:
+        async with client(create_app(runtime=runtime)) as http:
+            created = await http.post("/api/sessions", json={"session_id": "session", "request_id": "create"}, headers=_HEADERS)
+            assert created.status_code == 201
+            path = "/api/session/messages?session_id=session"
+            first = await http.post(path, json={"prompt": "first", "request_id": "first"}, headers=_HEADERS)
+            assert first.status_code == 202
+            try:
+                await asyncio.wait_for(entered.wait(), 10)
+                request = {"prompt": "next", "request_id": "rejected"}
+                busy = await http.post(path, json=request, headers=_HEADERS)
+                assert busy.status_code == 409 and busy.json()["code"] == "SESSION_BUSY"
+                current = await http.get("/api/session?session_id=session")
+                assert current.status_code == 200
+                assert current.json()["session"]["active_execution_id"] == first.json()["execution_id"]
+            finally:
+                release.set()
+            await (await runtime.executions.get(first.json()["execution_id"])).wait()
+            completed = await http.get("/api/session?session_id=session")
+            assert completed.status_code == 200 and completed.json()["session"]["active_execution_id"] is None
+            replay = await http.post(path, json=request, headers=_HEADERS)
+            assert replay.status_code == 409 and replay.json()["code"] == "SESSION_BUSY"
+            accepted = await http.post(path, json={**request, "request_id": "next-attempt"}, headers=_HEADERS)
+            assert accepted.status_code == 202
+            await (await runtime.executions.get(accepted.json()["execution_id"])).wait()
+            assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_execution_stream_replays_cursor_and_finishes_with_authoritative_snapshot() -> None:
     async with Runtime.open("web-stream", models=RuntimeUsageModels(), storage=RuntimeStorage.in_memory()) as runtime:
         execution = await runtime.agents.get().start("hello")
