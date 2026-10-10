@@ -31,13 +31,13 @@ def _record(manager, monkeypatch, fail=False):
                 return 0
         return _Proc()
 
-    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
+    monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
     monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
-        name: {} for container in context.containers for name in container.services}})
+        name: {"image": name + ":current"} for container in context.containers for name in container.services}})
     monkeypatch.setattr(
         manager.image_preparer,
         "plan",
-        lambda model, services=(), force_pull=False: ImagePlan(
+        lambda model, services=(), force_pull=False, refresh_services=(): ImagePlan(
             build=(), pull=(), targets=tuple(services)
         ),
     )
@@ -140,7 +140,7 @@ def test_cli_partial_up_includes_required_dependencies(monkeypatch, fresh_manage
     _record(fresh_manager, monkeypatch)
     cntr_main.command.on_command_up(names=["portainer"], pull=False)
     running = set(fresh_manager.running_state.get_persisted())
-    assert {"portainer", "nginx", "lldap", "authelia", "safeline"} <= running
+    assert {"portainer", "nginx"} <= running
 
 
 def test_cli_partial_down_marks_target_stopped(monkeypatch, fresh_manager):

@@ -15,7 +15,8 @@ def _record(manager, monkeypatch):
     recorded = []
 
     def fake(containers, *args, privilege=None, **kwargs):
-        recorded.append(args)
+        recorded.append(args[next(i for i, value in enumerate(args)
+                                  if value in ("up", "down", "stop", "pull", "build", "config")):])
 
         class _Proc:
             def check_call(self):
@@ -23,15 +24,15 @@ def _record(manager, monkeypatch):
 
         return _Proc()
 
-    def fake_plan(model, services=(), force_pull=False):
+    def fake_plan(model, services=(), force_pull=False, refresh_services=()):
         targets = tuple(services)
         if force_pull:
             return ImagePlan(build=(), pull=targets, targets=targets)
         return ImagePlan(build=targets, pull=(), targets=targets)
 
-    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
+    monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
     monkeypatch.setattr(manager.compose_runner, "final_model", lambda context: {"services": {
-        name: {} for container in context.containers for name in container.services}})
+        name: {"image": name + ":current"} for container in context.containers for name in container.services}})
     monkeypatch.setattr(manager.image_preparer, "plan", fake_plan)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)

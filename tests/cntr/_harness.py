@@ -197,28 +197,14 @@ def normalize_compose(data, manager) -> str:
 
 
 def stub_generated_runtime(manager, monkeypatch):
-    """Keep routing tests at the command boundary; native validation has its own tests."""
+    """Make command-routing tests independent of a native Docker daemon."""
     from types import SimpleNamespace
     from linktools.cntr.runtime.inspect import ProjectRuntimeState
+
     monkeypatch.setattr(manager.docker_inspector, "get_project_state", lambda containers:
                         ProjectRuntimeState(manager.project_name, (), "docker"))
-    monkeypatch.setattr(manager.compose_runner, "wait_service_healthy", lambda *args: None)
-    monkeypatch.setattr(manager.compose_runner, "apply_service", lambda context, service, recreate=False:
-                        manager.runtime.create_docker_compose_process(context.containers,
-                            *manager.compose_runner.apply_service_args(service, recreate)).check_call())
-    monkeypatch.setattr(manager.compose_runner, "apply_services", lambda context, services:
-                        [manager.compose_runner.apply_service(context, service) for service in services])
-    def candidate(container, render):
-        return SimpleNamespace(container=container, changed=True,
-                               generation_id="bootstrap" if render.__name__ == "render_bootstrap" else "candidate",
-                               previous_id=None,
-                               publish=lambda: None, restore=lambda: None)
-    monkeypatch.setattr("linktools.cntr.artifacts.GeneratedCandidate", candidate)
-    for owner in manager.generated_configs.values():
-        monkeypatch.setattr(owner, "on_prepare_config", lambda context: None)
-        monkeypatch.setattr(owner, "validate_config", lambda context, candidate: None)
-        monkeypatch.setattr(owner, "apply_config", lambda context, candidate, services:
-                            manager.compose_runner.apply_services(context, services))
-    def render_bootstrap(generation_id):
-        return {"nginx.conf": "bootstrap " + generation_id}
-    monkeypatch.setattr(manager.generated_configs["nginx"], "render_bootstrap", render_bootstrap)
+    monkeypatch.setattr(manager.compose_runner, "wait_service_ready",
+                        lambda context, service, **kwargs: True)
+    monkeypatch.setattr(manager.compose_runner, "validate_service", lambda *args, **kwargs:
+                        SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0))
+    monkeypatch.setattr(manager.image_preparer, "image_id", lambda image: "sha256:local-" + image)
