@@ -318,7 +318,7 @@ class _Console:
         elif action == "fork":
             result = await execution.fork(_text(payload, "prompt"), files=payload.get("files", ()), idempotency_key=request_id)
         elif action == "recover":
-            result = await execution.recover()
+            result = await execution.recover(idempotency_key=request_id)
         elif action == "resolve":
             resolution = payload.get("resolution")
             if resolution == "applied":
