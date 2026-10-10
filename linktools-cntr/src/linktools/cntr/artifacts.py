@@ -331,7 +331,7 @@ def bind_prepared_files(context: "OperationContext", model: dict,
 
 
 def _unapplied_running_services(context: "OperationContext", services: "Iterable[str]") -> "set[str]":
-    unapplied = set(context.initial_running_services) - set(services)
+    unapplied = set(context.initial_runtime_state.running_services) - set(services)
     if context.is_full_project:
         declared = {service for container in context.project_containers for service in container.services}
         unapplied.intersection_update(declared)
@@ -444,17 +444,12 @@ class AppliedServiceModels:
         self.root = os.path.join(str(manager.data_path), "compose", "applied", "services")
         if not isinstance(model, dict) or not isinstance(model.get("services"), dict):
             raise ContainerError("Resolved Compose model must contain a services mapping")
-        resolved = self._normalize(model)
-        current, previous = {}, {}
-        changed = set(model["services"])
+        previous = {}
         for service, spec in model["services"].items():
             if not isinstance(service, str) or not service or not isinstance(spec, dict):
                 raise ContainerError("Resolved Compose services must have names and mapping definitions")
-            # Compose validates dependencies even with --no-deps. Each service
-            # snapshot therefore retains its full project's rollback support.
-            current[service] = resolved
         retained_services = tuple(retained_services)
-        for service in dict.fromkeys(tuple(current) + retained_services):
+        for service in dict.fromkeys(tuple(model["services"]) + retained_services):
             if not isinstance(service, str) or not service:
                 raise ContainerError("Retained Compose services must have names")
             path = self._path(service)
@@ -473,11 +468,8 @@ class AppliedServiceModels:
                            for name, definition in saved["services"].items())):
                 raise ContainerError("Invalid applied Compose model for service {}".format(service))
             previous[service] = self._normalize(saved)
-            if service in current and self._projection(saved, service) == self._projection(model, service):
-                changed.remove(service)
-        self.current = MappingProxyType(current)
         self.previous = MappingProxyType(previous)
-        self.changed_services = frozenset(changed)
+        self.set_model(model)
         self.untracked_services = frozenset(service for service in retained_services if service not in previous)
 
     def retain_previous(self, models: "Mapping[str, str]") -> None:
@@ -487,6 +479,12 @@ class AppliedServiceModels:
         previous.update(self.previous)
         self.previous = MappingProxyType(previous)
         self.untracked_services = self.untracked_services.difference(previous)
+
+    def previous_model(self, service: str) -> "dict | None":
+        """Decode a separate working copy without exposing mutable snapshot state."""
+        import yaml
+        text = self.previous.get(service)
+        return yaml.safe_load(text) if text is not None else None
 
     @classmethod
     def _projection(cls, model: dict, service: str) -> str:
@@ -565,9 +563,10 @@ class AppliedServiceModels:
     def set_model(self, model: dict) -> None:
         """Compare prepared mount identities with the same captured old models."""
         from types import MappingProxyType
-        import yaml
         normalized = self._normalize(model)
+        # Compose validates dependencies even with --no-deps, so each service
+        # snapshot retains the full project's support declarations.
         self.current = MappingProxyType({name: normalized for name in model["services"]})
         self.changed_services = frozenset(
             name for name in model["services"] if name not in self.previous or
-            self._projection(yaml.safe_load(self.previous[name]), name) != self._projection(model, name))
+            self._projection(self.previous_model(name), name) != self._projection(model, name))

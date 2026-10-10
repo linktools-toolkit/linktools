@@ -218,6 +218,5 @@ def test_legacy_dependency_removed_from_current_owner_uses_saved_declaration(tmp
     context = SimpleNamespace(project_containers=(Owner("app", ("web", "cache") if not separate_owner else ("web",)),
                                           Owner("provider", ("cache",)) if separate_owner else Owner("empty", ())),
                               previous_compose_contents=saved,
-                              compose_owners={"app.yml": "app", "provider.yml": "provider", "unrelated.yml": "unrelated"},
                               service_models=SimpleNamespace(previous={}))
     assert yaml.safe_load(runner.saved_service_models(context, services)["web"]) == old

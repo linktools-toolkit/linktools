@@ -112,7 +112,7 @@ def test_build_args_can_omit_proxy_build_args(fresh_manager, monkeypatch):
     assert runner.build_args(opts) == ["build", "portainer"]
 
 
-def test_build_and_up_route_args_through_process(fresh_manager, monkeypatch):
+def test_build_and_apply_route_args_through_process(fresh_manager, monkeypatch):
     recorded = []
 
     class _Proc:
@@ -120,22 +120,17 @@ def test_build_and_up_route_args_through_process(fresh_manager, monkeypatch):
             return 0
 
     def fake_docker(*args, privilege=None, **kwargs):
-        recorded.append(args[args.index("build"):])
-        return _Proc()
-
-    def fake_compose(containers, *args, privilege=None, **kwargs):
-        recorded.append(args)
+        recorded.append(args[args.index("build") if "build" in args else args.index("up"):])
         return _Proc()
 
     monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fake_docker)
-    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fake_compose)
     runner = fresh_manager.compose_runner
     ctx = _ctx(fresh_manager, ["portainer"])
     ctx.compose_model = {"services": {"portainer": {"image": "portainer:local"}}}
     opts = ComposeOptions(services=["portainer"])
     runner.build(ctx, opts)
-    runner.up(ctx, opts)
+    runner.apply_service(ctx, "portainer")
     assert recorded[0] == ("build", "portainer")
     assert recorded[1] == (
-        "up", "--detach", "--no-build", "--pull", "never", "portainer",
+        "up", "--detach", "--no-build", "--pull", "never", "--no-deps", "portainer",
     )

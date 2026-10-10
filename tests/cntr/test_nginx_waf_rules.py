@@ -74,7 +74,7 @@ def test_nginx_header_rejects_control_characters_without_leaking(fresh_manager, 
 
 def test_nginx_auth_header_dedup_and_reserved_names(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    assert nginx._validated_auth_headers({"Authorization": "value"}) == {"Authorization": "value"}
+    assert nginx.validated_auth_headers({"Authorization": "value"}) == {"Authorization": "value"}
     for headers in (
         {"X-Proxy-Original-Method": "bad"},
         {"X-Auth-User": "bad"},
@@ -84,4 +84,4 @@ def test_nginx_auth_header_dedup_and_reserved_names(fresh_manager):
         {"Bad\nKey": "x"},
     ):
         with pytest.raises(ContainerError):
-            nginx._validated_auth_headers(headers)
+            nginx.validated_auth_headers(headers)

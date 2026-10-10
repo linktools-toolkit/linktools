@@ -14,6 +14,7 @@ from linktools.cntr.artifacts import AppliedServiceModels
 from linktools.cntr.errors import ContainerError
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.runtime.compose import ComposeRunner, order_services
+from linktools.cntr.runtime.inspect import ProjectRuntimeState
 
 
 class Hooks:
@@ -147,9 +148,9 @@ def setup_case(tmp_path, groups, running=()):
     manager.load_installed_config_metadata = lambda: owners
     manager.resolver = SimpleNamespace(resolve_dependencies=lambda selected: selected)
     manager.model = {"services": {name: spec for owner in owners for name, spec in owner.services.items()}}
-    state = SimpleNamespace(services=tuple(
+    state = ProjectRuntimeState("test", tuple(
         SimpleNamespace(service=name, state="running", image_id="sha256:old-" + name, labels={}, health=None,
-                        exit_code=None) for name in running))
+                        exit_code=None) for name in running), "docker")
     manager.docker_inspector = SimpleNamespace(get_project_state=lambda containers: state)
     stored = {owner.name for owner in owners if set(owner.services) & set(running)}
     manager.running_state = SimpleNamespace(
@@ -334,7 +335,8 @@ def test_restore_pins_original_image_and_does_not_inject_generation_label(tmp_pa
     runner._resolved_model = lambda process: {"services": {"app": {"image": "sha256:old"}}}
     runner.wait_service_dependencies = lambda *args, **kwargs: None
     ctx = OperationContext(project_containers=[SimpleNamespace(name="app", services={"app": {}})])
-    ctx.initial_running_images = {"app": "sha256:old"}
+    ctx.initial_runtime_state = ProjectRuntimeState("test", (
+        SimpleNamespace(service="app", state="running", image_id="sha256:old"),), "docker")
     runner.apply_saved_services(ctx, ("app",), {"previous.yml": "services:\n  app:\n    image: mutable:tag\n"})
     overlay = yaml.safe_load(documents[-1][-1])
     assert overlay == {"services": {"app": {"image": "sha256:old"}}}

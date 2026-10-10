@@ -55,7 +55,7 @@ class ExecutionPlanner:
         # a third-party container's on_prepare() (arbitrary file writes/
         # network access/hook registration) just to describe what a real
         # up/restart/down would do.
-        selection = manager.compose_operations.select(names, metadata_only=True, for_start=action != "down")
+        selection = manager.compose_operations.select(names, for_start=action != "down")
         unresolved_selection = False
         try:
             start_selection = manager.compose_operations.start_selection(selection, privilege=False) if action != "down" else selection

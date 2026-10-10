@@ -223,7 +223,7 @@ def test_partial_restart_starts_runtime_provider_without_stopping_it(lifecycle_c
         ("before-stop", target.name), ("after-stop", target.name),
     ]
 
-    selection = manager.compose_operations.select([target.name], metadata_only=True, for_start=True)
+    selection = manager.compose_operations.select([target.name], for_start=True)
     start_selection = manager.compose_operations.start_selection(selection)
     start_context = OperationContext()
     start_context.target_containers = start_selection.target_containers

@@ -39,7 +39,7 @@ class Container(BaseContainer):
         return '"' + data.replace("$", "$" + "{literal_dollar}") + '"'
 
     @staticmethod
-    def _validated_auth_headers(headers: "Mapping[str, str]") -> "dict[str, str]":
+    def validated_auth_headers(headers: "Mapping[str, str]") -> "dict[str, str]":
         result = {}
         seen = set()
         forbidden = {
@@ -254,7 +254,7 @@ class Container(BaseContainer):
             headers["X-Auth-" + name] = (
                 "$identity_" + site.var_name + "_" + name.lower()
                 if site.auth and not authentication else "")
-        auth_headers = self._validated_auth_headers(site.auth_headers) if site.auth else {}
+        auth_headers = self.validated_auth_headers(site.auth_headers) if site.auth else {}
         if not authentication:
             for index, key in enumerate(auth_headers):
                 headers[key] = "$credential_" + site.var_name + "_" + str(index)
@@ -278,42 +278,6 @@ class Container(BaseContainer):
         if authentication:
             headers.update({"Content-Length": "", "Connection": "", "Upgrade": ""})
         return tuple((key, self.complex_value(value)) for key, value in headers.items())
-
-    def security_maps(self, site: "ResolvedSite | SimpleNamespace") -> str:
-        """Generate only maps whose inputs and evaluation phase are explicit."""
-        lines = []
-        for capability in ("waf", "auth"):
-            if not getattr(site, capability):
-                continue
-            lines.extend(["map $uri $" + capability + "_skip_" + site.var_name + " {", "    default 0;"])
-            for regex in getattr(site, capability + "_bypass"):
-                lines.append("    " + self.complex_value("~*" + regex) + " 1;")
-            lines.append("}")
-        if not site.auth:
-            return "\n".join(lines)
-        suffix = site.var_name
-        # Exact keys preserve business regex captures when evaluated at proxy time.
-        lines.append('map "$auth_status_' + suffix + ':$auth_skip_' + suffix + ':$auth_proof_' + suffix + '" $auth_verified_' + suffix + ' {')
-        lines.append("    volatile;")
-        lines.append("    default 0;")
-        lines.extend('    "' + str(status) + ':0:1" 1;' for status in range(200, 300))
-        lines.append("}")
-        for name in ("user", "groups", "name", "email"):
-            lines.extend([
-                "map $auth_verified_" + suffix + " $identity_" + suffix + "_" + name + " {",
-                '    volatile;', '    default "";', "    1 $auth_" + name + "_" + suffix + ";", "}",
-            ])
-        for index, (key, value) in enumerate(self._validated_auth_headers(site.auth_headers).items()):
-            # nginx ignores non-conventional incoming header names by default;
-            # its $http_* variable syntax cannot address their punctuation.
-            incoming = ("${http_" + key.lower().replace("-", "_") + "}"
-                        if re.fullmatch(r"[A-Za-z0-9_-]+", key) else '""')
-            lines.extend([
-                "map $auth_verified_" + suffix + " $credential_" + suffix + "_" + str(index) + " {",
-                "    volatile;", "    default " + incoming + ";", "    1 " + self.quote(value) + ";", "}",
-            ])
-        return "\n".join(lines)
-
 
     def get_runtime_requirements(self, required: "AbstractSet[str]") -> "Mapping[str, Iterable[str]]":
         manager = self.manager
@@ -350,6 +314,7 @@ class Container(BaseContainer):
             trim_blocks=nginx_root in source.parents,
             lstrip_blocks=nginx_root in source.parents,
         )
+        environment.tests["http_header"] = re.compile(r"[A-Za-z0-9_-]+").fullmatch
         try:
             template_name = "nginx/" + source.relative_to(nginx_root).as_posix()
         except ValueError:
@@ -469,24 +434,16 @@ class Container(BaseContainer):
             lock_path = self.get_app_path("certs", ".acme.lock")
             with FileLock(str(lock_path)):
                 self.runtime.chmod(lock_path, 0o600)
-                legacy = None
-                if ("nginx" in context.initial_existing_services and
-                        not os.path.lexists(str(self.get_app_path("generated", "current")))):
-                    legacy = self._preserve_legacy_files()
-                    self._preserve_legacy_compose(context, legacy)
                 previous_revision = next((item.labels.get("io.linktools.nginx.certificate-revision")
                                           for item in context.initial_runtime_state.services
                                           if item.service == "nginx"), None)
-                account = (legacy / "acme" if legacy is not None and previous_revision is None else
-                           self.get_app_path("certs", self.cert_image_revision, "live", "acme"))
+                account = self.get_app_path("certs", self.cert_image_revision, "live", "acme")
                 if not account.is_dir() and previous_revision is not None:
                     if not re.fullmatch(r"[0-9a-f]{16}", previous_revision):
                         raise ContainerError("Invalid running nginx certificate revision")
                     account = self.get_app_path("certs", previous_revision, "live", "acme")
                 if not account.is_dir():
-                    account = self.get_app_path("certs", "live", "acme")
-                if not account.is_dir():
-                    account = legacy / "acme" if legacy is not None else self.get_app_path("acme")
+                    account = self.get_app_path("acme")
                 archive = self.get_app_path("acme-build-account.tar")
                 with tempfile.NamedTemporaryFile(dir=str(archive.parent), delete=False) as stream:
                     temporary = stream.name
@@ -504,77 +461,3 @@ class Container(BaseContainer):
         result["nginx.conf"] = self._render_site_template(
             self, self.get_source_path("templates", "nginx.conf"), root_site)
         context.write_files(self, result)
-    def _preserve_legacy_compose(self, context: "OperationContext", backup: Path) -> None:
-        import yaml
-        for path, text in tuple(context.previous_compose_contents.items()):
-            if context.compose_owners.get(path) != self.name:
-                continue
-            data = yaml.safe_load(text)
-            if not isinstance(data, dict):
-                continue
-            service = data.get("services", {}).get("nginx")
-            if not isinstance(service, dict):
-                continue
-            volumes = list(service.get("volumes") or ())
-            targets = set()
-            for volume in volumes:
-                if isinstance(volume, dict):
-                    targets.add(volume.get("target"))
-                elif isinstance(volume, str):
-                    parts = volume.rsplit(":", 2)
-                    target = parts[-1]
-                    if not target.startswith("/") and len(parts) > 1:
-                        target = parts[-2]
-                    targets.add(target)
-            additions = [{"type": "bind", "source": str(backup / name), "target": target}
-                         for name, target in (("certs", "/etc/certs"), ("acme", "/root/.acme.sh"))
-                         if target not in targets]
-            if additions:
-                service["volumes"] = volumes + additions
-                context.previous_compose_contents[path] = yaml.safe_dump(data)
-
-    def _preserve_legacy_files(self) -> Path:
-        import shutil
-        import tempfile
-        from pathlib import Path
-        # A prior snapshot may already be mounted by the restored legacy service.
-        backup = Path(tempfile.mkdtemp(prefix="migration-backup-", dir=str(self.get_app_path())))
-        self.logger.info("Preserve legacy nginx certificates and ACME account before mount migration")
-        for source, name in (("/etc/certs/.", "certs"), ("/root/.acme.sh/.", "acme")):
-            destination = backup / name
-            destination.mkdir()
-            service = self.get_service_name("nginx")
-            process = self.runtime.create_docker_process(
-                "cp", "{}:{}".format(service, source), str(destination), capture_output=True)
-            result = self.manager.structured_runner.execute(process, check=False)
-            if not result.succeeded:
-                missing = "Error response from daemon: Could not find the file {} in container {}".format(
-                    source, service)
-                if result.stderr.strip() != missing:
-                    raise ContainerError("Cannot preserve legacy nginx {}: {}".format(source, result.stderr.strip()))
-        previous = self.get_app_path("conf.d")
-        if previous.exists():
-            shutil.copytree(str(previous), str(backup / "conf.d"), symlinks=True)
-        if (self.manager.system in ("darwin", "linux") and self.manager.uid != 0
-                and self.manager.container_type == "docker"):
-            # sudo docker cp preserves private modes but makes copied files root-owned.
-            self.runtime.create_process(
-                "chown", "-R", "-h", "{}:{}".format(self.manager.uid, self.manager.gid),
-                str(backup), privilege=True,
-            ).check_call()
-        for name in ("certs", "acme"):
-            source = backup / name
-            if not source.is_dir():
-                raise ContainerError("Legacy nginx migration backup is incomplete")
-            for path in source.rglob("*"):
-                destination = self.get_app_path(name) / path.relative_to(source)
-                if os.path.lexists(destination):
-                    continue
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if path.is_symlink():
-                    os.symlink(os.readlink(str(path)), str(destination))
-                elif path.is_dir():
-                    destination.mkdir()
-                else:
-                    shutil.copy2(str(path), str(destination))
-        return backup

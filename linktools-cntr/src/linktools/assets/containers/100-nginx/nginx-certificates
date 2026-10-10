@@ -79,11 +79,6 @@ case "$1" in
         account="$seed/acme"
         if test "$action" = check && test -d "$root/previous" && verify "$root/previous"; then
             source="$root/previous"
-        elif test ! -e "$root/live" && test -L "$base/live" &&
-             test -f "$base/live/build-revision" &&
-             test "$(cat "$base/live/build-revision")" = "$revision" && verify "$base/live"; then
-            source="$base/live"
-            if test -d "$base/live/acme"; then account="$base/live/acme"; fi
         fi
         verify "$source"
         destination=$(mktemp -d "$versions/initial-XXXXXXXXXX")

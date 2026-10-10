@@ -538,6 +538,23 @@ def test_running_container_names_excludes_fully_stopped_container(inspector, fre
     assert state.running_container_names == []
 
 
+def test_initial_service_views_use_actual_running_replicas_and_return_separate_maps(inspector, fresh_manager, monkeypatch):
+    nginx = _service_container(fresh_manager, "nginx", ["nginx", "stopped"])
+    _stub_ids(monkeypatch, fresh_manager, "abc123abc123\ndef456def456\n012345abcdef\n")
+    live = dict(_item(status="RUNNING"), Image="sha256:live")
+    stopped_replica = dict(_item(status="exited"), Image="sha256:stopped-replica")
+    stopped_service = dict(_item(service="stopped", status="exited"), Image="sha256:stopped")
+    _stub_inspect(monkeypatch, fresh_manager, [live, stopped_replica, stopped_service])
+    state = inspector.get_project_state([nginx])
+    assert state.existing_services == {"nginx", "stopped"}
+    assert state.running_services == {"nginx"}
+    assert state.running_images == {"nginx": "sha256:live"}
+    assert state.image_ids["stopped"] == "sha256:stopped"
+    changed = state.running_images
+    changed["nginx"] = "mutated"
+    assert state.running_images == {"nginx": "sha256:live"}
+
+
 def test_project_and_backend_are_from_manager(inspector, fresh_manager, monkeypatch):
     nginx = _service_container(fresh_manager, "nginx", ["nginx"])
     _stub_ids(monkeypatch, fresh_manager, "")

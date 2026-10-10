@@ -14,7 +14,6 @@ from .structured import StructuredCommandError
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from typing import Any
-    from ..context import OperationContext
     from ..manager import ContainerManager
 
 
@@ -183,14 +182,3 @@ class ImagePreparer:
         if "no such image" in message or "not found" in message:
             return False
         raise ImagePreparationError(f"Unable to inspect image `{image}`: {result.stderr.strip()}")
-
-    def execute(self, context: "OperationContext", model: "dict[str, Any]", services: "Sequence[str]" = (), force_pull: bool = False) -> ImagePlan:
-        context.compose_model = model
-        plan = self.plan(model, services, force_pull=force_pull)
-        if plan.pull:
-            self.manager.compose_runner.pull(context, list(plan.pull))
-        if plan.build:
-            options = self.manager.compose_runner.options_for_build(plan.build, pull=force_pull)
-            self.manager.compose_runner.build(context, options)
-            self.verify_builds(model, plan.build)
-        return plan

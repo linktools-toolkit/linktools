@@ -9,7 +9,7 @@ configuration lifecycle.
 - `actions` contains operation labels such as `up`, `restart`, and `pull`, not process arguments
 - `project_containers` is the complete project scope; `target_containers` and `target_services` are the resolved operation targets
 - `is_full_project` identifies an unscoped project operation. Explicitly naming every container does not set it
-- `initial_runtime_state` is captured before preparation. `initial_existing_services` includes stopped containers; `initial_running_services` contains only initially running/restarting services, whose image IDs are in `initial_running_images`
+- `initial_runtime_state` is the pre-operation Docker inspection. Its derived `existing_services`, `running_services`, `image_ids` and `running_images` views replace separate context copies; stopped replicas never supply a running image ID
 - `prepared_dirs` maps container names to immutable prepared directory roots; use `write_files` and `file_path` to create and read their contents
 - `previous_compose_contents` maps captured Compose source paths to their previous YAML text for recovery
 - `refresh_services` remains the explicit refresh selection; `metadata` remains hook extension data
@@ -18,6 +18,30 @@ The former fields `commands`, `containers`, `is_full_containers`, `runtime_state
 `initial_services`, `native_running_images`, `prepared_files`, and `saved_compose`
 map to the corresponding names above without aliases. These are in-memory
 operation fields; persisted Compose/applied-model formats are unchanged.
+
+## Data ownership
+
+`ComposeOperations` owns the generate → validate → apply → recover flow. Its
+immutable `ComposeSelection` fixes the action scope; `OperationContext` exposes
+that scope and the working inputs to callbacks, without granting hooks authority
+to select additional actions.
+
+- `context.compose_model` is the native Compose model bound to prepared files and
+  selected image revisions. The runner constructs commands from that model
+- `context.initial_runtime_state` owns observed services, image IDs and exact
+  namespace bindings. Derived views do not introduce another state cache
+- `context.service_models` (`AppliedServiceModels`) owns immutable current and
+  previous per-service YAML snapshots. `previous_model(service)` returns an
+  independent decoded copy; recording and restoring retain the disk format
+- `context.prepared_dirs` owns candidate immutable file trees. Publication changes
+  their public references only after application; retained snapshots protect
+  historical running and rollback inputs from pruning
+
+Image preparation has one orchestration entry point. The image preparer computes
+build/pull requirements; the runner executes commands; `ComposeOperations`
+orders them and owns warnings, checks and failure handling. Recovery separately
+follows dependent actions, required stopped namespace providers and shared file
+inputs because those relationships require different restore actions.
 
 ## Ordering and responsibilities
 
@@ -147,6 +171,16 @@ credential values. Each revision has a separate TLS storage slot under
 `/etc/certs/<revision>`. The image entrypoint installs preissued material into its
 own slot; ordinary startup does not contact a CA. The restored image/configuration
 therefore references its original slot without Python code changing a TLS pointer.
+
+Only this revision-based layout is managed automatically. Before upgrading an old
+deployment, manually back up its container-local `/etc/certs` and `/root/.acme.sh`
+contents. The tool does not copy old writable layers, import flat `certs/live`
+directories, or add migration mounts to rollback models. Existing files and
+backups are left untouched; restoring old-layout data is a manual operation.
+An ACME account supplied in the host `nginx/acme` directory remains a build input
+when no current revision account exists. Changing the certificate script requires
+one normal image rebuild and build-time issuance; ordinary `up` adds no image pull
+or runtime issuance.
 
 The existing certificate script owns all TLS pointer changes and renewal reloads,
 under the shared certificate lock. Renewal verifies the served certificate and

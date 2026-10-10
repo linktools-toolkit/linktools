@@ -76,6 +76,24 @@ class ProjectRuntimeState:
     source: str = "docker-inspect"
 
     @property
+    def existing_services(self) -> "frozenset[str]":
+        return frozenset(item.service for item in self.services if item.service)
+
+    @property
+    def running_services(self) -> "frozenset[str]":
+        return frozenset(item.service for item in self.services
+                         if item.service and item.state in _RUNNING_STATES)
+
+    @property
+    def image_ids(self) -> "dict[str, str]":
+        return {item.service: item.image_id for item in self.services if item.service and item.image_id}
+
+    @property
+    def running_images(self) -> "dict[str, str]":
+        return {item.service: item.image_id for item in self.services
+                if item.service and item.image_id and item.state in _RUNNING_STATES}
+
+    @property
     def running_container_names(self) -> "list[str]":
         """Logical container names with >=1 service running/restarting.
 

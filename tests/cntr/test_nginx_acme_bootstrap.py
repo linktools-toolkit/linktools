@@ -5,6 +5,7 @@
 import os
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -177,3 +178,64 @@ def test_new_revision_does_not_modify_older_certificate(certificate_case):
     assert run_script(certificate_case, "install").returncode == 0
     assert os.readlink(str(first)) == original_link
     assert (base / "fedcba0987654321/live").is_symlink()
+
+
+@pytest.mark.parametrize("source", ["target", "running", "seed", "empty"])
+def test_build_account_uses_current_storage_without_migrating_old_files(fresh_manager, monkeypatch, source):
+    container = fresh_manager.containers["nginx"]
+    fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
+    revision, running_revision = "1234567890abcdef", "fedcba0987654321"
+    container.__dict__.update(cert_image_revision=revision, extend_configs={}, _rendered_site_files=({}, False))
+    accounts = {
+        "target": container.get_app_path("certs", revision, "live", "acme"),
+        "running": container.get_app_path("certs", running_revision, "live", "acme"),
+        "seed": container.get_app_path("acme"),
+    }
+    available = {"target": ("target", "running", "seed"), "running": ("running", "seed"),
+                 "seed": ("seed",), "empty": ()}
+    for name in available[source]:
+        if name in accounts:
+            accounts[name].mkdir(parents=True, exist_ok=True)
+            (accounts[name] / "account.conf").write_text(name)
+    old_files = [container.get_app_path(name, "untouched")
+                 for name in ("conf.d", "migration-backup-existing", "certs/live/acme")]
+    for path in old_files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("old layout")
+
+    def fail_process(*args, **kwargs):
+        raise AssertionError("Preparation must not copy from or change a container")
+
+    monkeypatch.setattr(container.runtime, "create_docker_process", fail_process)
+    monkeypatch.setattr(container.runtime, "chmod", lambda *args: None)
+    monkeypatch.setattr(container, "_render_site_template", lambda *args: "configuration")
+    context = SimpleNamespace(
+        initial_runtime_state=SimpleNamespace(services=(SimpleNamespace(service="nginx", labels={
+            "io.linktools.nginx.certificate-revision": running_revision,
+        }),)),
+        previous_compose_contents={"nginx": "original model"}, write_files=lambda *args: None,
+    )
+    container.on_starting(context)
+    with tarfile.open(str(container.get_app_path("acme-build-account.tar"))) as archive:
+        if source == "empty":
+            assert archive.getnames() == []
+        else:
+            assert archive.extractfile("account.conf").read().decode() == source
+    assert context.previous_compose_contents == {"nginx": "original model"}
+    assert all(path.read_text() == "old layout" for path in old_files)
+    assert list(container.get_app_path().glob("migration-backup-*")) == [old_files[1].parent]
+
+
+def test_install_uses_image_seed_without_importing_flat_layout(certificate_case):
+    _, _, base, seed, _, revision = certificate_case
+    old = base / "old"
+    shutil.copytree(str(seed / "certs"), str(old))
+    shutil.copytree(str(seed / "acme"), str(old / "acme"))
+    (old / "acme/account.key").write_text("old-layout-account")
+    (old / "build-revision").write_text(revision)
+    (base / "live").symlink_to("old", target_is_directory=True)
+    result = run_script(certificate_case, "install")
+    assert result.returncode == 0, result.stderr
+    assert (base / revision / "live/acme/account.key").read_text() == "existing-account"
+    assert (old / "acme/account.key").read_text() == "old-layout-account"
+    assert os.readlink(str(base / "live")) == "old"

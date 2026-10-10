@@ -4,6 +4,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 import yaml
@@ -12,6 +13,7 @@ from linktools.cntr._container.compose import write_docker_compose_file
 from linktools.cntr.artifacts import AppliedServiceModels
 from linktools.cntr.errors import ContainerError
 from linktools.cntr.runtime.compose import ComposeRunner
+from linktools.cntr.runtime.inspect import ProjectRuntimeState
 from linktools.cntr.runtime.process import RuntimeProcessFactory
 from test_lifecycle_rebuild import setup_case
 
@@ -75,8 +77,9 @@ def test_inspection_cannot_overwrite_migration_recovery_input(tmp_path, saved_sn
 def test_running_orphan_does_not_abort_after_applying_current_services(tmp_path, names):
     manager = setup_case(tmp_path, [("app", {"app": {"image": "app:new"}})], running=("app",))
     actual = manager.docker_inspector.get_project_state(None)
-    actual.services += (SimpleNamespace(service="retired", state="running", image_id="sha256:retired",
-                                       labels={}, health=None, exit_code=None),)
+    actual = replace(actual, services=actual.services + (SimpleNamespace(service="retired", state="running", image_id="sha256:retired",
+                                       labels={}, health=None, exit_code=None),))
+    manager.docker_inspector.get_project_state = lambda containers: actual
     manager.compose_operations.up(names)
     assert [event[1] for event in manager.events if event[0] == "apply"] == ["app"]
     assert ("after-callback", "app") in manager.events
@@ -360,8 +363,9 @@ def stopped_provider_case(tmp_path, binding):
     AppliedServiceModels(manager, manager.model).record(("db", "net", "child", "stopped"))
     manager.model["services"]["db"]["environment"] = {"VERSION": "new"}
     actual = manager.docker_inspector.get_project_state(None)
-    actual.services += (SimpleNamespace(service="db", state="exited", image_id="sha256:stopped-db",
-                                       labels={}, health=None, exit_code=0),)
+    actual = replace(actual, services=actual.services + (SimpleNamespace(service="db", state="exited", image_id="sha256:stopped-db",
+                                       labels={}, health=None, exit_code=0),))
+    manager.docker_inspector.get_project_state = lambda containers: actual
     return manager
 
 
@@ -416,7 +420,7 @@ def test_failed_stopped_provider_restores_live_bindings_then_stops_old_provider(
         service, = services
         if service == "db":
             assert image_ids[service] == "sha256:stopped-db"
-            assert service not in context.initial_running_images
+            assert service not in context.initial_runtime_state.running_images
             assert yaml.safe_load(next(iter(files.values())))["services"][service].get("environment") is None
             original_contexts.append(context)
         if service == "net":
@@ -439,7 +443,7 @@ def test_failed_stopped_provider_restores_live_bindings_then_stops_old_provider(
     assert [event[1] for event in manager.events if event[0] == "restore"] == [("db",), ("net",), ("child",)]
     assert active == {"net", "child"}
     assert manager.running_state.get_persisted() == ["child", "net"]
-    assert original_contexts and "db" not in original_contexts[0].initial_running_images
+    assert original_contexts and "db" not in original_contexts[0].initial_runtime_state.running_images
 
 
 @pytest.mark.parametrize("missing", ["image", "model"])
@@ -485,11 +489,11 @@ def test_explicit_recovery_image_ids_do_not_change_initial_running_images(tmp_pa
                                             runtime=SimpleNamespace(create_docker_process=process)))
     runner._resolved_model = lambda process: {"services": {"db": {"image": "sha256:old-stopped"}}}
     runner.wait_service_dependencies = lambda *args, **kwargs: None
-    context = SimpleNamespace(initial_running_images={}, project_containers=())
+    context = SimpleNamespace(initial_runtime_state=ProjectRuntimeState("test", (), "docker"), project_containers=())
     runner.apply_saved_services(context, ("db",), {"old.yml": "services: {db: {image: mutable:tag}}"},
                                 image_ids={"db": "sha256:old-stopped"})
     assert yaml.safe_load(files[-1][-1]) == {"services": {"db": {"image": "sha256:old-stopped"}}}
-    assert context.initial_running_images == {}
+    assert context.initial_runtime_state.running_images == {}
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -505,7 +509,8 @@ def test_recovery_configuration_explicitly_selects_profiled_service(tmp_path, le
                                           runtime=SimpleNamespace(create_docker_process=process)))
     runner._resolved_model = lambda process: model if process.args[-1] == "optional" else {"services": {}}
     runner.wait_service_dependencies = lambda *args, **kwargs: None
-    context = SimpleNamespace(initial_running_images={"optional": "sha256:original"}, project_containers=(),
+    context = SimpleNamespace(initial_runtime_state=ProjectRuntimeState("test", (
+        SimpleNamespace(service="optional", state="running", image_id="sha256:original"),), "docker"), project_containers=(),
                               service_models=SimpleNamespace(previous={}),
                               previous_compose_contents={"old.yml": yaml.safe_dump(model)})
     if legacy:
@@ -709,8 +714,9 @@ def test_stopped_unrelated_service_does_not_add_a_recovery_requirement(tmp_path)
         ("net", {"net": {"image": "net:new"}}),
     ], running=("net",))
     actual = manager.docker_inspector.get_project_state(None)
-    actual.services += (SimpleNamespace(service="db", state="exited", image_id=None,
-                                       labels={}, health=None, exit_code=0),)
+    actual = replace(actual, services=actual.services + (SimpleNamespace(service="db", state="exited", image_id=None,
+                                       labels={}, health=None, exit_code=0),))
+    manager.docker_inspector.get_project_state = lambda containers: actual
     manager.compose_operations.up(["db"])
     assert ("apply", "db", True) in manager.events
 
@@ -722,8 +728,9 @@ def test_legacy_stopped_namespace_preflight_follows_newly_captured_models(tmp_pa
         ("net", {"net": {"image": "net:new", "network_mode": "service:db"}}),
     ], running=("net",))
     actual = manager.docker_inspector.get_project_state(None)
-    actual.services += tuple(SimpleNamespace(service=name, state="exited", image_id="sha256:old-" + name,
-                                             labels={}, health=None, exit_code=0) for name in ("db", "vpn"))
+    actual = replace(actual, services=actual.services + tuple(SimpleNamespace(service=name, state="exited", image_id="sha256:old-" + name,
+                                             labels={}, health=None, exit_code=0) for name in ("db", "vpn")))
+    manager.docker_inspector.get_project_state = lambda containers: actual
     original = manager.compose_runner.saved_service_models
     captured = []
 

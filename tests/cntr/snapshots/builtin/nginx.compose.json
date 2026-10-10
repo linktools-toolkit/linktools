@@ -50,7 +50,7 @@
         ]
       },
       "hostname": "nginx",
-      "image": "aio-nginx:fa7c4a5f0dab0c12",
+      "image": "aio-nginx:2e68d2662819db9f",
       "logging": {
         "driver": "json-file",
         "options": {

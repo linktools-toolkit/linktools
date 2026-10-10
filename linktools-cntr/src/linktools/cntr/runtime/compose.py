@@ -27,6 +27,15 @@ if TYPE_CHECKING:
 _PROXY_ENV_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
 
 
+def namespace_dependencies(spec: "Mapping[str, Any]") -> "tuple[str, ...]":
+    """Project services whose container identities are bound into this service."""
+    result = [str(value).split(":", 1)[0] for value in spec.get("volumes_from") or ()
+              if not str(value).startswith("container:")]
+    result.extend(str(spec[key]).split(":", 1)[1] for key in ("network_mode", "ipc", "pid")
+                  if str(spec.get(key, "")).startswith("service:"))
+    return tuple(dict.fromkeys(result))
+
+
 def service_dependencies(spec: "dict[str, Any]") -> "dict[str, dict[str, Any]]":
     """Normalize Compose's explicit and implicit service dependency edges."""
     declared = spec.get("depends_on") or {}
@@ -36,12 +45,7 @@ def service_dependencies(spec: "dict[str, Any]") -> "dict[str, dict[str, Any]]":
     else:
         result = {name: {} for name in declared}
     implicit = [value.split(":", 1)[0] for value in spec.get("links") or ()]
-    implicit.extend(value.split(":", 1)[0] for value in spec.get("volumes_from") or ()
-                    if not value.startswith("container:"))
-    for key in ("network_mode", "ipc", "pid"):
-        value = spec.get(key) or ""
-        if value.startswith("service:"):
-            implicit.append(value[len("service:"):])
+    implicit.extend(namespace_dependencies(spec))
     for name in implicit:
         result.setdefault(name, {})
     return result
@@ -200,11 +204,6 @@ class ComposeRunner:
             raise ContainerError("Docker Compose returned an invalid final model")
         return result
 
-    def up(self, context: "OperationContext", options: ComposeOptions) -> int:
-        return self.manager.runtime.create_docker_compose_process(
-            context.project_containers, *self.up_args(options)
-        ).check_call()
-
     def stop(self, context: "OperationContext", services: "Sequence[str]") -> int:
         with self._model_args(context) as args:
             return self.manager.runtime.create_docker_process(*args, "stop", *services).check_call()
@@ -345,19 +344,6 @@ class ComposeRunner:
             return self.manager.runtime.create_docker_process(
                 *args, "restart", "--no-deps", service).check_call()
 
-    def wait_service_running(self, context: "OperationContext", service: str, timeout: int = 30) -> None:
-        import time
-        from ..errors import ContainerError
-        deadline = time.monotonic() + timeout
-        while True:
-            state = self.manager.docker_inspector.get_project_state(context.project_containers)
-            matches = [item for item in state.services if item.service == service]
-            if matches and all(item.state == "running" for item in matches):
-                return
-            if time.monotonic() >= deadline:
-                raise ContainerError("Service {} did not become running".format(service))
-            time.sleep(0.5)
-
     def exec_service(self, context: "OperationContext", service: str, command: "Sequence[str]",
                      check: bool = True) -> "CommandResult":
         return self.manager.structured_runner.execute(
@@ -462,11 +448,6 @@ class ComposeRunner:
             if deadline is not None and time.monotonic() >= deadline:
                 raise ContainerError("Service {} did not complete successfully".format(service))
             time.sleep(0.5)
-
-    def apply_services(self, context: "OperationContext", services: "Sequence[str]") -> None:
-        """Apply the dependency-ordered selection supplied by the orchestrator."""
-        for service in services:
-            self.apply_service(context, service)
 
     @contextmanager
     def _saved_compose_args(self, context: "OperationContext",
@@ -595,7 +576,7 @@ class ComposeRunner:
             raise ContainerError("No saved Compose files available")
         overlay = {}
         for service in services:
-            image = (context.initial_running_images if image_ids is None else image_ids).get(service)
+            image = (context.initial_runtime_state.running_images if image_ids is None else image_ids).get(service)
             if not image:
                 raise ContainerError("No original image ID for service " + service)
             overlay[service] = {"image": image}

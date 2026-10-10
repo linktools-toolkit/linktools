@@ -29,7 +29,8 @@ def _no_real_processes(monkeypatch, fresh_manager):
 
     monkeypatch.setattr(fresh_manager.compose_runner, "build", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "pull", fail)
-    monkeypatch.setattr(fresh_manager.compose_runner, "up", fail)
+    monkeypatch.setattr(fresh_manager.compose_runner, "apply_service", fail)
+    monkeypatch.setattr(fresh_manager.compose_runner, "apply_saved_services", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "stop", fail)
     monkeypatch.setattr(fresh_manager.compose_runner, "down", fail)
     monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", lambda *a, **k: object())
@@ -414,7 +415,7 @@ def test_plan_excludes_unselected_authentication_admin(fresh_manager, monkeypatc
 def test_plan_preserves_interleaved_service_dependency_order(fresh_manager, monkeypatch):
     from linktools.cntr._operations import ComposeSelection
     operations = fresh_manager.compose_operations
-    explicit = operations.select(["portainer"], metadata_only=True, for_start=True)
+    explicit = operations.select(["portainer"], for_start=True)
     selected = ComposeSelection(explicit.project_containers,
                                 (fresh_manager.containers["authelia"], fresh_manager.containers["portainer"]),
                                 ("authelia-redis", "portainer", "authelia"), False)

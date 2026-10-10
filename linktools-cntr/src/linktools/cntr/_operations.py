@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from .errors import ContainerError
 from .context import OperationContext
 from .execution.model import get_records, record_phase, render_report
-from .runtime.compose import order_services, order_service_subset, service_dependencies
+from .runtime.compose import namespace_dependencies, order_services, order_service_subset, service_dependencies
 
 if TYPE_CHECKING:
     from collections.abc import Sequence, Iterable
@@ -29,7 +29,7 @@ class ComposeOperations:
         self.manager = manager
 
     def select(self, names: "Sequence[str] | None" = None, with_dependencies: bool = False,
-               metadata_only: bool = False, for_start: bool = False) -> ComposeSelection:
+               for_start: bool = False) -> ComposeSelection:
         project = tuple(self.manager.load_installed_config_metadata())
         if not project:
             from .container import NoContainerInstalledError
@@ -180,12 +180,10 @@ class ComposeOperations:
                                    action, service, owner.name if owner else "unknown", reason)
             warned_actions.add(key)
 
-        compose_files, compose_owners, saved_compose = {}, {}, {}
-        for path, (kind, owner, content) in collect_candidates(manager, explicit.project_containers).items():
+        saved_compose = {}
+        for path, (kind, owner, _) in collect_candidates(manager, explicit.project_containers).items():
             if kind != "compose":
                 continue
-            compose_files[path] = content
-            compose_owners[path] = owner
             legacy = os.path.join(str(manager.data_path), "compose", "applied", owner + ".yml")
             source = legacy if os.path.exists(legacy) else path
             try:
@@ -193,20 +191,14 @@ class ComposeOperations:
                     saved_compose[path] = stream.read()
             except FileNotFoundError:
                 pass
-        # Runtime inspection renders Compose files, so retain migration inputs first.
+        # Runtime inspection renders Compose files, so retain recovery inputs first.
         actual = manager.docker_inspector.get_project_state(explicit.project_containers)
-        initial = {item.service for item in actual.services if item.state in ("running", "restarting")}
+        initial = actual.running_services
         selection = self.start_selection(explicit, running_services=initial)
         refresh = frozenset(self.start_selection(explicit).services) if pull else frozenset()
         context = self._make_context(["restart" if restart else "up", pull and "pull"], selection)
         context.refresh_services = refresh
         context.initial_runtime_state = actual
-        context.initial_existing_services = frozenset(item.service for item in actual.services)
-        context.initial_running_images = {item.service: item.image_id for item in actual.services
-                                         if item.service in initial and item.image_id}
-        context.initial_running_services = frozenset(initial)
-        context.compose_files = compose_files
-        context.compose_owners = compose_owners
         context.previous_compose_contents = saved_compose
 
         with manager.lifecycle.notify_start(context):
@@ -225,7 +217,7 @@ class ComposeOperations:
             owners = {service: container for container in selection.project_containers for service in container.services}
             model_store = AppliedServiceModels(manager, raw_model, retained_services=initial)
             context.service_models = model_store
-            missing = initial.intersection(raw_model["services"]).difference(model_store.previous)
+            missing = set(initial).intersection(raw_model["services"]).difference(model_store.previous)
             while missing:
                 legacy = self._legacy_recovery_services(context, selection.services, missing)
                 if not legacy:
@@ -292,14 +284,9 @@ class ComposeOperations:
                 for service in selection.services:
                     failed = service
                     spec = context.compose_model["services"][service]
-                    before_image = context.initial_running_images.get(service)
+                    before_image = context.initial_runtime_state.running_images.get(service)
                     image_changed = service in initial and before_image != target_image_ids[service]
-                    binds = {str(spec.get(key)).split(":", 1)[1] for key in
-                             ("network_mode", "ipc", "pid")
-                             if str(spec.get(key, "")).startswith("service:")}
-                    binds.update(str(value).split(":", 1)[0] for value in
-                                 spec.get("volumes_from", ())
-                                 if not str(value).startswith("container:"))
+                    binds = set(namespace_dependencies(spec))
                     recreate = (service in model_store.changed_services or image_changed or
                                 bool(binds & recreated))
                     cascade = any(options.get("restart") and dependency in updated for
@@ -312,10 +299,10 @@ class ComposeOperations:
                             if manager.image_preparer.image_id(spec["image"]) != target_image_ids[service]:
                                 raise ContainerError("Selected image changed during deployment: " + service)
                             if spec.get("scale") == 0 or spec.get("deploy", {}).get("replicas") == 0:
-                                if service in context.initial_existing_services:
+                                if service in context.initial_runtime_state.existing_services:
                                     warn_collateral(service, "remove", "the desired service scale is zero")
                             elif recreate or service not in initial:
-                                action = "recreate" if service in context.initial_existing_services and recreate else "start"
+                                action = "recreate" if service in context.initial_runtime_state.existing_services and recreate else "start"
                                 reason = ("a namespace provider was replaced" if binds & recreated else
                                           "the selected image changed" if image_changed else
                                           "the required service configuration changed" if service in initial else
@@ -417,7 +404,7 @@ class ComposeOperations:
                                             yaml.safe_load(saved[service])) for service in actions}
                         specifications = {service: model["services"][service] for service, model in models.items()}
                         ordered_recovery = order_service_subset(context.project_containers, specifications)
-                        original_images = {item.service: item.image_id for item in actual.services if item.image_id}
+                        original_images = actual.image_ids
                         temporary_attempted = set()
 
                         def stop_temporary():
@@ -490,7 +477,6 @@ class ComposeOperations:
     def _dependent_actions(self, context, selected, running, updated, recreated,
                            applied=(), namespace_only=False):
         """Propagate only declared Compose restart edges and stale namespace binds."""
-        import yaml
         # Unknown legacy services have no trustworthy dependency model to act on.
         known = set(context.service_models.previous) | set(applied)
         if context.is_full_project:
@@ -498,8 +484,9 @@ class ComposeOperations:
         running = set(running).intersection(known)
         definitions = {}
         for name in running:
-            saved = None if name in applied else context.service_models.previous.get(name)
-            model = yaml.safe_load(saved) if saved else context.compose_model
+            model = None if name in applied else context.service_models.previous_model(name)
+            if model is None:
+                model = context.compose_model
             definitions[name] = model["services"][name]
         pending = {name: definitions[name] for name in sorted(running - set(selected))}
         for name in order_service_subset(context.project_containers, pending):
@@ -511,10 +498,7 @@ class ComposeOperations:
                     recreated.add(name)
 
     def _dependency_action(self, spec, updated, recreated, namespace_only=False):
-        binds = {str(spec.get(key)).split(":", 1)[1] for key in ("network_mode", "ipc", "pid")
-                 if str(spec.get(key, "")).startswith("service:")}
-        binds.update(str(value).split(":", 1)[0] for value in spec.get("volumes_from", ())
-                     if not str(value).startswith("container:"))
+        binds = set(namespace_dependencies(spec))
         if binds & recreated:
             return True
         if not namespace_only and any(options.get("restart") and parent in updated
@@ -553,12 +537,12 @@ class ComposeOperations:
                 restart = len(fields) < 3 or fields[2].lower() in ("1", "t", "true")
                 prior = dependencies.get(fields[0], {}).get("restart", False)
                 dependencies[fields[0]] = {"restart": prior or restart}
-        for service in context.initial_running_services:
-            saved = context.service_models.previous.get(service)
-            if saved is not None:
-                definitions[service] = [yaml.safe_load(saved)["services"][service]]
+        for service in context.initial_runtime_state.running_services:
+            model = context.service_models.previous_model(service)
+            if model is not None:
+                definitions[service] = [model["services"][service]]
         updated, recreated = set(selected), set(selected)
-        pending = (set(definitions) & set(context.initial_running_services)) - updated
+        pending = (set(definitions) & set(context.initial_runtime_state.running_services)) - updated
         if context.is_full_project:
             pending.intersection_update(context.service_models.current)
         while pending:
@@ -584,13 +568,12 @@ class ComposeOperations:
     def _shared_input_consumers(self, context, failed, applied):
         """Restore applied peers only when they share a changed file input."""
         from pathlib import Path
-        import yaml
 
         def changed_sources(service):
             if service not in context.compose_model["services"]:
                 return []
-            previous = context.service_models.previous.get(service)
-            old = yaml.safe_load(previous)["services"][service] if previous is not None else {}
+            previous = context.service_models.previous_model(service)
+            old = previous["services"][service] if previous is not None else {}
             mounts = {item["target"]: item["source"] for item in old.get("volumes", ())
                       if isinstance(item, dict) and item.get("type") == "bind"}
             return [Path(item["source"]) for item in context.compose_model["services"][service].get("volumes", ())
@@ -612,14 +595,14 @@ class ComposeOperations:
 
     def _require_rollback_models(self, context, services):
         from .errors import ContainerError
-        running = tuple(service for service in services if service in context.initial_running_services)
+        running = tuple(service for service in services if service in context.initial_runtime_state.running_services)
         for service in running:
-            if not context.initial_running_images.get(service):
+            if not context.initial_runtime_state.running_images.get(service):
                 raise ContainerError("Cannot replace running service {} without its original image ID".format(service))
         if running:
             self.manager.compose_runner.saved_service_models(context, running)
         captured = set()
-        images = {item.service: item.image_id for item in context.initial_runtime_state.services}
+        images = context.initial_runtime_state.image_ids
         while True:
             stopped = self._stopped_namespace_providers(context, services) - captured
             if not stopped:
@@ -633,23 +616,20 @@ class ComposeOperations:
 
     def _stopped_namespace_providers(self, context, services, consumers=None):
         """Find old stopped providers needed to preserve observed live namespaces."""
-        import yaml
-        candidates = set(services) & (context.initial_existing_services - context.initial_running_services)
-        pending = list(context.initial_running_services if consumers is None else consumers)
+        actual = context.initial_runtime_state
+        candidates = set(services) & (actual.existing_services - actual.running_services)
+        pending = list(actual.running_services if consumers is None else consumers)
         result, checked = set(), set()
         while pending:
             consumer = pending.pop()
             if consumer in checked:
                 continue
             checked.add(consumer)
-            saved = context.service_models.previous.get(consumer)
+            saved = context.service_models.previous_model(consumer)
             if saved is None:
                 continue
-            spec = yaml.safe_load(saved)["services"][consumer]
-            dependencies = {str(spec.get(key)).split(":", 1)[1] for key in ("network_mode", "ipc", "pid")
-                            if str(spec.get(key, "")).startswith("service:")}
-            dependencies.update(str(value).split(":", 1)[0] for value in spec.get("volumes_from", ())
-                                if not str(value).startswith("container:"))
+            spec = saved["services"][consumer]
+            dependencies = set(namespace_dependencies(spec))
             for provider in dependencies & candidates:
                 result.add(provider)
                 pending.append(provider)

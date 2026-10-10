@@ -5,7 +5,7 @@
 
 def test_partial_start_expands_required_integration_providers(fresh_manager):
     operations = fresh_manager.compose_operations
-    selection = operations.select(("portainer",), metadata_only=True, for_start=True)
+    selection = operations.select(("portainer",), for_start=True)
     assert [c.name for c in selection.target_containers] == ["portainer"]
 
     expanded = operations.start_selection(selection)
@@ -17,7 +17,7 @@ def test_partial_start_expands_required_integration_providers(fresh_manager):
 
 def test_unrelated_running_sidecar_does_not_expand_selected_scope(fresh_manager):
     operations = fresh_manager.compose_operations
-    explicit = operations.select(("lldap",), metadata_only=True, for_start=True)
+    explicit = operations.select(("lldap",), for_start=True)
     selection = operations.start_selection(explicit, running_services={"authelia-redis"})
     assert "lldap" in selection.services
     assert "authelia-redis" not in selection.services
@@ -26,7 +26,7 @@ def test_unrelated_running_sidecar_does_not_expand_selected_scope(fresh_manager)
 
 def test_explicit_restart_targets_remain_narrow(fresh_manager):
     operations = fresh_manager.compose_operations
-    selected = operations.select(("portainer",), metadata_only=True, for_start=True)
+    selected = operations.select(("portainer",), for_start=True)
     expanded = operations.start_selection(selected)
     assert {c.name for c in selected.target_containers} == {"portainer"}
     assert "nginx" in {c.name for c in expanded.target_containers}

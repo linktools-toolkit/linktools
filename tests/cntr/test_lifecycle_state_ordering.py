@@ -34,7 +34,6 @@ def _neutralize_runtime(manager, monkeypatch):
     )
     monkeypatch.setattr(manager.compose_runner, "build", lambda context, options: None)
     monkeypatch.setattr(manager.compose_runner, "pull", lambda context, services: None)
-    monkeypatch.setattr(manager.compose_runner, "up", lambda context, options: None)
     monkeypatch.setattr(manager.compose_runner, "stop", lambda context, services: None)
     monkeypatch.setattr(manager.compose_runner, "down", lambda context, services: None)
 

@@ -78,7 +78,8 @@ def test_header_overrides_reject_conflicts_and_controls(fresh_manager, overrides
 
 def test_auth_maps_require_exact_success_without_regex_capture_side_effects(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    rendered = nginx.security_maps(make_site(auth_bypass=(r"^/public",)))
+    rendered = nginx._render_site_template(
+        nginx, nginx.get_source_path("templates", "maps.conf"), make_site(auth_bypass=(r"^/public",)))
     gate = rendered[rendered.index('map "$auth_status_'):]
     assert '"200:0:1" 1;' in gate and '"299:0:1" 1;' in gate
     assert '"300:0:1:1" 1;' not in gate and '"204:1:1" 1;' not in gate
@@ -93,7 +94,7 @@ def test_header_names_are_quoted_and_auth_data_is_not_reinterpreted(fresh_manage
     source = tmp_path / "business.conf"
     source.write_text('{% from "nginx/headers.j2" import proxy_headers with context %}{{ proxy_headers() }}')
     assert 'proxy_set_header "#Odd" ' in nginx._render_site_template(nginx, source, site)
-    maps = nginx.security_maps(site)
+    maps = nginx._render_site_template(nginx, nginx.get_source_path("templates", "maps.conf"), site)
     assert "{{not_jinja}} ${literal_dollar}value" in maps
 
 

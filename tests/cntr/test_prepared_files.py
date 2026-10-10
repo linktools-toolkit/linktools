@@ -11,6 +11,7 @@ from linktools.cntr import OperationContext
 from linktools.cntr.artifacts import (AppliedServiceModels, stage_files, bind_prepared_files,
                                      publish_prepared_files, prune_prepared_files)
 from linktools.cntr.errors import ContainerError
+from linktools.cntr.runtime.inspect import ProjectRuntimeState
 
 
 class Index:
@@ -48,7 +49,7 @@ def model(owner, base=True, acl=True):
 def context(owner, full=False):
     ctx = OperationContext(project_containers=[owner], target_services=("auth", "admin"),
                            is_full_project=full)
-    ctx.initial_running_services = set()
+    ctx.initial_runtime_state = ProjectRuntimeState("test", (), "docker")
     ctx.service_models = SimpleNamespace(previous={}, untracked_services=frozenset())
     return ctx
 
@@ -195,7 +196,8 @@ def test_unselected_legacy_consumer_keeps_current_pointer(owner):
     ctx = context(owner)
     ctx.write_files(owner, {"base.yml": "new", "acl.yml": "new"})
     ctx.compose_model = bind_prepared_files(ctx, model(owner), {})
-    ctx.initial_running_services = {"auth", "admin"}
+    ctx.initial_runtime_state = ProjectRuntimeState("test", tuple(
+        SimpleNamespace(service=name, state="running") for name in ("auth", "admin")), "docker")
     legacy = {"services": {"admin": {"volumes": [{"type": "bind", "target": "/generated",
                                                   "source": str(owner.get_app_path("generated"))}]}}}
     ctx.service_models.previous = {"admin": yaml.safe_dump(legacy)}
@@ -207,7 +209,8 @@ def test_unselected_legacy_consumer_keeps_current_pointer(owner):
 def _apply_prepared(owner, value, services, running=(), desired_services=(), full=False, declared_services=()):
     ctx = context(owner, full=full)
     ctx.target_services = tuple(services)
-    ctx.initial_running_services = frozenset(running)
+    ctx.initial_runtime_state = ProjectRuntimeState("test", tuple(
+        SimpleNamespace(service=name, state="running") for name in running), "docker")
     ctx.write_files(owner, {"base.yml": value, "acl.yml": value})
     desired = model(owner)
     desired["services"] = {name: desired["services"][name] for name in desired_services or services}

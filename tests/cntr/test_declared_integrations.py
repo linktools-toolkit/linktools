@@ -70,7 +70,7 @@ def test_absent_flare_does_not_consume_navigation(fresh_manager, monkeypatch):
     monkeypatch.setattr(fresh_manager.installed_state, "get", lambda resolve=False: installed)
     assert list(fresh_manager.iter_integrations("flare")) == []
     assert any(value.consumer == "flare" for value in fresh_manager.integration_snapshot["portainer"])
-    selection = fresh_manager.compose_operations.select(["portainer"], metadata_only=True, for_start=True)
+    selection = fresh_manager.compose_operations.select(["portainer"], for_start=True)
     assert "flare" not in [c.name for c in fresh_manager.compose_operations.start_selection(selection).target_containers]
 
 
@@ -81,7 +81,7 @@ def test_partial_nginx_selection_refreshes_full_navigation_snapshot(fresh_manage
     fresh_manager.env_config.set("NGINX_WILDCARD_DOMAIN", True)
     fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
     operations = fresh_manager.compose_operations
-    selection = operations.select(["nginx"], metadata_only=True, for_start=True)
+    selection = operations.select(["nginx"], for_start=True)
     synchronized = selection.project_containers
     flare = fresh_manager.containers["flare"]
     assert flare in synchronized
@@ -106,7 +106,7 @@ def test_container_authoring_has_one_integration_entry():
 
 def test_proxy_runtime_dependency_does_not_select_authelia_admin(fresh_manager):
     operations = fresh_manager.compose_operations
-    explicit = operations.select(["portainer"], metadata_only=True, for_start=True)
+    explicit = operations.select(["portainer"], for_start=True)
     selected = operations.start_selection(explicit)
     assert {"authelia", "authelia-redis", "lldap"} <= set(selected.services)
     assert "authelia-admin" not in selected.services
@@ -571,7 +571,7 @@ def test_integration_containers_preserve_dependencies(fresh_manager):
     assert tuple(fresh_manager.containers["safeline"].dependencies) == ("nginx",)
     installed = fresh_manager.resolver.resolve_dependencies([fresh_manager.containers["authelia"]])
     assert {container.name for container in installed} == {"nginx", "lldap", "authelia"}
-    selection = fresh_manager.compose_operations.select(["portainer"], metadata_only=True, for_start=True)
+    selection = fresh_manager.compose_operations.select(["portainer"], for_start=True)
     started = fresh_manager.compose_operations.start_selection(selection)
     assert "lldap" in started.services
 

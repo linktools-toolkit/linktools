@@ -40,6 +40,17 @@ def test_environment_change_and_missing_snapshot_are_changed(manager):
     assert AppliedServiceModels(manager, changed).changed_services == frozenset({"app"})
 
 
+def test_decoded_previous_model_cannot_mutate_snapshot_or_other_reads(manager):
+    AppliedServiceModels(manager, _model()).record(("app",))
+    store = AppliedServiceModels(manager, _model("new"))
+    original = store.previous["app"]
+    decoded = store.previous_model("app")
+    decoded["services"]["app"]["environment"]["TOKEN"] = "mutated"
+    assert store.previous["app"] == original
+    assert store.previous_model("app") == _model()
+    assert store.previous_model("worker") is None
+
+
 def test_normalization_ignores_mapping_order_and_yaml_formatting(manager):
     initial = AppliedServiceModels(manager, _model())
     initial.record(("app", "worker"))
