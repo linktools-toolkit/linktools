@@ -56,8 +56,8 @@ def context(owner, full=False):
 
 def test_stage_records_sources_in_existing_artifact_index(owner):
     owner.manager.integration_snapshot = {
-        "app": (SimpleNamespace(consumer="nginx", expose=SimpleNamespace(consumer="auth")),),
-        "other": (SimpleNamespace(consumer="auth", expose=None),),
+        "app": (SimpleNamespace(consumer="nginx", link=SimpleNamespace(consumer="auth")),),
+        "other": (SimpleNamespace(consumer="auth", link=None),),
     }
     stage_files(owner, {"configuration.yml": "content"})
     entries = owner.manager.artifact_index.load()
@@ -67,12 +67,12 @@ def test_stage_records_sources_in_existing_artifact_index(owner):
 
 def test_reusing_prepared_tree_refreshes_source_provenance(owner):
     owner.manager.integration_snapshot = {
-        "first": (SimpleNamespace(consumer="auth", expose=None),),
+        "first": (SimpleNamespace(consumer="auth", link=None),),
     }
     first = stage_files(owner, {"configuration.yml": "unchanged"})
     assert next(iter(owner.manager.artifact_index.load().values()))["producers"] == ["first"]
     owner.manager.integration_snapshot = {
-        "second": (SimpleNamespace(consumer="auth", expose=None),),
+        "second": (SimpleNamespace(consumer="auth", link=None),),
     }
     reused = stage_files(owner, {"configuration.yml": "unchanged"})
     assert reused == first

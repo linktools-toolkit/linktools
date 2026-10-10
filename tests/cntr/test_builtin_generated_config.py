@@ -30,7 +30,7 @@ def flare_instance(module, entries):
         containers[producer.name] = producer
         snapshot.setdefault(producer.name, []).append(link)
     return instance(module, integration_snapshot={name: tuple(values) for name, values in snapshot.items()},
-                    containers=containers, nginx_sites={})
+                    containers=containers)
 
 
 def test_flare_custom_categories_merge_by_name_without_title_deduplication():
@@ -76,7 +76,7 @@ def test_authelia_oidc_identity_and_redirects_are_acyclic_readonly(monkeypatch):
     from linktools.cntr.ext import Authelia
     declaration = Authelia.oidc(("https://app.test", "https://app.test"))
     container = instance(module, project_name="project")
-    container.manager.iter_integrations = lambda consumer: iter(((SimpleNamespace(name="app"), None, declaration),))
+    container.manager.iter_integrations = lambda consumer: iter(((SimpleNamespace(name="app"), declaration),))
     monkeypatch.setitem(container.__dict__, "public_url", "https://sso.test")
     monkeypatch.setattr(container, "get_config", lambda key: "saved-secret")
     client = container.oidc_client

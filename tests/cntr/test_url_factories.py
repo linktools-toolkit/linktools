@@ -74,14 +74,14 @@ def test_nginx_local_id_is_validated_before_manager_access(local_id):
 def test_nginx_tuple_lookup_is_deferred_and_uses_producer_identity():
     reads = []
 
-    class Manager:
+    class Nginx:
         @property
-        def nginx_sites(self):
+        def sites(self):
             reads.append("sites")
             return {("app", "web"): SimpleNamespace(get_url=lambda default="": "https://app.test"),
                     ("other", "web"): SimpleNamespace(get_url=lambda default="": "https://other.test")}
 
-    container = SimpleNamespace(name="app", manager=Manager())
+    container = SimpleNamespace(name="app", manager=SimpleNamespace(containers={"nginx": Nginx()}))
     url = load_nginx_url(container, "web", "ui")
     assert reads == []
     assert str(url) == "https://app.test/ui"

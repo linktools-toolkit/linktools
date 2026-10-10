@@ -17,12 +17,11 @@ def integrations(self) -> "Integrations":
     return [
         Nginx.site(
             self.get_config_later("APP_DOMAIN"),
-            local_id="web",
             proxy="http://app:8080",
             auth=None,
             auth_bypass=(r"^/public/",),
             waf_bypass=(),
-            expose=Flare.public("App", "apps", "Application"),
+            link=Flare.public("App", "apps", "Application"),
         ),
         Flare.container(
             "App direct", "apps",
@@ -35,19 +34,17 @@ def integrations(self) -> "Integrations":
 a `Nginx`; `Flare.public(...)`, `Flare.container(...)`, and `Flare.bookmark(...)`
 return a `Flare`.
 The `ext/` package owns these factories and public declaration types, also
-re-exported from `linktools.cntr`. `Integration` declares public `consumer` and
-`local_id` metadata. A declaration with `requires_local_id=True` must supply a
-nonempty local ID, including nginx site declarations.
-`Nginx.consumer` is `"nginx"`; `Flare.consumer` is `"flare"`. New
-consumer-specific subclasses set their own `consumer` name and optionally a
-`local_id`. `Integrations` is the Python 3.6-compatible alias
+re-exported from `linktools.cntr`. `Integration` declares only the public
+`consumer` name. `Nginx.consumer` is `"nginx"`; `Flare.consumer` is `"flare"`.
+New consumer-specific subclasses set their own `consumer` name. `Integrations`
+is the Python 3.6-compatible alias
 `Iterable[Integration]`: return a finite list, tuple, or iterator of declarations.
 The former consumer-keyed mappings and nested named mappings are not accepted.
 
-`Nginx.local_id` defaults to `"web"`. Give additional sites explicit IDs,
-for example `Nginx.site("api.example.com", local_id="api")`. IDs must be nonempty
-strings and unique for each `(producer, consumer)` pair. Different producers or
-consumers can reuse the same ID. Flare links have no local ID and do not need
+`Nginx.local_id` defaults to `"web"`, so omit it for a single/default site.
+Give additional sites explicit IDs, for example `Nginx.site("api.example.com", local_id="api")`. IDs must be nonempty
+strings and unique within their producer. Different producers can reuse the
+same ID. Other integrations have no framework-level local ID and do not need
 invented names.
 
 The manager freezes each installed producer's declaration structure once per
@@ -56,18 +53,22 @@ consuming a generator once. Mixed declaration order is preserved in the snapshot
 Iterables must be finite. If `integrations` is cached and its snapshot can be
 rebuilt, return a reusable list/tuple or provide a fresh iterator for the rebuild;
 do not reuse an exhausted generator.
-It checks consumer names, local IDs and the `Integration` type without
-resolving lazy fields or URLs. Consumers validate their own declaration content.
+It checks consumer names and the `Integration` type without resolving lazy
+fields or URLs. Consumers validate their own declaration content. The nginx
+container owns the command-local site snapshot in its public `sites` property.
+`ResolvedSite.collect(manager)` in `ext` checks site types and nonempty, unique
+local IDs before resolving any site fields. URL helpers, navigation and
+authentication share `containers["nginx"].sites`; the manager has no nginx index.
 The generic `iter_integrations` filters by the declaration's consumer and yields
-`(producer, declaration.local_id, declaration)`. It returns only explicit
-declarations for an installed consumer; unnamed declarations have `local_id=None`.
+`(producer, declaration)`. It returns only explicit declarations for an
+installed consumer.
 
-`Nginx.expose` optionally attaches a `Flare` for navigation. Omitting
+`Nginx.link` optionally attaches a `Flare` for navigation. Omitting
 its URL lazily inherits the resolved site's URL. Explicit `None` or `""` disables
 the link; an explicit URL stays unchanged. An omitted URL on a standalone link
 has no site to inherit from and is skipped. The link's category is presentation
 metadata, not an authentication policy; there is no `public` site boolean.
-Sites without `expose` create no navigation.
+Sites without `link` create no navigation.
 
 Standalone `Flare` values in the list supply independent navigation entries.
 Use `Flare.public(name, icon, desc, url)` for application entries; their
@@ -170,11 +171,11 @@ templates retain only the explicit context described below.
 ## Site values
 
 - `server_name=""` disables the site and unrelated secret/config resolution
-- `default=True` makes this site the native default server on its HTTP, HTTPS
+- `default_server=True` makes this site the native default server on its HTTP, HTTPS
   (when enabled), and WAF (when enabled) listeners, regardless of its hostname.
   Enabled defaults must not share a listening socket. If none is declared, nginx
   adds one built-in fallback site. `server_name="_"` alone no longer requests
-  default behavior; migrate catch-all declarations to `default=True`
+  default behavior; migrate catch-all declarations to `default_server=True`
   (this is separate from `NGINX_ROOT_DOMAIN`)
 - `https`, `waf`, and `auth`: `None` inherits, `False` disables, and `True`
   requires the global capability; missing providers fail closed
@@ -186,8 +187,8 @@ templates retain only the explicit context described below.
 - `auth_rule` is an optional native Authelia rule; a literal domain is filled in
   when omitted. Pattern domains need an explicit native domain/domain_regex
 - Only a single literal hostname implies a public URL. Pattern/default sites
-  need explicit `url`; navigation placeholders such as `{{port}}` remain literal
-- `cert_domains` declares additional certificate names; `vars` owns business
+  need explicit `public_url`; navigation placeholders such as `{{port}}` remain literal
+- `cert_domains` declares additional certificate names; `template_vars` owns business
   template variables
 
 ## Authelia OIDC callbacks
@@ -225,7 +226,7 @@ must not mutate or restore historical derived ACL/OIDC settings.
 
 A custom template owns the server's business directives and locations, not its
 listeners, TLS, authentication endpoint or WAF forwarding. Context contains
-`site`, `container`, `nginx`, `config`, and `vars`, plus `route_auth=True` only
+`site`, `container`, `nginx`, `config`, and `template_vars`, plus `route_auth=True` only
 when sharing a hostname requires location-level authentication. Read environment
 values with `config.get("KEY")`. Undefined fields fail rendering.
 

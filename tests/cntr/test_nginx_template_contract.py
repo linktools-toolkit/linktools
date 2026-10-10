@@ -32,7 +32,7 @@ def make_site(**kwargs):
 def prepared_config(nginx):
     """Render the immutable inputs consumed by the current Nginx lifecycle."""
     files, waf = nginx._rendered_site_files
-    root = SimpleNamespace(vars={"waf": waf, "site_files": tuple(files)})
+    root = SimpleNamespace(template_vars={"waf": waf, "site_files": tuple(files)})
     rendered = nginx._render_site_template(
         nginx, nginx.get_source_path("templates", "nginx.conf"), root)
     return dict(files, **{"nginx.conf": rendered})
@@ -101,14 +101,14 @@ def test_header_names_are_quoted_and_auth_data_is_not_reinterpreted(fresh_manage
 def test_namespaced_single_pass_includes_comments_raw_and_literal_values(fresh_manager, tmp_path):
     nginx = fresh_manager.containers["nginx"]
     (tmp_path / "headers.j2").write_text("local header body")
-    (tmp_path / "child.conf").write_text("{{ vars.literal }}")
+    (tmp_path / "child.conf").write_text("{{ template_vars.literal }}")
     source = tmp_path / "business.conf"
-    source.write_text('''# {{ vars.comment }}
+    source.write_text('''# {{ template_vars.comment }}
 {% include "local/headers.j2" %}
 {% include "local/child.conf" %}
 {% from "nginx/headers.j2" import proxy_headers with context %}{{ proxy_headers() }}
 {% raw %}{{port}}{% endraw %}''')
-    rendered = nginx._render_site_template(nginx, source, make_site(vars={
+    rendered = nginx._render_site_template(nginx, source, make_site(template_vars={
         "comment": "evaluated", "literal": "{{unexpanded}} $native",
     }))
     assert "# evaluated" in rendered
@@ -134,9 +134,9 @@ def test_business_file_is_rendered_once_for_repeated_preparation(fresh_manager, 
     nginx = fresh_manager.containers["nginx"]
     calls = []
     source = tmp_path / "business.conf"
-    source.write_text("{{ vars.record() }}\nlocation / { return 204; }")
-    site = make_site(server_name="_", default=True, waf=False, auth=False, template=source,
-                     vars={"record": lambda: calls.append("render") or "# business"})
+    source.write_text("{{ template_vars.record() }}\nlocation / { return 204; }")
+    site = make_site(server_name="_", default_server=True, waf=False, auth=False, template=source,
+                     template_vars={"record": lambda: calls.append("render") or "# business"})
     site.producer = nginx
     site.enabled = True
     site.resolve = lambda: site
@@ -160,7 +160,7 @@ def test_business_file_is_rendered_once_for_repeated_preparation(fresh_manager, 
 def test_default_listeners_are_explicit_and_independent_of_server_name(
         fresh_manager: "ContainerManager", server_name: str, default: bool) -> None:
     nginx = fresh_manager.containers["nginx"]
-    site = make_site(server_name=server_name, default=default)
+    site = make_site(server_name=server_name, default_server=default)
     rendered = nginx._render_site_template(
         nginx, nginx.get_source_path("templates", "server.conf"), site)
     assert rendered.count("default_server") == (3 if default else 0)
@@ -189,7 +189,7 @@ def generation_site(nginx: "BaseContainer", local_id: str = "web",
 @pytest.mark.parametrize("default", [False, True])
 def test_fallback_depends_on_explicit_default_not_underscore(fresh_manager: "ContainerManager", default: bool) -> None:
     nginx = fresh_manager.containers["nginx"]
-    site = generation_site(nginx, server_name="_", default=default)
+    site = generation_site(nginx, server_name="_", default_server=default)
     nginx.__dict__["sites"] = {site.identity: site}
     files = prepared_config(nginx)
     assert ("sites/default.conf" in files) is not default
@@ -208,7 +208,7 @@ def test_disabled_default_keeps_fallback_without_resolving_other_fields(fresh_ma
         raise AssertionError("disabled site evaluated")
 
     nginx = fresh_manager.containers["nginx"]
-    site = generation_site(nginx, server_name="", default=lazy_load(fail), proxy=lazy_load(fail))
+    site = generation_site(nginx, server_name="", default_server=lazy_load(fail), proxy=lazy_load(fail))
     nginx.__dict__["sites"] = {site.identity: site}
     files = prepared_config(nginx)
     assert "sites/default.conf" in files
@@ -218,8 +218,8 @@ def test_disabled_default_keeps_fallback_without_resolving_other_fields(fresh_ma
 @pytest.mark.parametrize("shared", [True, False])
 def test_explicit_defaults_only_conflict_on_shared_listeners(fresh_manager: "ContainerManager", shared: bool) -> None:
     nginx = fresh_manager.containers["nginx"]
-    first = generation_site(nginx, "first", ports={"NGINX_HTTP_PORT": 8080}, default=True)
-    second = generation_site(nginx, "second", ports={"NGINX_HTTP_PORT": 8080 if shared else 8081}, default=True)
+    first = generation_site(nginx, "first", ports={"NGINX_HTTP_PORT": 8080}, default_server=True)
+    second = generation_site(nginx, "second", ports={"NGINX_HTTP_PORT": 8080 if shared else 8081}, default_server=True)
     nginx.__dict__["sites"] = {site.identity: site for site in (first, second)}
     owner = nginx
     if shared:
@@ -237,9 +237,9 @@ def test_defaults_detect_collisions_on_optional_listeners(
         fresh_manager: "ContainerManager", capability: str, port: str) -> None:
     nginx = fresh_manager.containers["nginx"]
     first = generation_site(nginx, "first", ports={"NGINX_HTTP_PORT": 8080, port: 8443},
-                            default=True, **{capability: True})
+                            default_server=True, **{capability: True})
     second = generation_site(nginx, "second", ports={"NGINX_HTTP_PORT": 8081, port: 8443},
-                             default=True, **{capability: True})
+                             default_server=True, **{capability: True})
     nginx.__dict__["sites"] = {site.identity: site for site in (first, second)}
     with pytest.raises(ContainerError, match="[Dd]efault"):
         prepared_config(nginx)
@@ -374,7 +374,7 @@ def test_header_overrides_suppress_headers_without_losing_same_level_defaults(fr
 
 def test_generated_sites_are_self_contained_and_internal_names_are_purpose_specific(fresh_manager):
     nginx = fresh_manager.containers["nginx"]
-    site = make_site(default=True)
+    site = make_site(default_server=True)
     site.producer = nginx
     site.enabled = True
     site.resolve = lambda: site
@@ -396,7 +396,7 @@ def test_embedded_business_preserves_multiline_quoted_values(fresh_manager, tmp_
     source = tmp_path / "business.conf"
     content = 'location / { return 200 "first\nsecond"; }'
     source.write_text(content)
-    site = make_site(default=True, auth=False, waf=False, template=source)
+    site = make_site(default_server=True, auth=False, waf=False, template=source)
     site.producer = nginx
     site.enabled = True
     site.resolve = lambda: site

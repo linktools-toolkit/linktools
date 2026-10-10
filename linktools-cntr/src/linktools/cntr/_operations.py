@@ -101,7 +101,7 @@ class ComposeOperations:
                     exposed = {consumer.name for consumer in previous_consumers.get(producer.name, ())}
                     for declaration in self.manager.integration_snapshot.get(producer.name, ()):
                         exposed.add(declaration.consumer)
-                        attached = getattr(declaration, "expose", None)
+                        attached = getattr(declaration, "link", None)
                         if attached is not None:
                             exposed.add(attached.consumer)
                     for name in exposed:

@@ -260,7 +260,7 @@ ct-cntr repo update --json   # 每个仓库都会更新并重新校验；任意�
 from linktools.cntr import Flare, Nginx
 
 return [
-    Nginx.site("app.example.com", expose=Flare.public("应用", "web", "应用描述")),
+    Nginx.site("app.example.com", link=Flare.public("应用", "web", "应用描述")),
     Flare.bookmark("工具", "web", "https://tool.example.com", category="tool"),
 ]
 ```

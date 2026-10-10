@@ -268,7 +268,7 @@ def stage_files(container: "BaseContainer", files: "Mapping[str, str]", *,
         name for name, declarations in getattr(container.manager, "integration_snapshot", {}).items()
         for declaration in declarations
         if declaration.consumer == container.name or
-        getattr(getattr(declaration, "expose", None), "consumer", None) == container.name
+        getattr(getattr(declaration, "link", None), "consumer", None) == container.name
     })
     container.manager.artifact_index.record({
         os.path.relpath(str(destination / name), str(container.manager.data_path)): {

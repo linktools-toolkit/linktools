@@ -49,7 +49,7 @@ class Container(BaseContainer):
                 auth=None if self.get_config("SAFELINE_AUTH_ENABLE") else False,
                 auth_bypass=(r"\.(css|js)$",),
                 auth_headers={"X-SLCE-API-TOKEN": self.get_config_later("SAFELINE_API_TOKEN")},
-                expose=Flare.public("Safeline", "alienOutline", "雷池WAF"),
+                link=Flare.public("Safeline", "alienOutline", "雷池WAF"),
             ),
         ]
 

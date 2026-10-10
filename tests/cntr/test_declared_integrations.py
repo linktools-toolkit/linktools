@@ -28,11 +28,37 @@ def test_nginx_consumes_sites_without_exposure_side_effects(fresh_manager):
     original_hooks = len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START)))
 
     entries = list(fresh_manager.iter_integrations("nginx"))
-    matches = [(producer, site_id, site) for producer, site_id, site in entries
-               if producer is portainer and site_id == "web"]
+    matches = [(producer, site) for producer, site in entries
+               if producer is portainer and site.local_id == "web"]
     assert len(matches) == 1
-    assert matches[0][2] in portainer.integrations
+    assert matches[0][1] in portainer.integrations
     assert len(list(portainer.hooks.iter_phase(HookPhase.BEFORE_START))) == original_hooks
+
+
+def test_nginx_owns_one_site_snapshot_shared_by_all_consumers(fresh_manager, monkeypatch) -> None:
+    import pytest
+    from linktools.cntr import ContainerManager
+    from linktools.cntr.ext import ResolvedSite
+
+    calls = []
+    collect = ResolvedSite.collect
+
+    def counted(cls: "type[ResolvedSite]", manager: "ContainerManager") -> "object":
+        calls.append(manager)
+        return collect(manager)
+
+    monkeypatch.setattr(ResolvedSite, "collect", classmethod(counted))
+    nginx = fresh_manager.containers["nginx"]
+    sites = nginx.sites
+    authelia = fresh_manager.containers["authelia"]
+    assert str(load_nginx_url(authelia, "web")) == authelia.public_url
+    fresh_manager.containers["flare"]._navigation_files()
+    assert nginx.sites is sites
+    assert calls == [fresh_manager]
+    assert not hasattr(ContainerManager, "nginx_sites")
+    assert not hasattr(fresh_manager, "nginx_sites")
+    with pytest.raises(TypeError):
+        sites[("app", "web")] = None
 
 
 def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monkeypatch):
@@ -41,15 +67,15 @@ def test_navigation_is_declared_without_resolving_lazy_urls(fresh_manager, monke
     def fail(*args, **kwargs):
         raise AssertionError("navigation URLs must stay lazy")
 
-    monkeypatch.setattr(fresh_manager, "nginx_sites", {})
+    monkeypatch.setattr(fresh_manager.containers["nginx"], "sites", {})
     for name in ("lldap", "authelia", "safeline", "portainer", "flare"):
         container = fresh_manager.containers[name]
         original = container.get_config
         monkeypatch.setattr(container, "get_config", lambda key, *args, _get=original, **kwargs:
                             _get(key, *args, **kwargs) if key.endswith("AUTH_ENABLE") else fail())
         links = [value for value in container.integrations if isinstance(value, Flare)]
-        links.extend(site.expose for site in container.integrations
-                     if isinstance(site, Nginx) and site.expose is not None)
+        links.extend(site.link for site in container.integrations
+                     if isinstance(site, Nginx) and site.link is not None)
         assert links
         assert all(isinstance(link, Flare) for link in links)
     assert not hasattr(BaseContainer, "exposes")
@@ -130,14 +156,14 @@ def _site_navigation_manager(declarations, links=None, nginx=True):
         return {"NGINX_HTTPS_ENABLE": True, "NGINX_HTTPS_PORT": 9443}[key]
     manager = SimpleNamespace()
     producer = SimpleNamespace(name="app", order=10, manager=manager, get_config=config)
-    manager.containers = {"app": producer}
+    manager.containers = {"app": producer, "nginx": SimpleNamespace(sites={})}
     for local_id, site in declarations.items():
         site.local_id = local_id
     links = links.values() if isinstance(links, Mapping) else (links or ())
     manager.integration_snapshot = {"flare": (), "app": tuple(declarations.values()) + tuple(links)}
     if nginx:
         manager.integration_snapshot["nginx"] = ()
-    manager.nginx_sites = {(producer.name, key): ResolvedSite(producer, key, value)
+    manager.containers["nginx"].sites = {(producer.name, key): ResolvedSite(producer, key, value)
                            for key, value in declarations.items()}
     return manager, reads
 
@@ -159,13 +185,13 @@ def test_site_navigation_inherits_only_omitted_url_lazily():
     public = Flare.category("public", "Public", apps=True)
     omitted = public("Inherited", "web", "")
     manager, reads = _site_navigation_manager({
-        "inherited": Nginx.site("app.test", expose=omitted),
-        "empty": Nginx.site("empty.test", expose=public("Empty", "web", "", "")),
-        "none": Nginx.site("none.test", expose=public("None", "web", "", None)),
-        "explicit": Nginx.site("explicit.test", expose=public("Explicit", "web", "", "custom://{{port}}")),
+        "inherited": Nginx.site("app.test", link=omitted),
+        "empty": Nginx.site("empty.test", link=public("Empty", "web", "", "")),
+        "none": Nginx.site("none.test", link=public("None", "web", "", None)),
+        "explicit": Nginx.site("explicit.test", link=public("Explicit", "web", "", "custom://{{port}}")),
         "silent": Nginx.site("silent.test"),
     }, {"omitted": public("Unbound", "web", "")})
-    inherited = manager.nginx_sites[("app", "inherited")].expose
+    inherited = manager.containers["nginx"].sites[("app", "inherited")].link
     assert reads == []
     assert omitted.url is None
     assert inherited is not omitted
@@ -187,7 +213,7 @@ def test_disabled_or_uninstalled_sites_do_not_resolve_navigation_defaults():
         raise AssertionError("disabled URL must not resolve")
     for server_name, nginx in (("", True), ("app.test", False)):
         manager, reads = _site_navigation_manager({"web": Nginx.site(
-            server_name, url=lazy_load(fail), expose=public("App", "web", ""),
+            server_name, public_url=lazy_load(fail), link=public("App", "web", ""),
         )}, nginx=nginx)
         assert _render_navigation(manager)["apps.yml"]["links"] == []
         assert reads == []
@@ -197,7 +223,7 @@ def test_site_navigation_category_does_not_change_auth_and_paths_are_independent
     from linktools.cntr import Flare
 
     category = Flare.category("team", "Team")
-    declaration = Nginx.site("app.test", auth=True, expose=category("Root", "web", ""))
+    declaration = Nginx.site("app.test", auth=True, link=category("Root", "web", ""))
     manager, reads = _site_navigation_manager({"web": declaration}, {
         "one": category("Path", "web", "", "https://app.test/one"),
         "two": category("Path", "web", "", "https://app.test/two?q=1"),
@@ -214,11 +240,11 @@ def test_attached_navigation_rejects_invalid_values_and_category_conflicts():
     import pytest
     from linktools.cntr import ContainerError, Flare
 
-    manager, _ = _site_navigation_manager({"web": Nginx.site("app.test", expose=True)})
-    with pytest.raises(ContainerError, match="expose must be a Flare"):
+    manager, _ = _site_navigation_manager({"web": Nginx.site("app.test", link=True)})
+    with pytest.raises(ContainerError, match="link must be a Flare"):
         _render_navigation(manager)
     manager, _ = _site_navigation_manager({"web": Nginx.site(
-        "app.test", expose=Flare.category("team", "Team")("Root", "web", ""),
+        "app.test", link=Flare.category("team", "Team")("Root", "web", ""),
     )}, {"other": Flare.category("team", "Different")("Other", "web", "", "https://other.test")})
     with pytest.raises(ContainerError, match="Conflicting description"):
         _render_navigation(manager)
@@ -247,16 +273,16 @@ def test_navigation_merge_preserves_producer_ties_and_local_id_collisions():
 
     public = Flare.category("public", "Public", apps=True)
     manager, _ = _site_navigation_manager({
-        "web": Nginx.site("one.test", expose=public("One", "web", "")),
-        "two": Nginx.site("two.test", expose=public("Two", "web", "")),
+        "web": Nginx.site("one.test", link=public("One", "web", "")),
+        "two": Nginx.site("two.test", link=public("Two", "web", "")),
     }, {"web": public("Path", "web", "", "https://one.test/path")})
     producer = SimpleNamespace(name="other", order=10, manager=manager)
     manager.containers["other"] = producer
     site = Nginx.site(
-        "other.test", expose=public("Other", "web", "", "https://other.test"),
+        "other.test", link=public("Other", "web", "", "https://other.test"),
     )
     manager.integration_snapshot["other"] = (site,)
-    manager.nginx_sites[("other", "web")] = ResolvedSite(
+    manager.containers["nginx"].sites[("other", "web")] = ResolvedSite(
         producer, "web", site)
     assert [entry["name"] for entry in _render_navigation(manager)["apps.yml"]["links"]] == [
         "One", "Two", "Path", "Other"]
@@ -272,7 +298,7 @@ def test_absent_flare_does_not_resolve_attached_navigation(fresh_manager, monkey
     installed = [c for c in fresh_manager.installed_state.get(resolve=True) if c.name != "flare"]
     monkeypatch.setattr(fresh_manager.installed_state, "get", lambda resolve=False: installed)
     monkeypatch.setattr(fresh_manager.containers["portainer"], "integrations", [Nginx.site(
-        "app.test", expose=Flare.category("public", "Public", apps=True)("App", "web", "", lazy_load(fail)),
+        "app.test", link=Flare.category("public", "Public", apps=True)("App", "web", "", lazy_load(fail)),
     )])
     assert "flare" not in {c.name for c in fresh_manager.installed_state.get(resolve=True)}
     assert list(fresh_manager.iter_integrations("flare")) == []
@@ -311,7 +337,7 @@ def test_flare_iterable_preserves_attached_then_standalone_order():
     from linktools.cntr import Flare
 
     manager, _ = _site_navigation_manager({
-        "web": Nginx.site("app.test", expose=Flare.public("Attached", "web", "")),
+        "web": Nginx.site("app.test", link=Flare.public("Attached", "web", "")),
     }, (Flare.public("First", "web", "", "https://one.test"),
         Flare.public("Second", "web", "", "https://two.test")))
     assert [link["name"] for link in _render_navigation(manager)["apps.yml"]["links"]] == [
@@ -349,7 +375,7 @@ def test_flare_category_output_area_is_independent_of_name() -> None:
     favorites = Flare.category("favorites", "Favorites", apps=True)
     public = Flare.category("public", "Public bookmarks")
     manager, _ = _site_navigation_manager({
-        "web": Nginx.site("app.test", expose=dashboard("Attached", "web", "Application")),
+        "web": Nginx.site("app.test", link=dashboard("Attached", "web", "Application")),
     }, [
         public("Bookmark", "web", "", "https://bookmark.test"),
         favorites("Favorite", "web", "", "https://favorite.test"),
@@ -397,7 +423,7 @@ def test_flare_bookmarks_accept_custom_category_ids_and_inherit_site_urls() -> N
     from linktools.cntr import Flare
 
     manager, reads = _site_navigation_manager({
-        "web": Nginx.site("app.test", expose=Flare.bookmark("Attached", "web", category="tool")),
+        "web": Nginx.site("app.test", link=Flare.bookmark("Attached", "web", category="tool")),
     }, [
         Flare.public("App", "apps", "Application description", "https://app.test"),
         Flare.bookmark("Standalone", "book", "https://docs.test", category="tool"),
@@ -452,9 +478,9 @@ def test_flare_container_factory_inherits_only_omitted_site_urls() -> None:
     assert empty.with_default_url("https://fallback.test") is empty
     assert disabled.with_default_url("https://fallback.test") is disabled
     manager, reads = _site_navigation_manager({
-        "inherited": Nginx.site("app.test", expose=omitted),
-        "empty": Nginx.site("empty.test", expose=empty),
-        "disabled": Nginx.site("disabled.test", expose=disabled),
+        "inherited": Nginx.site("app.test", link=omitted),
+        "empty": Nginx.site("empty.test", link=empty),
+        "disabled": Nginx.site("disabled.test", link=disabled),
     }, [Flare.container("Unbound", "web")])
     assert reads == []
     result = _render_navigation(manager)
@@ -525,8 +551,8 @@ def test_authelia_admin_link_does_not_change_oidc_issuer(fresh_manager):
     fresh_manager.env_config.set("NGINX_HTTPS_ENABLE", True)
     fresh_manager.env_config.set("NGINX_HTTPS_PORT", 9443)
     authelia = fresh_manager.containers["authelia"]
-    site = fresh_manager.nginx_sites[("authelia", "web")]
-    assert site.expose.url == "https://sso.example.test:9443/auth-admin"
+    site = fresh_manager.containers["nginx"].sites[("authelia", "web")]
+    assert site.link.url == "https://sso.example.test:9443/auth-admin"
     assert authelia.oidc_client["issuer_url"] == "https://sso.example.test:9443"
     assert authelia.oidc_client["authorization_url"] == "https://sso.example.test:9443/api/oidc/authorization"
 

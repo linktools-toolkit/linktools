@@ -14,12 +14,38 @@ from linktools.types import MISSING
 if TYPE_CHECKING:
     from typing import Any, Optional
     from ..container import BaseContainer
+    from ..manager import ContainerManager
     from ._flare import Flare
     from ._nginx import Nginx
 
 
 class ResolvedSite:
     """A command-local lazy view shared by navigation and configuration consumers."""
+
+    @classmethod
+    def collect(cls, manager: "ContainerManager") -> "Mapping[tuple[str, str], ResolvedSite]":
+        """Collect and validate site identities without resolving lazy fields."""
+        from collections import OrderedDict
+        from ._nginx import Nginx
+        from ..errors import ContainerError
+
+        result = OrderedDict()
+        # Preserve declared identities even when the optional nginx consumer is absent.
+        for producer_name, declarations in manager.integration_snapshot.items():
+            producer = manager.containers[producer_name]
+            for declaration in declarations:
+                if declaration.consumer != "nginx":
+                    continue
+                if not isinstance(declaration, Nginx):
+                    raise ContainerError("Invalid nginx site in %s: expected Nginx" % producer_name)
+                local_id = declaration.local_id
+                if not isinstance(local_id, str) or not local_id:
+                    raise ContainerError("Invalid nginx integration ID in %s" % producer_name)
+                identity = (producer_name, local_id)
+                if identity in result:
+                    raise ContainerError("Duplicate nginx integration ID %r in %s" % (local_id, producer_name))
+                result[identity] = cls(producer, local_id, declaration)
+        return MappingProxyType(result)
 
     def __init__(self, producer: "BaseContainer", local_id: str, declaration: "Nginx") -> None:
         self.producer = producer
@@ -41,15 +67,15 @@ class ResolvedSite:
         return str(value)
 
     @cached_property
-    def expose(self) -> "Optional[Flare]":
+    def link(self) -> "Optional[Flare]":
         from ._flare import Flare
         from linktools.runtime import lazy_load
 
-        value = self._declaration.expose
+        value = self._declaration.link
         if value is None:
             return None
         if not isinstance(value, Flare):
-            self._error("expose must be a Flare or None")
+            self._error("link must be a Flare or None")
         return value.with_default_url(lazy_load(lambda: self.get_url(default="")))
 
     @cached_property
@@ -61,8 +87,8 @@ class ResolvedSite:
         return "nginx" in self.producer.manager.integration_snapshot and bool(self.server_name)
 
     @cached_property
-    def default(self) -> bool:
-        return bool(self._declaration.default) if self.enabled else False
+    def default_server(self) -> bool:
+        return bool(self._declaration.default_server) if self.enabled else False
 
     @cached_property
     def literal_domain(self) -> "Optional[str]":
@@ -102,16 +128,16 @@ class ResolvedSite:
         return value
 
     @cached_property
-    def url(self) -> str:
+    def public_url(self) -> str:
         return self.get_url()
 
     def get_url(self, default: str = MISSING) -> str:
         """Resolve a public URL, optionally leaving a non-concrete identity unset."""
         if not self.enabled:
             return ""
-        explicit = self._declaration.url
+        explicit = self._declaration.public_url
         if explicit is not None:
-            return self._text(explicit, "url")
+            return self._text(explicit, "public_url")
         if self.literal_domain is None:
             if default is not MISSING:
                 return default
@@ -183,16 +209,16 @@ class ResolvedSite:
         return self._sequence("cert_domains")
 
     @cached_property
-    def vars(self) -> "Mapping":
-        return self._mapping("vars")
+    def template_vars(self) -> "Mapping":
+        return self._mapping("template_vars")
 
     def resolve(self) -> "ResolvedSite":
         if not self.enabled:
             return self
         if not self.template and not self.proxy:
             self._error("default proxy template requires a nonempty proxy")
-        for field in ("default", "https", "waf", "auth", "waf_bypass", "auth_bypass", "auth_headers",
-                      "auth_rule", "cert_domains", "vars"):
+        for field in ("default_server", "https", "waf", "auth", "waf_bypass", "auth_bypass", "auth_headers",
+                      "auth_rule", "cert_domains", "template_vars"):
             getattr(self, field)
         if self.producer.name == "authelia" and not self.https:
             self._error("Authelia public site requires HTTPS")

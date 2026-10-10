@@ -17,7 +17,7 @@ class Nginx(Integration):
     """One nginx site owned by a container and identified by its local ID."""
 
     consumer = "nginx"
-    requires_local_id = True
+    local_id: str
 
     @classmethod
     def site(
@@ -30,19 +30,19 @@ class Nginx(Integration):
             auth: "Optional[bool]" = None, auth_bypass: "Sequence[str]" = (),
             auth_headers: "Optional[Mapping[str, str]]" = None,
             auth_rule: "Optional[Mapping[str, Any]]" = None,
-            url: "Optional[str]" = None,
+            public_url: "Optional[str]" = None,
             cert_domains: "Sequence[str]" = (),
-            vars: "Optional[Mapping[str, Any]]" = None,
-            expose: "Optional[Flare]" = None,
+            template_vars: "Optional[Mapping[str, Any]]" = None,
+            link: "Optional[Flare]" = None,
             *,
             local_id: str = "web",
-            default: bool = False,
+            default_server: bool = False,
     ) -> "Nginx":
         self = cls()
         self.local_id = local_id
-        self.expose = expose
+        self.link = link
         self.server_name = server_name
-        self.default = default
+        self.default_server = default_server
         self.proxy = proxy
         self.template = template
         self.https = https
@@ -52,9 +52,9 @@ class Nginx(Integration):
         self.auth_bypass = tuple(auth_bypass) if type(auth_bypass) in (tuple, list) else auth_bypass
         self.auth_headers = {} if auth_headers is None else auth_headers
         self.auth_rule = auth_rule
-        self.url = url
+        self.public_url = public_url
         self.cert_domains = tuple(cert_domains) if type(cert_domains) in (tuple, list) else cert_domains
-        self.vars = {} if vars is None else vars
+        self.template_vars = {} if template_vars is None else template_vars
         return self
 
     @classmethod

@@ -228,7 +228,8 @@ class Container(BaseContainer):
                 location, result.returncode))
     @cached_property
     def sites(self) -> "Mapping[tuple[str, str], ResolvedSite]":
-        return self.manager.nginx_sites
+        from linktools.cntr.ext import ResolvedSite
+        return ResolvedSite.collect(self.manager)
 
     def complex_value(self, value: str) -> str:
         """Quote one native nginx complex value without interpreting its variables."""
@@ -330,7 +331,7 @@ class Container(BaseContainer):
                 container=container,
                 nginx=nginx,
                 config=container.env_config,
-                vars=site.vars,
+                template_vars=site.template_vars,
                 **extra,
             )
         except TemplateError as exc:
@@ -349,7 +350,7 @@ class Container(BaseContainer):
                 active.append(site.resolve())
         defaults = {}
         for site in active:
-            if not site.default:
+            if not site.default_server:
                 continue
             ports = [site.producer.get_config("NGINX_HTTP_PORT")]
             if site.https:
@@ -362,11 +363,11 @@ class Container(BaseContainer):
                         port, defaults[port].producer.name, defaults[port].local_id,
                         site.producer.name, site.local_id))
                 defaults[port] = site
-        if not any(site.default for site in active):
+        if not any(site.default_server for site in active):
             active.append(SimpleNamespace(
                 producer=self, local_id="default", file_id="default", var_name="default",
-                server_name='""', default=True, https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
-                waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, vars={},
+                server_name='""', default_server=True, https=self.get_config("NGINX_HTTPS_ENABLE", type=bool),
+                waf=False, auth=False, waf_bypass=(), auth_bypass=(), auth_headers={}, template_vars={},
                 template=self.get_source_path("templates", "index.conf"), proxy=None,
             ))
         from collections import OrderedDict
@@ -396,7 +397,7 @@ class Container(BaseContainer):
             route_auth = len(sites) > 1 and any(
                 (member.auth, member.auth_bypass) != (leader.auth, leader.auth_bypass)
                 for member in sites[1:])
-            leader = next((site for site in sites if site.default), leader)
+            leader = next((site for site in sites if site.default_server), leader)
             routes = []
             for site in sites:
                 source = site.template or self.get_source_path("templates", "default.conf")
@@ -457,7 +458,7 @@ class Container(BaseContainer):
                 os.replace(temporary, str(archive))
         files, waf = self._rendered_site_files
         result = dict(files)
-        root_site = SimpleNamespace(vars={"waf": waf, "site_files": tuple(files)})
+        root_site = SimpleNamespace(template_vars={"waf": waf, "site_files": tuple(files)})
         result["nginx.conf"] = self._render_site_template(
             self, self.get_source_path("templates", "nginx.conf"), root_site)
         context.write_files(self, result)

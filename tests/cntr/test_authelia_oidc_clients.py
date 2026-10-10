@@ -32,7 +32,7 @@ def test_oidc_redirects_derive_only_from_current_declarations(fresh_manager, mon
     producer = fresh_manager.containers["portainer"]
     declaration = Authelia.oidc(("https://service.example.com", "https://service.example.com/callback",
                                  "https://external.example.com/callback", "https://service.example.com/callback"))
-    monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, None, declaration),)))
+    monkeypatch.setattr(fresh_manager, "iter_integrations", lambda consumer: iter(((producer, declaration),)))
     assert authelia.oidc_redirects == (
         authelia.oidc_client["issuer_url"], "https://service.example.com",
         "https://service.example.com/callback", "https://external.example.com/callback",
@@ -83,11 +83,11 @@ def test_explicit_public_base_path_keeps_origin_and_cookie_domain_separate(fresh
     import yaml
     authelia = fresh_manager.containers["authelia"]
     site = ResolvedSite(authelia, "web", Nginx.site(
-        server_name="sso.example.com", url="https://login.example.com:8443/auth",
+        server_name="sso.example.com", public_url="https://login.example.com:8443/auth",
         proxy="http://authelia:9091", auth=False, waf=False))
-    sites = dict(fresh_manager.nginx_sites)
+    sites = dict(fresh_manager.containers["nginx"].sites)
     sites[("authelia", "web")] = site
-    monkeypatch.setattr(fresh_manager, "nginx_sites", sites)
+    monkeypatch.setattr(fresh_manager.containers["nginx"], "sites", sites)
     assert authelia.oidc_client["issuer_url"] == "https://login.example.com:8443/auth"
     config = yaml.safe_load(authelia.render_template(authelia.get_source_path("templates", "configuration.yml")))
     cookie = config["session"]["cookies"][0]
@@ -116,12 +116,12 @@ def test_optional_site_url_only_defaults_for_absent_concrete_identity(fresh_mana
     site = ResolvedSite(authelia, "web", Nginx.site(server_name=server_name, proxy="http://app"))
     assert site.get_url(default="") == ""
     with pytest.raises(ContainerError, match="explicit public URL"):
-        _ = site.url
+        _ = site.public_url
     explicit = ResolvedSite(authelia, "web", Nginx.site(
-        server_name=server_name, url="https://login.example.com/auth", proxy="http://app"))
-    assert explicit.get_url(default="") == explicit.url == "https://login.example.com/auth"
-    invalid = ResolvedSite(authelia, "web", Nginx.site(server_name=server_name, url=123, proxy="http://app"))
-    with pytest.raises(ContainerError, match="url must be a string"):
+        server_name=server_name, public_url="https://login.example.com/auth", proxy="http://app"))
+    assert explicit.get_url(default="") == explicit.public_url == "https://login.example.com/auth"
+    invalid = ResolvedSite(authelia, "web", Nginx.site(server_name=server_name, public_url=123, proxy="http://app"))
+    with pytest.raises(ContainerError, match="public_url must be a string"):
         invalid.get_url(default="")
 
 

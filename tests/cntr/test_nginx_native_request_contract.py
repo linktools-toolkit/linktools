@@ -21,10 +21,10 @@ import pytest
 
 def _native_site(port):
     return SimpleNamespace(server_name="app.test", file_id="native", var_name="native",
-                           local_id="web", default=False, https=True, waf=True, auth=True,
+                           local_id="web", default_server=False, https=True, waf=True, auth=True,
                            waf_bypass=(r"^/waf-public", r"^/both"),
                            auth_bypass=(r"^/auth-public", r"^/both"),
-                           auth_headers={"Authorization": "Bearer secret$host"}, vars={},
+                           auth_headers={"Authorization": "Bearer secret$host"}, template_vars={},
                            proxy="http://127.0.0.1:" + str(port))
 
 
@@ -131,7 +131,7 @@ def test_native_waf_auth_metadata_and_credential_headers(fresh_manager, tmp_path
         def render(name, selected=site):
             return nginx._render_site_template(producer, nginx.get_source_path("templates", name), selected)
 
-        root = render("nginx.conf", SimpleNamespace(vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
+        root = render("nginx.conf", SimpleNamespace(template_vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
         # The fixture changes only sandbox resources and loopback endpoint addresses.
         root = root.replace("include /etc/nginx/mime.types;", "")
         root = root.replace("/etc/nginx/managed/", str(tmp_path) + "/")
@@ -295,7 +295,7 @@ def test_native_fixture_template_contract_without_native_processes(fresh_manager
     server = nginx._render_site_template(
         producer, nginx.get_source_path("templates", "server.conf"), site, business=business)
     root = nginx._render_site_template(producer, nginx.get_source_path("templates", "nginx.conf"),
-        SimpleNamespace(vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
+        SimpleNamespace(template_vars={"generation_id": "native-test", "waf": True, "site_files": ("sites/native.conf",)}))
     assert "app.test" in server
     assert "sites/native.conf" in root
     assert "http://127.0.0.1:8082" in business
@@ -354,10 +354,10 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
         def site(name, auth_enabled):
             return SimpleNamespace(
                 producer=producer, local_id=name, file_id=name, var_name=name,
-                server_name="app.test", default=False, https=True, waf=False,
+                server_name="app.test", default_server=False, https=True, waf=False,
                 auth=auth_enabled, auth_bypass=(r"^/admin/free",) if auth_enabled else (),
                 waf_bypass=(), auth_headers={"Authorization": "Bearer trusted"} if auth_enabled else {},
-                vars={},
+                template_vars={},
             )
 
         public = site("public", False)
@@ -379,7 +379,7 @@ def test_native_shared_host_keeps_public_and_authenticated_routes_isolated(fresh
 
         root = nginx._render_site_template(
             producer, nginx.get_source_path("templates", "nginx.conf"),
-            SimpleNamespace(vars={"generation_id": "native", "waf": False,
+            SimpleNamespace(template_vars={"generation_id": "native", "waf": False,
                                   "site_files": ("sites/shared.conf",)}))
         root = root.replace("include /etc/nginx/mime.types;", "")
         root = root.replace("/etc/nginx/managed/", str(tmp_path) + "/")

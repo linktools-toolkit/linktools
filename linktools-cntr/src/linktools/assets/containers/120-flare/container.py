@@ -88,7 +88,7 @@ class Container(BaseContainer):
             for declaration in declarations:
                 if declaration.consumer != "nginx":
                     continue
-                link = manager.nginx_sites[(name, declaration.local_id)].expose
+                link = manager.containers["nginx"].sites[(name, declaration.local_id)].link
                 if link is not None:
                     yield link
             for declaration in declarations:

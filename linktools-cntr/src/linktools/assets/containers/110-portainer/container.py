@@ -34,7 +34,7 @@ class Container(BaseContainer):
             )),
             Nginx.site(
                 server_name=self.get_config_later("PORTAINER_DOMAIN"),
-                expose=Flare.public("Portainer", "docker", "Docker管理工具"),
+                link=Flare.public("Portainer", "docker", "Docker管理工具"),
                 proxy="http://portainer:9000",
                 auth=None if self.get_config("PORTAINER_AUTH_ENABLE") else False,
                 auth_bypass=(r"\.(css|js)$",),

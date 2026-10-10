@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.cntr import ContainerError, ContainerManager, Flare, Integration, Nginx
+from linktools.cntr import Authelia, ContainerError, ContainerManager, Flare, Integration, Nginx
 from linktools.cntr.ext import load_nginx_url
 from linktools.cntr.ext import ResolvedSite
 from linktools.runtime import lazy_load
@@ -17,15 +17,18 @@ class Producer:
         self.config = dict(NGINX_HTTPS_ENABLE=True, NGINX_AUTH_ENABLE=True,
                            NGINX_WAF_ENABLE=True, NGINX_HTTP_PORT=80, NGINX_HTTPS_PORT=443)
         self.config.update(config)
-        self.manager = SimpleNamespace(integration_snapshot={name: () for name in installed})
-        self.manager.nginx_sites = {(self.name, "web"): ResolvedSite(self, "web", site)}
+        self.manager = SimpleNamespace(
+            integration_snapshot={name: () for name in installed},
+            containers={"nginx": SimpleNamespace(sites={})},
+        )
+        self.manager.containers["nginx"].sites = {(self.name, "web"): ResolvedSite(self, "web", site)}
 
     def get_config(self, key, **kwargs):
         return self.config[key]
 
     @property
     def site(self):
-        return self.manager.nginx_sites[(self.name, "web")]
+        return self.manager.containers["nginx"].sites[(self.name, "web")]
 
 
 def fail():
@@ -81,28 +84,28 @@ def test_migrated_http_site_must_disable_inherited_auth_explicitly():
                                   https=False, auth=False))
     assert producer.site.resolve() is producer.site
     assert producer.site.auth is False
-    assert producer.site.url == "http://public.example.test"
+    assert producer.site.public_url == "http://public.example.test"
 
 
 @pytest.mark.parametrize("domain", ["_", "*.test", "a.test b.test", "~^app\\.test$", "a.test\tb.test"])
 def test_nonliteral_domain_requires_explicit_url(domain):
     producer = Producer(Nginx.site(domain, proxy="http://app"))
     with pytest.raises(ContainerError, match="explicit public URL"):
-        producer.site.url
+        producer.site.public_url
 
 
 def test_placeholder_domain_skips_navigation_without_oidc_coupling():
     producer = Producer(Nginx.site(
-        "_", proxy="http://app", expose=Flare.public("App", "app", "Application"),
+        "_", proxy="http://app", link=Flare.public("App", "app", "Application"),
     ))
-    assert producer.site.expose.url is None
+    assert producer.site.link.url is None
     assert str(load_nginx_url(producer, "web")) == ""
     assert producer.site.resolve() is producer.site
 
 
 def test_literal_template_url_is_not_executed():
-    producer = Producer(Nginx.site("~^app", proxy="http://app", url="https://app:{{port}}"))
-    assert producer.site.url == "https://app:{{port}}"
+    producer = Producer(Nginx.site("~^app", proxy="http://app", public_url="https://app:{{port}}"))
+    assert producer.site.public_url == "https://app:{{port}}"
 
 
 def test_auth_rule_preserves_native_fields_and_is_read_only():
@@ -130,7 +133,14 @@ def test_old_proxy_declaration_arguments_are_removed():
 
 
 def manager_with(containers, installed):
+    from _harness import builtin_container_type
+
     manager = object.__new__(ContainerManager)
+    if "nginx" in containers:
+        nginx = object.__new__(builtin_container_type("100-nginx"))
+        nginx._name = "nginx"
+        nginx.manager = manager
+        containers["nginx"] = nginx
     manager.__dict__["containers"] = containers
     manager.__dict__["installed_state"] = SimpleNamespace(get=lambda resolve: [containers[name] for name in installed])
     return manager
@@ -143,11 +153,13 @@ def test_snapshot_is_once_and_optional_consumer_is_not_consumed():
         @property
         def integrations(self):
             self.calls += 1
-            return [Nginx.site("a.test")]
+            return [Nginx.site(lazy_load(fail))]
     app = Counted()
     manager = manager_with({"app": app, "nginx": SimpleNamespace(name="nginx")}, ["app"])
+    app.manager = manager
     assert list(manager.iter_integrations("nginx")) == []
-    assert ("app", "web") in manager.nginx_sites
+    assert ("app", "web") in manager.containers["nginx"].sites
+    assert str(load_nginx_url(app, "web")) == ""
     assert app.calls == 1
 
 
@@ -156,7 +168,7 @@ def test_explicit_false_does_not_read_unneeded_global_switches():
     del producer.config["NGINX_HTTPS_ENABLE"]
     del producer.config["NGINX_AUTH_ENABLE"]
     del producer.config["NGINX_WAF_ENABLE"]
-    assert producer.site.url == "http://a.test"
+    assert producer.site.public_url == "http://a.test"
     assert producer.site.resolve() is producer.site
 
 
@@ -166,8 +178,8 @@ def test_snapshot_freezes_mixed_declarations_once_without_url_resolution() -> No
     class CustomIntegration(Integration):
         consumer = "custom"
 
-        def __init__(self, local_id: "str | None" = None) -> None:
-            self.local_id = local_id
+        def __init__(self, label: "str | None" = None) -> None:
+            self.label = label
 
     inputs = [
         CustomIntegration("second"),
@@ -201,9 +213,9 @@ def test_snapshot_freezes_mixed_declarations_once_without_url_resolution() -> No
     assert snapshot["app"] == tuple(inputs)
     assert iterations == inputs
     inputs.clear()
-    assert [key for _, key, _ in manager.iter_integrations("custom")] == ["second", "first", None]
-    assert [key for _, key, _ in manager.iter_integrations("flare")] == [None]
-    assert [key for _, key, _ in manager.iter_integrations("nginx")] == ["web"]
+    assert [item.label for _, item in manager.iter_integrations("custom")] == ["second", "first", None]
+    assert list(manager.iter_integrations("flare")) == [(app, snapshot["app"][1])]
+    assert [item.local_id for _, item in manager.iter_integrations("nginx")] == ["web"]
     assert manager.integration_snapshot is snapshot
     assert app.calls == 1
     assert len(iterations) == 5
@@ -218,7 +230,7 @@ def test_empty_integration_sequences_are_valid(values: object) -> None:
     app = SimpleNamespace(name="app", integrations=values)
     manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=[])}, ["app"])
     assert manager.integration_snapshot["app"] == ()
-    assert not manager.nginx_sites
+    assert not manager.containers["nginx"].sites
 
 
 @pytest.mark.parametrize("declarations", ["text", b"text", 42, None, [object()], {}, {"nginx": []}])
@@ -230,35 +242,60 @@ def test_snapshot_rejects_invalid_declaration_shapes_or_non_markers(declarations
 
 
 @pytest.mark.parametrize("local_id", ["", 0, None])
-def test_snapshot_rejects_invalid_nginx_ids(local_id: "str | int | None") -> None:
-    app = SimpleNamespace(name="app", integrations=[Nginx.site("a.test", local_id=local_id)])
+def test_nginx_rejects_invalid_ids_before_resolving_fields(local_id: "str | int | None") -> None:
+    app = SimpleNamespace(name="app", integrations=[Nginx.site(lazy_load(fail), local_id=local_id)])
     manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=[])}, ["app"])
     with pytest.raises(ContainerError, match="integration ID"):
-        manager.integration_snapshot
+        manager.containers["nginx"].sites
 
 
-@pytest.mark.parametrize("local_id", [None, "", "entry"])
-def test_required_local_id_is_declared_by_the_integration_type(local_id: "str | None") -> None:
-    class RequiredIntegration(Integration):
+def test_generic_integrations_have_no_identity_contract() -> None:
+    class CustomIntegration(Integration):
         consumer = "custom"
-        requires_local_id = True
 
-    declaration = RequiredIntegration()
-    declaration.local_id = local_id
-    app = SimpleNamespace(name="app", integrations=[declaration])
-    manager = manager_with({"app": app, "custom": SimpleNamespace()}, ["app"])
-    if local_id:
-        assert manager.integration_snapshot["app"] == (declaration,)
-    else:
-        with pytest.raises(ContainerError, match="Invalid custom integration ID"):
-            manager.integration_snapshot
+    declarations = [CustomIntegration(), CustomIntegration()]
+    flare = Flare.public("App", "web", "Application", lazy_load(fail))
+    authelia = Authelia.oidc(lazy_load(fail))
+    app = SimpleNamespace(name="app", integrations=declarations)
+    custom = SimpleNamespace(name="custom", integrations=())
+    declarations.extend((flare, authelia))
+    containers = {"app": app, "custom": custom}
+    containers.update({name: SimpleNamespace(name=name, integrations=()) for name in ("flare", "authelia")})
+    manager = manager_with(containers, list(containers))
+    assert manager.integration_snapshot["app"] == tuple(declarations)
+    assert list(manager.iter_integrations("custom")) == [(app, item) for item in declarations[:2]]
+    assert list(manager.iter_integrations("flare")) == [(app, flare)]
+    assert list(manager.iter_integrations("authelia")) == [(app, authelia)]
+    assert not hasattr(Integration, "local_id")
+    assert not hasattr(Integration, "requires_local_id")
+    assert not hasattr(flare, "local_id")
+    assert not hasattr(authelia, "local_id")
 
 
-def test_snapshot_rejects_duplicate_site_ids() -> None:
-    app = SimpleNamespace(name="app", integrations=[Nginx.site("a.test"), Nginx.site("b.test")])
+def test_site_factory_and_resolved_view_use_explicit_field_names() -> None:
+    declaration = Nginx.site(
+        "~^app", proxy="http://app", public_url="https://public.example.test",
+        template_vars={"title": "Application"}, link=Flare.public("App", "web", "Application"),
+        default_server=True,
+    )
+    site = Producer(declaration).site
+    assert site.public_url == declaration.public_url == "https://public.example.test"
+    assert dict(site.template_vars) == declaration.template_vars == {"title": "Application"}
+    assert site.link.url == site.public_url
+    assert site.default_server is declaration.default_server is True
+    assert declaration.local_id == "web"
+    for old in ("url", "vars", "expose", "default"):
+        assert not hasattr(declaration, old)
+        assert not hasattr(site, old)
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            Nginx.site("app.test", **{old: None})
+
+
+def test_nginx_rejects_duplicate_ids_before_resolving_fields() -> None:
+    app = SimpleNamespace(name="app", integrations=[Nginx.site(lazy_load(fail)), Nginx.site(lazy_load(fail))])
     manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=[])}, ["app"])
     with pytest.raises(ContainerError, match="Duplicate nginx integration ID 'web' in app"):
-        manager.integration_snapshot
+        manager.containers["nginx"].sites
 
 
 def test_site_ids_are_scoped_to_their_producer() -> None:
@@ -266,17 +303,16 @@ def test_site_ids_are_scoped_to_their_producer() -> None:
     other = SimpleNamespace(name="other", integrations=[Nginx.site("b.test")])
     manager = manager_with({"app": app, "other": other, "nginx": SimpleNamespace(integrations=[])},
                            ["app", "other"])
-    assert tuple(manager.nginx_sites) == (("app", "web"), ("app", "api"), ("other", "web"))
+    assert tuple(manager.containers["nginx"].sites) == (("app", "web"), ("app", "api"), ("other", "web"))
 
 
 def test_nginx_rejects_declarations_of_another_type() -> None:
     declaration = Integration()
     declaration.consumer = "nginx"
-    declaration.local_id = "web"
     app = SimpleNamespace(name="app", integrations=[declaration])
     manager = manager_with({"app": app, "nginx": SimpleNamespace(integrations=[])}, ["app"])
     with pytest.raises(ContainerError, match="expected Nginx"):
-        manager.nginx_sites
+        manager.containers["nginx"].sites
 
 
 def test_unknown_consumer_rejected_and_empty_installed_consumer_is_empty() -> None:
@@ -294,14 +330,14 @@ def test_unknown_consumer_rejected_and_empty_installed_consumer_is_empty() -> No
 
 @pytest.mark.parametrize("server_name,default", [("_", False), ("app.example.com", True)])
 def test_default_server_is_independent_of_domain(server_name: str, default: bool) -> None:
-    producer = Producer(Nginx.site(server_name, proxy="http://app", default=default))
-    assert producer.site.default is default
+    producer = Producer(Nginx.site(server_name, proxy="http://app", default_server=default))
+    assert producer.site.default_server is default
     assert producer.site.server_name == server_name
     if default:
-        assert producer.site.url == "https://app.example.com"
+        assert producer.site.public_url == "https://app.example.com"
 
 
 def test_disabled_default_is_lazy() -> None:
-    producer = Producer(Nginx.site("", default=lazy_load(fail)))
-    assert producer.site.default is False
+    producer = Producer(Nginx.site("", default_server=lazy_load(fail)))
+    assert producer.site.default_server is False
     assert producer.site.resolve() is producer.site

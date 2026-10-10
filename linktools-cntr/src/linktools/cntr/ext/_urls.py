@@ -47,7 +47,7 @@ def load_nginx_url(container: "BaseContainer", local_id: str, *path: str,
         raise ContainerError("Nginx site ID must be a nonempty string")
 
     def make_url() -> str:
-        site = container.manager.nginx_sites.get((container.name, local_id))
+        site = container.manager.containers["nginx"].sites.get((container.name, local_id))
         if site is None:
             raise ContainerError("Unknown nginx site %s/%s" % (container.name, local_id))
         url = site.get_url(default="")

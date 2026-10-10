@@ -64,7 +64,7 @@ class Container(BaseContainer):
         return [
             Nginx.site(
                 server_name=self.get_config_later("AUTHELIA_DOMAIN"),
-                expose=Flare.public(
+                link=Flare.public(
                     "Authelia", "account", "单点登录", load_nginx_url(self, "web", "auth-admin")),
                 template=self.get_source_path("templates", "nginx.conf"),
                 auth=None if self.get_config("AUTHELIA_ADMIN_AUTH_ENABLE") else False,
@@ -78,7 +78,7 @@ class Container(BaseContainer):
         """Use the declared site URL for every externally visible endpoint."""
         # Metadata may describe an unconfigured public identity; native OIDC
         # generation below still requires a concrete HTTPS endpoint.
-        return self.manager.nginx_sites[(self.name, "web")].get_url(default="")
+        return self.manager.containers["nginx"].sites[(self.name, "web")].get_url(default="")
 
     @cached_property
     def public_authority(self) -> str:
@@ -130,7 +130,7 @@ class Container(BaseContainer):
     @cached_property
     def oidc_redirects(self) -> "tuple[str, ...]":
         redirects = [self._oidc_identity["issuer_url"]]
-        for producer, _, declaration in self.manager.iter_integrations("authelia"):
+        for producer, declaration in self.manager.iter_integrations("authelia"):
             if not isinstance(declaration, Authelia):
                 raise ContainerError("Invalid Authelia declaration in " + producer.name)
             for redirect in declaration.redirect_uris:

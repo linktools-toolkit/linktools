@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from .repo.service import RepoService
     from .artifacts import ArtifactIndex
     from .execution.planner import ExecutionPlanner
-    from .ext import ResolvedSite
 
 
 def describe_origin(container: "BaseContainer") -> str:
@@ -323,25 +322,16 @@ class ContainerManager:
                 declarations = tuple(integrations)
             except TypeError:
                 raise ContainerError("Invalid integrations in " + producer.name)
-            identities = set()
             for declaration in declarations:
                 if not isinstance(declaration, Integration):
                     raise ContainerError("Invalid integration in %s: expected Integration" % producer.name)
                 name = declaration.consumer
                 if not isinstance(name, str) or name not in self.containers:
                     raise ContainerError("Unknown integration consumer %r in %s" % (name, producer.name))
-                local_id = declaration.local_id
-                if local_id is not None or declaration.requires_local_id:
-                    if not isinstance(local_id, str) or not local_id:
-                        raise ContainerError("Invalid %s integration ID in %s" % (name, producer.name))
-                    identity = (name, local_id)
-                    if identity in identities:
-                        raise ContainerError("Duplicate %s integration ID %r in %s" % (name, local_id, producer.name))
-                    identities.add(identity)
             result[producer.name] = declarations
         return MappingProxyType(result)
 
-    def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, Optional[str], Integration]]":
+    def iter_integrations(self, consumer_name: str) -> "Iterator[Tuple[BaseContainer, Integration]]":
         """Yield read-only declaration inputs from the command's installed snapshot."""
         if consumer_name not in self.containers:
             raise ContainerError("Unknown integration consumer: " + consumer_name)
@@ -351,26 +341,7 @@ class ContainerManager:
         for producer_name, declarations in snapshot.items():
             for declaration in declarations:
                 if declaration.consumer == consumer_name:
-                    yield self.containers[producer_name], declaration.local_id, declaration
-
-    @cached_property
-    def nginx_sites(self) -> "Mapping[tuple[str, str], ResolvedSite]":
-        from collections import OrderedDict
-        from types import MappingProxyType
-        from .ext import Nginx, ResolvedSite
-
-        result = OrderedDict()
-        # Preserve declared identities even when the optional nginx consumer is absent.
-        for producer_name, declarations in self.integration_snapshot.items():
-            producer = self.containers[producer_name]
-            for declaration in declarations:
-                if declaration.consumer != "nginx":
-                    continue
-                local_id = declaration.local_id
-                if not isinstance(declaration, Nginx):
-                    raise ContainerError("Invalid nginx site %s/%s: expected Nginx" % (producer_name, local_id))
-                result[(producer_name, local_id)] = ResolvedSite(producer, local_id, declaration)
-        return MappingProxyType(result)
+                    yield self.containers[producer_name], declaration
 
     def load_installed_config_metadata(self) -> "list[BaseContainer]":
         """Load installed containers and register their own config fields,
