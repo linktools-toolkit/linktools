@@ -218,7 +218,7 @@ def test_partial_restart_starts_runtime_provider_without_stopping_it(lifecycle_c
     assert events == []
     planned = [(hook.phase, hook.container, hook.name) for hook in plan.hooks]
     provider_phases = [phase for phase, name, _ in planned if name == provider.name]
-    assert provider_phases == ["check", "before-start", "after-start"]
+    assert provider_phases == ["before-start", "check", "after-start"]
     assert [(phase, name) for phase, name, _ in planned if phase.endswith("stop")] == [
         ("before-stop", target.name), ("after-stop", target.name),
     ]

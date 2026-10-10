@@ -115,18 +115,23 @@ def test_build_args_can_omit_proxy_build_args(fresh_manager, monkeypatch):
 def test_build_and_up_route_args_through_process(fresh_manager, monkeypatch):
     recorded = []
 
-    def fake_create(containers, *args, privilege=None, **kwargs):
-        recorded.append(args)
+    class _Proc:
+        def check_call(self):
+            return 0
 
-        class _Proc:
-            def check_call(self):
-                return 0
-
+    def fake_docker(*args, privilege=None, **kwargs):
+        recorded.append(args[args.index("build"):])
         return _Proc()
 
-    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fake_create)
+    def fake_compose(containers, *args, privilege=None, **kwargs):
+        recorded.append(args)
+        return _Proc()
+
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fake_docker)
+    monkeypatch.setattr(fresh_manager.runtime, "create_docker_compose_process", fake_compose)
     runner = fresh_manager.compose_runner
     ctx = _ctx(fresh_manager, ["portainer"])
+    ctx.compose_model = {"services": {"portainer": {"image": "portainer:local"}}}
     opts = ComposeOptions(services=["portainer"])
     runner.build(ctx, opts)
     runner.up(ctx, opts)

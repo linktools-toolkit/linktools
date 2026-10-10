@@ -77,6 +77,8 @@ def test_down_records_failure_with_message(fresh_manager, monkeypatch):
         return _Proc()
 
     monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fail)
+    monkeypatch.setattr(fresh_manager.compose_runner, "final_model",
+                        lambda context: {"services": {"portainer": {"image": "portainer:local"}}})
 
     context_holder = []
     real_make_context = fresh_manager.compose_operations._make_context
@@ -111,6 +113,8 @@ def test_failure_diagnostic_is_logged_regardless_of_report_flag(fresh_manager, m
         return _Proc()
 
     monkeypatch.setattr(fresh_manager.runtime, "create_docker_process", fail)
+    monkeypatch.setattr(fresh_manager.compose_runner, "final_model",
+                        lambda context: {"services": {"portainer": {"image": "portainer:local"}}})
 
     errors = []
     monkeypatch.setattr(fresh_manager.logger, "error", lambda msg: errors.append(msg))

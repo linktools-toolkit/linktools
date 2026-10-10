@@ -16,9 +16,9 @@ def _record(manager, monkeypatch):
     stub_generated_runtime(manager, monkeypatch)
     recorded = []
 
-    def fake(containers, *args, privilege=None, **kwargs):
-        recorded.append(args[next(i for i, value in enumerate(args)
-                                  if value in ("up", "down", "stop", "pull", "build", "config")):])
+    def fake(*args, privilege=None, **kwargs):
+        recorded.append(tuple(args[next(i for i, value in enumerate(args)
+                                        if value in ("up", "down", "stop", "pull", "build", "config")):]))
 
         class _Proc:
             def check_call(self):

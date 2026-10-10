@@ -20,8 +20,10 @@ import linktools.cntr.commands._shared as cntr_shared
 def _record(manager, monkeypatch):
     recorded = []
 
-    def fake(containers, *args, privilege=None, **kwargs):
-        recorded.append((tuple(containers), args))
+    def fake(*args, privilege=None, **kwargs):
+        # ComposeRunner uses a resolved temporary file, not the container command adapter.
+        command = args[args.index("config"):]
+        recorded.append((tuple(manager.installed_state.get(resolve=True)), command))
 
         class _Proc:
             def check_call(self):
@@ -29,7 +31,7 @@ def _record(manager, monkeypatch):
 
         return _Proc()
 
-    monkeypatch.setattr(manager.runtime, "create_docker_compose_process", fake)
+    monkeypatch.setattr(manager.runtime, "create_docker_process", fake)
     monkeypatch.setattr(LifecycleDispatcher, "_invoke_callback", lambda self, func, context=None: None)
     monkeypatch.setattr(HookRegistry, "call", lambda self, phase, context=None, reverse=False: None)
     return recorded

@@ -208,3 +208,4 @@ def stub_generated_runtime(manager, monkeypatch):
     monkeypatch.setattr(manager.compose_runner, "validate_service", lambda *args, **kwargs:
                         SimpleNamespace(succeeded=True, stdout="", stderr="", returncode=0))
     monkeypatch.setattr(manager.image_preparer, "image_id", lambda image: "sha256:local-" + image)
+    monkeypatch.setattr(manager.image_preparer, "verify_builds", lambda model, services: None)

@@ -11,6 +11,7 @@ import pytest
 import linktools.cntr.__main__ as cntr_main
 import linktools.cntr.commands._shared as cntr_shared
 from linktools.cntr.context import OperationContext
+from linktools.cntr.errors import ContainerError
 from linktools.cntr.lifecycle.dispatcher import LifecycleDispatcher
 from linktools.cntr.lifecycle.hooks import HookRegistry
 from linktools.cntr.runtime.images import ImagePlan
@@ -165,7 +166,8 @@ def test_cli_failed_up_does_not_mark_running(monkeypatch, fresh_manager):
     monkeypatch.setattr(cntr_shared, "manager", fresh_manager)
     fresh_manager.running_state._set([])
     _record(fresh_manager, monkeypatch, fail=True)
-    with pytest.raises(RuntimeError):
+    # A failed cold start followed by a failed cleanup reports both errors.
+    with pytest.raises(ContainerError, match="Operation failed.*recovery failed"):
         cntr_main.command.on_command_up(names=["portainer"], pull=False)
     assert fresh_manager.running_state.get_persisted() == []
 
